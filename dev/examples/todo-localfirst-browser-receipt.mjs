@@ -4,6 +4,11 @@ import { dirname, resolve } from "node:path";
 import { chromium } from "playwright";
 
 const appUrl = process.env.JAZZ_TODO_APP_URL ?? "http://127.0.0.1:5173";
+const expectedMode = process.argv.includes("--async-mode")
+  ? "async"
+  : process.argv.includes("--sync-mode")
+    ? "sync"
+    : undefined;
 const screenshotPath = resolve(
   process.env.JAZZ_TODO_BROWSER_SCREENSHOT ?? "scratchpad/todo-localfirst-browser-receipt.png",
 );
@@ -21,6 +26,21 @@ page.on("console", (message) => {
 
 try {
   await page.goto(appUrl, { waitUntil: "networkidle" });
+  if (expectedMode) {
+    const actualMode = await page.waitForFunction(
+      () => {
+        const client = globalThis.jazzClient;
+        if (!client?.db) return null;
+        return "all" in client.db ? "sync" : "async";
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const mode = await actualMode.jsonValue();
+    if (mode !== expectedMode) {
+      throw new Error(`Expected ${expectedMode} Jazz client mode, got ${mode}`);
+    }
+  }
   await page.getByPlaceholder("What needs to be done?").fill(title);
   await page.getByRole("button", { name: "Add" }).click();
   const item = page.locator("#todo-list li", { hasText: title });
@@ -42,6 +62,7 @@ try {
       {
         ok: true,
         appUrl,
+        mode: expectedMode ?? "unchecked",
         title,
         screenshotPath,
         consoleMessages,

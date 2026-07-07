@@ -11,9 +11,12 @@ const serverPort = Number(process.env.JAZZ_TODO_SERVER_PORT ?? "4200");
 const appPort = Number(process.env.JAZZ_TODO_APP_PORT ?? "5173");
 const adminSecret = process.env.JAZZ_TODO_ADMIN_SECRET ?? "todo-localfirst-admin";
 const backendSecret = process.env.JAZZ_TODO_BACKEND_SECRET ?? adminSecret;
-// The async channel is currently subscription-only. Keep the working one-command
-// launch on sync subscriptions until the worker/API write channel lands.
-const subscriptionMode = process.env.JAZZ_TODO_SUBSCRIPTION_MODE ?? "sync";
+const modeArg = process.argv.includes("--sync-mode")
+  ? "sync"
+  : process.argv.includes("--async-mode")
+    ? "async"
+    : undefined;
+const subscriptionMode = modeArg ?? process.env.JAZZ_TODO_SUBSCRIPTION_MODE ?? "async";
 
 if (!["async", "sync"].includes(subscriptionMode)) {
   throw new Error("JAZZ_TODO_SUBSCRIPTION_MODE must be 'async' or 'sync'.");
@@ -70,8 +73,12 @@ try {
   console.log(`[todo-localfirst] app:  http://127.0.0.1:${appPort}`);
   console.log(`[todo-localfirst] sync: ${server.url}/sync`);
   console.log(`[todo-localfirst] subscription_mode=${subscriptionMode}`);
-  console.log("[todo-localfirst] browser receipt: node dev/examples/todo-localfirst-browser-receipt.mjs");
-  console.log("[todo-localfirst] napi receipt:    node dev/examples/todo-localfirst-napi-receipt.mjs");
+  console.log(
+    `[todo-localfirst] browser receipt: node dev/examples/todo-localfirst-browser-receipt.mjs --${subscriptionMode}-mode`,
+  );
+  console.log(
+    "[todo-localfirst] napi receipt:    node dev/examples/todo-localfirst-napi-receipt.mjs",
+  );
 
   vite = spawn("pnpm", ["dev", "--host", "127.0.0.1", "--port", String(appPort)], {
     cwd: exampleDir,

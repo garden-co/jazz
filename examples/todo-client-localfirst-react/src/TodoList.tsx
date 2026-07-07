@@ -7,9 +7,11 @@ type LocalDurabilityHandle = {
   wait(options: { tier: "local" }): Promise<unknown>;
 };
 
-function notifyLocalWriteDurable(write: LocalDurabilityHandle) {
-  void write
-    .wait({ tier: "local" })
+type MaybeAsyncWrite = LocalDurabilityHandle | Promise<LocalDurabilityHandle>;
+
+function notifyLocalWriteDurable(write: MaybeAsyncWrite) {
+  void Promise.resolve(write)
+    .then((handle) => handle.wait({ tier: "local" }))
     .then(() => window.dispatchEvent(new CustomEvent("todo-app:local-write-durable")))
     .catch(() => {
       toast.error("Could not save this task locally");
@@ -86,11 +88,11 @@ export function TodoList() {
               type="checkbox"
               checked={todo.done}
               onChange={() => {
-                try {
-                  db.update(app.todos, todo.id, { done: !todo.done });
-                } catch {
-                  toast.error("You don't have permission to update this task");
-                }
+                void Promise.resolve(db.update(app.todos, todo.id, { done: !todo.done })).catch(
+                  () => {
+                    toast.error("You don't have permission to update this task");
+                  },
+                );
               }}
               className="toggle"
             />
@@ -99,11 +101,9 @@ export function TodoList() {
             <button
               className="delete-btn"
               onClick={() => {
-                try {
-                  db.delete(app.todos, todo.id);
-                } catch {
+                void Promise.resolve(db.delete(app.todos, todo.id)).catch(() => {
                   toast.error("You don't have permission to delete this task");
-                }
+                });
               }}
             >
               &times;
