@@ -8,4 +8,9 @@ export {
   onActiveQuerySubscriptionsChange,
   onDevToolsPortConnect,
   onDevToolsPortDisconnect,
+  setDevtoolsBridgeConnector,
+  resetDevtoolsBridgeConnector,
+  type DevtoolsBridgePort,
+  type DevtoolsBridgeConnector,
 } from "./extension-panel.js";
+export { createParentWindowBridgePort } from "./parent-window-port.js";

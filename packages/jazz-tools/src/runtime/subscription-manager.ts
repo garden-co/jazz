@@ -82,7 +82,7 @@ export class SubscriptionManager<T extends { id: string }> {
     nativeColumns?: readonly ColumnDescriptor[],
     nativeTransform?: (row: Record<string, unknown>) => T,
   ): SubscriptionDelta<T> {
-    if (isNativeRowDelta(delta)) {
+    if (!Array.isArray(delta)) {
       if (!nativeColumns) {
         throw new Error("Native subscription delta requires output columns for decoding");
       }
@@ -247,10 +247,6 @@ function decodeNativeTypedDelta<T extends { id: string }>(
   }
 
   return delta;
-}
-
-function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
-  return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {
