@@ -19,7 +19,7 @@ use jazz::protocol::{SubscriptionKey, SyncMessage};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::wire::{
-    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireStreamDecoder,
+    FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireCompression, WireStreamDecoder,
     WireStreamEncoder, compress_sync_payload, current_wire_features,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
@@ -1830,8 +1830,14 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    let transport_codec = match WireCompression::from_features(current_wire_features()) {
+        WireCompression::None => "none",
+        WireCompression::Lz4 => "lz4",
+        WireCompression::Zstd => "zstd",
+    };
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("scale".to_owned(), json!(config.scale));
+    fields.insert("active_transport_codec".to_owned(), json!(transport_codec));
     fields.insert("wall_ms".to_owned(), json!(summary.wall_ms));
     fields.insert("target_ms".to_owned(), json!(1000));
     fields.insert("under_target".to_owned(), json!(summary.wall_ms < 1000));

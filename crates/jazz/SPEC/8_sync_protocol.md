@@ -302,6 +302,11 @@ when there is nothing to amortize against. Windowed _storage_ representation
 (groove ch. 2 §2.9) is never a wire obligation: the wire ships logical
 messages; storage and transport each compress in their own layer.
 
+Native transports advertise zstd-3 stream compression by default when the
+feature is compiled in. WASM/browser artifacts keep transport compression
+opt-in so bundle-size trade-offs stay explicit; reconnect resets the compression
+context and relies on known-state redelivery for correctness.
+
 ## 8.9 Edge mergeable fate deferral and permission-scope subscriptions
 
 An edge that acts as mergeable fate authority needs the relevant policy data

@@ -261,13 +261,25 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
 /// Optional transport compression features enabled for this process.
 pub fn runtime_transport_compression_features() -> WireFeatures {
     let Ok(value) = std::env::var("JAZZ_TRANSPORT_COMPRESSION") else {
-        return FEATURE_NONE;
+        return default_transport_compression_features();
     };
     match value.to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "none" | "disabled" => FEATURE_NONE,
         "lz4" => cfg_lz4_feature(),
         "zstd" | "zstd-3" => cfg_zstd_feature(),
         "1" | "true" | "on" | "auto" => cfg_lz4_feature() | cfg_zstd_feature(),
         _ => FEATURE_NONE,
+    }
+}
+
+fn default_transport_compression_features() -> WireFeatures {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"))]
+    {
+        FEATURE_PAYLOAD_ZSTD
+    }
+    #[cfg(any(target_arch = "wasm32", not(feature = "transport-compression-zstd")))]
+    {
+        FEATURE_NONE
     }
 }
 
@@ -374,8 +386,8 @@ fn compress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
 fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
     #[cfg(feature = "transport-compression-zstd")]
     {
-        return zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
-            .map_err(|error| format!("failed to decompress zstd payload: {error}"));
+        zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
+            .map_err(|error| format!("failed to decompress zstd payload: {error}"))
     }
     #[cfg(all(
         not(feature = "transport-compression-zstd"),
@@ -825,6 +837,15 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"))]
+    #[test]
+    fn native_default_transport_compression_advertises_zstd() {
+        assert_eq!(
+            default_transport_compression_features(),
+            FEATURE_PAYLOAD_ZSTD
+        );
     }
 
     #[test]
