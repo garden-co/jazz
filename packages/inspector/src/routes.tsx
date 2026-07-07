@@ -4,6 +4,7 @@ import { TableDataGrid } from "./components/data-explorer/TableDataGrid";
 import { TableSchemaDefinition } from "./components/data-explorer/TableSchemaDefinition";
 import { InspectorLayout } from "./components/inspector-layout";
 import { LiveQuery } from "./pages/live-query";
+import { SettingsPage } from "./pages/settings";
 
 export function InspectorRoutes() {
   return (
@@ -15,6 +16,7 @@ export function InspectorRoutes() {
           <Route path=":table/schema" element={<TableSchemaDefinition />} />
         </Route>
         <Route path="live-query" element={<LiveQuery />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );
