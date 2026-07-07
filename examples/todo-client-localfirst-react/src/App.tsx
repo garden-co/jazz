@@ -8,6 +8,7 @@ const devToolsAttachedClients = new WeakSet<object>();
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const subscriptionMode = import.meta.env.VITE_JAZZ_SUBSCRIPTION_MODE ?? "async";
 
 // #region context-setup-react
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
@@ -35,10 +36,12 @@ function DevToolsRegistration() {
       return;
     }
 
-    void attachDevTools(client, app.wasmSchema);
+    if ("setDevMode" in client.db) {
+      void attachDevTools(client, app.wasmSchema);
+    }
     devToolsAttachedClients.add(client as object);
 
-    if (location.origin.includes("localhost")) {
+    if (["localhost", "127.0.0.1"].includes(location.hostname)) {
       Object.defineProperty(window, "jazzClient", {
         value: client,
         writable: true,
@@ -58,9 +61,13 @@ export function App({ config, fallback }: AppProps = {}) {
   }
 
   const resolvedConfig = defaultConfig(secret, config);
+  const asyncSubscriptionsOnly = subscriptionMode !== "sync";
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzProvider
+      config={{ ...resolvedConfig, asyncSubscriptionsOnly }}
+      fallback={fallback ?? <p>Loading...</p>}
+    >
       <DevToolsRegistration />
       <h1>Todos</h1>
       <TodoList />
