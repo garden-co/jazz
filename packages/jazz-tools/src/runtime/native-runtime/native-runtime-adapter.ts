@@ -1176,6 +1176,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (chunk.type === "snapshot") {
+      const previousRows = subscription.opened ? subscription.rows : [];
       subscription.rows = rowsFromRelationSnapshot(
         chunk.snapshot,
         this.schema,
@@ -1183,7 +1184,7 @@ export class NativeRuntimeAdapter implements Runtime {
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
-      subscription.callback?.(nativeDeltaFromRows(subscription.rows, []));
+      subscription.callback?.(nativeDeltaFromRows(subscription.rows, previousRows));
     } else {
       const applied = applySubscriptionDeltaWithWireDelta(
         subscription.rows,

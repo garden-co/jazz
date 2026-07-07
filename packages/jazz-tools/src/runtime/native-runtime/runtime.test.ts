@@ -2254,6 +2254,12 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
+    controller!.enqueue({
+      type: "snapshot",
+      rows: encodeRelationSnapshot([], []),
+    });
+    await Promise.resolve();
+
     expect(deltas).toEqual([
       [
         {
@@ -2298,6 +2304,18 @@ describe("NativeRuntimeAdapter server transport", () => {
           kind: 1,
           id: "00000000-0000-0000-0000-000000000001",
           index: 0,
+        },
+      ],
+      [
+        {
+          kind: 1,
+          id: "00000000-0000-0000-0000-000000000002",
+          index: 0,
+        },
+        {
+          kind: 1,
+          id: "00000000-0000-0000-0000-000000000003",
+          index: 1,
         },
       ],
     ]);
