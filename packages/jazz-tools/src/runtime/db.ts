@@ -1783,7 +1783,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
 
   let resolvedConfig = { ...config };
 
-  // Enable subscription tracing in dev so the inspector's Live Query sees the
+  // Enable subscription tracing in dev so the inspector's Subscriptions view sees the
   // subscriptions an app creates on mount, with no app config. Keyed on
   // "development" specifically (not `!== "production"`) to keep tracing off under
   // `test`/SSR; the runtime is the only client-creation seam shared by every
