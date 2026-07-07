@@ -719,7 +719,6 @@ export function TableDataGrid() {
       }) as const,
     [queryPropagation],
   );
-
   // `undefined` means the live query hasn't resolved yet (loading); `[]` means
   // it resolved and is genuinely empty. Keep them apart so the grid can
   // show a skeleton while the first result is in flight.
