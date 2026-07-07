@@ -5,10 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && pnpm run build:web && pnpm run build:extension && pnpm run build:embedded",
+    "build": "tsc -b && pnpm run build:web && pnpm run build:embedded",
     "build:vercel": "bash ../../dev/scripts/install-vercel-deps.sh && pnpm --dir ../.. exec turbo run build:crates --filter=@jazz/rust && pnpm --dir ../.. exec turbo run build --filter=jazz-wasm && pnpm --dir ../.. exec turbo run build --filter=jazz-tools --only && pnpm run build:web",
     "build:web": "vite build --mode web",
-    "build:extension": "vite build --mode extension",
     "build:embedded": "vite build --mode embedded",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
