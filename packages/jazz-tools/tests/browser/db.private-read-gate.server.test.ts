@@ -9,6 +9,8 @@ import {
   type QueryBuilder,
   type RowOf,
 } from "../../src/index.js";
+import { createJazzClient } from "../../src/web/create-jazz-client.js";
+import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import {
   TestCleanup,
@@ -216,8 +218,23 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
   ],
 );
 
+const createdByApp = schema.defineApp({
+  todos: schema.table({
+    title: schema.string(),
+    done: schema.boolean(),
+  }),
+});
+
+const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
+  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+});
+
 type Chat = RowOf<typeof app.chats>;
 type Message = RowOf<typeof app.messages>;
+type CreatedByTodo = RowOf<typeof createdByApp.todos>;
 
 type BobExposureSnapshot = {
   phase: string;
@@ -234,6 +251,68 @@ afterEach(async () => {
 });
 
 describe("raw websocket private read gate", () => {
+  it("delivers async-channel subscription updates for $createdBy-scoped inserts", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("created-by-async-channel-subscription"),
+    );
+    await publishSchemaAndPermissions(
+      appId,
+      serverUrl,
+      adminSecret,
+      createdByPermissions,
+      createdByApp,
+    );
+
+    const client = await createJazzClient({
+      appId,
+      serverUrl,
+      secret: generateAuthSecret(),
+      driver: {
+        type: "persistent",
+        dbName: uniqueDbName("created-by-async-channel-client"),
+      },
+      asyncSubscriptionsOnly: true,
+    });
+    ctx.track({
+      shutdown: client.shutdown,
+    } as Db);
+
+    const store = getSubscriptionStore(client);
+    const key = store.makeQueryKey(createdByApp.todos);
+    const entry = store.getCacheEntry<CreatedByTodo>(key);
+    const snapshots: CreatedByTodo[][] = [];
+    const unsubscribe = entry.subscribe({
+      onfulfilled: (rows) => snapshots.push([...rows]),
+      onDelta: (delta) => snapshots.push([...delta.all]),
+      onReset: () => snapshots.push([]),
+    });
+    ctx.trackSubscription(unsubscribe);
+
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      10_000,
+      "$createdBy async-channel subscription should produce an initial snapshot",
+    );
+    await sleep(500);
+
+    const inserted = await withTimeout(
+      client.db
+        .insert(createdByApp.todos, {
+          title: "Alice-created async channel row",
+          done: false,
+        })
+        .then((write) => write.wait({ tier: "global" })),
+      15_000,
+      "async-channel $createdBy insert global wait",
+    );
+
+    await waitForCondition(
+      async () => snapshots.some((rows) => rows.some((row) => row.id === inserted.id)),
+      15_000,
+      "$createdBy async-channel subscription should emit the inserted row",
+    );
+  }, 60_000);
+
   it("lets Bob insert a camelCase chat message after edge-confirmed membership", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("camel-chat-member-message-insert"),
