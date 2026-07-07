@@ -1,9 +1,7 @@
 /*
  * Inspector design tokens — the single source of truth for the dark theme.
  *
- * Before this file the same palette was hand-copied as raw hex across every CSS
- * module (and the overlay chrome in jazz-tools `loader.ts`, which mirrors these
- * values on its shadow `:host`). Reach for a semantic token below instead of a
+ * Reach for a semantic token below instead of a
  * literal; if a value genuinely has no role here, it's a deliberate one-off
  * (component state tints, animation washes) and stays inline.
  *

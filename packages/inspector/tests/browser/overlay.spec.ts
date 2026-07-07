@@ -96,8 +96,8 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
       timeout: 30_000,
     });
 
-    // The host's `useAll(app.todos)` subscription is pushed to Live Query.
-    await inspector.getByRole("link", { name: "Live Query" }).click();
+    // The host's `useAll(app.todos)` subscription is pushed to the Subscriptions tab.
+    await inspector.getByRole("link", { name: "Subscriptions" }).click();
     await expect(inspector.getByRole("cell", { name: "todos", exact: true })).toBeVisible({
       timeout: 30_000,
     });
