@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
-import type { Db, DbConfig } from "../runtime/db.js";
+import type { DbConfig } from "../runtime/db.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -21,7 +21,7 @@ if (process.env.NODE_ENV === "development" && typeof window !== "undefined") {
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
 interface JazzClientContextValue {
-  db: Db;
+  db: CreatedJazzClient["db"];
   session: Session | null;
   shutdown: CreatedJazzClient["shutdown"];
 }
@@ -34,14 +34,14 @@ export type JazzProviderProps = {
 };
 
 export function JazzProvider({ config, fallback, children, onJWTExpired }: JazzProviderProps) {
-  const createSyncJazzClient: CreateJazzClient = (nextConfig) =>
-    createJazzClient({ ...nextConfig, asyncSubscriptionsOnly: false });
+  const createClient: CreateJazzClient = (nextConfig) =>
+    createJazzClient(nextConfig) as Promise<CreatedJazzClient>;
 
   return (
     <CoreJazzProvider
       config={config}
       fallback={fallback}
-      createJazzClient={createSyncJazzClient}
+      createJazzClient={createClient}
       onJWTExpired={onJWTExpired}
     >
       {children}
@@ -56,8 +56,8 @@ export function useJazzClient(): JazzClientContextValue {
 /**
  * Get a Jazz {@link Db} instance that can be used to read and write data.
  */
-export function useDb(): Db {
-  return useCoreDb<Db>();
+export function useDb(): CreatedJazzClient["db"] {
+  return useCoreDb<CreatedJazzClient["db"]>();
 }
 
 export { useSession };

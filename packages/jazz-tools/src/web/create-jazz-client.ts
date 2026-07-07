@@ -1,9 +1,15 @@
 import type { Session } from "../runtime/context.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
-import type { Db, DbConfig, QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { Db, DbConfig, QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
+import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
+import type { AuthState } from "../runtime/auth-state.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { createDb } from "../runtime/db.js";
-import type { SubscriptionChannel } from "../runtime/subscription-channel.js";
+import type {
+  AsyncWriteHandle,
+  AsyncWriteResult,
+  SubscriptionChannel,
+} from "../runtime/subscription-channel.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
@@ -30,6 +36,7 @@ export type JazzClientConfig<TAsyncSubscriptionsOnly extends boolean = true> = D
   };
 
 export interface AsyncOnlyJazzClient {
+  db: AsyncChannelDb;
   session: Session | null;
   shutdown(): Promise<void>;
 }
@@ -46,6 +53,31 @@ export type JazzClient<TAsyncSubscriptionsOnly extends boolean = true> =
 type ChannelBackedClient = AsyncOnlyJazzClient & {
   subscriptionChannel: SubscriptionChannel;
 };
+
+export interface AsyncChannelDb {
+  getAuthState(): AuthState;
+  onAuthChanged(listener: (state: AuthState) => void): () => void;
+  updateAuthToken(token: string | null): void;
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): Promise<AsyncWriteResult<T>>;
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): Promise<AsyncWriteHandle>;
+  delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+  ): Promise<AsyncWriteHandle>;
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<boolean>;
+  canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): Promise<boolean>;
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean>;
+}
 
 type SyncClientWithChannel = SyncJazzClient & {
   subscriptionChannel?: SubscriptionChannel;
@@ -70,6 +102,85 @@ class DualSubscriptionTarget {
       return this.channel.subscribeAll(query, callback, options, session);
     }
     return this.db.subscribeAll(query, callback, options, session);
+  }
+}
+
+class AsyncChannelDbFacade implements AsyncChannelDb {
+  private authState: AuthState;
+
+  constructor(
+    private readonly channel: SubscriptionChannel,
+    initialAuthState: AuthState,
+  ) {
+    this.authState = initialAuthState;
+  }
+
+  getAuthState(): AuthState {
+    return this.authState;
+  }
+
+  onAuthChanged(listener: (state: AuthState) => void): () => void {
+    const unsubscribe = this.channel.onAuthChanged((state) => {
+      this.authState = state;
+      listener(state);
+    });
+    listener(this.authState);
+    return unsubscribe;
+  }
+
+  updateAuthToken(token: string | null): void {
+    void this.channel.updateAuthToken(token);
+  }
+
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): Promise<AsyncWriteResult<T>> {
+    return Promise.resolve(
+      this.channel.insert(table, data, options, this.authState.session ?? undefined),
+    );
+  }
+
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): Promise<AsyncWriteHandle> {
+    return Promise.resolve(
+      this.channel.update(table, id, data, options, this.authState.session ?? undefined),
+    );
+  }
+
+  delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+  ): Promise<AsyncWriteHandle> {
+    return Promise.resolve(
+      this.channel.delete(table, id, options, this.authState.session ?? undefined),
+    );
+  }
+
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<boolean> {
+    return Promise.resolve(
+      this.channel.canInsert(table, data, this.authState.session ?? undefined),
+    );
+  }
+
+  canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): Promise<boolean> {
+    return Promise.resolve(
+      this.channel.canUpdate(table, id, data, this.authState.session ?? undefined),
+    );
+  }
+
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean> {
+    return Promise.resolve(this.channel.canDelete(table, id, this.authState.session ?? undefined));
   }
 }
 
@@ -115,18 +226,28 @@ async function createAsyncOnlyJazzClientInternal(
 ): Promise<ChannelBackedClient> {
   const subscriptionChannel =
     config.subscriptionChannel ?? createBrowserWorkerSubscriptionChannel(config);
-  const session = config.cookieSession ?? null;
+  const initialAuthState = await subscriptionChannel.getAuthState();
+  let session = initialAuthState.session;
+  const db = new AsyncChannelDbFacade(subscriptionChannel, initialAuthState);
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
     subscriptionChannel,
     session,
   );
   await manager.init();
+  const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
+    session = nextSession ?? null;
+    manager.setSession(nextSession ?? null);
+  });
 
   return attachSubscriptionStore(
     {
-      session,
+      db,
+      get session() {
+        return session;
+      },
       async shutdown() {
+        stopSessionSync();
         await manager.shutdown();
         await subscriptionChannel.shutdown?.();
       },
@@ -173,32 +294,19 @@ export function createJazzClient(
   return trackPromise(
     shared.then((client) =>
       attachSubscriptionStore(
-        hasDb(client)
-          ? {
-              db: client.db,
-              get session() {
-                return client.session;
-              },
-              shutdown() {
-                return releaseClient(key, holder);
-              },
-            }
-          : {
-              get session() {
-                return client.session;
-              },
-              shutdown() {
-                return releaseClient(key, holder);
-              },
-            },
+        {
+          db: client.db,
+          get session() {
+            return client.session;
+          },
+          shutdown() {
+            return releaseClient(key, holder);
+          },
+        },
         getSubscriptionStore(client),
       ),
     ),
   ) as Promise<AsyncOnlyJazzClient | SyncJazzClient>;
-}
-
-function hasDb(client: AsyncOnlyJazzClient | SyncJazzClient): client is SyncJazzClient {
-  return "db" in client;
 }
 
 async function createExtensionJazzClientInternal(): Promise<SyncJazzClient> {

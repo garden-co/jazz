@@ -1,6 +1,10 @@
 import type { Session } from "./context.js";
-import type { QueryBuilder, QueryOptions } from "./db.js";
+import type { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type { AuthState } from "./auth-state.js";
 import type { RowDelta, SubscriptionDelta } from "./subscription-manager.js";
+import type { CreateOptions, DeleteOptions, DurabilityTier, UpdateOptions } from "./client.js";
+
+type MaybePromise<T> = T | Promise<T>;
 
 export type SubscriptionChannelCallback<T extends { id: string }> = (
   delta: SubscriptionDelta<T>,
@@ -31,7 +35,54 @@ export interface SubscriptionChannel {
     options?: QueryOptions,
     session?: Session,
   ): () => void;
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteResult<T>>;
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteHandle>;
+  delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteHandle>;
+  canInsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    session?: Session,
+  ): MaybePromise<boolean>;
+  canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    session?: Session,
+  ): MaybePromise<boolean>;
+  canDelete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    session?: Session,
+  ): MaybePromise<boolean>;
+  getAuthState(): MaybePromise<AuthState>;
+  onAuthChanged(listener: (state: AuthState) => void): () => void;
+  updateAuthToken(token: string | null): MaybePromise<void>;
   shutdown?(): Promise<void> | void;
+}
+
+export interface AsyncWriteHandle<T = void> {
+  readonly transactionId: string;
+  wait(options: { tier: DurabilityTier }): Promise<T>;
+}
+
+export interface AsyncWriteResult<T> extends AsyncWriteHandle<T> {
+  readonly value: T;
 }
 
 export type SubscriptionChannelTarget = SubscriptionChannel;
@@ -50,6 +101,71 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
 
   shutdown(): Promise<void> | void {
     return this.target.shutdown?.();
+  }
+
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteResult<T>> {
+    return this.target.insert(table, data, options, session);
+  }
+
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteHandle> {
+    return this.target.update(table, id, data, options, session);
+  }
+
+  delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+    session?: Session,
+  ): MaybePromise<AsyncWriteHandle> {
+    return this.target.delete(table, id, options, session);
+  }
+
+  canInsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    session?: Session,
+  ): MaybePromise<boolean> {
+    return this.target.canInsert(table, data, session);
+  }
+
+  canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    session?: Session,
+  ): MaybePromise<boolean> {
+    return this.target.canUpdate(table, id, data, session);
+  }
+
+  canDelete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    session?: Session,
+  ): MaybePromise<boolean> {
+    return this.target.canDelete(table, id, session);
+  }
+
+  getAuthState(): MaybePromise<AuthState> {
+    return this.target.getAuthState();
+  }
+
+  onAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.target.onAuthChanged(listener);
+  }
+
+  updateAuthToken(token: string | null): MaybePromise<void> {
+    return this.target.updateAuthToken(token);
   }
 }
 

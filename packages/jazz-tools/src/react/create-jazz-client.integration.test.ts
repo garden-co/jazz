@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { QueryBuilder, TableProxy } from "../runtime/db.js";
-import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+import { createJazzClient, type SyncJazzClient } from "./create-jazz-client.js";
 
 type Todo = {
   id: string;
@@ -51,7 +51,7 @@ function makeAppId(scope: string): string {
 
 describe("react/create-jazz-client integration", () => {
   it("RC-I01: supports mutation + query flow via returned db", async () => {
-    let client: JazzClient | null = null;
+    let client: SyncJazzClient | null = null;
 
     try {
       client = await createJazzClient({
@@ -78,7 +78,7 @@ describe("react/create-jazz-client integration", () => {
   }, 15000);
 
   it("RC-I02: uses a caller-supplied uuid for inserts", async () => {
-    let client: JazzClient | null = null;
+    let client: SyncJazzClient | null = null;
     const externalId = "550e8400-e29b-41d4-a716-446655440000";
 
     try {
@@ -108,7 +108,7 @@ describe("react/create-jazz-client integration", () => {
   }, 15000);
 
   it("RC-I03: shutdown after activity releases resources cleanly", async () => {
-    let client: JazzClient | null = null;
+    let client: SyncJazzClient | null = null;
 
     try {
       client = await createJazzClient({
