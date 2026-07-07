@@ -42,11 +42,21 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
   const input = form.querySelector<HTMLInputElement>("input[name='title']")!;
   const list = parent.querySelector<HTMLUListElement>("ul")!;
 
-  form.addEventListener("submit", (event) => {
+  function renderTodos(todos: Todo[]) {
+    list.replaceChildren(...todos.map(renderRow));
+  }
+
+  async function refreshTodos() {
+    renderTodos(await db.all(app.todos, { tier: "edge" }));
+  }
+
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = input.value.trim();
     if (!title) return;
-    db.insert(app.todos, { title, done: false });
+    const write = db.insert(app.todos, { title, done: false });
+    await write.wait({ tier: "edge" });
+    await refreshTodos();
     form.reset();
   });
 
@@ -56,7 +66,7 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (!li) return;
     const id = li.dataset.id!;
     if (target.dataset.action === "delete") {
-      db.delete(app.todos, id);
+      void db.delete(app.todos, id).wait({ tier: "edge" }).then(refreshTodos);
     }
   });
 
@@ -65,8 +75,13 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (target.dataset.action !== "toggle") return;
     const li = target.closest<HTMLLIElement>("li[data-id]");
     if (!li) return;
-    db.update(app.todos, li.dataset.id!, { done: target.checked });
+    void db
+      .update(app.todos, li.dataset.id!, { done: target.checked })
+      .wait({ tier: "edge" })
+      .then(refreshTodos);
   });
+
+  void refreshTodos();
 
   return db.subscribeAll(app.todos, (delta) => {
     // The simplest possible approach: rebuild the whole list on every tick.
@@ -81,6 +96,6 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     //       { kind: Removed, id, index }         // row gone at `index`
     // Iterate delta.delta to apply per-row DOM patches instead of a full
     // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    list.replaceChildren(...delta.all.map(renderRow));
+    renderTodos(delta.all);
   });
 }
