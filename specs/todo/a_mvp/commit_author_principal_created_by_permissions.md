@@ -197,7 +197,7 @@ Not supported in MVP:
 
 ### Explicit opt-in
 
-Like `$canRead` / `$canEdit` / `$canDelete`, provenance magic columns are omitted from `select("*")`.
+Like `$canRead`, provenance magic columns are omitted from `select("*")`.
 
 Examples:
 

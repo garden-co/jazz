@@ -9,6 +9,7 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
+import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
   PostcardReader,
@@ -139,6 +140,16 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  canInsertEncoded?(table: string, cells: Uint8Array): boolean;
+  canInsertEncodedForIdentity?(table: string, cells: Uint8Array, author: Uint8Array): boolean;
+  canReadForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
+  canUpdateEncodedForIdentity?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+  ): boolean;
+  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
   mergeableTx(): Tx;
   mergeableTxForIdentity?(author: Uint8Array): Tx;
   exclusiveTx?(): Tx;
@@ -498,6 +509,61 @@ export class NativeRuntimeAdapter implements Runtime {
         : this.db.delete(table, rowId, updatedAtMs),
     );
     return this.finishMutation(write);
+  }
+
+  canInsert(table: string, values: InsertValues, session?: Session): boolean {
+    const cells = encodeCellsForRow(this.table(table), values, table);
+    const runtimeSession = runtimeSessionFromPublicSession(session);
+    this.applySessionClaims(runtimeSession);
+    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
+    if (this.db.canInsertEncodedForIdentity) {
+      return this.db.canInsertEncodedForIdentity(table, cells, identity);
+    }
+    if (!runtimeSession && this.db.canInsertEncoded) {
+      return this.db.canInsertEncoded(table, cells);
+    }
+    throw new Error("Runtime does not support write-policy dry-run insert checks.");
+  }
+
+  canRead(table: string, objectId: string, session?: Session): boolean {
+    this.table(table);
+    const rowId = parseUuid(objectId);
+    const runtimeSession = runtimeSessionFromPublicSession(session);
+    this.applySessionClaims(runtimeSession);
+    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
+    if (!this.db.canReadForIdentity) {
+      throw new Error("Runtime does not support read-policy dry-run checks.");
+    }
+    return this.db.canReadForIdentity(table, rowId, identity);
+  }
+
+  canUpdate(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): boolean {
+    const rowId = parseUuid(objectId);
+    const patch = encodeCellsForPatch(this.table(table), values);
+    const runtimeSession = runtimeSessionFromPublicSession(session);
+    this.applySessionClaims(runtimeSession);
+    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
+    if (!this.db.canUpdateEncodedForIdentity) {
+      throw new Error("Runtime does not support write-policy dry-run update checks.");
+    }
+    return this.db.canUpdateEncodedForIdentity(table, rowId, patch, identity);
+  }
+
+  canDelete(table: string, objectId: string, session?: Session): boolean {
+    this.table(table);
+    const rowId = parseUuid(objectId);
+    const runtimeSession = runtimeSessionFromPublicSession(session);
+    this.applySessionClaims(runtimeSession);
+    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
+    if (!this.db.canDeleteForIdentity) {
+      throw new Error("Runtime does not support write-policy dry-run delete checks.");
+    }
+    return this.db.canDeleteForIdentity(table, rowId, identity);
   }
 
   beginTransaction(kind: TransactionKind): string {
@@ -1355,6 +1421,15 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
   };
 }
 
+function runtimeSessionFromPublicSession(session: Session | undefined): RuntimeSession | null {
+  if (!session) return null;
+  return {
+    user_id: session.user_id,
+    claims: sessionClaims(session.user_id, session.claims),
+    identity: authorBytesForSubject(session.user_id),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1428,7 +1503,7 @@ function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
   if (!queryContainsPermissionIntrospection(queryJson)) return;
   throw new Error(
     "Native runtime does not support permission-introspection query columns or predicates " +
-      "($canRead, $canEdit, $canDelete) until unified policy lowering exists.",
+      "($canRead) until unified policy lowering exists.",
   );
 }
 

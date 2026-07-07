@@ -157,35 +157,21 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 }
 // #endregion reading-select-ts
 
-// #region reading-magic-columns-ts
-export async function readTodoPermissionIntrospection(db: Db) {
-  return db.all(
-    app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
-  );
-}
-
+// #region dry-run-permissions-ts
 export async function readTodosWithDeletePermission(db: Db) {
-  return db.all(app.todos.select("*", "$canDelete").orderBy("title", "asc"));
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  return todos.filter((todo) => db.canDelete(app.todos, todo.id));
 }
 
 export async function readEditableTodos(db: Db) {
-  return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  return todos.filter((todo) => db.canUpdate(app.todos, todo.id, { title: todo.title }));
 }
 
-export async function readDeletableTodos(db: Db) {
-  return db.all(app.todos.where({ $canDelete: true }).select("title", "$canDelete"));
+export function canCreateTodo(db: Db, title: string) {
+  return db.canInsert(app.todos, { title, done: false });
 }
-// #endregion reading-magic-columns-ts
-
-// #region reading-magic-columns-include-ts
-export async function readProjectsWithTodoPermissions(db: Db) {
-  return db.all(
-    app.projects.include({
-      todosViaProject: app.todos.select("title", "$canEdit", "$canDelete").orderBy("title", "asc"),
-    }),
-  );
-}
-// #endregion reading-magic-columns-include-ts
+// #endregion dry-run-permissions-ts
 
 // #region reading-edit-metadata-magic-columns-ts
 export async function readTodoEditMetadata(db: Db, currentUserId: string, updatedSinceMs: number) {

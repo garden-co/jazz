@@ -1313,6 +1313,44 @@ export class Db {
     return client.delete(table._table, id, options, context?.session, context?.attribution);
   }
 
+  canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): boolean {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.canInsert(table._table, values, context?.session);
+  }
+
+  canRead<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.canRead(table._table, id, context?.readSession ?? context?.session);
+  }
+
+  canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): boolean {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.canUpdate(table._table, id, updates, context?.session);
+  }
+
+  canDelete<T, Init>(table: TableProxy<T, Init>, id: string): boolean {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.canDelete(table._table, id, context?.session);
+  }
+
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     const context = this.getRuntimeOperationContext();
     return new Transaction(

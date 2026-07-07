@@ -94,6 +94,8 @@ declare module "jazz-wasm" {
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): boolean;
+    canInsertEncodedForIdentity(table: string, cells: Uint8Array, author: Uint8Array): boolean;
+    canReadForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
     insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     insertWithIdEncodedForIdentity(
       table: string,
@@ -114,6 +116,7 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       author: Uint8Array,
     ): boolean;
+    canDeleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
     upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     upsertEncodedForIdentity(
       table: string,

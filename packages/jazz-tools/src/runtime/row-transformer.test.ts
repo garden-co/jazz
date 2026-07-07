@@ -360,7 +360,7 @@ describe("transformRows", () => {
     expect(result).toEqual([{ id: "uuid-1", title: "Buy milk" }]);
   });
 
-  it("applies magic column projections while preserving id", () => {
+  it("applies supported magic column projections while preserving id", () => {
     const rows: WasmRow[] = [
       {
         id: "uuid-1",
@@ -375,16 +375,14 @@ describe("transformRows", () => {
     const result = transformRows<{
       id: string;
       title: string;
-      $canEdit: boolean;
-      $canDelete: boolean | null;
-    }>(rows, schema, "todos", {}, ["title", "$canEdit", "$canDelete"]);
+      $canRead: boolean;
+    }>(rows, schema, "todos", {}, ["title", "$canRead"]);
 
     expect(result).toEqual([
       {
         id: "uuid-1",
         title: "Buy milk",
-        $canEdit: true,
-        $canDelete: null,
+        $canRead: true,
       },
     ]);
   });
@@ -396,7 +394,7 @@ describe("transformRows", () => {
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Uuid", value: "user-1" },
-          { type: "Boolean", value: true },
+          { type: "Uuid", value: "user-1" },
           {
             type: "Array",
             value: [
@@ -415,7 +413,7 @@ describe("transformRows", () => {
 
     const result = transformRows(rows, relationSchema, "todos", { owner: true }, [
       "*",
-      "$canDelete",
+      "$createdBy",
     ]);
 
     expect(result).toEqual([
@@ -423,7 +421,7 @@ describe("transformRows", () => {
         id: "todo-1",
         title: "Buy milk",
         owner_id: "user-1",
-        $canDelete: true,
+        $createdBy: "user-1",
         owner: {
           id: "user-1",
           name: "Alice",

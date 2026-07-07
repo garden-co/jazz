@@ -549,7 +549,7 @@ fn cloned_row_descriptor_recomputes_content_hash_after_mutation() {
     let mut cloned = desc.clone();
     cloned
         .columns
-        .push(ColumnDescriptor::new("$canEdit", ColumnType::Boolean));
+        .push(ColumnDescriptor::new("can_edit", ColumnType::Boolean));
 
     assert_ne!(
         original_hash,

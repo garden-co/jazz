@@ -2,7 +2,7 @@ import type { ColumnType } from "./drivers/types.js";
 
 export const RESERVED_MAGIC_COLUMN_PREFIX = "$";
 
-const REJECTED_PERMISSION_INTROSPECTION_COLUMNS = ["$canRead", "$canEdit", "$canDelete"] as const;
+const REJECTED_PERMISSION_INTROSPECTION_COLUMNS = ["$canRead"] as const;
 export const PROVENANCE_MAGIC_COLUMNS = [
   "$createdBy",
   "$createdAt",

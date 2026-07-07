@@ -1276,13 +1276,27 @@ where
     /// hypothetical version used by the write path, evaluates policy as this
     /// Db's authenticated author, and does not store a version or advance time.
     pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<bool, Error> {
+        self.can_insert_for_identity(table, cells, self.identity.author)
+    }
+
+    /// Return whether an insert with these cells would pass write policy for `identity`.
+    ///
+    /// This trusted serving-node dry-run mirrors `insert_with_id_for_identity`
+    /// without storing a version or advancing time.
+    pub fn can_insert_for_identity(
+        &self,
+        table: &str,
+        cells: RowCells,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
             .dry_run_insert_allows(
                 MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
-                    .made_by(self.identity.author)
+                    .made_by(identity)
+                    .permission_subject(identity)
                     .cells(cells),
             )
             .map_err(Into::into)
@@ -1723,11 +1737,21 @@ where
 
     /// Return whether this Db's author can read the current local row.
     pub fn can_read(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.can_read_for_identity(table, row, self.identity.author)
+    }
+
+    /// Return whether `author` can read the current local row.
+    pub fn can_read_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorId,
+    ) -> Result<bool, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
-            .dry_run_read_current_allows(table, row, self.identity.author)
+            .dry_run_read_current_allows(table, row, author)
             .map_err(Into::into)
     }
 
