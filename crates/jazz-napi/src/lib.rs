@@ -117,6 +117,19 @@ struct CoreRelationSnapshot<'a> {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+struct CoreSubscriptionDelta<'a> {
+    added: Vec<CoreRowBatch<'a>>,
+    updated: Vec<CoreRowBatch<'a>>,
+    removed: Vec<CoreRemovedRow>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRemovedRow {
+    table: String,
+    row_id: CoreRowUuid,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
 struct CoreRelationEdge {
     source_table: String,
     source_row_id: CoreRowUuid,
@@ -1854,6 +1867,24 @@ fn encode_core_relation_snapshot(
     })
 }
 
+fn encode_core_subscription_delta<'a>(
+    added: &'a [jazz::node::CurrentRow],
+    updated: &'a [jazz::node::CurrentRow],
+    removed: &[jazz::db::RemovedRow],
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&CoreSubscriptionDelta {
+        added: core_row_batches(added),
+        updated: core_row_batches(updated),
+        removed: removed
+            .iter()
+            .map(|row| CoreRemovedRow {
+                table: row.table.clone(),
+                row_id: row.row_uuid,
+            })
+            .collect(),
+    })
+}
+
 fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
     let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -1912,16 +1943,18 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             }))
         }
         SubscriptionEvent::Delta {
-            current,
+            added,
+            updated,
+            removed,
             settled,
             tier,
             ..
         } => {
-            let rows = encode_core_relation_snapshot(current)
+            let delta = encode_core_subscription_delta(added, updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
-                "type": "snapshot",
-                "rows": rows,
+                "type": "delta",
+                "delta": delta,
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             }))
