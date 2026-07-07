@@ -4,17 +4,17 @@
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  background: #0f141b;
-  color: #dbe1ea;
+  background: var(--jz-bg);
+  color: var(--jz-ink);
 }
 
 .topBar {
-  height: 44px;
+  height: 34px;
   box-sizing: border-box;
-  flex: 0 0 44px;
-  border-bottom: 1px solid #1c2430;
-  background: #0f141b;
-  padding: 0 12px;
+  flex: 0 0 34px;
+  border-bottom: 1px solid var(--jz-border);
+  background: var(--jz-bg);
+  padding: 0 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -43,8 +43,8 @@
 }
 
 .schemaSelect {
-  border: 1px solid #1c2430;
-  background: #161b24;
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
   color: #9ca8b9;
   border-radius: 4px;
   padding: 5px 8px;
@@ -60,26 +60,45 @@
 .tabLink {
   display: inline-flex;
   align-items: center;
-  height: 30px;
+  height: 24px;
   padding: 0 10px;
-  border-radius: 4px;
-  color: #6b7a8d;
+  border-radius: 5px;
+  color: var(--jz-faint);
   text-decoration: none;
   font-size: 13px;
   font-weight: 500;
+  transition:
+    background-color 0.14s ease,
+    color 0.14s ease;
 }
 
 .tabLink:hover {
-  color: #b0bcc9;
+  background: var(--jz-surface);
+  color: var(--jz-text);
 }
 
-.tabLinkActive {
-  color: #dbe1ea;
+.tabLink:focus-visible {
+  outline: 2px solid var(--jz-focus);
+  outline-offset: -2px;
+}
+
+/* Active tab reuses the app's selected-state fill (active table link / icon
+   button). After the :hover rule so an active+hovered tab keeps the fill. */
+.tabLinkActive,
+.tabLinkActive:hover {
+  background: var(--jz-selected);
+  color: var(--jz-ink-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabLink {
+    transition: none;
+  }
 }
 
 .resetButton {
-  border: 1px solid #1c2430;
-  background: #161b24;
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
   color: #9ca8b9;
   border-radius: 4px;
   padding: 5px 10px;
@@ -88,7 +107,7 @@
 }
 
 .resetButton:hover {
-  background: #1c2430;
+  background: var(--jz-border);
   color: #d4dae3;
 }
 
@@ -96,18 +115,26 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid #1c2430;
-  background: #161b24;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--jz-border);
+  background: var(--jz-surface);
   color: #9ca8b9;
   border-radius: 4px;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .iconButton:hover {
-  background: #1c2430;
+  background: var(--jz-border);
   color: #d4dae3;
+}
+
+.iconButtonActive,
+.iconButtonActive:hover {
+  background: var(--jz-selected);
+  border-color: var(--jz-accent);
+  color: var(--jz-ink-strong);
 }
 
 .content {
