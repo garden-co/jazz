@@ -1032,6 +1032,7 @@ export class Db {
    * against this connection without bridging or private-field access. Null if
    * no client exists yet — run a query/subscription (or wait for connection)
    * first.
+   * @internal
    */
   getRuntimeSchema(): WasmSchema | null {
     const schema = this.connection.getRuntimeSchema();
