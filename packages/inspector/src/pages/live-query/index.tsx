@@ -294,7 +294,7 @@ function ExtensionLiveQuery() {
     <section className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1 className={styles.title}>Live Query</h1>
+          <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
             Active `Db.subscribeAll(...)` subscriptions captured from the inspected page runtime.
           </p>
@@ -311,7 +311,7 @@ function ExtensionLiveQuery() {
         <section className={styles.emptyState}>
           <p className={styles.emptyTitle}>No active subscriptions</p>
           <p className={styles.emptyText}>
-            Create a live query in the inspected page to see it here.
+            Create a subscription in the inspected page to see it here.
           </p>
         </section>
       ) : (
@@ -444,7 +444,7 @@ function OverlayLiveQuery() {
     <section className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1 className={styles.title}>Live Query</h1>
+          <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
             Active `Db.subscribeAll(...)` subscriptions captured from the inspected page runtime.
           </p>
@@ -523,7 +523,7 @@ function StandaloneLiveQuery() {
     <section className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1 className={styles.title}>Live Query</h1>
+          <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
             Grouped active server-managed subscriptions for the connected Jazz server.
           </p>
