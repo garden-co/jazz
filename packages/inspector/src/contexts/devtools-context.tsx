@@ -1,20 +1,18 @@
 import type { QueryPropagation, StoredPermissionsResponse, WasmSchema } from "jazz-tools";
-import { createContext, useContext, useState, type PropsWithChildren } from "react";
+import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
-export type InspectorRuntime = "standalone" | "extension";
+export type InspectorRuntime = "standalone" | "extension" | "overlay";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
   storedPermissions: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
   /**
-   * True only when the inspector is rendered inside the dev-overlay iframe (as
-   * opposed to the standalone app or the browser-extension panel). Gates
-   * overlay-specific UI such as the launcher-button setting. Kept separate from
-   * `runtime` so it doesn't disturb the runtime branches, which treat the
-   * overlay as "extension".
+   * True only when the inspector is rendered inside the dev-overlay iframe.
+   * Gates overlay-specific UI (Close button, launcher-hide setting).
    */
   isOverlay: boolean;
+  /** Both runtimes are server-backed, so propagation is always "full". */
   queryPropagation: QueryPropagation;
   setQueryPropagation: (value: QueryPropagation) => void;
 }
@@ -27,37 +25,24 @@ export function DevtoolsProvider({
   storedPermissions = null,
   runtime,
   isOverlay = false,
-  queryPropagation,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
   storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
   isOverlay?: boolean;
-  queryPropagation?: QueryPropagation;
 }>) {
-  const [extensionQueryPropagation, setExtensionQueryPropagation] = useState<QueryPropagation>(
-    queryPropagation ?? "local-only",
+  const value = useMemo(
+    () => ({
+      wasmSchema,
+      storedPermissions,
+      runtime,
+      isOverlay,
+      queryPropagation: "full" as const,
+      setQueryPropagation: () => {},
+    }),
+    [wasmSchema, storedPermissions, runtime, isOverlay],
   );
-  const resolvedPropagation = runtime === "standalone" ? "full" : extensionQueryPropagation;
-  const setQueryPropagation = (value: QueryPropagation) => {
-    if (runtime === "standalone") return;
-    setExtensionQueryPropagation(value);
-  };
-
-  return (
-    <DevtoolsContext.Provider
-      value={{
-        wasmSchema,
-        storedPermissions,
-        runtime,
-        isOverlay,
-        queryPropagation: resolvedPropagation,
-        setQueryPropagation,
-      }}
-    >
-      {children}
-    </DevtoolsContext.Provider>
-  );
+  return <DevtoolsContext.Provider value={value}>{children}</DevtoolsContext.Provider>;
 }
 
 export function useDevtoolsContext(): DevtoolsContextValue {

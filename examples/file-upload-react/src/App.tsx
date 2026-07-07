@@ -1,12 +1,5 @@
 import { use, useEffect, useRef, useState } from "react";
-import {
-  attachDevTools,
-  JazzProvider,
-  useAll,
-  useDb,
-  useJazzClient,
-  useSession,
-} from "jazz-tools/react";
+import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { app, type UploadWithIncludes, type File as JazzFile } from "../schema.js";
@@ -56,30 +49,6 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
     auth: { localFirstSecret: secret },
     ...overrides,
   };
-}
-
-const devToolsAttachedClients = new WeakSet<object>();
-
-function DevToolsRegistration() {
-  const client = useJazzClient();
-
-  useEffect(() => {
-    if (devToolsAttachedClients.has(client as object)) {
-      return;
-    }
-
-    void attachDevTools(client, app.wasmSchema);
-    devToolsAttachedClients.add(client as object);
-
-    if (location.origin.includes("localhost")) {
-      Object.defineProperty(window, "jazzClient", {
-        value: client,
-        writable: true,
-      });
-    }
-  }, [client]);
-
-  return null;
 }
 
 function FileUploadScreen() {
@@ -287,7 +256,6 @@ export function App({ config, fallback }: AppProps = {}) {
 
   return (
     <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
-      <DevToolsRegistration />
       <FileUploadScreen />
     </JazzProvider>
   );

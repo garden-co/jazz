@@ -92,7 +92,7 @@ vi.mock("jazz-tools/react", () => ({
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
-    runtime: "extension",
+    runtime: "overlay",
     queryPropagation: "local-only",
   }),
 }));
@@ -255,7 +255,7 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with local-only propagation in extension mode", () => {
+  it("subscribes with local-only propagation in overlay mode", () => {
     renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(

@@ -15,6 +15,8 @@
 // guard). Without the plugin there's no flag and no toggle — correct, since
 // nothing would serve the iframe. Read process.env.NEXT_PUBLIC_JAZZ_INSPECTOR as
 // a literal: Next only static-inlines that exact member access, not an alias.
+import type { Db } from "../runtime/db.js";
+
 function jazzDevPluginActive(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const nextFlag =
@@ -29,7 +31,7 @@ function jazzDevPluginActive(): boolean {
  * with no guard here: the overlay UI mounts once globally and the bridge
  * registers once per db (see attachDevTools), so repeat calls are idempotent.
  */
-export function startInspectorOnce(db: object): void {
+export function startInspectorOnce(db: Db): void {
   if (!jazzDevPluginActive()) return;
   void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
     startInspectorOverlay(db),
