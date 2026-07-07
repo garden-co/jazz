@@ -1,5 +1,11 @@
 import type { Session } from "./context.js";
-import type { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type { DbConfig, QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type {
+  BinaryLargeValueFileApp,
+  BinaryLargeValueFileRow,
+  FileReadOptions,
+  FileWriteOptions,
+} from "./file-storage.js";
 import type { AuthState } from "./auth-state.js";
 import type { RowDelta, SubscriptionDelta } from "./subscription-manager.js";
 import type { CreateOptions, DeleteOptions, DurabilityTier, UpdateOptions } from "./client.js";
@@ -73,6 +79,17 @@ export interface SubscriptionChannel {
   getAuthState(): MaybePromise<AuthState>;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
   updateAuthToken(token: string | null): MaybePromise<void>;
+  getConfig(): MaybePromise<DbConfig>;
+  createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): MaybePromise<BinaryLargeValueFileRow<TApp>>;
+  loadFileAsBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    fileOrId: string | BinaryLargeValueFileRow<TApp>,
+    options?: FileReadOptions,
+  ): MaybePromise<Blob>;
   shutdown?(): Promise<void> | void;
 }
 
@@ -166,6 +183,26 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
 
   updateAuthToken(token: string | null): MaybePromise<void> {
     return this.target.updateAuthToken(token);
+  }
+
+  getConfig(): MaybePromise<DbConfig> {
+    return this.target.getConfig();
+  }
+
+  createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): MaybePromise<BinaryLargeValueFileRow<TApp>> {
+    return this.target.createFileFromBlob(app, blob, options);
+  }
+
+  loadFileAsBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    fileOrId: string | BinaryLargeValueFileRow<TApp>,
+    options?: FileReadOptions,
+  ): MaybePromise<Blob> {
+    return this.target.loadFileAsBlob(app, fileOrId, options);
   }
 }
 

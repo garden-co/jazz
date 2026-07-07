@@ -170,6 +170,15 @@ function createChannel(rows: TestRow[]): SubscriptionChannel & {
       return () => {};
     },
     async updateAuthToken(_token) {},
+    async getConfig() {
+      return { appId: "test-app" };
+    },
+    async createFileFromBlob(_app, blob) {
+      return { id: "async-file", data: new Uint8Array(await blob.arrayBuffer()) } as any;
+    },
+    async loadFileAsBlob() {
+      return new Blob(["async-file"]);
+    },
   } satisfies SubscriptionChannel & {
     calls: Array<{ options?: QueryOptions; session?: Session }>;
     writes: Array<{ operation: string; id?: string; session?: Session }>;
@@ -251,6 +260,15 @@ function createTypedChannel(rows: TestRow[]): SubscriptionChannel & {
       return () => {};
     },
     async updateAuthToken(_token) {},
+    async getConfig() {
+      return { appId: "test-app" };
+    },
+    async createFileFromBlob(_app, blob) {
+      return { id: "async-file", data: new Uint8Array(await blob.arrayBuffer()) } as any;
+    },
+    async loadFileAsBlob() {
+      return new Blob(["async-file"]);
+    },
   };
 }
 
@@ -278,6 +296,11 @@ function createMockDb(rows: TestRow[] = []) {
     canInsert: vi.fn(() => true),
     canUpdate: vi.fn(() => true),
     canDelete: vi.fn(() => true),
+    createFileFromBlob: vi.fn(async (_app, blob) => ({
+      id: "worker-file",
+      data: new Uint8Array(await blob.arrayBuffer()),
+    })),
+    loadFileAsBlob: vi.fn(async () => new Blob(["worker-file"])),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => ({ appId: "test-app" })),

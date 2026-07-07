@@ -7,6 +7,12 @@ import {
   type QueryOptions,
   type TableProxy,
 } from "../runtime/db.js";
+import type {
+  BinaryLargeValueFileApp,
+  BinaryLargeValueFileRow,
+  FileReadOptions,
+  FileWriteOptions,
+} from "../runtime/file-storage.js";
 import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import type {
@@ -169,6 +175,29 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
   async updateAuthToken(token: string | null): Promise<void> {
     const db = await this.owner.db();
     db.updateAuthToken(token);
+  }
+
+  async getConfig(): Promise<DbConfig> {
+    const db = await this.owner.db();
+    return db.getConfig();
+  }
+
+  async createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): Promise<BinaryLargeValueFileRow<TApp>> {
+    const db = await this.owner.db();
+    return db.createFileFromBlob(app, blob, options);
+  }
+
+  async loadFileAsBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    fileOrId: string | BinaryLargeValueFileRow<TApp>,
+    options?: FileReadOptions,
+  ): Promise<Blob> {
+    const db = await this.owner.db();
+    return db.loadFileAsBlob(app, fileOrId, options);
   }
 
   async shutdown(): Promise<void> {

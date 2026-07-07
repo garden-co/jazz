@@ -3,6 +3,12 @@ import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig, QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
 import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import type {
+  BinaryLargeValueFileApp,
+  BinaryLargeValueFileRow,
+  FileReadOptions,
+  FileWriteOptions,
+} from "../runtime/file-storage.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { createDb } from "../runtime/db.js";
 import type {
@@ -58,6 +64,7 @@ export interface AsyncChannelDb {
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
   updateAuthToken(token: string | null): void;
+  getConfig(): DbConfig;
   insert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
@@ -77,6 +84,16 @@ export interface AsyncChannelDb {
   canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<boolean>;
   canUpdate<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): Promise<boolean>;
   canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean>;
+  createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): Promise<BinaryLargeValueFileRow<TApp>>;
+  loadFileAsBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    fileOrId: string | BinaryLargeValueFileRow<TApp>,
+    options?: FileReadOptions,
+  ): Promise<Blob>;
 }
 
 type SyncClientWithChannel = SyncJazzClient & {
@@ -111,6 +128,7 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
   constructor(
     private readonly channel: SubscriptionChannel,
     initialAuthState: AuthState,
+    private readonly config: DbConfig,
   ) {
     this.authState = initialAuthState;
   }
@@ -130,6 +148,10 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
 
   updateAuthToken(token: string | null): void {
     void this.channel.updateAuthToken(token);
+  }
+
+  getConfig(): DbConfig {
+    return this.config;
   }
 
   insert<T, Init>(
@@ -182,6 +204,22 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
   canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<boolean> {
     return Promise.resolve(this.channel.canDelete(table, id, this.authState.session ?? undefined));
   }
+
+  createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): Promise<BinaryLargeValueFileRow<TApp>> {
+    return Promise.resolve(this.channel.createFileFromBlob(app, blob, options));
+  }
+
+  loadFileAsBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
+    app: TApp,
+    fileOrId: string | BinaryLargeValueFileRow<TApp>,
+    options?: FileReadOptions,
+  ): Promise<Blob> {
+    return Promise.resolve(this.channel.loadFileAsBlob(app, fileOrId, options));
+  }
 }
 
 async function createSyncJazzClientInternal(
@@ -228,7 +266,7 @@ async function createAsyncOnlyJazzClientInternal(
     config.subscriptionChannel ?? createBrowserWorkerSubscriptionChannel(config);
   const initialAuthState = await subscriptionChannel.getAuthState();
   let session = initialAuthState.session;
-  const db = new AsyncChannelDbFacade(subscriptionChannel, initialAuthState);
+  const db = new AsyncChannelDbFacade(subscriptionChannel, initialAuthState, config);
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
     subscriptionChannel,
