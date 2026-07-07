@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router";
+import { NavLink, Outlet, useLocation } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import {
@@ -6,8 +6,35 @@ import {
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
 import { requestCloseOverlay } from "../../utility/overlay-settings.js";
+import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import { Tooltip } from "../tooltip/Tooltip.js";
 import styles from "./index.module.css";
+
+const TABLES_PANEL_OPEN_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesPanelOpen";
+
+interface TablesPanelIconProps {
+  direction: "open" | "close";
+}
+
+function TablesPanelIcon({ direction }: TablesPanelIconProps) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+      <path d="M6 3v10" />
+      {direction === "close" ? <path d="M10 6l-2 2 2 2" /> : <path d="M8 6l2 2-2 2" />}
+    </svg>
+  );
+}
 
 function CloseIcon() {
   return (
@@ -29,11 +56,33 @@ function CloseIcon() {
 export function InspectorLayout() {
   const { isOverlay } = useDevtoolsContext();
   const standaloneContext = useStandaloneContext();
+  const location = useLocation();
+  const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
+    TABLES_PANEL_OPEN_STORAGE_KEY,
+    true,
+  );
+
+  const isDataExplorerRoute = location.pathname.startsWith("/data-explorer");
+
+  const onToggleTablesPanel = () => {
+    setIsTablesPanelOpen((isOpen) => !isOpen);
+  };
 
   return (
     <main className={styles.root}>
       <header className={styles.topBar}>
         <nav className={styles.tabBar} aria-label="Inspector sections">
+          {isDataExplorerRoute ? (
+            <button
+              type="button"
+              onClick={onToggleTablesPanel}
+              className={styles.iconButton}
+              aria-label={isTablesPanelOpen ? "Collapse tables panel" : "Expand tables panel"}
+              aria-pressed={isTablesPanelOpen}
+            >
+              <TablesPanelIcon direction={isTablesPanelOpen ? "close" : "open"} />
+            </button>
+          ) : null}
           <NavLink
             to="/data-explorer"
             className={({ isActive }) =>
@@ -48,7 +97,7 @@ export function InspectorLayout() {
               `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
             }
           >
-            Live Query
+            Subscriptions
           </NavLink>
           {isOverlay ? (
             <NavLink
@@ -94,7 +143,7 @@ export function InspectorLayout() {
         </div>
       </header>
       <section className={styles.content}>
-        <Outlet context={{ isTablesPanelOpen: true }} />
+        <Outlet context={{ isTablesPanelOpen }} />
       </section>
     </main>
   );
