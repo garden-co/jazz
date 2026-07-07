@@ -2,6 +2,7 @@
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
 const client = createJazzClient({
+  asyncSubscriptionsOnly: false,
   appId: "my-app",
   serverUrl: "http://127.0.0.1:4200",
   jwtToken: "<provider-jwt>",
