@@ -1687,7 +1687,13 @@ export class Db {
       queryOptions.propagation !== "local-only" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
-      void this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" })
+      const seedQuery = () =>
+        this.all(query, { ...queryOptions, tier: "local", propagation: "local-only" });
+      const seedRows =
+        session == null
+          ? seedQuery()
+          : this.__withRuntimeOperationContext({ session }, () => seedQuery());
+      void seedRows
         .then((rows) => {
           if (unsubscribed) return;
           callback(manager.seed(rows));
