@@ -53,6 +53,15 @@ persists a sealed submission until the settlement target (edge) acks it
 (`writes.rs:1109-1138`). Submissions accumulate faster than acks retire them, so write #N decodes
 N-1 submissions.
 
+Note the cost driver is the number of **unsettled sealed submissions**, not bare inserts as such.
+`settlement_target()` (`sync_manager/mod.rs:327`) is `GlobalServer` whenever a server is
+registered _or pending_, so with a `serverUrl` configured every committed batch — explicit
+`db.batch(...)` included — persists a submission until the upstream confirms it. Explicit
+batching merely divides the submission count by the batch size. The same quadratic reproduces
+with batches given enough unsettled ones at once: sustained writes while the server is
+unreachable (nothing can settle), ack lag under heavy write volume, or many small batches over a
+long-lived session. Bare inserts are simply the fastest route there (one submission per row).
+
 The scan is load-bearing for three cases, all of which must be preserved:
 
 1. **Crash recovery:** a submission stored without a terminal fate (crash between accepting a
