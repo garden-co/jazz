@@ -6,7 +6,7 @@ const { secret, isLoading } = useLocalFirstAuth();
 
 const client = computed(() =>
   !isLoading.value && secret.value
-    ? createJazzClient({ appId: "my-app", secret: secret.value })
+    ? createJazzClient({ asyncSubscriptionsOnly: false, appId: "my-app", secret: secret.value })
     : null,
 );
 </script>

@@ -3,6 +3,7 @@
   import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
   const client = createJazzClient({
+    asyncSubscriptionsOnly: false,
     appId: 'my-app',
     env: 'prod',
     userBranch: 'staging',

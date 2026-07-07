@@ -13,7 +13,7 @@
 
   let client = $derived(
     !auth.isLoading && auth.secret
-      ? createJazzClient({ appId: 'my-app', secret: auth.secret })
+      ? createJazzClient({ asyncSubscriptionsOnly: false, appId: 'my-app', secret: auth.secret })
       : null,
   );
 </script>
