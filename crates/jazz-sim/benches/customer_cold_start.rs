@@ -472,9 +472,21 @@ struct RunSummary {
     relay_receiver_bulk_bundle_ingests: u64,
     relay_receiver_per_bundle_ingests: u64,
     relay_receiver_bulk_ingest_commits: u64,
+    relay_hydration_memo_hits: u64,
+    relay_hydration_memo_computes: u64,
+    relay_hydration_memo_distinct_nodes: usize,
+    relay_hydration_memo_entries: usize,
     client_receiver_bulk_bundle_ingests: u64,
     client_receiver_per_bundle_ingests: u64,
     client_receiver_bulk_ingest_commits: u64,
+    client_hydration_memo_hits: u64,
+    client_hydration_memo_computes: u64,
+    client_hydration_memo_distinct_nodes: usize,
+    client_hydration_memo_entries: usize,
+    core_hydration_memo_hits: u64,
+    core_hydration_memo_computes: u64,
+    core_hydration_memo_distinct_nodes: usize,
+    core_hydration_memo_entries: usize,
     peak_rss_bytes: u64,
     core_encoded_storage_bytes: u64,
     relay_encoded_storage_bytes: u64,
@@ -1420,6 +1432,9 @@ fn run_connect_and_subscribe(
         .unwrap();
     let relay_sync_metrics = relay.db.sync_metrics_for_test();
     let client_sync_metrics = client.db.sync_metrics_for_test();
+    let relay_runtime_stats = relay.db.runtime_stats_for_test();
+    let client_runtime_stats = client.db.runtime_stats_for_test();
+    let core_runtime_stats = seeded.core.runtime_stats_for_test();
     let core_encoded_storage_bytes = seeded.core.encoded_storage_bytes_for_test().unwrap();
     let relay_encoded_storage_bytes = relay.db.encoded_storage_bytes_for_test().unwrap();
     let client_encoded_storage_bytes = client.db.encoded_storage_bytes_for_test().unwrap();
@@ -1479,9 +1494,24 @@ fn run_connect_and_subscribe(
         relay_receiver_bulk_bundle_ingests: relay_sync_metrics.receiver_bulk_bundle_ingests,
         relay_receiver_per_bundle_ingests: relay_sync_metrics.receiver_per_bundle_ingests,
         relay_receiver_bulk_ingest_commits: relay_sync_metrics.receiver_bulk_ingest_commits,
+        relay_hydration_memo_hits: relay_runtime_stats.hydration_memo_hits,
+        relay_hydration_memo_computes: relay_runtime_stats.hydration_memo_computes,
+        relay_hydration_memo_distinct_nodes: relay_runtime_stats
+            .hydration_memo_distinct_computed_nodes,
+        relay_hydration_memo_entries: relay_runtime_stats.hydration_memo_entries,
         client_receiver_bulk_bundle_ingests: client_sync_metrics.receiver_bulk_bundle_ingests,
         client_receiver_per_bundle_ingests: client_sync_metrics.receiver_per_bundle_ingests,
         client_receiver_bulk_ingest_commits: client_sync_metrics.receiver_bulk_ingest_commits,
+        client_hydration_memo_hits: client_runtime_stats.hydration_memo_hits,
+        client_hydration_memo_computes: client_runtime_stats.hydration_memo_computes,
+        client_hydration_memo_distinct_nodes: client_runtime_stats
+            .hydration_memo_distinct_computed_nodes,
+        client_hydration_memo_entries: client_runtime_stats.hydration_memo_entries,
+        core_hydration_memo_hits: core_runtime_stats.hydration_memo_hits,
+        core_hydration_memo_computes: core_runtime_stats.hydration_memo_computes,
+        core_hydration_memo_distinct_nodes: core_runtime_stats
+            .hydration_memo_distinct_computed_nodes,
+        core_hydration_memo_entries: core_runtime_stats.hydration_memo_entries,
         peak_rss_bytes,
         core_encoded_storage_bytes,
         relay_encoded_storage_bytes,
@@ -1933,6 +1963,22 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!(summary.relay_receiver_bulk_ingest_commits),
     );
     fields.insert(
+        "relay_hydration_memo_hits".to_owned(),
+        json!(summary.relay_hydration_memo_hits),
+    );
+    fields.insert(
+        "relay_hydration_memo_computes".to_owned(),
+        json!(summary.relay_hydration_memo_computes),
+    );
+    fields.insert(
+        "relay_hydration_memo_distinct_nodes".to_owned(),
+        json!(summary.relay_hydration_memo_distinct_nodes),
+    );
+    fields.insert(
+        "relay_hydration_memo_entries".to_owned(),
+        json!(summary.relay_hydration_memo_entries),
+    );
+    fields.insert(
         "client_receiver_bulk_bundle_ingests".to_owned(),
         json!(summary.client_receiver_bulk_bundle_ingests),
     );
@@ -1943,6 +1989,38 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert(
         "client_receiver_bulk_ingest_commits".to_owned(),
         json!(summary.client_receiver_bulk_ingest_commits),
+    );
+    fields.insert(
+        "client_hydration_memo_hits".to_owned(),
+        json!(summary.client_hydration_memo_hits),
+    );
+    fields.insert(
+        "client_hydration_memo_computes".to_owned(),
+        json!(summary.client_hydration_memo_computes),
+    );
+    fields.insert(
+        "client_hydration_memo_distinct_nodes".to_owned(),
+        json!(summary.client_hydration_memo_distinct_nodes),
+    );
+    fields.insert(
+        "client_hydration_memo_entries".to_owned(),
+        json!(summary.client_hydration_memo_entries),
+    );
+    fields.insert(
+        "core_hydration_memo_hits".to_owned(),
+        json!(summary.core_hydration_memo_hits),
+    );
+    fields.insert(
+        "core_hydration_memo_computes".to_owned(),
+        json!(summary.core_hydration_memo_computes),
+    );
+    fields.insert(
+        "core_hydration_memo_distinct_nodes".to_owned(),
+        json!(summary.core_hydration_memo_distinct_nodes),
+    );
+    fields.insert(
+        "core_hydration_memo_entries".to_owned(),
+        json!(summary.core_hydration_memo_entries),
     );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
     fields.insert(

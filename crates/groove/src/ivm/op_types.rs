@@ -71,7 +71,7 @@ pub struct BindingSourceOp {
 }
 
 /// Name of a value bound in an evaluation context.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrontierName(pub String);
 
 // Stateless transformations.
