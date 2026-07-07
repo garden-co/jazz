@@ -22,6 +22,8 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo test -p jazz-tools --features test -j 2` (matches `crates/jazz-tools/TESTING_GUIDELINES.md`)
 - `cargo test -p jazz-server -j 2`
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
+- `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
+  (Anselm-approved 2026-07-07)
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the
