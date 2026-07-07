@@ -6,6 +6,7 @@ import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { fireAndReport, waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 import { type DurabilityTier } from "jazz-tools";
 
@@ -80,8 +81,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     autoJoinPending.current = true;
     setAutoJoinFailed(false);
 
-    db.insert(app.chatMembers, { chatId, userId })
-      .wait(sharedWriteOptions)
+    waitForWrite(db.insert(app.chatMembers, { chatId, userId }), sharedWriteOptions)
       .then(() => {
         autoJoinPending.current = false;
         setMembershipReady(true);
@@ -135,7 +135,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const hasMore = messages.length > showNLastMessages;
 
   const handleDelete = (messageId: string) => {
-    db.delete(app.messages, messageId);
+    fireAndReport(db.delete(app.messages, messageId), "failed to delete message");
   };
 
   if (chatRowsResult !== undefined && !chatKnown && userId && autoJoinFailed) {

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { waitForWrite } from "@/lib/db-write";
 import { app } from "../../schema.js";
 import { DurabilityTier } from "jazz-tools";
 
@@ -23,23 +24,29 @@ export const CreateChatRedirect = () => {
     initialized.current = true;
 
     void (async () => {
-      const chatWrite = db.insert(app.chats, {
-        isPublic: true,
-        createdBy: userId,
-      });
+      const chatWrite = await Promise.resolve(
+        db.insert(app.chats, {
+          isPublic: true,
+          createdBy: userId,
+        }),
+      );
       const chat = chatWrite.value;
       await chatWrite.wait(sharedWriteOptions);
 
-      await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
+      await waitForWrite(
+        db.insert(app.chatMembers, { chatId: chat.id, userId }),
+        sharedWriteOptions,
+      );
 
-      await db
-        .insert(app.messages, {
+      await waitForWrite(
+        db.insert(app.messages, {
           chatId: chat.id,
           text: "Hello world",
           senderId: myProfile.id,
           createdAt: new Date(),
-        })
-        .wait(sharedWriteOptions);
+        }),
+        sharedWriteOptions,
+      );
 
       navigate(`/#/chat/${chat.id}`);
     })().catch((error) => {

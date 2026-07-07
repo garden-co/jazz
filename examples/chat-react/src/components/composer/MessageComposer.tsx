@@ -5,6 +5,7 @@ import { ActionMenu } from "@/components/composer/ActionMenu";
 import { Editor, type EditorHandle } from "@/components/editor/Editor";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 import type { AttachmentData } from "./UploadModal";
 import { DurabilityTier } from "jazz-tools";
@@ -37,14 +38,15 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
       if (!html.trim()) return;
 
       setPendingSends((count) => count + 1);
-      void db
-        .insert(app.messages, {
+      void waitForWrite(
+        db.insert(app.messages, {
           chatId,
           text: html.trim(),
           senderId: myProfile.id,
           createdAt: new Date(),
-        })
-        .wait(sharedWriteOptions)
+        }),
+        sharedWriteOptions,
+      )
         .catch((error) => {
           console.error("failed to send message", error);
         })
@@ -63,21 +65,25 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
 
       const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
 
-      const messageWriteResult = db.insert(app.messages, {
-        chatId,
-        text: "",
-        senderId: myProfile.id,
-        createdAt: new Date(),
-      });
+      const messageWriteResult = await Promise.resolve(
+        db.insert(app.messages, {
+          chatId,
+          text: "",
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        }),
+      );
       const message = messageWriteResult.value;
 
-      const attachmentWriteResult = db.insert(app.attachments, {
-        messageId: message.id,
-        type: attachment.type,
-        name: attachment.file.name,
-        fileId: storedFile.id,
-        size: attachment.file.size,
-      });
+      const attachmentWriteResult = await Promise.resolve(
+        db.insert(app.attachments, {
+          messageId: message.id,
+          type: attachment.type,
+          name: attachment.file.name,
+          fileId: storedFile.id,
+          size: attachment.file.size,
+        }),
+      );
 
       if (sharedWriteOptions) {
         await Promise.all(

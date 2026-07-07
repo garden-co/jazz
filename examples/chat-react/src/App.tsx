@@ -1,5 +1,5 @@
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
-import { Suspense } from "react";
+import { JazzProvider, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
+import { Suspense, useEffect } from "react";
 import type { DbConfig } from "jazz-tools";
 
 import { Loader2Icon } from "lucide-react";
@@ -14,14 +14,21 @@ import { RouterScope } from "@/hooks/useRouter";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const subscriptionMode = import.meta.env.VITE_JAZZ_SUBSCRIPTION_MODE ?? "async";
 
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
+function defaultConfig(
+  secret: string,
+  overrides: Partial<DbConfig> = {},
+): DbConfig & {
+  asyncSubscriptionsOnly: boolean;
+} {
   return {
     appId,
     env: "dev",
     userBranch: "main",
     serverUrl,
     secret,
+    asyncSubscriptionsOnly: subscriptionMode !== "sync",
     ...overrides,
   };
 }
@@ -54,9 +61,21 @@ function AppInner({ config }: { config?: Partial<DbConfig> }) {
       config={defaultConfig(secret, config)}
       fallback={<p id="joining-chat">Loading...</p>}
     >
+      <ExposeDevClient />
       <AppContent />
     </JazzProvider>
   );
+}
+
+function ExposeDevClient() {
+  const client = useJazzClient();
+
+  useEffect(() => {
+    if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) return;
+    (window as unknown as { jazzClient?: typeof client }).jazzClient = client;
+  }, [client]);
+
+  return null;
 }
 
 function AppContent() {

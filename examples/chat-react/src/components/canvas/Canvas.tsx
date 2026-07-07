@@ -15,6 +15,7 @@ import {
   ERASER_WIDTH,
   getLogicalPoint,
 } from "./utils";
+import { fireAndReport } from "@/lib/db-write";
 
 export function CollaborativeCanvas({
   canvasId,
@@ -158,14 +159,17 @@ export function CollaborativeCanvas({
     // Save the finished stroke
     if (currentStrokeRef.current && userId) {
       const stroke = currentStrokeRef.current;
-      db.insert(app.strokes, {
-        canvasId,
-        ownerId: userId,
-        color: stroke.color,
-        width: stroke.width,
-        pointsJson: JSON.stringify(stroke.points),
-        createdAt: stroke.createdAt,
-      });
+      fireAndReport(
+        db.insert(app.strokes, {
+          canvasId,
+          ownerId: userId,
+          color: stroke.color,
+          width: stroke.width,
+          pointsJson: JSON.stringify(stroke.points),
+          createdAt: stroke.createdAt,
+        }),
+        "failed to save stroke",
+      );
     }
 
     currentStrokeRef.current = null;
@@ -177,7 +181,7 @@ export function CollaborativeCanvas({
     if (!userId) return;
     const myStrokes = allStrokes.filter((s) => s.ownerId === userId);
     for (const s of myStrokes) {
-      db.delete(app.strokes, s.id);
+      fireAndReport(db.delete(app.strokes, s.id), "failed to delete stroke");
     }
   };
 
