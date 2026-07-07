@@ -1,8 +1,8 @@
 import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
 import type { DbConfig } from "../runtime/db.js";
-import { type JazzClient } from "../web/create-jazz-client.js";
+import { type SyncJazzClient } from "../web/create-jazz-client.js";
 
-export type JazzClientFactory = (config: DbConfig) => Promise<JazzClient>;
+export type JazzClientFactory = (config: DbConfig) => Promise<SyncJazzClient>;
 
 export function createSolidJazzClientInternal(
   config: Accessor<DbConfig>,
@@ -22,7 +22,7 @@ export function createSolidJazzClientInternal(
 
   const [res, { mutate, refetch }] = createResource(
     stableConfig,
-    async (nextConfig): Promise<JazzClient> => {
+    async (nextConfig): Promise<SyncJazzClient> => {
       const runId = activeRunId() + 1;
       setActiveRunId(runId);
 
@@ -37,7 +37,7 @@ export function createSolidJazzClientInternal(
         }
       };
 
-      let rawClient: JazzClient | undefined;
+      let rawClient: SyncJazzClient | undefined;
       onCleanup(() => {
         disconnectRunId();
         void rawClient?.shutdown();
