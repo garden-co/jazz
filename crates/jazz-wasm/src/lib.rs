@@ -2161,6 +2161,9 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
             other => return Err(JsValue::from_str(&format!("unknown local_updates {other}"))),
         };
     }
+    if optional_bool_prop(&value, "propagate")? == Some(false) {
+        opts.propagation = Propagation::LocalOnly;
+    }
     if let Some(propagation) = optional_string_prop(&value, "propagation")? {
         opts.propagation = match propagation.as_str() {
             "Full" | "full" => Propagation::Full,

@@ -180,6 +180,7 @@ where
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
+type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
@@ -215,6 +216,12 @@ struct PendingUpstreamSubscription {
     binding: Binding,
     opts: RegisterShapeOptions,
     identity: AuthorId,
+}
+
+#[derive(Clone)]
+struct UpstreamCoverageHandle {
+    coverage: CoverageKey,
+    subscription: SubscriptionKey,
 }
 
 struct CoverageGroup {
@@ -969,6 +976,7 @@ where
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
         let mut cleanup = None;
+        let propagates_upstream = opts.propagation == Propagation::Full;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
                 upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
@@ -1004,6 +1012,7 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
+            propagates_upstream,
             author,
             read_tier,
             remote_read_tier,
@@ -1048,27 +1057,74 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorId,
-    ) -> Result<Vec<SubscriptionKey>, Error> {
+    ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
         ensure_supported_subscription_shape(shape)?;
-        Ok(vec![self.attach_query_shape_binding_with_opts(
-            shape, binding, opts, identity,
-        )?])
+        let coverage = coverage_key(shape, binding, opts.clone());
+        if self
+            .node
+            .upstream_coverage_refcounts
+            .borrow()
+            .contains_key(&coverage)
+        {
+            if let Some(subscription) = self
+                .node
+                .latest_coverage_subscriptions
+                .borrow()
+                .get(&coverage)
+                .copied()
+            {
+                *self
+                    .node
+                    .upstream_coverage_refcounts
+                    .borrow_mut()
+                    .entry(coverage.clone())
+                    .or_insert(0) += 1;
+                return Ok(vec![UpstreamCoverageHandle {
+                    coverage,
+                    subscription,
+                }]);
+            }
+        }
+        let subscription =
+            self.attach_query_shape_binding_with_opts(shape, binding, opts, identity)?;
+        self.node
+            .upstream_coverage_refcounts
+            .borrow_mut()
+            .insert(coverage.clone(), 1);
+        Ok(vec![UpstreamCoverageHandle {
+            coverage,
+            subscription,
+        }])
     }
 
     fn upstream_subscription_cleanup(
         &self,
-        upstream_subscriptions: Vec<SubscriptionKey>,
+        upstream_subscriptions: Vec<UpstreamCoverageHandle>,
     ) -> Box<dyn FnOnce()> {
         let node = Rc::clone(&self.node.node);
         let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
+        let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
         let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
         let scheduler = Rc::clone(&self.node.scheduler);
         Box::new(move || {
-            for upstream_subscription in upstream_subscriptions {
+            for handle in upstream_subscriptions {
+                let mut refcounts = upstream_coverage_refcounts.borrow_mut();
+                let Some(count) = refcounts.get_mut(&handle.coverage) else {
+                    continue;
+                };
+                *count = count.saturating_sub(1);
+                if *count > 0 {
+                    continue;
+                }
+                refcounts.remove(&handle.coverage);
+                drop(refcounts);
+                let upstream_subscription = handle.subscription;
                 node.borrow_mut().apply_unsubscribe(upstream_subscription);
                 latest_coverage_subscriptions
                     .borrow_mut()
-                    .retain(|_, subscription| *subscription != upstream_subscription);
+                    .retain(|coverage, subscription| {
+                        coverage != &handle.coverage && *subscription != upstream_subscription
+                    });
                 pending_upstream_subscriptions
                     .borrow_mut()
                     .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
@@ -2621,6 +2677,7 @@ where
     outbox: Outbox,
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
+    upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
@@ -2642,6 +2699,7 @@ where
             outbox: Rc::new(RefCell::new(Vec::new())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
+            upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -2795,6 +2853,9 @@ where
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
             {
                 let state = state.borrow();
+                if !state.propagates_upstream {
+                    continue;
+                }
                 let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
                 let opts =
                     upstream_register_shape_options(state.read_tier, state.read_view.clone());
@@ -5485,6 +5546,7 @@ fn write_rejected(reason: RejectionReason) -> Error {
 
 struct SubscriptionState {
     kind: SubscriptionKind,
+    propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,

@@ -227,6 +227,23 @@ describe("JazzClient runtime helpers", () => {
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
+  it("maps propagate false to local-only runtime subscriptions", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagate: false,
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("lets explicit propagation override propagate shorthand", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagate: false,
+      propagation: "full",
+    });
+    expect(createSubscriptionCalls[0]![3]).toBeUndefined();
+  });
+
   // =========================================================================
   // 2-phase subscribe lifecycle
   // =========================================================================

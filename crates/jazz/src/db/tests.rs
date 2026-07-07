@@ -44,6 +44,30 @@ fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
     }
 }
 
+fn pending_upstream_subscribe_count<S>(db: &Db<S>) -> usize
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db.node
+        .upstream_subscriptions
+        .borrow()
+        .iter()
+        .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)))
+        .count()
+}
+
+fn pending_upstream_unsubscribe_count<S>(db: &Db<S>) -> usize
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db.node
+        .upstream_subscriptions
+        .borrow()
+        .iter()
+        .filter(|command| matches!(command, PendingUpstreamCommand::Unsubscribe(_)))
+        .count()
+}
+
 fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Vec<RemovedRow>) {
     match event {
         SubscriptionEvent::Delta {
@@ -2634,6 +2658,73 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
     assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
     assert_eq!(scheduler.take(), Vec::<TickUrgency>::new());
     assert!(db.node.upstream_subscriptions.borrow().is_empty());
+}
+
+#[test]
+fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let opts = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+
+    let mut first = doctest_support::block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
+    let _ = doctest_support::block_on(first.next_event()).unwrap();
+    assert_eq!(pending_upstream_subscribe_count(&db), 1);
+
+    let mut second = doctest_support::block_on(db.subscribe(&prepared_query, opts)).unwrap();
+    let _ = doctest_support::block_on(second.next_event()).unwrap();
+    assert_eq!(
+        pending_upstream_subscribe_count(&db),
+        1,
+        "second propagating registrant should share upstream coverage"
+    );
+
+    drop(first);
+    assert_eq!(
+        pending_upstream_unsubscribe_count(&db),
+        0,
+        "upstream coverage stays live while another propagating registrant remains"
+    );
+
+    drop(second);
+    assert_eq!(pending_upstream_unsubscribe_count(&db), 1);
+}
+
+#[test]
+fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+
+    let mut inspector = doctest_support::block_on(db.subscribe(
+        &prepared_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    let _ = doctest_support::block_on(inspector.next_event()).unwrap();
+
+    let (client_transport, _server_transport) = duplex();
+    let upstream = db.connect_upstream(client_transport);
+    let pending_subscribes = match &upstream.borrow().link {
+        ConnectionLink::Upstream { pending, .. } => pending
+            .iter()
+            .filter(|command| matches!(command, PendingUpstreamCommand::Subscribe(_)))
+            .count(),
+        _ => unreachable!("connect_upstream creates upstream links"),
+    };
+    assert_eq!(pending_subscribes, 0);
 }
 
 #[test]
