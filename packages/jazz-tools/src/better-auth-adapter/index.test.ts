@@ -407,7 +407,7 @@ describe("jazzAdapter", () => {
     it("accepts app-like schema sources from root schema.ts modules", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
-        db: () => context.db(authSchema),
+        db: () => context.asBackend(authSchema),
         schema: authSchema,
       })({});
 
