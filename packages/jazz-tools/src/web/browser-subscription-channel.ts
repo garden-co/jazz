@@ -87,10 +87,10 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     table: TableProxy<T, Init>,
     data: Init,
     options?: CreateOptions,
-    _session?: Session,
+    session?: Session,
   ): Promise<AsyncWriteResult<T>> {
     const db = await this.owner.db();
-    return db.insert(table, data, options);
+    return db.__withRuntimeOperationContext({ session }, () => db.insert(table, data, options));
   }
 
   async update<T, Init>(
@@ -98,48 +98,48 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
-    _session?: Session,
+    session?: Session,
   ): Promise<AsyncWriteHandle> {
     const db = await this.owner.db();
-    return db.update(table, id, data, options);
+    return db.__withRuntimeOperationContext({ session }, () => db.update(table, id, data, options));
   }
 
   async delete<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     options?: DeleteOptions,
-    _session?: Session,
+    session?: Session,
   ): Promise<AsyncWriteHandle> {
     const db = await this.owner.db();
-    return db.delete(table, id, options);
+    return db.__withRuntimeOperationContext({ session }, () => db.delete(table, id, options));
   }
 
   async canInsert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    _session?: Session,
+    session?: Session,
   ): Promise<boolean> {
     const db = await this.owner.db();
-    return db.canInsert(table, data);
+    return db.__withRuntimeOperationContext({ session }, () => db.canInsert(table, data));
   }
 
   async canUpdate<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    _session?: Session,
+    session?: Session,
   ): Promise<boolean> {
     const db = await this.owner.db();
-    return db.canUpdate(table, id, data);
+    return db.__withRuntimeOperationContext({ session }, () => db.canUpdate(table, id, data));
   }
 
   async canDelete<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    _session?: Session,
+    session?: Session,
   ): Promise<boolean> {
     const db = await this.owner.db();
-    return db.canDelete(table, id);
+    return db.__withRuntimeOperationContext({ session }, () => db.canDelete(table, id));
   }
 
   async getAuthState(): Promise<AuthState> {

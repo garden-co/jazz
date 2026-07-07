@@ -946,6 +946,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -1104,7 +1105,25 @@ export class Db {
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
-    return null;
+    return this.runtimeOperationContextOverride;
+  }
+
+  /**
+   * @internal Runs one synchronous high-level Db operation with an explicit
+   * session context. The browser worker subscription channel uses this when a
+   * shared worker Db serves edge-client requests for multiple identities.
+   */
+  __withRuntimeOperationContext<TResult>(
+    context: DbRuntimeOperationContext,
+    operation: () => TResult,
+  ): TResult {
+    const previous = this.runtimeOperationContextOverride;
+    this.runtimeOperationContextOverride = context;
+    try {
+      return operation();
+    } finally {
+      this.runtimeOperationContextOverride = previous;
+    }
   }
 
   private installMainThreadCoreTelemetry(): void {
