@@ -1659,7 +1659,9 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
-    callback(manager.seed([]));
+    if (queryOptions.tier == null || queryOptions.tier === "local") {
+      callback(manager.seed([]));
+    }
     startNativeSubscription();
     if (
       this.config.serverUrl &&

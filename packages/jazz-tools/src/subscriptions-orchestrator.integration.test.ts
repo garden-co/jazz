@@ -189,7 +189,9 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
 
       const { value: inserted } = await db.insert(todosTable, { title: "shared", done: false });
       await waitForCondition(
-        () => listenerA.length > 0 && listenerB.length > 0,
+        () =>
+          listenerA.some((rows) => rows.includes(inserted.id)) &&
+          listenerB.some((rows) => rows.includes(inserted.id)),
         5_000,
         "SO-I03 expected both listeners to receive update",
       );
@@ -236,7 +238,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         "SO-I04 expected remaining listener updates",
       );
 
-      expect(listenerA).toHaveLength(0);
+      expect(listenerA).toEqual([[]]);
       expect([...(listenerB[listenerB.length - 1] ?? [])].sort()).toEqual([
         "remaining-1",
         "remaining-2",
