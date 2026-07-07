@@ -38,7 +38,11 @@ vi.mock("../dev-tools/index.js", () => ({
 }));
 
 import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
-import { createBrowserWorkerSubscriptionChannel } from "./browser-subscription-channel.js";
+import {
+  __browserWorkerSubscriptionChannelDiagnostics,
+  __resetBrowserWorkerSubscriptionChannelsForTests,
+  createBrowserWorkerSubscriptionChannel,
+} from "./browser-subscription-channel.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 type TestRow = { id: string; value: string };
@@ -191,6 +195,7 @@ describe("web/createJazzClient async subscription channel", () => {
   });
 
   afterEach(async () => {
+    await __resetBrowserWorkerSubscriptionChannelsForTests();
     vi.restoreAllMocks();
   });
 
@@ -306,5 +311,90 @@ describe("web/createJazzClient async subscription channel", () => {
     unsubscribe();
     await channel.shutdown();
     expect(db.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one worker-owned node across multiple async-only tabs", async () => {
+    const db = createMockDb([{ id: "shared-worker-row", value: "from-shared-owner" }]);
+    mocks.createDb.mockResolvedValue(db);
+
+    const tabA = createBrowserWorkerSubscriptionChannel({
+      appId: "multi-tab-app",
+      dbName: "multi-tab-db",
+    });
+    const tabB = createBrowserWorkerSubscriptionChannel({
+      appId: "multi-tab-app",
+      dbName: "multi-tab-db",
+    });
+    const updatesA: TestRow[][] = [];
+    const updatesB: TestRow[][] = [];
+
+    const unsubscribeA = tabA.subscribeAll(query, (next) => {
+      updatesA.push(next.all);
+    });
+    const unsubscribeB = tabB.subscribeAll(query, (next) => {
+      updatesB.push(next.all);
+    });
+
+    await vi.waitFor(() => {
+      expect(updatesA).toHaveLength(1);
+      expect(updatesB).toHaveLength(1);
+    });
+    expect(mocks.createDb).toHaveBeenCalledTimes(1);
+    expect(db.subscribeAll).toHaveBeenCalledTimes(2);
+    expect(__browserWorkerSubscriptionChannelDiagnostics().owners).toEqual([
+      expect.objectContaining({ refCount: 2, closed: false }),
+    ]);
+
+    unsubscribeA();
+    await tabA.shutdown();
+    expect(db.shutdown).not.toHaveBeenCalled();
+    expect(__browserWorkerSubscriptionChannelDiagnostics().owners).toEqual([
+      expect.objectContaining({ refCount: 1, closed: false }),
+    ]);
+
+    unsubscribeB();
+    await tabB.shutdown();
+    expect(db.shutdown).toHaveBeenCalledTimes(1);
+    expect(__browserWorkerSubscriptionChannelDiagnostics().owners).toEqual([]);
+  });
+
+  it("reopens the owning worker and resubscribes after leader handoff", async () => {
+    const firstDb = createMockDb([{ id: "before-handoff", value: "old-leader" }]);
+    const secondDb = createMockDb([{ id: "after-handoff", value: "new-leader" }]);
+    mocks.createDb.mockResolvedValueOnce(firstDb).mockResolvedValueOnce(secondDb);
+
+    const firstTab = createBrowserWorkerSubscriptionChannel({
+      appId: "handoff-app",
+      dbName: "handoff-db",
+    });
+    const firstUpdates: TestRow[][] = [];
+    const unsubscribeFirst = firstTab.subscribeAll(query, (next) => {
+      firstUpdates.push(next.all);
+    });
+    await vi.waitFor(() => {
+      expect(firstUpdates).toEqual([[{ id: "before-handoff", value: "old-leader" }]]);
+    });
+    unsubscribeFirst();
+    await firstTab.shutdown();
+
+    const replacementTab = createBrowserWorkerSubscriptionChannel({
+      appId: "handoff-app",
+      dbName: "handoff-db",
+    });
+    const replacementUpdates: TestRow[][] = [];
+    const unsubscribeReplacement = replacementTab.subscribeAll(query, (next) => {
+      replacementUpdates.push(next.all);
+    });
+
+    await vi.waitFor(() => {
+      expect(replacementUpdates).toEqual([[{ id: "after-handoff", value: "new-leader" }]]);
+    });
+    expect(mocks.createDb).toHaveBeenCalledTimes(2);
+    expect(firstDb.shutdown).toHaveBeenCalledTimes(1);
+    expect(secondDb.subscribeAll).toHaveBeenCalledTimes(1);
+
+    unsubscribeReplacement();
+    await replacementTab.shutdown();
+    expect(secondDb.shutdown).toHaveBeenCalledTimes(1);
   });
 });
