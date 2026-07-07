@@ -1,10 +1,4 @@
-export {
-  createJazzClient,
-  createExtensionJazzClient,
-  type JazzClient,
-} from "./create-jazz-client.js";
-export { createEmbeddedJazzClient } from "./create-embedded-jazz-client.js";
-export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
+export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
   type JazzProviderProps,

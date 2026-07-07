@@ -1,10 +1,5 @@
-import {
-  fetchServerSubscriptions,
-  getActiveQuerySubscriptions,
-  onActiveQuerySubscriptionsChange,
-} from "jazz-tools";
+import { fetchServerSubscriptions } from "jazz-tools";
 import type {
-  ActiveQuerySubscriptionTrace,
   DurabilityTier,
   InspectorSubscription,
   IntrospectionSubscriptionGroup,
@@ -89,16 +84,6 @@ function buildExplorerUrl(table: string, queryJson: string): string {
   return base;
 }
 
-function getUserStackSummary(stack: string | undefined): string {
-  if (!stack) {
-    return "n/a";
-  }
-
-  const lines = stack.split("\n").slice(1);
-  const firstUserFrame = lines.find((line) => line.includes("/src/"));
-  return firstUserFrame?.trim() ?? lines[0]?.trim() ?? "n/a";
-}
-
 function formatTime(value: string | number): string {
   return new Date(value).toLocaleTimeString();
 }
@@ -114,33 +99,15 @@ function tierRank(tier: DurabilityTier): number {
   }
 }
 
-function useActiveSubscriptions(runtime: "standalone" | "extension" | "overlay") {
-  const [subscriptions, setSubscriptions] = useState(() => getActiveQuerySubscriptions());
-
-  useEffect(() => {
-    if (runtime !== "extension") {
-      setSubscriptions([]);
-      return;
-    }
-
-    setSubscriptions(getActiveQuerySubscriptions());
-    return onActiveQuerySubscriptionsChange((nextSubscriptions) => {
-      setSubscriptions([...nextSubscriptions]);
-    });
-  }, [runtime]);
-
-  return subscriptions;
-}
-
-function useServerSubscriptionTelemetry(runtime: "standalone" | "overlay") {
+function useServerSubscriptionTelemetry() {
   const standaloneContext = useStandaloneContext();
   const [queries, setQueries] = useState<IntrospectionSubscriptionGroup[]>([]);
   const [generatedAt, setGeneratedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(runtime === "standalone");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (runtime !== "standalone" || !standaloneContext) {
+    if (!standaloneContext) {
       setQueries([]);
       setGeneratedAt(null);
       setError(null);
@@ -188,174 +155,12 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "overlay") {
       window.clearInterval(intervalId);
     };
   }, [
-    runtime,
     standaloneContext?.connection.adminSecret,
     standaloneContext?.connection.appId,
     standaloneContext?.connection.serverUrl,
   ]);
 
   return { queries, generatedAt, error, isLoading };
-}
-
-function ExtensionLiveQuery() {
-  const { runtime, wasmSchema } = useDevtoolsContext();
-  const subscriptions = useActiveSubscriptions(runtime);
-  const [selectedTable, setSelectedTable] = useState("");
-  const [selectedTier, setSelectedTier] = useState("");
-  const [sorting, setSorting] = useState<SortingState>([
-    { id: "createdAt", desc: true },
-    { id: "tier", desc: false },
-  ]);
-
-  const availableTables = useMemo(() => Object.keys(wasmSchema ?? {}).sort(), [wasmSchema]);
-  const filteredSubscriptions = useMemo(() => {
-    return subscriptions.filter((subscription) => {
-      if (selectedTable && subscription.table !== selectedTable) {
-        return false;
-      }
-      if (selectedTier && subscription.tier !== selectedTier) {
-        return false;
-      }
-      return true;
-    });
-  }, [selectedTable, selectedTier, subscriptions]);
-
-  const columns = useMemo<ColumnDef<ActiveQuerySubscriptionTrace>[]>(
-    () => [
-      {
-        accessorKey: "table",
-        header: "Table",
-        cell: ({ row }) => (
-          <Link
-            to={buildExplorerUrl(row.original.table, row.original.query)}
-            className={styles.tableLink}
-          >
-            {row.original.table}
-          </Link>
-        ),
-      },
-      {
-        accessorKey: "tier",
-        header: "Tier",
-        sortingFn: (left, right, columnId) =>
-          tierRank(left.getValue<DurabilityTier>(columnId)) -
-          tierRank(right.getValue<DurabilityTier>(columnId)),
-        cell: (info) => info.getValue<string>(),
-      },
-      {
-        accessorKey: "propagation",
-        header: "Propagation",
-        cell: (info) => info.getValue<string>(),
-      },
-      {
-        id: "branches",
-        header: "Branches",
-        cell: ({ row }) => row.original.branches.join(", "),
-      },
-      {
-        accessorKey: "createdAt",
-        header: "Started",
-        sortingFn: "datetime",
-        cell: ({ row }) => formatTime(row.original.createdAt),
-      },
-      {
-        accessorKey: "query",
-        header: "Query",
-        enableSorting: false,
-        cell: ({ row }) => <pre className={styles.codeBlock}>{row.original.query}</pre>,
-      },
-      {
-        id: "stack",
-        header: "Stack",
-        enableSorting: false,
-        cell: ({ row }) => (
-          <details className={styles.stackDetails}>
-            <summary className={styles.stackSummary}>
-              {getUserStackSummary(row.original.stack)}
-            </summary>
-            <pre className={styles.codeBlock}>{row.original.stack ?? "n/a"}</pre>
-          </details>
-        ),
-      },
-    ],
-    [],
-  );
-
-  const table = useReactTable({
-    data: filteredSubscriptions,
-    columns,
-    state: { sorting },
-    onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-  });
-
-  return (
-    <section className={styles.container}>
-      <header className={styles.header}>
-        <div>
-          <h1 className={styles.title}>Subscriptions</h1>
-          <p className={styles.subtitle}>
-            Active `Db.subscribeAll(...)` subscriptions captured from the inspected page runtime.
-          </p>
-        </div>
-        <LiveQueryFilters
-          availableTables={availableTables}
-          selectedTable={selectedTable}
-          selectedTier={selectedTier}
-          onTableChange={setSelectedTable}
-          onTierChange={setSelectedTier}
-        />
-      </header>
-      {filteredSubscriptions.length === 0 ? (
-        <section className={styles.emptyState}>
-          <p className={styles.emptyTitle}>No active subscriptions</p>
-          <p className={styles.emptyText}>
-            Create a subscription in the inspected page to see it here.
-          </p>
-        </section>
-      ) : (
-        <div className={styles.tableShell}>
-          <table className={styles.table}>
-            <thead>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <tr key={headerGroup.id}>
-                  {headerGroup.headers.map((header) => {
-                    const sortDirection = header.column.getIsSorted();
-                    const canSort = header.column.getCanSort();
-
-                    return (
-                      <th
-                        key={header.id}
-                        className={canSort ? styles.sortableHeader : undefined}
-                        onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
-                      >
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(header.column.columnDef.header, header.getContext())}
-                        {sortDirection === "asc" ? " ↑" : sortDirection === "desc" ? " ↓" : ""}
-                      </th>
-                    );
-                  })}
-                </tr>
-              ))}
-            </thead>
-            <tbody>
-              {table.getRowModel().rows.map((row) => (
-                <tr key={row.id}>
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
 }
 
 function OverlayLiveQuery() {
@@ -509,7 +314,7 @@ function OverlayLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
-  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
+  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry();
   const [selectedTable, setSelectedTable] = useState("");
 
   const availableTables = useMemo(() => {
@@ -604,10 +409,6 @@ export function LiveQuery() {
 
   if (runtime === "standalone") {
     return <StandaloneLiveQuery />;
-  }
-
-  if (runtime === "extension") {
-    return <ExtensionLiveQuery />;
   }
 
   return <OverlayLiveQuery />;
