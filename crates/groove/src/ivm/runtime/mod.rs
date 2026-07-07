@@ -50,6 +50,7 @@ use recursion::{
 
 const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;
+const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
 
 // These maps are keyed by local runtime/schema/graph metadata produced after
 // validation. Wire-facing or otherwise adversarial-input maps must keep the
@@ -82,6 +83,7 @@ pub struct IvmRuntime {
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<String, u64>,
     memo_use_clock: u64,
+    eval_memo_bytes: usize,
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
     hydration_memo_computed_nodes: HashSet<NodeId>,
@@ -114,6 +116,7 @@ impl IvmRuntime {
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,
+            eval_memo_bytes: 0,
             hydration_memo_hits: 0,
             hydration_memo_computes: 0,
             hydration_memo_computed_nodes: HashSet::default(),
@@ -395,9 +398,12 @@ impl IvmRuntime {
         table_deltas: &[TableDelta],
         binding_deltas: &[BindingDelta],
     ) {
+        let mut changed_tables = Vec::new();
         for delta in table_deltas.iter().filter(|delta| !delta.deltas.is_empty()) {
             *self.table_frontiers.entry(delta.table.clone()).or_default() += 1;
+            changed_tables.push(delta.table.as_str());
         }
+        let mut changed_bindings = Vec::new();
         for delta in binding_deltas
             .iter()
             .filter(|delta| !delta.deltas.is_empty())
@@ -406,12 +412,39 @@ impl IvmRuntime {
                 .binding_frontiers
                 .entry(delta.shape.clone())
                 .or_default() += 1;
+            changed_bindings.push(delta.shape.as_str());
+        }
+        if changed_tables.is_empty() && changed_bindings.is_empty() {
+            return;
+        }
+        for meta in self.node_meta.values_mut() {
+            let Some(signature) = meta.input_signature.as_ref() else {
+                continue;
+            };
+            let table_changed = changed_tables.iter().any(|changed| {
+                signature
+                    .tables
+                    .iter()
+                    .any(|table| table.as_str() == *changed)
+            });
+            let binding_changed = changed_bindings.iter().any(|changed| {
+                signature
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.as_str() == *changed)
+            });
+            if table_changed || binding_changed {
+                meta.input_generation = meta.input_generation.wrapping_add(1);
+            }
         }
     }
 
     fn evict_eval_memo(&mut self) {
         self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
-        if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES {
+        self.recompute_eval_memo_bytes();
+        if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
+            && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
+        {
             return;
         }
         let mut entries = self
@@ -420,10 +453,24 @@ impl IvmRuntime {
             .map(|(key, entry)| (key.clone(), entry.last_used))
             .collect::<Vec<_>>();
         entries.sort_unstable_by_key(|(_, last_used)| *last_used);
-        let remove_count = entries.len() - EVAL_MEMO_MAX_ENTRIES;
-        for (key, _) in entries.into_iter().take(remove_count) {
-            self.eval_memo.remove(&key);
+        for (key, _) in entries {
+            if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
+                && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
+            {
+                break;
+            }
+            if let Some(entry) = self.eval_memo.remove(&key) {
+                self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+            }
         }
+    }
+
+    fn recompute_eval_memo_bytes(&mut self) {
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
     }
 
     fn hydration_snapshot<S>(
@@ -465,6 +512,7 @@ impl IvmRuntime {
             .update_node(output_node)
             .map(|records| records.as_ref().clone());
         self.record_hydration_memo_metrics(&metrics);
+        self.evict_eval_memo();
         records
     }
 
@@ -517,6 +565,7 @@ impl IvmRuntime {
                 scope: ScopeId::root(),
                 sub_tick: 0,
                 bindings: HashMap::default(),
+                binding_digests: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Replace,
                 eval_mode: EvalMode::Tick,
             },
@@ -527,6 +576,7 @@ impl IvmRuntime {
         for node in ancestors {
             evaluator.update_node(node)?;
         }
+        self.evict_eval_memo();
         Ok(())
     }
 
@@ -1434,6 +1484,11 @@ impl IvmRuntime {
                 .keys()
                 .filter(|key| key.tick_epoch.is_none())
                 .count(),
+            eval_memo_bytes: self
+                .eval_memo
+                .values()
+                .map(|entry| entry.payload_bytes)
+                .sum(),
             hydration_memo_hits: self.hydration_memo_hits,
             hydration_memo_computes: self.hydration_memo_computes,
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
@@ -2401,6 +2456,7 @@ pub struct RuntimeStats {
     pub active_shape_params: usize,
     pub arrangement_count: usize,
     pub eval_memo_entries: usize,
+    pub eval_memo_bytes: usize,
     pub hydration_memo_entries: usize,
     pub hydration_memo_hits: u64,
     pub hydration_memo_computes: u64,
@@ -2592,6 +2648,7 @@ pub(super) enum EvalMode {
 struct EvalMemoKey {
     scope: ScopeId,
     node: NodeId,
+    input_signature_hash: u64,
     /// Tick-mode results are deltas and are only reusable inside one public
     /// tick. Hydration results are snapshots, so their key omits the tick and
     /// validity is owned by the input frontier vector stored on the entry.
@@ -2599,27 +2656,46 @@ struct EvalMemoKey {
     /// Recursive sub-ticks intentionally affect memoization, not operator
     /// state identity.
     sub_tick: u64,
-    context_inputs: Vec<(FrontierName, u64)>,
+    context_digest: u64,
 }
 
 #[derive(Clone, Debug)]
 struct EvalMemoEntry {
     records: Arc<RecordDeltas>,
-    input_frontiers: MemoInputFrontiers,
+    input_watermark: u64,
+    payload_bytes: usize,
     last_used: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct MemoInputFrontiers {
-    tables: Vec<(String, u64)>,
-    bindings: Vec<(String, u64)>,
+struct NodeInputSignature {
+    tables: Arc<[String]>,
+    bindings: Arc<[String]>,
+    frontier_bindings: Arc<[FrontierName]>,
+    hash: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct NodeInputSignature {
-    tables: BTreeSet<String>,
-    bindings: BTreeSet<String>,
-    frontier_bindings: BTreeSet<FrontierName>,
+impl NodeInputSignature {
+    fn from_sets(
+        tables: BTreeSet<String>,
+        bindings: BTreeSet<String>,
+        frontier_bindings: BTreeSet<FrontierName>,
+    ) -> Self {
+        let tables = tables.into_iter().collect::<Arc<[_]>>();
+        let bindings = bindings.into_iter().collect::<Arc<[_]>>();
+        let frontier_bindings = frontier_bindings.into_iter().collect::<Arc<[_]>>();
+        let mut hasher = DefaultHasher::new();
+        tables.hash(&mut hasher);
+        bindings.hash(&mut hasher);
+        frontier_bindings.hash(&mut hasher);
+        let hash = hasher.finish();
+        Self {
+            tables,
+            bindings,
+            frontier_bindings,
+            hash,
+        }
+    }
 }
 
 /// Current scoped inputs and logical time for node evaluation.
@@ -2631,6 +2707,7 @@ struct EvalContext {
     sub_tick: u64,
     /// FrontierSource bindings, currently used for recursive frontiers.
     bindings: HashMap<FrontierName, RecordDeltas>,
+    binding_digests: HashMap<FrontierName, u64>,
     /// Hydrate preparation rebuilds arrangements instead of layering onto them.
     arrangement_update_mode: ArrangementUpdateMode,
     eval_mode: EvalMode,
@@ -2642,6 +2719,7 @@ impl EvalContext {
             scope: ScopeId::root(),
             sub_tick: 0,
             bindings: HashMap::default(),
+            binding_digests: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
         }
@@ -2652,6 +2730,7 @@ impl EvalContext {
             scope: ScopeId::root(),
             sub_tick: 0,
             bindings: HashMap::default(),
+            binding_digests: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
         }
@@ -2664,11 +2743,15 @@ impl EvalContext {
         deltas: RecordDeltas,
     ) -> Self {
         let mut bindings = HashMap::default();
-        bindings.insert(binding, deltas);
+        let digest = record_deltas_digest(&deltas);
+        bindings.insert(binding.clone(), deltas);
+        let mut binding_digests = HashMap::default();
+        binding_digests.insert(binding, digest);
         Self {
             scope,
             sub_tick,
             bindings,
+            binding_digests,
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
         }
@@ -2682,11 +2765,15 @@ impl EvalContext {
         arrangement_update_mode: ArrangementUpdateMode,
     ) -> Self {
         let mut bindings = HashMap::default();
-        bindings.insert(binding, deltas);
+        let digest = record_deltas_digest(&deltas);
+        bindings.insert(binding.clone(), deltas);
+        let mut binding_digests = HashMap::default();
+        binding_digests.insert(binding, digest);
         Self {
             scope,
             sub_tick,
             bindings,
+            binding_digests,
             arrangement_update_mode,
             eval_mode: EvalMode::Tick,
         }
@@ -3973,7 +4060,8 @@ struct NodeRuntimeMeta {
     retainers: HashSet<Retainer>,
     last_used_tick: u64,
     depends_on_context: Option<bool>,
-    input_signature: Option<NodeInputSignature>,
+    input_signature: Option<Arc<NodeInputSignature>>,
+    input_generation: u64,
     join_left_fields: Option<Arc<[String]>>,
     join_right_fields: Option<Arc<[String]>>,
     join_output_mapping: Option<Arc<[(usize, usize)]>>,
@@ -4577,6 +4665,7 @@ where
                 scope: self.scope,
                 sub_tick: 0,
                 bindings: HashMap::default(),
+                binding_digests: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Accumulate,
                 eval_mode: EvalMode::Tick,
             },
@@ -4595,9 +4684,9 @@ where
     fn update_node(&mut self, node: NodeId) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
         let signature = self.input_signature(node)?;
         let memo_key = self.memo_key(node, &signature)?;
-        let current_frontiers = self.memo_input_frontiers(&signature);
+        let current_watermark = self.input_generation(node);
         if let Some(entry) = self.eval_memo.get_mut(&memo_key)
-            && entry.input_frontiers == current_frontiers
+            && entry.input_watermark == current_watermark
         {
             *self.memo_use_clock += 1;
             entry.last_used = *self.memo_use_clock;
@@ -4624,7 +4713,8 @@ where
                 memo_key,
                 EvalMemoEntry {
                     records: Arc::clone(&result),
-                    input_frontiers: current_frontiers,
+                    input_watermark: current_watermark,
+                    payload_bytes: 0,
                     last_used: *self.memo_use_clock,
                 },
             );
@@ -4778,15 +4868,19 @@ where
         }?;
         self.metrics.records_processed += result.deltas.len();
         let result = Arc::new(result);
+        let payload_bytes = record_deltas_encoded_bytes(&result);
         *self.memo_use_clock += 1;
-        self.eval_memo.insert(
+        if let Some(previous) = self.eval_memo.insert(
             memo_key,
             EvalMemoEntry {
                 records: Arc::clone(&result),
-                input_frontiers: current_frontiers,
+                input_watermark: current_watermark,
+                payload_bytes,
                 last_used: *self.memo_use_clock,
             },
-        );
+        ) {
+            drop(previous);
+        }
         Ok(result)
     }
 
@@ -4802,58 +4896,38 @@ where
                 self.context.scope
             },
             node,
+            input_signature_hash: signature.hash,
             tick_epoch: match self.context.eval_mode {
                 EvalMode::Tick => Some(self.current_tick),
                 EvalMode::Hydrate => None,
             },
             sub_tick: self.context.sub_tick,
-            context_inputs: self.context_input_hashes(signature),
+            context_digest: self.context_digest(signature),
         })
     }
 
-    fn memo_input_frontiers(&self, signature: &NodeInputSignature) -> MemoInputFrontiers {
-        MemoInputFrontiers {
-            tables: signature
-                .tables
-                .iter()
-                .map(|table| {
-                    (
-                        table.clone(),
-                        self.table_frontiers.get(table).copied().unwrap_or_default(),
-                    )
-                })
-                .collect(),
-            bindings: signature
-                .bindings
-                .iter()
-                .map(|binding| {
-                    (
-                        binding.clone(),
-                        self.binding_frontiers
-                            .get(binding)
-                            .copied()
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect(),
-        }
+    fn input_generation(&self, node: NodeId) -> u64 {
+        self.node_meta
+            .get(&node)
+            .map(|meta| meta.input_generation)
+            .unwrap_or_default()
     }
 
-    fn context_input_hashes(&self, signature: &NodeInputSignature) -> Vec<(FrontierName, u64)> {
-        signature
-            .frontier_bindings
-            .iter()
-            .map(|binding| {
-                (
-                    binding.clone(),
-                    self.context
-                        .bindings
-                        .get(binding)
-                        .map(record_deltas_digest)
-                        .unwrap_or_default(),
-                )
-            })
-            .collect()
+    fn context_digest(&self, signature: &NodeInputSignature) -> u64 {
+        if signature.frontier_bindings.is_empty() {
+            return 0;
+        }
+        let mut hasher = DefaultHasher::new();
+        for binding in signature.frontier_bindings.iter() {
+            binding.hash(&mut hasher);
+            self.context
+                .binding_digests
+                .get(binding)
+                .copied()
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     fn operator_key(&mut self, node: NodeId) -> Result<OperatorStateKey, IvmRuntimeError> {
@@ -4887,7 +4961,10 @@ where
         Ok(!self.input_signature(node)?.frontier_bindings.is_empty())
     }
 
-    fn input_signature(&mut self, node: NodeId) -> Result<NodeInputSignature, IvmRuntimeError> {
+    fn input_signature(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Arc<NodeInputSignature>, IvmRuntimeError> {
         self.input_signature_inner(node, &mut HashSet::new())
     }
 
@@ -4895,7 +4972,7 @@ where
         &mut self,
         node: NodeId,
         seen: &mut HashSet<NodeId>,
-    ) -> Result<NodeInputSignature, IvmRuntimeError> {
+    ) -> Result<Arc<NodeInputSignature>, IvmRuntimeError> {
         if let Some(signature) = self
             .node_meta
             .get(&node)
@@ -4904,7 +4981,7 @@ where
             return Ok(signature);
         }
         if !seen.insert(node) {
-            return Ok(NodeInputSignature::default());
+            return Ok(Arc::new(NodeInputSignature::default()));
         }
         let graph_node = self
             .graph
@@ -4912,35 +4989,39 @@ where
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let operator = graph_node.descriptor.operator.clone();
         let inputs = graph_node.descriptor.inputs.clone();
-        let mut signature = match operator {
-            OpType::TableSource(input) => NodeInputSignature {
-                tables: [input.table].into(),
-                ..NodeInputSignature::default()
-            },
-            OpType::IndexSource(input) => NodeInputSignature {
-                tables: [input.table].into(),
-                ..NodeInputSignature::default()
-            },
-            OpType::BindingSource(input) => NodeInputSignature {
-                bindings: [input.shape].into(),
-                ..NodeInputSignature::default()
-            },
-            OpType::FrontierSource(input) => NodeInputSignature {
-                frontier_bindings: [input.binding].into(),
-                ..NodeInputSignature::default()
-            },
-            _ => NodeInputSignature::default(),
+        let mut tables = BTreeSet::new();
+        let mut bindings = BTreeSet::new();
+        let mut frontier_bindings = BTreeSet::new();
+        match operator {
+            OpType::TableSource(input) => {
+                tables.insert(input.table);
+            }
+            OpType::IndexSource(input) => {
+                tables.insert(input.table);
+            }
+            OpType::BindingSource(input) => {
+                bindings.insert(input.shape);
+            }
+            OpType::FrontierSource(input) => {
+                frontier_bindings.insert(input.binding);
+            }
+            _ => {}
         };
         for input in inputs {
             let child = self.input_signature_inner(input, seen)?;
-            signature.tables.extend(child.tables);
-            signature.bindings.extend(child.bindings);
-            signature.frontier_bindings.extend(child.frontier_bindings);
+            tables.extend(child.tables.iter().cloned());
+            bindings.extend(child.bindings.iter().cloned());
+            frontier_bindings.extend(child.frontier_bindings.iter().cloned());
         }
+        let signature = Arc::new(NodeInputSignature::from_sets(
+            tables,
+            bindings,
+            frontier_bindings,
+        ));
         let depends_on_context = !signature.frontier_bindings.is_empty();
         let meta = self.node_meta.entry(node).or_default();
         meta.depends_on_context = Some(depends_on_context);
-        meta.input_signature = Some(signature.clone());
+        meta.input_signature = Some(Arc::clone(&signature));
         Ok(signature)
     }
 
