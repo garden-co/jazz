@@ -1892,7 +1892,7 @@ fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnTy
 }
 
 fn is_permission_introspection_magic_column(column: &str) -> bool {
-    matches!(column, "$canRead" | "$canEdit" | "$canDelete")
+    matches!(column, "$canRead")
 }
 
 fn validate_include(schema: &JazzSchema, root: &TableSchema, path: &str) -> Result<(), QueryError> {

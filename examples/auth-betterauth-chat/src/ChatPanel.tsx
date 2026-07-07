@@ -34,9 +34,21 @@ export function ChatPanel({
     useAll(
       app.messages
         .where({ chat_id: chatId })
-        .select("id", "author_name", "text", "sent_at", "$canDelete")
+        .select("id", "author_name", "text", "sent_at")
         .orderBy("sent_at", "asc"),
     ) ?? [];
+
+  const [canDeleteById, setCanDeleteById] = React.useState<Record<string, boolean>>({});
+  const rowIds = React.useMemo(() => rows.map((row) => row.id).join("\0"), [rows]);
+  React.useEffect(() => {
+    let cancelled = false;
+    const ids = rowIds.length > 0 ? rowIds.split("\0") : [];
+    const next = Object.fromEntries(ids.map((id) => [id, db.canDelete(app.messages, id)]));
+    if (!cancelled) setCanDeleteById(next);
+    return () => {
+      cancelled = true;
+    };
+  }, [db, rowIds]);
 
   const [messageText, setMessageText] = React.useState("");
   const [messagePending, setMessagePending] = React.useState(false);
@@ -111,7 +123,7 @@ export function ChatPanel({
                   <strong data-testid="message-author">{row.author_name}</strong>
                   <time data-testid="message-date">{formatTimestamp(row.sent_at)}</time>
                 </div>
-                {row.$canDelete ? (
+                {canDeleteById[row.id] ? (
                   <button
                     type="button"
                     className="delete-message-button"

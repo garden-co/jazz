@@ -1,8 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum MagicColumnKind {
     CanRead,
-    CanEdit,
-    CanDelete,
     CreatedBy,
     CreatedAt,
     UpdatedBy,
@@ -12,8 +10,6 @@ pub(super) enum MagicColumnKind {
 pub(super) fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
     match name {
         "$canRead" => Some(MagicColumnKind::CanRead),
-        "$canEdit" => Some(MagicColumnKind::CanEdit),
-        "$canDelete" => Some(MagicColumnKind::CanDelete),
         "$createdBy" => Some(MagicColumnKind::CreatedBy),
         "$createdAt" => Some(MagicColumnKind::CreatedAt),
         "$updatedBy" => Some(MagicColumnKind::UpdatedBy),

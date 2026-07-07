@@ -10,6 +10,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const updateCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
   const upsertCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
   const deleteCalls: Array<[string, string, string | undefined]> = [];
+  const dryRunCalls: Array<[string, ...unknown[]]> = [];
 
   const runtimeBase: TransactionalRuntime = {
     beginTransaction: (mode) => `transaction-${mode}`,
@@ -77,6 +78,22 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
           : "delete-transaction-id",
       };
     },
+    canInsert: (table, values, session) => {
+      dryRunCalls.push(["canInsert", table, values, session]);
+      return true;
+    },
+    canRead: (table, objectId, session) => {
+      dryRunCalls.push(["canRead", table, objectId, session]);
+      return true;
+    },
+    canUpdate: (table, objectId, values, session) => {
+      dryRunCalls.push(["canUpdate", table, objectId, values, session]);
+      return true;
+    },
+    canDelete: (table, objectId, session) => {
+      dryRunCalls.push(["canDelete", table, objectId, session]);
+      return true;
+    },
     query: async () => [],
     waitForTransaction: async () => {},
     connect: () => {},
@@ -114,10 +131,34 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     updateCalls,
     upsertCalls,
     deleteCalls,
+    dryRunCalls,
   };
 }
 
 describe("JazzClient write attribution", () => {
+  it("routes dry-run permission checks through runtime methods", () => {
+    const { client, dryRunCalls } = makeClient();
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+    const session: Session = {
+      user_id: "backend-user",
+      claims: { role: "admin" },
+      authMode: "external",
+    };
+
+    expect(client.canInsert("todos", insertValues, session)).toBe(true);
+    expect(client.canRead("todos", "row-1", session)).toBe(true);
+    expect(client.canUpdate("todos", "row-1", updates, session)).toBe(true);
+    expect(client.canDelete("todos", "row-1", session)).toBe(true);
+
+    expect(dryRunCalls).toEqual([
+      ["canInsert", "todos", insertValues, session],
+      ["canRead", "todos", "row-1", session],
+      ["canUpdate", "todos", "row-1", updates, session],
+      ["canDelete", "todos", "row-1", session],
+    ]);
+  });
+
   it("routes attributed writes through runtime methods with write context", async () => {
     const { client, insertCalls, updateCalls, deleteCalls } = makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };

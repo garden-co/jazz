@@ -1199,27 +1199,16 @@ fn db_close_is_idempotent() {
 fn permission_introspection_magic_columns_fail_closed_on_prepare_query() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
 
-    for (column, query) in [
-        ("$canRead", db.table("todos").select(["$canRead"])),
-        (
-            "$canEdit",
-            db.table("todos").filter(eq(col("$canEdit"), lit(true))),
-        ),
-        (
-            "$canDelete",
-            db.table("todos").filter(ne(col("$canDelete"), lit(false))),
-        ),
-    ] {
-        let error = expect_error(db.prepare_query(&query));
-        assert_eq!(error.code, ErrorCode::Query);
-        assert!(
-            error.message.contains("unsupported")
-                && error.message.contains("permission introspection")
-                && error.message.contains(column),
-            "unexpected error message: {}",
-            error.message
-        );
-    }
+    let query = db.table("todos").select(["$canRead"]);
+    let error = expect_error(db.prepare_query(&query));
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("unsupported")
+            && error.message.contains("permission introspection")
+            && error.message.contains("$canRead"),
+        "unexpected error message: {}",
+        error.message
+    );
 
     let provenance_query = db.table("todos").select(["$createdAt", "$createdBy"]);
     db.prepare_query(&provenance_query).unwrap();

@@ -57,6 +57,15 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
+  canInsert?(table: string, values: InsertValues, session?: Session): boolean;
+  canRead?(table: string, objectId: string, session?: Session): boolean;
+  canUpdate?(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): boolean;
+  canDelete?(table: string, objectId: string, session?: Session): boolean;
   waitForTransaction(transactionId: string, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -876,6 +885,44 @@ export class JazzClient {
   ): WriteHandle {
     const result = this.deleteInternal(table, objectId, options?.updatedAt, session, attribution);
     return new WriteHandle(result.transactionId, this);
+  }
+
+  canInsert(table: string, values: InsertValues, session?: Session): boolean {
+    if (!this.runtime.canInsert) {
+      throw new Error("Runtime does not support write-policy dry-run insert checks.");
+    }
+    return this.runtime.canInsert(table, values, session ?? this.resolvedSession ?? undefined);
+  }
+
+  canRead(table: string, objectId: string, session?: Session): boolean {
+    if (!this.runtime.canRead) {
+      throw new Error("Runtime does not support read-policy dry-run checks.");
+    }
+    return this.runtime.canRead(table, objectId, session ?? this.resolvedSession ?? undefined);
+  }
+
+  canUpdate(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): boolean {
+    if (!this.runtime.canUpdate) {
+      throw new Error("Runtime does not support write-policy dry-run update checks.");
+    }
+    return this.runtime.canUpdate(
+      table,
+      objectId,
+      values,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  canDelete(table: string, objectId: string, session?: Session): boolean {
+    if (!this.runtime.canDelete) {
+      throw new Error("Runtime does not support write-policy dry-run delete checks.");
+    }
+    return this.runtime.canDelete(table, objectId, session ?? this.resolvedSession ?? undefined);
   }
 
   /**

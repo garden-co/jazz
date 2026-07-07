@@ -204,7 +204,7 @@ Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 
 Allowed "magic" select columns are the provenance columns `$createdAt`,
 `$createdBy`, `$updatedAt`, `$updatedBy`. Alpha-compatible permission
-introspection fields such as `$canRead`, `$canEdit`, and `$canDelete` are not
+introspection fields such as `$canRead` are not
 ordinary stored columns and are not executable query columns. Permission
 introspection is exposed through standalone dry-run APIs (ch. 7, ch. 13), so
 current query execution must reject `$can*` predicates/projections rather than

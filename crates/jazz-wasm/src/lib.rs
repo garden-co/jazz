@@ -1270,6 +1270,48 @@ impl WasmDb {
         }
     }
 
+    #[wasm_bindgen(js_name = canInsertEncodedForIdentity)]
+    pub fn can_insert_encoded_for_identity(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<bool, JsValue> {
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => db
+                .can_insert_for_identity(&table, cells, author)
+                .map_err(to_js_error),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .can_insert_for_identity(&table, cells, author)
+                .map_err(to_js_error),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = canReadForIdentity)]
+    pub fn can_read_for_identity(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<bool, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => db
+                .can_read_for_identity(&table, row_id, author)
+                .map_err(to_js_error),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .can_read_for_identity(&table, row_id, author)
+                .map_err(to_js_error),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
     #[wasm_bindgen(js_name = insertWithIdEncoded)]
     pub fn insert_with_id_encoded(
         &self,

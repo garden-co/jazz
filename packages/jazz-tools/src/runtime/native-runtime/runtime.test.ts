@@ -1885,11 +1885,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos", select_columns: ["title", "$canEdit"] })),
+      runtime.query(JSON.stringify({ table: "todos", select_columns: ["title", "$canRead"] })),
     ).rejects.toThrow("permission-introspection query");
     await expect(
       runtime.query(
-        JSON.stringify({ table: "todos", select_columns: ["title", "todos.$canEdit"] }),
+        JSON.stringify({ table: "todos", select_columns: ["title", "todos.$canRead"] }),
       ),
     ).rejects.toThrow("permission-introspection query");
     expect(calls).toEqual([]);
@@ -1926,7 +1926,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({
           table: "todos",
-          conditions: [{ column: "$canDelete", op: "eq", value: true }],
+          conditions: [{ column: "$canRead", op: "eq", value: true }],
         }),
       ),
     ).rejects.toThrow("permission-introspection query");
@@ -2010,8 +2010,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({
           table: "todos",
-          conditions: [{ column: "$canEdit", op: "eq", value: true }],
-          select_columns: ["title", "$canEdit"],
+          conditions: [{ column: "$canRead", op: "eq", value: true }],
+          select_columns: ["title", "$canRead"],
         }),
       ),
     ).toThrow("permission-introspection query");

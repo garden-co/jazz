@@ -1928,7 +1928,7 @@ impl JazzClient {
         column: &str,
     ) -> Result<Option<Value>> {
         let value = match column {
-            "$canRead" | "$canEdit" | "$canDelete" => {
+            "$canRead" => {
                 return Err(JazzError::Query(format!(
                     "permission introspection column {column} requires unified policy lowering"
                 )));

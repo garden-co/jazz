@@ -169,9 +169,9 @@ describe("typed app prototype", () => {
     // @ts-expect-error Permission introspection columns are not selectable query columns.
     app.todos.select("$canRead");
     // @ts-expect-error Permission introspection columns are not filterable query columns.
-    app.todos.where({ $canEdit: true });
+    app.todos.where({ $canRead: true });
     // @ts-expect-error Permission introspection columns are not orderable query columns.
-    app.todos.orderBy("$canDelete");
+    app.todos.orderBy("$canRead");
 
     app.todos
       .select("$createdAt")

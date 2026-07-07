@@ -217,34 +217,6 @@ pub async fn read_todo_titles(client: &JazzClient) -> jazz_tools::Result<usize> 
 }
 // #endregion reading-select-rust
 
-// #region reading-magic-columns-rust
-pub async fn read_todos_with_permissions(client: &JazzClient) -> jazz_tools::Result<usize> {
-    let query = QueryBuilder::new("todos")
-        .select(&["title", "$canRead", "$canEdit", "$canDelete"])
-        .build();
-
-    let rows = client.query(query, None).await?;
-    Ok(rows.len())
-}
-// #endregion reading-magic-columns-rust
-
-// #region reading-magic-columns-include-rust
-pub async fn read_projects_with_todo_permissions(client: &JazzClient) -> jazz_tools::Result<usize> {
-    let query = QueryBuilder::new("projects")
-        .with_array("todos_via_project", |sub| {
-            sub.from("todos").correlate("project_id", "_id").select(&[
-                "title",
-                "$canEdit",
-                "$canDelete",
-            ])
-        })
-        .build();
-
-    let rows = client.query(query, None).await?;
-    Ok(rows.len())
-}
-// #endregion reading-magic-columns-include-rust
-
 // #region reading-recursive-rust
 pub fn build_todo_lineage_query() -> jazz_tools::Query {
     QueryBuilder::new("todos")
