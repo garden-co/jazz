@@ -14,7 +14,7 @@
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
 // | recursive membership                         | both reachable shapes include transitive hops |
-// | aggregate                                    | review-visible gap: program-fact comparison is possible, but a trial lane found `docs.count()` diverging in this multi-shape corpus (seed 29, fuzz-step-2: maintained 3 vs one-shot 5), so it stays out of the passing gate until aggregate maintained delivery is fixed |
+// | aggregate                                    | `docs_count`                                |
 
 #[derive(Clone)]
 struct DifferentialShape {
@@ -29,10 +29,26 @@ struct DifferentialOracle {
     peers: Vec<PeerState>,
     shapes: Vec<DifferentialShape>,
     rows: Vec<BTreeSet<(String, RowUuid)>>,
+    aggregate: AggregateDifferential,
+}
+
+struct AggregateDifferential {
+    name: &'static str,
+    shape: ValidatedQuery,
+    binding: Binding,
+    identity: AuthorId,
+    subscription: SubscriptionKey,
+    peer: PeerState,
+    value: Value,
 }
 
 impl DifferentialOracle {
-    fn open(core: &mut NodeState<RocksDbStorage>, shapes: Vec<DifferentialShape>, seed: u64) -> Self {
+    fn open(
+        core: &mut NodeState<RocksDbStorage>,
+        schema: &JazzSchema,
+        shapes: Vec<DifferentialShape>,
+        seed: u64,
+    ) -> Self {
         let mut peers = Vec::new();
         let mut rows = Vec::new();
         for shape in &shapes {
@@ -50,10 +66,35 @@ impl DifferentialOracle {
             rows.push(shape_rows);
             peers.push(peer);
         }
+        let aggregate_shape = Query::from("docs").count().validate(schema).unwrap();
+        let aggregate_binding = aggregate_shape.bind(BTreeMap::new()).unwrap();
+        let aggregate_subscription = SubscriptionKey {
+            shape_id: aggregate_shape.shape_id(),
+            binding_id: aggregate_binding.binding_id(),
+            read_view: Default::default(),
+        };
+        let mut aggregate_peer = PeerState::for_author(user(0xa1));
+        let aggregate_initial = aggregate_peer
+            .rehydrate_query(core, &aggregate_shape, &aggregate_binding)
+            .unwrap_or_else(|err| {
+                panic!("seed {seed}: initial maintained open failed for docs_count: {err:?}")
+            });
+        let mut aggregate_value = Value::U64(0);
+        apply_aggregate_payload(&mut aggregate_value, &aggregate_initial);
+
         let mut oracle = Self {
             peers,
             shapes,
             rows,
+            aggregate: AggregateDifferential {
+                name: "docs_count",
+                shape: aggregate_shape,
+                binding: aggregate_binding,
+                identity: user(0xa1),
+                subscription: aggregate_subscription,
+                peer: aggregate_peer,
+                value: aggregate_value,
+            },
         };
         oracle.assert_checkpoint(core, seed, "t0");
         oracle
@@ -76,6 +117,22 @@ impl DifferentialOracle {
                 });
             apply_result_members(rows, &update, &shape.shape.query().table);
         }
+        let aggregate_update = self
+            .aggregate
+            .peer
+            .query_update_for_subscription(
+                core,
+                self.aggregate.subscription,
+                &self.aggregate.shape,
+                &self.aggregate.binding,
+            )
+            .unwrap_or_else(|err| {
+                panic!(
+                    "seed {seed}: maintained update failed for {} at {checkpoint}: {err:?}",
+                    self.aggregate.name
+                )
+            });
+        apply_aggregate_payload(&mut self.aggregate.value, &aggregate_update);
         self.assert_checkpoint(core, seed, checkpoint);
     }
 
@@ -88,6 +145,17 @@ impl DifferentialOracle {
                 shape.name
             );
         }
+        let one_shot = one_shot_aggregate_value(
+            core,
+            &self.aggregate.shape,
+            &self.aggregate.binding,
+            self.aggregate.identity,
+        );
+        assert_eq!(
+            self.aggregate.value, one_shot,
+            "seed {seed}: maintained/one-shot aggregate divergence for {} at {checkpoint}",
+            self.aggregate.name
+        );
     }
 }
 
@@ -123,7 +191,7 @@ fn run_m3_differential_seed(seed: u64) {
     let schema = m3_differential_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x71), schema.clone());
     seed_m3_differential_base(&mut core, seed);
-    let mut differential = DifferentialOracle::open(&mut core, m3_differential_shapes(&schema), seed);
+    let mut differential = DifferentialOracle::open(&mut core, &schema, m3_differential_shapes(&schema), seed);
 
     let mut rng = Lcg::new(seed ^ 0x9e37_79b9);
     let mut parents = m3_differential_parent_map(&mut core);
@@ -162,6 +230,7 @@ fn m3_differential_empty_seed_then_insert_created_by() {
     };
     let mut oracle = DifferentialOracle::open(
         &mut core,
+        &schema,
         vec![DifferentialShape {
             name: "empty_seed_then_insert_created_by",
             shape,
@@ -229,7 +298,7 @@ fn m3_differential_revoke_mid_stream_and_reconnect_mid_stream() {
     let schema = m3_differential_schema();
     let (core_dir, mut core) = open_node_with_schema(node(0x75), schema.clone());
     seed_m3_differential_base(&mut core, 0);
-    let mut oracle = DifferentialOracle::open(&mut core, m3_differential_shapes(&schema), 0);
+    let mut oracle = DifferentialOracle::open(&mut core, &schema, m3_differential_shapes(&schema), 0);
     let mut parents = m3_differential_parent_map(&mut core);
 
     revoke_edge_access(&mut core, &mut parents, 0);
@@ -739,4 +808,58 @@ fn apply_result_members(rows: &mut BTreeSet<(String, RowUuid)>, update: &SyncMes
             rows.insert((table.to_string(), row_uuid));
         }
     }
+}
+
+fn apply_aggregate_payload(value: &mut Value, update: &SyncMessage) {
+    let SyncMessage::ViewUpdate {
+        reset_result_set,
+        program_fact_adds,
+        ..
+    } = update
+    else {
+        panic!("expected view update");
+    };
+    if *reset_result_set {
+        *value = Value::U64(0);
+    }
+    for fact in program_fact_adds {
+        if let Some(next) = aggregate_payload_count(fact) {
+            *value = next;
+        }
+    }
+}
+
+fn aggregate_payload_count(fact: &crate::protocol::ProgramFactEntry) -> Option<Value> {
+    let crate::protocol::ProgramFactEntry::ResultPayload(payload) = fact else {
+        return None;
+    };
+    let table = payload.member.table_name()?;
+    if table != "docs_aggregate" {
+        return None;
+    }
+    let fields: Vec<(Option<String>, groove::records::ValueType)> =
+        postcard::from_bytes(&payload.descriptor).unwrap();
+    let descriptor = groove::records::RecordDescriptor::new(
+        fields
+            .into_iter()
+            .map(|(name, value_type)| (name.unwrap(), value_type)),
+    );
+    let record = groove::records::BorrowedRecord::new(&payload.record, &descriptor);
+    Some(record.get("count").unwrap().clone())
+}
+
+fn one_shot_aggregate_value(
+    core: &mut NodeState<RocksDbStorage>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorId,
+) -> Value {
+    let rows = core
+        .query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
+        .unwrap();
+    if rows.is_empty() {
+        return Value::U64(0);
+    }
+    assert_eq!(rows.len(), 1, "aggregate one-shot should produce at most one synthetic row");
+    rows[0].test_cells_by_descriptor()["count"].clone()
 }
