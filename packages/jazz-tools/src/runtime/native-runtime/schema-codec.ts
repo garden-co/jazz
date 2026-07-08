@@ -461,9 +461,6 @@ function policyExprToAlternatives(
   table: string,
   expr: PolicyExpr,
 ): PolicyQueryShape[] {
-  if (expr.type === "Inherits" && expr.operation !== "Select") {
-    return inheritedPolicyToQueryShapes(schema, table, expr.operation, expr.via_column);
-  }
   if (expr.type === "InheritsReferencing") {
     return inheritedReferencingPolicyToQueryShapes(
       schema,
@@ -523,18 +520,6 @@ function policyExprToQueryShape(
     return policyExistsRelToQueryShape(schema, table, expr.rel);
   }
   if (expr.type === "Inherits") {
-    if (expr.operation !== "Select") {
-      const alternatives = inheritedPolicyToQueryShapes(
-        schema,
-        table,
-        expr.operation,
-        expr.via_column,
-      );
-      if (alternatives.length !== 1) {
-        throw new Error("Core runtime schema Inherits policy alternatives must be branch-lowered.");
-      }
-      return alternatives[0]!;
-    }
     return {
       filters: [],
       joins: [],
