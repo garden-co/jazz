@@ -24,6 +24,8 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
+- `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the
@@ -34,5 +36,9 @@ was born-red for roughly nine commits; `large_blob_values_follow_ordinary_row_pe
 was born-red at `e03780d70`; `jazz-server`'s `cli_dry_run` target rotted after a
 core API evolution; and adding `SyncMessage::SubscribeRejected` broke jazz-sim
 bench compilation two steps before the bench gate caught it.
+
+Wide maintained-vs-one-shot soaks use
+`JAZZ_SEED_COUNT=2000 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+alongside the existing m3 soak conventions.
 
 **Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
