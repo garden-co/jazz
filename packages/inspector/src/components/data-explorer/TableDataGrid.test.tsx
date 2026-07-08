@@ -92,8 +92,7 @@ vi.mock("jazz-tools/react", () => ({
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: mockWasmSchema,
-    runtime: "extension",
-    queryPropagation: "local-only",
+    runtime: "overlay",
   }),
 }));
 
@@ -190,12 +189,11 @@ describe("TableDataGrid", () => {
 
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
     expect(screen.getByRole("region", { name: "Filter rows" })).not.toBeNull();
-    expect(screen.getByRole("link", { name: "Schema" }).getAttribute("title")).toBe("Schema");
-    expect(screen.getByRole("button", { name: "Insert row" }).getAttribute("title")).toBe(
-      "Insert row",
-    );
-    const toolbarDeleteButton = screen.getByRole("button", { name: "Delete row(s)" });
-    expect(toolbarDeleteButton.getAttribute("title")).toBe("Delete row(s)");
+    // The toolbar actions are labelled via aria-label (their hover hint is now a
+    // Popover-API tooltip, not a native title attribute).
+    expect(screen.getByRole("link", { name: "Schema" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Insert row" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Delete row(s)" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
@@ -256,7 +254,7 @@ describe("TableDataGrid", () => {
     });
   });
 
-  it("subscribes with local-only propagation in extension mode", () => {
+  it("subscribes with local-only propagation in overlay mode", () => {
     renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(

@@ -24,16 +24,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -72,6 +68,10 @@ describe("auto-join race on first message send", () => {
     return { container, root };
   }
 
+  function renderApp(root: Root, config: { appId: string; serverUrl: string }) {
+    root.render(<App config={{ dbName: crypto.randomUUID(), ...config }} />);
+  }
+
   afterEach(async () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
@@ -105,16 +105,7 @@ describe("auto-join race on first message send", () => {
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
       const { container: aliceContainer, root: aliceRoot } = makeMount();
-      aliceRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-alice"),
-            serverUrl,
-            secret: await testSecret(`autojoin-alice-${runId}`),
-          }}
-        />,
-      );
+      renderApp(aliceRoot, { appId: APP_ID, serverUrl });
 
       // The app redirects from / to /#/chat/:id once it has created the seed
       // public chat.  Wait for the hash to settle.
@@ -172,16 +163,7 @@ describe("auto-join race on first message send", () => {
       // URL so addInitScript fires before any client-side routing).
       window.location.hash = `#/chat/${chatId}`;
 
-      bobRoot.render(
-        <App
-          config={{
-            appId: APP_ID,
-            dbName: uniqueDbName("autojoin-bob"),
-            serverUrl,
-            secret: await testSecret(`autojoin-bob-${runId}`),
-          }}
-        />,
-      );
+      renderApp(bobRoot, { appId: APP_ID, serverUrl });
 
       // ── Assert A: composer must transition through disabled before enabling ─
       //

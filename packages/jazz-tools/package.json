@@ -121,6 +121,7 @@
     "build:runtime": "tsc && node scripts/bundle-broker-worker.mjs && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
+    "check": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",
     "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
@@ -130,6 +131,7 @@
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",
+    "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {

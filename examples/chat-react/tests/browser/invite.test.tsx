@@ -8,16 +8,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -63,7 +59,7 @@ describe("Invite Flow E2E", () => {
     const appId =
       config.appId ?? `test-invite-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
 
     await waitFor(
       () =>
@@ -116,9 +112,7 @@ describe("Invite Flow E2E", () => {
     // --- User A: create private chat and generate invite --------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("invite-a"),
       serverUrl,
-      secret: await testSecret(`invite-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -264,9 +258,7 @@ describe("Invite Flow E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("invite-b"),
       serverUrl,
-      secret: await testSecret(`invite-user-b-${Date.now()}`),
     });
 
     // User B should see the secret message after joining via invite

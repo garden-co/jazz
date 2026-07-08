@@ -903,7 +903,7 @@ export class Db {
 
   /**
    * Create a Db instance with a loaded runtime module.
-   * @internal Use createDb() instead.
+   * @internal Use {@link createDb()} instead.
    */
   static create(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Db {
     return new Db(config, runtimeModule);
@@ -958,6 +958,32 @@ export class Db {
 
   protected async ensureReady(tier?: DurabilityTier): Promise<void> {
     await this.connection.ensureReady(tier);
+  }
+
+  /**
+   * Temporarily disconnect this Db from its configured Jazz sync server.
+   *
+   * Local reads and writes can continue while disconnected. Call
+   * {@link reconnect} to resume sync using the same Db instance.
+   */
+  async disconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot disconnect a Db that is shutting down.");
+    }
+
+    await this.connection.disconnect();
+  }
+
+  /**
+   * Reconnect this Db to its configured Jazz sync server after
+   * {@link disconnect}.
+   */
+  async reconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot reconnect a Db that is shutting down.");
+    }
+
+    await this.connection.reconnect();
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
@@ -1024,6 +1050,19 @@ export class Db {
   getConfig(): DbConfig {
     // Return a copy of the config to avoid editing the original config.
     return structuredClone(this.config);
+  }
+
+  /**
+   * The runtime schema of this Db's live client, normalized. Used by the
+   * inspector overlay (a same-origin iframe) to render columns and build queries
+   * against this connection without bridging or private-field access. Null if
+   * no client exists yet — run a query/subscription (or wait for connection)
+   * first.
+   * @internal
+   */
+  getRuntimeSchema(): WasmSchema | null {
+    const schema = this.connection.getRuntimeSchema();
+    return schema ? normalizeRuntimeSchema(schema) : null;
   }
 
   setDevMode(enabled: boolean): void {
@@ -1684,6 +1723,14 @@ class ClientBackedDb extends Db {
     };
   }
 
+  override async disconnect(): Promise<void> {
+    throw new Error("Db.disconnect() is not supported on scoped Db handles.");
+  }
+
+  override async reconnect(): Promise<void> {
+    throw new Error("Db.reconnect() is not supported on scoped Db handles.");
+  }
+
   override async shutdown(): Promise<void> {
     // The owning JazzContext owns the runtime lifecycle.
   }
@@ -1806,10 +1853,6 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
-
-  if (driver.type === "memory" && !resolvedConfig.serverUrl) {
-    throw new Error("driver.type='memory' requires serverUrl.");
-  }
 
   let db: Db;
   if (

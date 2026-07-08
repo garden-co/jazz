@@ -28,7 +28,7 @@ export function TableSchemaDefinition() {
   }, [table, tableSchema]);
 
   const formattedPermissions = useMemo(() => {
-    if (runtime === "extension") {
+    if (runtime === "overlay") {
       return null;
     }
     if (!storedPermissions?.head) {

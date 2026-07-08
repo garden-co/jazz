@@ -20,11 +20,21 @@
   min-width: 0;
 }
 
+/* Full-height rule separating the where-clause builder (read) from the
+   row-mutation actions (write). margin-inline-start: auto pushes the divider and
+   the action group to the right as one unit, and lets them wrap together. */
+.toolbarDivider {
+  align-self: stretch;
+  inline-size: 1px;
+  flex: 0 0 1px;
+  margin-inline-start: auto;
+  background: var(--jz-border-strong);
+}
+
 .toolbarActions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  margin-left: auto;
+  gap: 6px;
   flex: 0 0 auto;
 }
 
@@ -39,12 +49,12 @@
 .select,
 .input {
   min-width: 140px;
-  block-size: 31px;
-  border: 1px solid #2a3647;
+  block-size: 28px;
+  border: 1px solid var(--jz-border-control);
   border-radius: 4px;
-  background: #151d27;
+  background: var(--jz-surface);
   color: #d9e2f0;
-  padding: 6px 8px;
+  padding: 5px 8px;
   font-size: 12px;
 }
 
@@ -53,14 +63,14 @@
 }
 
 .button {
-  border: 1px solid #2a3647;
-  background: #161d27;
+  border: 1px solid var(--jz-border-control);
+  background: var(--jz-surface);
   color: #d3dceb;
   border-radius: 4px;
-  padding: 6px 10px;
+  padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
-  block-size: 31px;
+  block-size: 28px;
 }
 
 .button:hover {
@@ -71,7 +81,7 @@
   display: grid;
   gap: 8px;
   padding: 0 12px 8px;
-  border-bottom: 1px solid #232c3a;
+  border-bottom: 1px solid var(--jz-border-strong);
 }
 
 .error {
@@ -101,13 +111,13 @@
   gap: 4px;
   max-width: 100%;
   padding: 3px 4px 3px 8px;
-  border: 1px solid #232c3a;
+  border: 1px solid var(--jz-border-strong);
   border-radius: 4px;
-  background: #151d27;
+  background: var(--jz-surface);
 }
 
 .clauseText {
-  color: #d7deea;
+  color: var(--jz-text);
   font-size: 12px;
 }
 
@@ -120,7 +130,7 @@
   border: 0;
   border-radius: 2px;
   background: transparent;
-  color: #6b7a8d;
+  color: var(--jz-faint);
   font-size: 14px;
   line-height: 1;
   padding: 0;

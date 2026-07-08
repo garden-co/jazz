@@ -51,7 +51,7 @@ describe("InspectorLayout", () => {
     expect(screen.getByRole("combobox")).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-a" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "hash-b" })).not.toBeNull();
-    expect(screen.getByRole("link", { name: "Live Query" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Subscriptions" })).not.toBeNull();
   });
 
   it("shortens schema hashes and includes upload time when available", () => {

@@ -269,7 +269,6 @@ fn native_subscription_delta_to_js(delta: &SubscriptionDelta) -> JsValue {
     }
 
     let object = Object::new();
-    set_property(&object, "__jazzNativeRowDelta", &JsValue::from_bool(true));
     set_property(&object, "added", &Uint8Array::from(added.as_slice()).into());
     set_property(
         &object,
@@ -2069,6 +2068,15 @@ impl WasmRuntime {
         let seed = decode_seed(seed_b64)?;
         let user_id = identity::derive_user_id(&seed);
         Ok(user_id.to_string())
+    }
+
+    /// Compute the canonical schema hash (64-char hex) for a JSON-encoded
+    /// schema without constructing a runtime.
+    #[wasm_bindgen(js_name = "computeSchemaHash")]
+    pub fn compute_schema_hash(schema_json: &str) -> Result<String, JsError> {
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        Ok(SchemaHash::compute(&runtime_schema.schema).to_string())
     }
 
     #[wasm_bindgen(js_name = "mintJazzSelfSignedToken")]

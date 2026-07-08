@@ -122,25 +122,6 @@
   color: #b8d2ff;
 }
 
-.stackDetails {
-  min-width: 280px;
-}
-
-.stackSummary {
-  cursor: pointer;
-  color: #ffd48a;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.stackSummary:hover {
-  color: #ffe2ad;
-}
-
-.stackDetails[open] .stackSummary {
-  margin-bottom: 8px;
-}
-
 .filters {
   display: flex;
   flex-wrap: wrap;

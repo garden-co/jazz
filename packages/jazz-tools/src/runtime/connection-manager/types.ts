@@ -117,6 +117,16 @@ export abstract class ConnectionManager {
     return client;
   }
 
+  /**
+   * The current runtime client's schema, or null if no client has been created
+   * yet (no query/subscription run). Used by `Db.getRuntimeSchema()` so the
+   * inspector overlay can render columns and build queries without reaching into
+   * private fields.
+   */
+  getRuntimeSchema(): WasmSchema | null {
+    return this.client ? this.client.getSchema() : null;
+  }
+
   protected get clientEntry(): ConnectionManagerClientInput | null {
     if (!this.client || !this.clientSchema) return null;
     return {
@@ -129,6 +139,10 @@ export abstract class ConnectionManager {
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
   abstract ensureReady(tier?: DurabilityTier): Promise<void>;
+
+  abstract disconnect(): Promise<void>;
+
+  abstract reconnect(): Promise<void>;
 
   updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
     if ("jwtToken" in auth) {

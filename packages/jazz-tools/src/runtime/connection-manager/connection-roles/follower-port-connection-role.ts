@@ -54,6 +54,14 @@ export class FollowerPortConnectionRole implements BrowserConnectionRole {
 
   async ensureReady(): Promise<void> {}
 
+  async disconnect(): Promise<void> {
+    throw new Error("Db.disconnect() is only supported on the browser leader tab.");
+  }
+
+  async reconnect(): Promise<void> {
+    throw new Error("Db.reconnect() is only supported on the browser leader tab.");
+  }
+
   updateAuth(auth: { jwtToken?: string }): void {
     this.followerPortBridge?.updateAuth(auth);
   }

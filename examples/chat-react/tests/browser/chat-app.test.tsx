@@ -7,16 +7,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -136,6 +132,7 @@ describe("Chat App E2E", () => {
       dbName?: string;
       serverUrl?: string;
       secret?: string;
+      authSecretStorageKey?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -148,7 +145,7 @@ describe("Chat App E2E", () => {
     const appId =
       config.appId ?? `test-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, ...config }} />);
+    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
 
     // Wait for the app to initialise and redirect to a chat
     await waitFor(
@@ -197,7 +194,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("creates a public chat on initial load with seed message", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("initial") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.textContent?.includes("Hello world") ?? false,
@@ -213,7 +210,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("sends a message and shows it in the chat", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("send") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -236,7 +233,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a reaction to a message", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("react") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.textContent?.includes("Hello world") ?? false,
@@ -308,7 +305,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a message via the dropdown menu", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("delete") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -377,7 +374,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("creates a new public chat via the chat list", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("newchat") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -452,13 +449,14 @@ describe("Chat App E2E", () => {
     bobContainer: HTMLDivElement;
   }> {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const aliceAuthKey = crypto.randomUUID();
+    const bobAuthKey = crypto.randomUUID();
 
     // --- User A: create a private chat with a secret message ----------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("access-a"),
+      authSecretStorageKey: aliceAuthKey,
       serverUrl,
-      secret: await testSecret(`chat-access-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -542,9 +540,8 @@ describe("Chat App E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("access-b"),
+      authSecretStorageKey: bobAuthKey,
       serverUrl,
-      secret: await testSecret(`chat-access-user-b-${Date.now()}`),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers
@@ -565,7 +562,7 @@ describe("Chat App E2E", () => {
     //   DOM[0] = msg2  (sent last, highest createdAt)
     //   DOM[1] = msg1
     //   DOM[2] = Hello world  (seed, oldest)
-    const el = await mountApp({ dbName: uniqueDbName("ordering") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -600,7 +597,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("inserting a canvas does not corrupt existing messages", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("canvas-corruption") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,

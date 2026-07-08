@@ -34,11 +34,7 @@ import {
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../../src/runtime/schema-fetch.js";
+import { deploy } from "../../src/dev/catalogue.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -2069,7 +2065,7 @@ describe("Worker Bridge with OPFS", () => {
     // Disconnect the WS transport so the block takes effect immediately.
     // Playwright route blocking only intercepts new connections; the existing
     // WebSocket must be closed explicitly for the offline simulation to hold.
-    getActiveRoleBridge(dbA)?.disconnectUpstream?.();
+    await dbA.disconnect();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
@@ -2098,7 +2094,7 @@ describe("Worker Bridge with OPFS", () => {
 
     await unblockJazzServerNetwork(serverUrl);
     // Re-establish the worker's upstream WebSocket now that the network is live again.
-    getActiveRoleBridge(dbA)?.reconnectUpstream?.();
+    await dbA.reconnect();
     await sleep(250);
 
     getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");
@@ -2944,21 +2940,12 @@ async function publishPermissionsForServer(
   schema?: Schema,
 ): Promise<void> {
   const { appId, serverUrl, adminSecret } = testingServer;
-  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+  await deploy({
     appId,
+    serverUrl,
     adminSecret,
     schema: schema ?? app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(serverUrl, {
-    appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(serverUrl, {
-    appId,
-    adminSecret,
-    schemaHash,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 }
 

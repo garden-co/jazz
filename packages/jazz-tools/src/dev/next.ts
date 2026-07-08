@@ -2,6 +2,11 @@ import { createRequire } from "node:module";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
+import {
+  OVERLAY_ENABLED_MESSAGE,
+  startOverlayAssetServer,
+  type OverlayAssetServer,
+} from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -37,6 +42,7 @@ const PUBLIC_APP_ID_ENV = "NEXT_PUBLIC_JAZZ_APP_ID";
 const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
 const PUBLIC_TELEMETRY_COLLECTOR_URL_ENV = "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL";
 const PUBLIC_WASM_URL_ENV = "NEXT_PUBLIC_JAZZ_WASM_URL";
+const PUBLIC_INSPECTOR_ENV = "NEXT_PUBLIC_JAZZ_INSPECTOR";
 const PUBLIC_WASM_SUBPATH = "_jazz/jazz_wasm_bg.wasm";
 const SCHEMA_HASH_STUB_SUBPATH = join("node_modules", ".cache", "jazz", "schema-hash.js");
 const SCHEMA_HASH_ALIAS = "jazz-tools/_dev/schema-hash";
@@ -69,6 +75,52 @@ async function copyWasmToPublic(appRoot: string): Promise<void> {
   const wasmDest = join(appRoot, "public", PUBLIC_WASM_SUBPATH);
   await mkdir(dirname(wasmDest), { recursive: true });
   await copyFile(wasmSource, wasmDest);
+}
+
+// Next exposes no dev-server middleware hook like Vite/SvelteKit, so we can't
+// mount the overlay handler directly. Instead we run a tiny localhost asset
+// server (shared handler) and proxy to it with a dev-only rewrite — no assets
+// copied into the app, nothing to gitignore, and it never exists in a build.
+// Started once and reused across config-factory invocations; unref()'d so it
+// can't hold the dev process open.
+let overlayAssetServer: Promise<OverlayAssetServer> | null = null;
+function ensureOverlayAssetServer(): Promise<OverlayAssetServer> {
+  return (overlayAssetServer ??= startOverlayAssetServer());
+}
+
+const OVERLAY_REWRITE_SOURCE = "/__jazz/embedded/:path*";
+
+interface NextRewrite {
+  source: string;
+  destination: string;
+  basePath?: false;
+}
+type NextRewritesResult =
+  | NextRewrite[]
+  | { beforeFiles?: NextRewrite[]; afterFiles?: NextRewrite[]; fallback?: NextRewrite[] };
+type NextRewritesFn = () => NextRewritesResult | Promise<NextRewritesResult>;
+
+// Proxy /__jazz/embedded/* to the overlay asset server, preserving any rewrites
+// the host app already defined. Our entry goes in `beforeFiles` so it wins
+// regardless of the app's routes; an array from the app keeps its original
+// (afterFiles) semantics.
+function withOverlayRewrite(previous: unknown, assetOrigin: string): NextRewritesFn {
+  const overlay: NextRewrite = {
+    source: OVERLAY_REWRITE_SOURCE,
+    destination: `${assetOrigin}${OVERLAY_REWRITE_SOURCE}`,
+    // The overlay iframe requests a root-absolute /__jazz/embedded/* URL; without
+    // this, Next prefixes the rewrite source with the app's basePath and the
+    // request never matches (overlay 404s on basePath apps).
+    basePath: false,
+  };
+  return async () => {
+    const prev = typeof previous === "function" ? await (previous as NextRewritesFn)() : undefined;
+    if (Array.isArray(prev)) return { beforeFiles: [overlay], afterFiles: prev };
+    if (prev && typeof prev === "object") {
+      return { ...prev, beforeFiles: [overlay, ...(prev.beforeFiles ?? [])] };
+    }
+    return { beforeFiles: [overlay] };
+  };
 }
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
@@ -109,15 +161,32 @@ export function withJazz(
     if (copyAndAdvertiseWasm) {
       await copyWasmToPublic(options.appRoot ?? process.cwd());
     }
-    const mergedWithWasmEnv: NextConfigLike = copyAndAdvertiseWasm
-      ? {
-          ...merged,
-          env: {
-            ...merged.env,
-            [PUBLIC_WASM_URL_ENV]: buildPublicWasmUrl(merged.basePath),
-          },
-        }
-      : merged;
+    // Inspector overlay is dev-only and on by default: in dev, serve its build
+    // from a localhost asset server, proxy to it via a rewrite, and expose a
+    // public flag so the client provider mounts the toggle (the signal that the
+    // jazz dev plugin is active). It leaves no trace in production builds (no
+    // rewrite, no env, no server).
+    const overlayInDev = options.inspector !== false && phase === DEVELOPMENT_PHASE;
+    let overlayRewrites: NextRewritesFn | undefined;
+    if (overlayInDev) {
+      const firstStart = overlayAssetServer === null;
+      const assetServer = await ensureOverlayAssetServer();
+      overlayRewrites = withOverlayRewrite(merged.rewrites, assetServer.origin);
+      // Announce once (the config factory can run more than once) so the toggle
+      // and shortcut are discoverable, matching the Vite/SvelteKit plugins.
+      if (firstStart) console.log(OVERLAY_ENABLED_MESSAGE);
+    }
+    const mergedWithWasmEnv: NextConfigLike = {
+      ...merged,
+      ...(overlayRewrites ? { rewrites: overlayRewrites } : {}),
+      env: {
+        ...merged.env,
+        ...(copyAndAdvertiseWasm
+          ? { [PUBLIC_WASM_URL_ENV]: buildPublicWasmUrl(merged.basePath) }
+          : {}),
+        ...(overlayInDev ? { [PUBLIC_INSPECTOR_ENV]: "1" } : {}),
+      },
+    };
 
     // Everything below is dev-only: managed server, APP_ID/SERVER_URL
     // injection. In production the host app supplies those via its own env.
@@ -202,4 +271,9 @@ interface TurbopackConfig {
 
 export async function __resetJazzNextPluginForTests(): Promise<void> {
   await runtime.resetForTests();
+  if (overlayAssetServer) {
+    const server = await overlayAssetServer.catch(() => null);
+    overlayAssetServer = null;
+    await server?.close();
+  }
 }
