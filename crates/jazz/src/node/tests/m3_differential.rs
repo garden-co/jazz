@@ -14,7 +14,7 @@
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
 // | recursive membership                         | both reachable shapes include transitive hops |
-// | aggregate                                    | review-visible gap: maintained aggregate support is not yet wired here |
+// | aggregate                                    | review-visible gap: program-fact comparison is possible, but a trial lane found `docs.count()` diverging in this multi-shape corpus (seed 29, fuzz-step-2: maintained 3 vs one-shot 5), so it stays out of the passing gate until aggregate maintained delivery is fixed |
 
 #[derive(Clone)]
 struct DifferentialShape {
