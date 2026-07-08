@@ -210,8 +210,9 @@ export default function HomePage() {
                 about your app or your users.
               </p>
               <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
-                You benefit from global infrastructure, our operational experience and pricing that
-                is only possible at scale, while being billed in predictable, scale-to-zero units.
+                You benefit from global infrastructure with multi-region edges, our operational
+                experience and pricing that is only possible at scale, while being billed in
+                predictable, scale-to-zero units.
               </p>
             </div>
             <div className="grid gap-x-8 gap-y-10 sm:grid-cols-3">
@@ -226,6 +227,9 @@ export default function HomePage() {
                   <p className="mt-1 text-sm font-medium">{meter.unit}</p>
                   <p className="mt-3 text-sm leading-relaxed text-fd-muted-foreground">
                     {meter.note}
+                  </p>
+                  <p className="mt-3 text-sm leading-relaxed text-fd-muted-foreground">
+                    {meter.included}
                   </p>
                 </div>
               ))}

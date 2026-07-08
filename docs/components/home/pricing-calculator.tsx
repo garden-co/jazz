@@ -37,6 +37,7 @@ const realtimeTicks = [
 ] as const;
 
 function formatCurrency(value: number) {
+  if (value === 0) return "$0";
   if (value >= 1000)
     return compactFormatter
       .format(value)
@@ -61,23 +62,11 @@ function formatCount(value: number) {
   return `${Math.round(value)}`;
 }
 
-function formatOps(value: number) {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${Math.round(value)}`;
-}
-
 function formatData(value: number) {
   if (value >= 100) return `${value.toFixed(0)} GB`;
   if (value >= 10) return `${value.toFixed(1)} GB`;
   if (value >= 1) return `${value.toFixed(2)} GB`;
   return `${(value * 1024).toFixed(0)} MB`;
-}
-
-function formatIops(value: number) {
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
-  return `${Math.round(value)}`;
 }
 
 function parseNumber(value: string) {
@@ -225,8 +214,8 @@ export function PricingCalculator() {
           </p>
         </div>
         <div className="space-y-8 border-t pt-8">
-          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-end">
-            <div className="pt-4">
+          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-start">
+            <div>
               <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Cost per user / mo
               </p>
@@ -244,6 +233,12 @@ export function PricingCalculator() {
               <p className="font-display text-5xl font-black tracking-[-0.06em]">
                 {formatCurrency(estimate.totalMonthlyCost)}
               </p>
+              {estimate.isWithinFreeTier ? (
+                <p className="mt-2 text-sm leading-relaxed text-fd-muted-foreground">
+                  This estimate fits within the free tier: up to 360 CU-hours of compute (0.5 CU
+                  running all month).
+                </p>
+              ) : null}
             </div>
           </div>
           <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
@@ -253,13 +248,13 @@ export function PricingCalculator() {
           {/* <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
             <div className="border-t pt-4">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Monthly I/O
+                Compute uptime
               </p>
               <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatOps(estimate.monthlyIoOperations)}
+                {Math.round(estimate.estimatedComputeUptimeHours)} h
               </p>
               <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.ioCost)} at $0.15 per 1M ops
+                {formatCurrency(estimate.computeCost)} at $0.039 per CU/h
               </p>
             </div>
             <div className="border-t pt-4">
@@ -282,17 +277,6 @@ export function PricingCalculator() {
               </p>
               <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
                 {formatCurrency(estimate.egressCost)} at $0.09 per GB out
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Rough peak IOPS
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatIops(estimate.peakIops)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                Planning signal only, not billed
               </p>
             </div>
           </div>*/}
