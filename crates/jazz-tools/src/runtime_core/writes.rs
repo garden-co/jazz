@@ -249,6 +249,26 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         batch_mode == BatchMode::Direct && write_context.and_then(WriteContext::batch_id).is_none()
     }
 
+    fn finish_local_write(
+        &mut self,
+        row_id: ObjectId,
+        batch_id: BatchId,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode)?;
+        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
+            self.commit_batch(batch_id)?;
+        } else {
+            // commit_batch runs these operations internally, avoid firing two ticks
+            self.mark_storage_write_pending_flush();
+            self.immediate_tick();
+        }
+        Ok(())
+    }
+
     fn ensure_batch_is_writable(
         &mut self,
         write_context: Option<&WriteContext>,
@@ -588,16 +608,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let row_id = result.row_id;
         let row_values = result.row_values;
         let batch_id = result.batch_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.commit_batch(batch_id)?;
-        }
+        self.finish_local_write(row_id, batch_id, write_context)?;
         debug!(object_id = %row_id, "inserted");
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
         Ok(((row_id, row_values), batch_id))
     }
 
@@ -616,16 +628,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .schema_manager
             .update(&mut self.storage, object_id, &values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.commit_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
+        self.finish_local_write(object_id, batch_id, write_context)?;
         Ok(batch_id)
     }
 
@@ -644,17 +647,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .schema_manager
             .upsert(&mut self.storage, table, object_id, values, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.commit_batch(batch_id)?;
-        }
-
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
+        self.finish_local_write(object_id, batch_id, write_context)?;
         Ok(batch_id)
     }
 
@@ -673,16 +666,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .delete(&mut self.storage, object_id, write_context)
             .map_err(crate::runtime_core::write_error_from_query)?;
         let batch_id = handle.batch_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.commit_batch(batch_id)?;
-        }
+        self.finish_local_write(object_id, batch_id, write_context)?;
         debug!("deleted");
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
         Ok(batch_id)
     }
 
@@ -705,16 +690,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let row_id = result.row_id;
         let row_values = result.row_values;
         let batch_id = result.batch_id;
-        let batch_mode = write_context
-            .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(row_id, batch_id, batch_mode)?;
-        if Self::should_auto_seal_direct_write(batch_mode, write_context) {
-            self.commit_batch(batch_id)?;
-        }
+        self.finish_local_write(row_id, batch_id, write_context)?;
         debug!(object_id = %row_id, "restored");
-        self.mark_storage_write_pending_flush();
-        self.immediate_tick();
         Ok(((row_id, row_values), batch_id))
     }
 
