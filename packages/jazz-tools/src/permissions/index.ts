@@ -45,6 +45,7 @@ type PolicyAction = "read" | "insert" | "update" | "delete";
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 const RECURSIVE_POLICY_MAX_DEPTH_DEFAULT = 10;
+const REACHABLE_POLICY_MAX_DEPTH_DEFAULT = 8;
 const RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP = 64;
 const CREATOR_CONDITION = {
   type: "Cmp",
@@ -159,6 +160,36 @@ export interface PermissionRelation {
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
+  reachable_via(
+    access_table: string,
+    access_row_column: string,
+    access_team_column: string,
+    from: SessionRefValue,
+    edge_table: string,
+    edge_member_column: string,
+    edge_parent_column: string,
+    edge_filters?: Record<string, unknown>,
+  ): ReachableSeedBuilder;
+  reachable_via_with_access_filters(
+    access_table: string,
+    access_row_column: string,
+    access_team_column: string,
+    from: SessionRefValue,
+    access_filters: Record<string, unknown>,
+    edge_table: string,
+    edge_member_column: string,
+    edge_parent_column: string,
+    edge_filters?: Record<string, unknown>,
+  ): ReachableSeedBuilder;
+}
+
+export interface ReachableSeedBuilder {
+  seeded_by(
+    seed_table: string,
+    user_column: string,
+    claim_path: string,
+    team_column: string,
+  ): PermissionRelation;
 }
 
 interface RecursiveCurrentValue {
@@ -416,8 +447,190 @@ class PermissionRelationBuilder implements PermissionRelation {
     );
   }
 
+  reachable_via(
+    access_table: string,
+    access_row_column: string,
+    access_team_column: string,
+    from: SessionRefValue,
+    edge_table: string,
+    edge_member_column: string,
+    edge_parent_column: string,
+    edge_filters: Record<string, unknown> = {},
+  ): ReachableSeedBuilder {
+    return this.reachable_via_with_access_filters(
+      access_table,
+      access_row_column,
+      access_team_column,
+      from,
+      {},
+      edge_table,
+      edge_member_column,
+      edge_parent_column,
+      edge_filters,
+    );
+  }
+
+  reachable_via_with_access_filters(
+    access_table: string,
+    access_row_column: string,
+    access_team_column: string,
+    from: SessionRefValue,
+    access_filters: Record<string, unknown>,
+    edge_table: string,
+    edge_member_column: string,
+    edge_parent_column: string,
+    edge_filters: Record<string, unknown> = {},
+  ): ReachableSeedBuilder {
+    return new ReachableRelationSeedBuilder(
+      this.state.outputTable,
+      {
+        access_table,
+        access_row_column,
+        access_team_column,
+        from,
+        access_filters,
+        edge_table,
+        edge_member_column,
+        edge_parent_column,
+        edge_filters,
+      },
+      this.relations,
+    );
+  }
+
   toState(): RelationExprState {
     return this.state;
+  }
+}
+
+type ReachableRelationArgs = {
+  access_table: string;
+  access_row_column: string;
+  access_team_column: string;
+  from: SessionRefValue;
+  access_filters: Record<string, unknown>;
+  edge_table: string;
+  edge_member_column: string;
+  edge_parent_column: string;
+  edge_filters: Record<string, unknown>;
+};
+
+class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
+  constructor(
+    private readonly rootTable: string,
+    private readonly args: ReachableRelationArgs,
+    private readonly relations: Map<string, Relation[]>,
+  ) {}
+
+  seeded_by(
+    seed_table: string,
+    user_column: string,
+    claim_path: string,
+    team_column: string,
+  ): PermissionRelation {
+    const accessScope = "__reachable_access_0";
+    const recursiveHopScope = "__recursive_hop_0";
+    const seedScope = seed_table;
+
+    const seedPredicates: RelPredicateExpr[] = [
+      {
+        Cmp: {
+          left: { scope: seedScope, column: user_column },
+          op: "Eq",
+          right: { SessionRef: [claim_path] },
+        },
+      },
+    ];
+    const seed: RelExpr = applyRelFilter({ TableScan: { table: seed_table } }, seedPredicates);
+
+    const stepPredicates: RelPredicateExpr[] = [
+      {
+        Cmp: {
+          left: { scope: this.args.edge_table, column: this.args.edge_member_column },
+          op: "Eq",
+          right: { RowId: "Frontier" },
+        },
+      },
+      ...whereObjectToRelationPredicates(this.args.edge_filters, this.args.edge_table),
+    ];
+    const stepFiltered = applyRelFilter(
+      { TableScan: { table: this.args.edge_table } },
+      stepPredicates,
+    );
+    const step: RelExpr = {
+      Project: {
+        input: {
+          Join: {
+            left: stepFiltered,
+            right: {
+              TableScan: {
+                table: seed_table,
+                alias: recursiveHopScope,
+              },
+            },
+            on: [
+              {
+                left: { scope: this.args.edge_table, column: this.args.edge_parent_column },
+                right: { scope: recursiveHopScope, column: team_column },
+              },
+            ],
+            join_kind: "Inner",
+          },
+        },
+        columns: projectHopResult(recursiveHopScope),
+      },
+    };
+
+    const gather: RelExpr = {
+      Gather: {
+        seed,
+        step,
+        frontier_key: { RowId: "Current" },
+        bound: { MaxDepth: REACHABLE_POLICY_MAX_DEPTH_DEFAULT },
+        dedupe_key: [{ RowId: "Current" }],
+      },
+    };
+    const joined: RelExpr = {
+      Join: {
+        left: gather,
+        right: {
+          TableScan: {
+            table: this.args.access_table,
+            alias: accessScope,
+          },
+        },
+        on: [
+          {
+            left: { column: "id" },
+            right: { scope: accessScope, column: this.args.access_team_column },
+          },
+        ],
+        join_kind: "Inner",
+      },
+    };
+    const correlated: RelPredicateExpr[] = [
+      {
+        Cmp: {
+          left: { scope: accessScope, column: this.args.access_row_column },
+          op: "Eq",
+          right: { RowId: "Outer" },
+        },
+      },
+      ...whereObjectToRelationPredicates(this.args.access_filters, accessScope),
+    ];
+
+    return new PermissionRelationBuilder(
+      {
+        kind: "recursive",
+        outputTable: this.rootTable,
+        base: applyRelFilter(joined, correlated),
+        initialScope: this.rootTable,
+        filters: [],
+        joins: [],
+        selectMap: undefined,
+      },
+      this.relations,
+    );
   }
 }
 
@@ -776,6 +989,50 @@ function buildTablePolicyBuilder(
       maxDepth?: number;
     }): PermissionRelation {
       return createTableRelation(table, relationsByTable).gather(options);
+    },
+    reachable_via(
+      access_table: string,
+      access_row_column: string,
+      access_team_column: string,
+      from: SessionRefValue,
+      edge_table: string,
+      edge_member_column: string,
+      edge_parent_column: string,
+      edge_filters?: Record<string, unknown>,
+    ): ReachableSeedBuilder {
+      return createTableRelation(table, relationsByTable).reachable_via(
+        access_table,
+        access_row_column,
+        access_team_column,
+        from,
+        edge_table,
+        edge_member_column,
+        edge_parent_column,
+        edge_filters,
+      );
+    },
+    reachable_via_with_access_filters(
+      access_table: string,
+      access_row_column: string,
+      access_team_column: string,
+      from: SessionRefValue,
+      access_filters: Record<string, unknown>,
+      edge_table: string,
+      edge_member_column: string,
+      edge_parent_column: string,
+      edge_filters?: Record<string, unknown>,
+    ): ReachableSeedBuilder {
+      return createTableRelation(table, relationsByTable).reachable_via_with_access_filters(
+        access_table,
+        access_row_column,
+        access_team_column,
+        from,
+        access_filters,
+        edge_table,
+        edge_member_column,
+        edge_parent_column,
+        edge_filters,
+      );
     },
   };
 }
@@ -1305,6 +1562,26 @@ function relationFilterToPredicates(filter: RelationFilterEntry): RelPredicateEx
   }
 
   return predicates.length > 0 ? predicates : ["True"];
+}
+
+function whereObjectToRelationPredicates(
+  where: Record<string, unknown> | undefined,
+  defaultScope: string,
+): RelPredicateExpr[] {
+  if (!where) {
+    return [];
+  }
+  return Object.entries(where).flatMap(([column, raw]) => {
+    if (raw === undefined) {
+      return [];
+    }
+    const [prefix, bare] = splitQualifiedColumn(column);
+    return relationFilterToPredicates({
+      column: bare,
+      raw,
+      scope: prefix ?? defaultScope,
+    });
+  });
 }
 
 function andRelPredicates(predicates: RelPredicateExpr[]): RelPredicateExpr {

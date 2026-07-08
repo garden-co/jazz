@@ -10,6 +10,8 @@ import {
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
 import { decodeNativeDelta } from "../subscription-manager.js";
+import { definePermissions } from "../../permissions/index.js";
+import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -3320,6 +3322,105 @@ describe("NativeRuntimeAdapter server transport", () => {
         tag: 3,
         column: "administrator",
         operand: { tag: 3, literalTag: 5, value: false },
+      },
+    ]);
+  });
+
+  it("serializes reachable_via seeded_by TS policies as the Rust reachable atom", () => {
+    const baseSchema: WasmSchema = {
+      resources: {
+        columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+      },
+      teams: {
+        columns: [{ name: "identity_key", column_type: { type: "Text" }, nullable: false }],
+      },
+      team_team_edges: {
+        columns: [
+          {
+            name: "child_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          {
+            name: "parent_team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+        ],
+      },
+      resource_access_edges: {
+        columns: [
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "resources",
+          },
+          {
+            name: "team",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "teams",
+          },
+          { name: "grant_role", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const app = {
+      wasmSchema: baseSchema,
+      resources: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      teams: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      team_team_edges: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      resource_access_edges: { _rowType: {} as never, where: (_input: unknown) => undefined },
+    };
+    const permissions = definePermissions(app, ({ policy, session }) => {
+      policy.resources.allowRead.where(
+        policy.exists(
+          policy.resources
+            .reachable_via_with_access_filters(
+              "resource_access_edges",
+              "resource",
+              "team",
+              session.sub,
+              { grant_role: "viewer" },
+              "team_team_edges",
+              "child_team",
+              "parent_team",
+            )
+            .seeded_by("teams", "identity_key", "sub", "id"),
+        ),
+      );
+    });
+    const reachables = readSchemaSelectPolicyReachables(
+      encodeSchema(mergePermissionsIntoWasmSchema(baseSchema, permissions)),
+      "resources",
+    );
+
+    expect(reachables).toHaveLength(1);
+    expect(reachables[0]).toMatchObject({
+      accessTable: "resource_access_edges",
+      accessRowColumn: "resource",
+      accessTeamColumn: "team",
+      accessTeamTargetTag: 0,
+      edgeTable: "team_team_edges",
+      edgeMemberColumn: "child_team",
+      edgeParentColumn: "parent_team",
+      maxDepth: 8,
+      seed: {
+        table: "teams",
+        userColumn: "identity_key",
+        userClaim: "sub",
+        teamColumn: "id",
+        filters: [],
+      },
+    });
+    expect(reachables[0]!.accessFilters).toEqual([
+      {
+        tag: 3,
+        column: "grant_role",
+        operand: { tag: 3, literalTag: 6, value: "viewer" },
       },
     ]);
   });
