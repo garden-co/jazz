@@ -4303,10 +4303,10 @@ where
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                Some(query_binding_source_shape_for_parts(
+                query_binding_source_shape_for_parts_if_needed(
                     shape.params(),
                     &binding_claim_params_for_shape(&input_shape),
-                )),
+                ),
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -4333,10 +4333,10 @@ where
             binding: self.program_binding_for_shape(
                 shape,
                 binding,
-                Some(query_binding_source_shape_for_parts(
+                query_binding_source_shape_for_parts_if_needed(
                     shape.params(),
                     &binding_claim_params_for_shape(&input_shape),
-                )),
+                ),
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -4379,10 +4379,10 @@ where
             binding: self.program_binding_for_shape(
                 &lowered_shape,
                 &binding,
-                Some(query_binding_source_shape_for_parts(
+                query_binding_source_shape_for_parts_if_needed(
                     lowered_shape.params(),
                     &binding_claim_params_for_shape(&input_shape),
-                )),
+                ),
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -4423,10 +4423,10 @@ where
             binding: self.program_binding_for_shape(
                 &lowered_shape,
                 &binding,
-                Some(query_binding_source_shape_for_parts(
+                query_binding_source_shape_for_parts_if_needed(
                     lowered_shape.params(),
                     &binding_claim_params_for_shape(&input_shape),
-                )),
+                ),
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -4650,7 +4650,13 @@ where
         let policy = self.query_program_policy_context(identity);
         let binding_claim_params = binding_claim_params_for_shape(&input_shape);
         let source_shape = use_prepared_binding_source
-            .then(|| query_binding_source_shape_for_parts(shape.params(), &binding_claim_params));
+            .then(|| {
+                query_binding_source_shape_for_parts_if_needed(
+                    shape.params(),
+                    &binding_claim_params,
+                )
+            })
+            .flatten();
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 shape,
@@ -5007,10 +5013,10 @@ where
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
-                Some(query_binding_source_shape_for_parts(
+                query_binding_source_shape_for_parts_if_needed(
                     policy_shape.params(),
                     &binding_claim_params_for_shape(&input_shape),
-                )),
+                ),
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -6448,9 +6454,7 @@ where
                 .binding
                 .source_shape
                 .clone()
-                .unwrap_or_else(|| {
-                    query_binding_source_shape_for_program_binding(&program.request.input.binding)
-                });
+                .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
             let route_fields = terminal_route_fields(
                 &route_params,
                 &app_row_terminal_route_eligible_fields(&program.lowered.output)?,
@@ -6522,7 +6526,9 @@ where
                 .source_shape
                 .clone()
                 .unwrap_or_else(|| {
-                    query_binding_source_shape_for_program_binding(&program.request.input.binding)
+                    query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
+                        &program.lowered.parameters,
+                    ))
                 }),
         )?;
         let mut maintained = MaintainedSubscriptionView::default();
@@ -6736,36 +6742,46 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let claim_params = binding_claim_params_for_shape(&input_shape);
-        if let Some(binding_source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
+        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        collect_reachable_seed_claim_params(
+            policy_schema,
+            policy_shape.query(),
+            &mut claim_params,
+        )?;
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
+            binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
                 claim_params,
-            ),
+                &policy,
+            )?,
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
             reads: historical_query_read_set(&input.shape, policy_schema_version, position),
-            policy: match self.query_program_policy_context(identity) {
-                PolicyContext::Identity {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                } => PolicyContext::AuthorizationSubplan {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                },
-                other => other,
-            },
+            policy,
             input,
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
@@ -6849,18 +6865,41 @@ where
         } else {
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
-        let claim_params = binding_claim_params_for_shape(&input_shape);
-        if let Some(binding_source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
+        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        collect_reachable_seed_claim_params(
+            policy_schema,
+            policy_shape.query(),
+            &mut claim_params,
+        )?;
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
+            binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
                 claim_params,
-            ),
+                &policy,
+            )?,
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
@@ -6871,20 +6910,7 @@ where
                 tier,
                 None,
             ),
-            policy: match self.query_program_policy_context(identity) {
-                PolicyContext::Identity {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                } => PolicyContext::AuthorizationSubplan {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                },
-                other => other,
-            },
+            policy,
             input,
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
@@ -6923,18 +6949,41 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let claim_params = binding_claim_params_for_shape(&input_shape);
-        if let Some(binding_source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &binding_source_shape);
+        let mut claim_params = binding_claim_params_for_shape(&input_shape);
+        collect_reachable_seed_claim_params(
+            &self.catalogue.schema,
+            policy_shape.query(),
+            &mut claim_params,
+        )?;
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
         }
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
         let input = RowSetProgramInput {
-            binding: self.program_binding_for_shape(
+            binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
                 &binding,
                 binding_source_shape,
                 binding_user_params,
                 claim_params,
-            ),
+                &policy,
+            )?,
             shape: input_shape,
         };
         Ok(QueryProgramRequest {
@@ -6944,20 +6993,7 @@ where
                 DurabilityTier::Local,
                 branch_id,
             ),
-            policy: match self.query_program_policy_context(identity) {
-                PolicyContext::Identity {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                } => PolicyContext::AuthorizationSubplan {
-                    mode,
-                    permission_subject,
-                    claims,
-                    attribution,
-                },
-                other => other,
-            },
+            policy,
             input,
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
@@ -7508,6 +7544,47 @@ fn binding_claim_params_for_shape(
     params
 }
 
+fn collect_reachable_seed_claim_params(
+    schema: &JazzSchema,
+    query: &JazzQuery,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) -> Result<(), Error> {
+    for reachable in query.reachable.iter().chain(
+        query
+            .policy_branches
+            .iter()
+            .flat_map(|branch| branch.reachable.iter()),
+    ) {
+        let Some(seed) = &reachable.seed else {
+            continue;
+        };
+        let (Some(user_column), Some(user_claim)) = (&seed.user_column, &seed.user_claim) else {
+            continue;
+        };
+        let table = schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == seed.table)
+            .ok_or_else(|| Error::TableNotFound(seed.table.clone()))?;
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == *user_column)
+            .ok_or(Error::InvalidStoredValue(
+                "reachable seed column is missing from schema",
+            ))?;
+        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        params.insert(
+            claim_param_field(&path),
+            ProgramClaimParam {
+                path,
+                ty: column.column_type.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
 fn collect_claim_field_params_from_node(
     node: &RowSetExpr,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -7810,8 +7887,26 @@ pub(crate) fn exact_known_state_declaration_for_test(
     exact_known_state_declaration_if_within_limits(shape_id, subscription, values, refs)
 }
 
-fn query_binding_source_shape_for_program_binding(binding: &ProgramBinding) -> String {
-    query_binding_source_shape_for_parts(&binding.param_types, &binding.claim_params)
+fn query_binding_source_shape_for_prepared_params(params: &[PreparedQueryParam]) -> String {
+    let mut user_params = BTreeMap::new();
+    let mut claim_params = BTreeMap::new();
+    for param in params {
+        match &param.source {
+            PreparedQueryParamSource::User => {
+                user_params.insert(param.name.clone(), param.ty.clone());
+            }
+            PreparedQueryParamSource::Claim(path) => {
+                claim_params.insert(
+                    param.name.clone(),
+                    ProgramClaimParam {
+                        path: path.clone(),
+                        ty: param.ty.clone(),
+                    },
+                );
+            }
+        }
+    }
+    query_binding_source_shape_for_parts(&user_params, &claim_params)
 }
 
 fn query_binding_source_shape_for_parts(
@@ -7838,6 +7933,25 @@ fn query_binding_source_shape_for_parts(
     format!("jazz-query-binding:{}", hash.to_hex())
 }
 
+fn query_binding_source_shape_for_parts_if_needed(
+    param_types: &BTreeMap<String, ColumnType>,
+    claim_params: &BTreeMap<String, ProgramClaimParam>,
+) -> Option<String> {
+    (!param_types.is_empty() || !claim_params.is_empty())
+        .then(|| query_binding_source_shape_for_parts(param_types, claim_params))
+}
+
+fn authorization_binding_source_shape(
+    shape: &ValidatedQuery,
+    extra_user_params: &BTreeMap<String, ColumnType>,
+    claim_params: &BTreeMap<String, ProgramClaimParam>,
+) -> Option<String> {
+    let mut param_types = shape.params().clone();
+    param_types.extend(extra_user_params.clone());
+    (!param_types.is_empty() || !claim_params.is_empty())
+        .then(|| query_binding_source_shape_for_parts(&param_types, claim_params))
+}
+
 fn push_usize(bytes: &mut Vec<u8>, value: usize) {
     bytes.extend_from_slice(&(value as u64).to_le_bytes());
 }
@@ -7861,11 +7975,11 @@ fn binding_values_for_plan(
                     .get(&param.name)
                     .cloned()
                     .ok_or_else(|| QueryError::MissingParam(param.name.clone()))?;
-                Ok(coerce_prepared_binding_value(value, &param.ty))
+                Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
             PreparedQueryParamSource::Claim(ref path) => {
                 let value = prepared_claim_value(path, policy)?;
-                Ok(coerce_prepared_binding_value(value, &param.ty))
+                Ok::<_, Error>(coerce_prepared_binding_value(value, &param.ty))
             }
         })
         .collect()
@@ -7907,6 +8021,9 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
     match (value, column_type) {
+        (Value::Uuid(value), groove::schema::ColumnType::String) => {
+            Value::String(value.to_string())
+        }
         (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),

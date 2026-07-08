@@ -10,7 +10,8 @@
 // | claim/provenance-scoped `$createdBy`         | `docs_created_by`                           |
 // | claim/provenance-scoped `$createdAt`         | `docs_created_at`                           |
 // | seeded reachable closure, edge-table seed    | `docs_edge_seeded_reachable`                |
-// | seeded reachable closure, same-table seed    | `resources_same_table_seeded_reachable`     |
+// | seeded reachable closure, same-table UUID seed | `resources_same_table_seeded_reachable`   |
+// | seeded reachable closure, same-table string seed | `string_resources_same_table_seeded_reachable` |
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
 // | recursive membership                         | both reachable shapes include transitive hops |
@@ -324,6 +325,19 @@ fn m3_differential_schema() -> JazzSchema {
             [eq(col("administrator"), lit(false))],
         )
         .seeded_by("teams", "identity_key", "sub", "id");
+    let string_same_table_policy = Query::from("string_resources")
+        .reachable_via_with_access_filters(
+            "string_resource_access",
+            "resource",
+            "team",
+            lit("same-table-string-seed"),
+            [eq(col("administrator"), lit(false))],
+            "team_edges",
+            "member",
+            "parent",
+            [eq(col("administrator"), lit(false))],
+        )
+        .seeded_by("teams", "identity_key_text", "sub", "id");
 
     JazzSchema::new([
         TableSchema::new(
@@ -357,6 +371,7 @@ fn m3_differential_schema() -> JazzSchema {
                 ColumnSchema::new("id", ColumnType::Uuid),
                 ColumnSchema::new("name", ColumnType::String),
                 ColumnSchema::new("identity_key", ColumnType::Uuid),
+                ColumnSchema::new("identity_key_text", ColumnType::String),
             ],
         )
         .with_read_policy(Policy::public())
@@ -398,6 +413,12 @@ fn m3_differential_schema() -> JazzSchema {
             .with_read_policy(Policy::shape(same_table_policy))
             .with_write_policy(Policy::public()),
         TableSchema::new(
+            "string_resources",
+            [ColumnSchema::new("label", ColumnType::String)],
+        )
+        .with_read_policy(Policy::shape(string_same_table_policy))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
             "resource_access",
             [
                 ColumnSchema::new("resource", ColumnType::Uuid),
@@ -406,6 +427,18 @@ fn m3_differential_schema() -> JazzSchema {
             ],
         )
         .with_reference("resource", "resources")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "string_resource_access",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "string_resources")
         .with_reference("team", "teams")
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
@@ -468,6 +501,10 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
         Query::from("resources").validate(schema).unwrap(),
     );
     push(
+        "string_resources_same_table_seeded_reachable",
+        Query::from("string_resources").validate(schema).unwrap(),
+    );
+    push(
         "children_inherit_doc",
         Query::from("children").inherits("doc").validate(schema).unwrap(),
     );
@@ -502,6 +539,10 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
                 ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
                 ("identity_key".to_owned(), Value::Uuid(identity.0)),
+                (
+                    "identity_key_text".to_owned(),
+                    Value::String(identity.0.to_string()),
+                ),
             ])),
         );
     }
@@ -555,6 +596,31 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
         accept_global(
             core,
             MergeableCommit::new("resource_access", edge, 31).cells(BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(resource.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("administrator".to_owned(), Value::Bool(false)),
+            ])),
+        );
+    }
+    for (resource, label) in [
+        (row(0x67), "string-direct"),
+        (row(0x68), "string-transitive"),
+        (row(0x69), "string-hidden"),
+    ] {
+        accept_global(
+            core,
+            MergeableCommit::new("string_resources", resource, 32)
+                .cells(BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))])),
+        );
+    }
+    for (edge, resource, team) in [
+        (row(0x6a), row(0x67), row(0x31)),
+        (row(0x6b), row(0x68), row(0x32)),
+        (row(0x6c), row(0x69), row(0x33)),
+    ] {
+        accept_global(
+            core,
+            MergeableCommit::new("string_resource_access", edge, 33).cells(BTreeMap::from([
                 ("resource".to_owned(), Value::Uuid(resource.0)),
                 ("team".to_owned(), Value::Uuid(team.0)),
                 ("administrator".to_owned(), Value::Bool(false)),
