@@ -298,6 +298,18 @@ which representation is in use.
   exists for `MemoryStorage`; OPFS currently has only wasm-gated compile coverage
   through its in-memory B-tree fixture, not a runnable browser test that closes
   and reopens a real OPFS namespace.
+- 🔶 **Warm-reopen arrangement snapshots.** A proposed warm-reopen optimization
+  would persist derived arrangement snapshots in a relaxed-durability storage
+  class, stamped with the storage frontier they are consistent through. A clean
+  shutdown would write snapshots for shapes or canonical fragments; reopen would
+  load a snapshot only when its stamp matches the current frontier and otherwise
+  rebuild from base data. Crash safety comes from treating snapshots as derived
+  state: a missing or stale snapshot is discarded. The design is deferred for
+  now because the flight itemization measured reopen itself at about 49ms, while
+  first-serve range enumeration dominated the warm wall; bulk serve enumeration
+  and window-decode caching are the load-bearing warm path. Revisit persisted
+  arrangement snapshots only if the remaining rebuild cost justifies the added
+  storage class, frontier accounting, and eviction interaction.
 - 🔶 **Reserved schema metadata enforcement.** `ForeignKey` and
   `PrimaryKey.generated` are reserved for validation and planning; the
   implementation currently carries them but does not enforce them.
