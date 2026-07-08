@@ -41,7 +41,6 @@ import { acquireWebLockWithRetry, type LeaderLockLease } from "./tab-ownership-l
 export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
   private readonly owner: SharedBrowserWorkerOwner;
   private closed = false;
-  private readonly activeSubscriptions = new Set<ActiveBrowserWorkerSubscription<any>>();
 
   constructor(config: DbConfig) {
     this.owner = acquireSharedBrowserWorkerOwner(config);
@@ -62,29 +61,16 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
         if (cancelled || this.closed) return;
         const ownerSession = db.getAuthState().session ?? undefined;
         const subscriptionSession = sessionsEqual(ownerSession, session) ? undefined : session;
-        const active: ActiveBrowserWorkerSubscription<T> = {
-          query,
-          options,
-          session,
-          current: [],
-          callback,
-        };
-        this.activeSubscriptions.add(active);
         unsubscribe = db.subscribeAll<T>(
           query,
-          (delta: SubscriptionDelta<T>) => {
-            active.current = [...delta.all];
-            callback(delta);
-          },
+          (delta: SubscriptionDelta<T>) => callback(delta),
           options,
           subscriptionSession,
         );
         if (cancelled || this.closed) {
-          this.activeSubscriptions.delete(active);
           unsubscribe();
           unsubscribe = undefined;
         }
-        void this.refreshSubscription(active, db).catch(() => {});
       })
       .catch((error: unknown) => {
         setTimeout(() => {
@@ -96,11 +82,6 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
       cancelled = true;
       unsubscribe?.();
       unsubscribe = undefined;
-      for (const active of Array.from(this.activeSubscriptions)) {
-        if (active.query === query && active.callback === callback) {
-          this.activeSubscriptions.delete(active);
-        }
-      }
     };
   }
 
@@ -111,14 +92,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<AsyncWriteResult<T>> {
     const db = await this.owner.db();
-    const result = db.__withRuntimeOperationContext({ session }, () =>
-      db.insert(table, data, options),
-    );
-    void result
-      .wait({ tier: "edge" })
-      .then(() => this.refreshSubscriptionsForTable(table._table))
-      .catch(() => {});
-    return result;
+    return db.__withRuntimeOperationContext({ session }, () => db.insert(table, data, options));
   }
 
   async update<T, Init>(
@@ -129,14 +103,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<AsyncWriteHandle> {
     const db = await this.owner.db();
-    const result = db.__withRuntimeOperationContext({ session }, () =>
-      db.update(table, id, data, options),
-    );
-    void result
-      .wait({ tier: "edge" })
-      .then(() => this.refreshSubscriptionsForTable(table._table))
-      .catch(() => {});
-    return result;
+    return db.__withRuntimeOperationContext({ session }, () => db.update(table, id, data, options));
   }
 
   async delete<T, Init>(
@@ -146,14 +113,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     session?: Session,
   ): Promise<AsyncWriteHandle> {
     const db = await this.owner.db();
-    const result = db.__withRuntimeOperationContext({ session }, () =>
-      db.delete(table, id, options),
-    );
-    void result
-      .wait({ tier: "edge" })
-      .then(() => this.refreshSubscriptionsForTable(table._table))
-      .catch(() => {});
-    return result;
+    return db.__withRuntimeOperationContext({ session }, () => db.delete(table, id, options));
   }
 
   async canInsert<T, Init>(
@@ -245,80 +205,8 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.activeSubscriptions.clear();
     await releaseSharedBrowserWorkerOwner(this.owner);
   }
-
-  private async refreshSubscriptionsForTable(table: string): Promise<void> {
-    const subscriptions = Array.from(this.activeSubscriptions).filter(
-      (subscription) => subscription.query._table === table,
-    );
-    if (subscriptions.length === 0 || this.closed) return;
-
-    const db = await this.owner.db();
-    await Promise.all(
-      subscriptions.map(async (subscription) => {
-        if (!this.activeSubscriptions.has(subscription)) return;
-        await this.refreshSubscription(subscription, db);
-      }),
-    );
-  }
-
-  private async refreshSubscription<T extends { id: string }>(
-    subscription: ActiveBrowserWorkerSubscription<T>,
-    db: Db,
-  ): Promise<void> {
-    if (!this.activeSubscriptions.has(subscription)) return;
-    const rows = await db.__withRuntimeOperationContext({ session: subscription.session }, () =>
-      db.all(subscription.query, {
-        ...subscription.options,
-        tier: subscription.options?.tier ?? "edge",
-      }),
-    );
-    if (!this.activeSubscriptions.has(subscription)) return;
-    const delta = diffSnapshot(subscription.current, rows);
-    if (delta.delta.length === 0) return;
-    subscription.current = [...rows];
-    subscription.callback(delta);
-  }
-}
-
-type ActiveBrowserWorkerSubscription<T extends { id: string }> = {
-  query: QueryBuilder<T>;
-  options?: QueryOptions;
-  session?: Session;
-  current: T[];
-  callback: SubscriptionChannelCallback<T>;
-};
-
-function diffSnapshot<T extends { id: string }>(
-  previous: readonly T[],
-  next: readonly T[],
-): SubscriptionDelta<T> {
-  const previousById = new Map(previous.map((row, index) => [row.id, { row, index }]));
-  const nextById = new Map(next.map((row, index) => [row.id, { row, index }]));
-  const delta: SubscriptionDelta<T>["delta"] = [];
-
-  for (const [id, { index }] of previousById) {
-    if (!nextById.has(id)) {
-      delta.push({ kind: 1, id, index });
-    }
-  }
-
-  for (const [id, { row, index }] of nextById) {
-    const previousEntry = previousById.get(id);
-    if (!previousEntry) {
-      delta.push({ kind: 0, id, index, item: row });
-    } else if (previousEntry.row !== row) {
-      delta.push({ kind: 2, id, index, item: row });
-    }
-  }
-
-  delta.sort((a, b) => a.index - b.index);
-  return {
-    all: [...next],
-    delta,
-  };
 }
 
 function sessionsEqual(a: Session | undefined, b: Session | undefined): boolean {
