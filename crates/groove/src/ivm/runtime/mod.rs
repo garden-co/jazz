@@ -577,16 +577,17 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
-    fn hydrate_shape_graph<S>(
+    fn subscription_hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
         storage: &S,
-    ) -> Result<(), IvmRuntimeError>
+    ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
+        let hydrate_arrangements = self.output_depends_on_aggregate(output_node)?;
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
@@ -603,23 +604,70 @@ impl IvmRuntime {
             memo_use_clock: &mut self.memo_use_clock,
             node_meta: &mut self.node_meta,
             storage: Some(storage),
-            context: EvalContext {
-                scope: ScopeId::root(),
-                sub_tick: 0,
-                bindings: HashMap::default(),
-                binding_digests: HashMap::default(),
-                arrangement_update_mode: ArrangementUpdateMode::Replace,
-                eval_mode: EvalMode::Tick,
+            context: if hydrate_arrangements {
+                EvalContext::root_subscription_snapshot()
+            } else {
+                EvalContext::root_snapshot()
             },
             metrics: &mut metrics,
         };
-        let mut ancestors = HashSet::new();
-        evaluator.graph.mark_ancestors(output_node, &mut ancestors);
-        for node in ancestors {
-            evaluator.update_node(node)?;
-        }
+        let records = evaluator
+            .update_node(output_node)
+            .map(|records| records.as_ref().clone());
+        self.record_hydration_memo_metrics(&metrics);
         self.evict_eval_memo();
-        Ok(())
+        records
+    }
+
+    fn subscription_hydration_snapshots<S>(
+        &mut self,
+        outputs: &BTreeMap<String, CompiledNode>,
+        storage: &S,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let mut sinks = BTreeMap::new();
+        for (sink, output) in outputs {
+            let records = self.subscription_hydration_snapshot(output.node, storage)?;
+            if records.descriptor != output.output {
+                return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            sinks.insert(sink.clone(), records);
+        }
+        Ok(MultisinkDeltas { sinks })
+    }
+
+    fn hydration_snapshots_for_subscription<S>(
+        &mut self,
+        outputs: &BTreeMap<String, CompiledNode>,
+        storage: &S,
+    ) -> Result<MultisinkDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        if outputs.values().try_fold(false, |depends, output| {
+            Ok::<_, IvmRuntimeError>(depends || self.output_depends_on_aggregate(output.node)?)
+        })? {
+            self.subscription_hydration_snapshots(outputs, storage)
+        } else {
+            self.hydration_snapshots(outputs, storage)
+        }
+    }
+
+    fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut ancestors = HashSet::new();
+        self.graph.mark_ancestors(output_node, &mut ancestors);
+        for ancestor in ancestors {
+            let graph_node = self
+                .graph
+                .node(ancestor)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
+            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn tick_durable_nodes<S>(
@@ -754,7 +802,7 @@ impl IvmRuntime {
                 target: MultisinkSubscriptionTarget::Direct,
             },
         );
-        let initial = match self.hydration_snapshots(&outputs, storage) {
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
             Ok(initial) => initial,
             Err(error) => {
                 self.unsubscribe(subscription_id);
@@ -839,7 +887,6 @@ impl IvmRuntime {
                 output.node,
                 Retainer::PreparedShape(shape_id.retainer_key()),
             );
-            self.hydrate_shape_graph(output.node, storage)?;
             terminal_states.insert(
                 terminal.sink.clone(),
                 RoutedMultisinkTerminalState { terminal, output },
@@ -932,7 +979,7 @@ impl IvmRuntime {
                 },
             },
         );
-        let initial = match self.hydration_snapshots(&outputs, storage) {
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
             Ok(initial) => initial,
             Err(error) => {
                 self.unsubscribe(subscription_id);
@@ -2795,6 +2842,7 @@ struct EvalContext {
     /// Hydrate preparation rebuilds arrangements instead of layering onto them.
     arrangement_update_mode: ArrangementUpdateMode,
     eval_mode: EvalMode,
+    hydrate_arrangements: bool,
 }
 
 impl EvalContext {
@@ -2806,6 +2854,7 @@ impl EvalContext {
             binding_digests: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
+            hydrate_arrangements: false,
         }
     }
 
@@ -2817,6 +2866,19 @@ impl EvalContext {
             binding_digests: HashMap::default(),
             arrangement_update_mode: ArrangementUpdateMode::Replace,
             eval_mode: EvalMode::Hydrate,
+            hydrate_arrangements: false,
+        }
+    }
+
+    fn root_subscription_snapshot() -> Self {
+        Self {
+            scope: ScopeId::root(),
+            sub_tick: 0,
+            bindings: HashMap::default(),
+            binding_digests: HashMap::default(),
+            arrangement_update_mode: ArrangementUpdateMode::Replace,
+            eval_mode: EvalMode::Hydrate,
+            hydrate_arrangements: true,
         }
     }
 
@@ -2838,6 +2900,7 @@ impl EvalContext {
             binding_digests,
             arrangement_update_mode: ArrangementUpdateMode::Accumulate,
             eval_mode: EvalMode::Tick,
+            hydrate_arrangements: false,
         }
     }
 
@@ -2860,6 +2923,7 @@ impl EvalContext {
             binding_digests,
             arrangement_update_mode,
             eval_mode: EvalMode::Tick,
+            hydrate_arrangements: false,
         }
     }
 }
@@ -4771,6 +4835,7 @@ where
                 binding_digests: HashMap::default(),
                 arrangement_update_mode: ArrangementUpdateMode::Accumulate,
                 eval_mode: EvalMode::Tick,
+                hydrate_arrangements: false,
             },
             metrics: self.metrics,
         };
@@ -4784,11 +4849,35 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut ancestors = HashSet::new();
+        self.graph.mark_ancestors(node, &mut ancestors);
+        for ancestor in ancestors {
+            let graph_node = self
+                .graph
+                .node(ancestor)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
+            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn update_node(&mut self, node: NodeId) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let signature = self.input_signature(node)?;
         let memo_key = self.memo_key(node, &signature)?;
         let current_watermark = self.input_generation(node);
-        if let Some(entry) = self.eval_memo.get_mut(&memo_key)
+        let requires_state_rebuild = (self.context.hydrate_arrangements
+            && self.node_depends_on_aggregate(node)?)
+            || (self.context.eval_mode == EvalMode::Tick
+                && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
+        if !requires_state_rebuild
+            && let Some(entry) = self.eval_memo.get_mut(&memo_key)
             && entry.input_watermark == current_watermark
         {
             *self.memo_use_clock += 1;
@@ -4799,10 +4888,6 @@ where
             return Ok(Arc::clone(&entry.records));
         }
 
-        let graph_node = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         if self.context.eval_mode == EvalMode::Hydrate {
             self.metrics.hydration_memo_computes += 1;
             self.metrics.hydration_memo_computed_nodes.insert(node);
@@ -5501,6 +5586,19 @@ where
                     .entry(group_key)
                     .or_default()
                     .push((delta.record.clone(), delta.weight));
+            }
+            if self.context.hydrate_arrangements {
+                let arrangement_key =
+                    self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+                let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
+                arrangement.value_mut().apply_record_deltas(
+                    input_desc,
+                    group_fields.as_ref(),
+                    &input.deltas,
+                    ArrangementUpdateMode::Replace,
+                )?;
+                arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
+                self.arrangement_states.insert(arrangement_key, arrangement);
             }
             let mut output = Vec::new();
             for records in groups.values() {
