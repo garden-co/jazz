@@ -44,6 +44,7 @@ pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 const DECODED_WINDOW_CACHE_CAPACITY: usize = 32;
 const STAGED_POINT_READS_BEFORE_INDEX: usize = 16;
+const STAGED_OPS_BEFORE_POINT_INDEX: usize = 64;
 /// Callback form used by scans so storage implementations do not have to
 /// materialize large ranges before the caller can process them.
 pub type ScanVisitor<'visitor> =
@@ -1593,7 +1594,7 @@ pub struct StagedWriteOverlay<'a, S> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
     operations: Vec<OwnedWriteOperation>,
-    latest_by_key: Option<HashMap<(String, Vec<u8>), usize>>,
+    latest_by_cf_key: Option<BTreeMap<String, BTreeMap<Vec<u8>, usize>>>,
     point_reads_without_index: usize,
 }
 
@@ -1609,8 +1610,11 @@ impl StagedWriteState {
 
     pub(crate) fn stage(&mut self, operation: OwnedWriteOperation) {
         let index = self.operations.len();
-        if let Some(latest_by_key) = &mut self.latest_by_key {
-            latest_by_key.insert((operation.cf().to_owned(), operation.key().to_vec()), index);
+        if let Some(latest_by_cf_key) = &mut self.latest_by_cf_key {
+            latest_by_cf_key
+                .entry(operation.cf().to_owned())
+                .or_default()
+                .insert(operation.key().to_vec(), index);
         }
         self.operations.push(operation);
     }
@@ -1626,8 +1630,10 @@ impl StagedWriteState {
     }
 
     fn latest_index(&mut self, cf: &ColumnFamilyName, key: &Key) -> Option<usize> {
-        if self.latest_by_key.is_none() {
-            if self.point_reads_without_index < STAGED_POINT_READS_BEFORE_INDEX {
+        if self.latest_by_cf_key.is_none() {
+            if self.operations.len() < STAGED_OPS_BEFORE_POINT_INDEX
+                && self.point_reads_without_index < STAGED_POINT_READS_BEFORE_INDEX
+            {
                 self.point_reads_without_index += 1;
                 return self
                     .operations
@@ -1639,16 +1645,24 @@ impl StagedWriteState {
                     });
             }
 
-            let mut latest_by_key = HashMap::with_capacity(self.operations.len());
+            let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
             for (index, operation) in self.operations.iter().enumerate() {
-                latest_by_key.insert((operation.cf().to_owned(), operation.key().to_vec()), index);
+                latest_by_cf_key
+                    .entry(operation.cf().to_owned())
+                    .or_default()
+                    .insert(operation.key().to_vec(), index);
             }
-            self.latest_by_key = Some(latest_by_key);
+            self.latest_by_cf_key = Some(latest_by_cf_key);
         }
 
-        self.latest_by_key
+        self.latest_by_cf_key
             .as_ref()
-            .and_then(|latest_by_key| latest_by_key.get(&(cf.to_owned(), key.to_vec())).copied())
+            .and_then(|latest_by_cf_key| latest_by_cf_key.get(cf))
+            .and_then(|latest_by_key| latest_by_key.get(key).copied())
+    }
+
+    pub(crate) fn contains_key(&mut self, cf: &ColumnFamilyName, key: &Key) -> bool {
+        self.latest_index(cf, key).is_some()
     }
 }
 
@@ -1791,13 +1805,21 @@ where
     S: OrderedKvStorage,
 {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.get(cf, key);
+        }
+
         let mut staged_writes = self.staged_writes.borrow_mut();
         if let Some(index) = staged_writes.latest_index(cf, key) {
             let operation = &staged_writes.operations[index];
             if operation.cf() == cf && operation.key() == key {
                 match operation {
-                    OwnedWriteOperation::Set { value, .. } => return Ok(Some(value.clone())),
-                    OwnedWriteOperation::Delete { .. } => return Ok(None),
+                    OwnedWriteOperation::Set { value, .. } => {
+                        return Ok(Some(value.clone()));
+                    }
+                    OwnedWriteOperation::Delete { .. } => {
+                        return Ok(None);
+                    }
                     OwnedWriteOperation::Delta { .. } => {}
                 }
             }
@@ -1845,6 +1867,10 @@ where
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.scan_range(cf, start, end, visit);
+        }
+
         let mut values = self.base.range(cf, start, end)?;
         overlay_values(
             &mut values,
@@ -1864,6 +1890,10 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.scan_prefix(cf, prefix, visit);
+        }
+
         let mut values = self.base.prefix(cf, prefix)?;
         overlay_values(
             &mut values,
@@ -1883,6 +1913,10 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.scan_prefix_reverse(cf, prefix, visit);
+        }
+
         if self
             .staged_writes
             .borrow()
@@ -1948,6 +1982,10 @@ where
         cf: &ColumnFamilyName,
         prefix: &Key,
     ) -> Result<Option<KeyValue>, Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.last_with_prefix(cf, prefix);
+        }
+
         let mut needs_full_merge = false;
         for operation in self.staged_writes.borrow().operations.iter() {
             if operation.cf() != cf || !operation.key().starts_with(prefix) {
