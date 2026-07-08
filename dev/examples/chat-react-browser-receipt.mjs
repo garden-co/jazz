@@ -76,7 +76,7 @@ async function uploadFile(page, name, body) {
     .filter({ has: page.locator("svg.lucide-plus") })
     .click();
   await page.getByRole("menuitem", { name: /file/i }).click();
-  await page.waitForSelector('input[type="file"]');
+  await page.waitForSelector('input[type="file"]', { state: "attached" });
   await page.evaluate(
     async ({ fileName, fileBody }) => {
       const input = document.querySelector('input[type="file"]');

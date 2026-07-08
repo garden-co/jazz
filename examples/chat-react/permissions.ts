@@ -50,12 +50,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.reactions.allowInsert.where({ userId: session.user_id });
   policy.reactions.allowDelete.where({ userId: session.user_id });
 
-  policy.canvases.allowRead.where((canvas) =>
-    anyOf([
-      allowedTo.read("chatId"),
-      policy.chatMembers.exists.where({ chatId: canvas.chatId, userId: session.user_id }),
-    ]),
-  );
+  policy.canvases.allowRead.where(allowedTo.read("chatId"));
   policy.canvases.allowInsert.where((canvas) =>
     policy.chatMembers.exists.where({ chatId: canvas.chatId, userId: session.user_id }),
   );

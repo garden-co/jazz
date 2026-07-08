@@ -1250,16 +1250,17 @@ function inheritedParentBranchToChildQuery(
     });
   }
   for (const join of branch.joins) {
+    const sourceColumn = join.sourceLookup?.rowIdSourceColumn ?? join.sourceColumn;
     joins.push({
       ...join,
-      sourceColumn: join.sourceColumn,
+      sourceColumn,
       sourceLookup:
-        join.sourceColumn == null
+        sourceColumn == null
           ? undefined
           : {
               table: parentTable,
               rowIdSourceColumn: viaColumn,
-              valueColumn: join.sourceColumn,
+              valueColumn: sourceColumn,
             },
     });
   }

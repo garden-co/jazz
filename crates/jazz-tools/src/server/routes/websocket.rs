@@ -790,6 +790,7 @@ mod tests {
     use jazz::query::{Query, claim, col, eq};
     use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
     use jazz::tx::DurabilityTier;
+    use jazz::wire::FEATURE_STRUCTURED_ERRORS;
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WireTransport};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};

@@ -2198,6 +2198,9 @@ function coerceLiteralForColumnType(
   if (columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)) {
     return { type: "Uuid", value: value.value };
   }
+  if (columnType?.type === "Text" && value.type === "Uuid") {
+    return { type: "Text", value: value.value };
+  }
   if (columnType?.type === "Double" && value.type === "Integer") {
     return { type: "Double", value: value.value };
   }
