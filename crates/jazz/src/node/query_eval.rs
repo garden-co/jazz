@@ -2561,6 +2561,7 @@ fn normalize_array_subquery(
 fn normalize_reachable(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
+    schema: &JazzSchema,
     root_source: &SourceId,
     reachable: &crate::query::ReachableVia,
     index: usize,
@@ -2576,6 +2577,7 @@ fn normalize_reachable(
     let frontier = FrontierId(format!("{reachable_id}:frontier"));
     let (seed_node, columns) = normalize_reachable_seed(
         nodes,
+        schema,
         reachable,
         &reachable_id,
         binding_source_shape,
@@ -2884,6 +2886,7 @@ fn reachable_dedupe_keys(
 
 fn normalize_reachable_seed(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    schema: &JazzSchema,
     reachable: &crate::query::ReachableVia,
     reachable_id: &str,
     binding_source_shape: &str,
@@ -2896,7 +2899,19 @@ fn normalize_reachable_seed(
             ));
         }
         let seed_source = reachable_seed_source_id(seed, reachable_id);
-        let columns = reachable_seed_frontier_columns(&seed_source, seed);
+        let columns = reachable_seed_frontier_columns(schema, &seed_source, seed)?;
+        let user_column_ty = seed
+            .user_column
+            .as_ref()
+            .map(|column| schema_column_type(schema, &seed.table, column))
+            .transpose()?;
+        let team_column_ty = schema_column_type(schema, &seed.table, &seed.team_column)?;
+        if team_column_ty != ColumnType::Uuid {
+            return Err(Error::QueryLowering(format!(
+                "reachable_via seed {}.{} must be uuid, found {:?}",
+                seed.table, seed.team_column, team_column_ty
+            )));
+        }
         let seed_source_node = RowSetNodeId(format!("{reachable_id}:seed_source"));
         nodes.insert(
             seed_source_node.clone(),
@@ -2959,7 +2974,10 @@ fn normalize_reachable_seed(
         ];
         if let Some((_, claim_field)) = &claim_route_field {
             seed_columns.push(RowProjection {
-                output: typed_output_field(claim_field, ColumnType::Uuid),
+                output: typed_output_field(
+                    claim_field,
+                    user_column_ty.clone().unwrap_or(ColumnType::Uuid),
+                ),
                 value: NormalizedValueRef::Param(claim_field.clone()),
             });
         }
@@ -2987,9 +3005,17 @@ fn normalize_reachable_seed(
 }
 
 fn reachable_seed_frontier_columns(
+    schema: &JazzSchema,
     source: &SourceId,
     seed: &crate::query::ReachableSeed,
-) -> Vec<ValueSourceColumn> {
+) -> Result<Vec<ValueSourceColumn>, Error> {
+    let team_column_ty = schema_column_type(schema, &seed.table, &seed.team_column)?;
+    if team_column_ty != ColumnType::Uuid {
+        return Err(Error::QueryLowering(format!(
+            "reachable_via seed {}.{} must be uuid, found {:?}",
+            seed.table, seed.team_column, team_column_ty
+        )));
+    }
     let value = NormalizedValueRef::SourceField {
         source: source.clone(),
         field: seed.team_column.clone(),
@@ -3007,14 +3033,20 @@ fn reachable_seed_frontier_columns(
         },
     ];
     if let Some(user_claim) = &seed.user_claim {
+        let Some(user_column) = &seed.user_column else {
+            return Err(Error::QueryLowering(
+                "reachable_via relation seed user_claim requires user_column".to_owned(),
+            ));
+        };
+        let user_column_ty = schema_column_type(schema, &seed.table, user_column)?;
         let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
         columns.push(ValueSourceColumn {
             name: claim_param_field(&path),
             value: NormalizedValueRef::Claim(path),
-            ty: ColumnType::Uuid,
+            ty: user_column_ty,
         });
     }
-    columns
+    Ok(columns)
 }
 
 fn reachable_frontier_columns(
@@ -3115,6 +3147,18 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> Result<&'a TableSche
         .iter()
         .find(|candidate| candidate.name == table)
         .ok_or_else(|| Error::QueryLowering(format!("unknown query table {table}")))
+}
+
+fn schema_column_type(schema: &JazzSchema, table: &str, column: &str) -> Result<ColumnType, Error> {
+    if column == "id" {
+        return Ok(ColumnType::Uuid);
+    }
+    table_schema(schema, table)?
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .map(|column| column.column_type.clone())
+        .ok_or_else(|| Error::QueryLowering(format!("unknown query column {table}.{column}")))
 }
 
 fn row_id_output_field() -> TypedOutputField {
@@ -3385,6 +3429,7 @@ fn normalize_policy_atom_chain(
         let (next, contribution) = normalize_reachable(
             nodes,
             current,
+            schema,
             root_source,
             reachable,
             index,
@@ -7483,7 +7528,11 @@ fn collect_claim_field_params_from_node(
         }
         RowSetExpr::Project { columns, .. } => {
             for column in columns {
-                collect_claim_field_param(&column.value, column.output.ty.clone(), params);
+                collect_claim_field_param_authoritative(
+                    &column.value,
+                    column.output.ty.clone(),
+                    params,
+                );
             }
         }
         RowSetExpr::Distinct { keys, .. } => {
@@ -7576,6 +7625,20 @@ fn collect_claim_field_param(
     params
         .entry(param.clone())
         .or_insert(ProgramClaimParam { path, ty });
+}
+
+fn collect_claim_field_param_authoritative(
+    value: &NormalizedValueRef,
+    ty: ColumnType,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    let NormalizedValueRef::Param(param) = value else {
+        return;
+    };
+    let Some(path) = claim_path_from_param_field(param) else {
+        return;
+    };
+    params.insert(param.clone(), ProgramClaimParam { path, ty });
 }
 
 fn bind_query_predicate(

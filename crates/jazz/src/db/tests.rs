@@ -704,6 +704,66 @@ fn same_table_seeded_resource_policy_schema() -> JazzSchema {
     ])
 }
 
+fn same_table_string_seeded_resource_policy_schema() -> JazzSchema {
+    let resource_policy = Policy::shape(
+        Query::from("resources")
+            .reachable_via_with_access_filters(
+                "resource_access",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "team_entries",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("teams", "identity_key", "user_id", "id"),
+    );
+
+    JazzSchema::new([
+        TableSchema::new(
+            "teams",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("identity_key", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_entries",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("member_id", "teams")
+        .with_reference("target_id", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "resources",
+            [ColumnSchema::new("label", ColumnType::String)],
+        )
+        .with_read_policy(resource_policy)
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "resource_access",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "resources")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn customer_inherited_child_policy_schema() -> JazzSchema {
     let resource_policy = Query::from("res_i")
         .reachable_via_with_access_filters(
@@ -6347,6 +6407,34 @@ fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
 }
 
 #[test]
+fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
+    let schema = same_table_string_seeded_resource_policy_schema();
+    let server = open_core(0x86, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x21; 16]);
+    let other = AuthorId::from_bytes([0x22; 16]);
+    let (direct, transitive, hidden) =
+        seed_same_table_string_seeded_resource_fixture(&server, member, other);
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "resources"),
+        vec![direct, transitive]
+    );
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, other, "resources"),
+        vec![hidden]
+    );
+    assert!(
+        served_subscription_rows_for_author(
+            &schema,
+            &server,
+            AuthorId::from_bytes([0x99; 16]),
+            "resources"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     let schema = same_table_seeded_resource_policy_schema();
     let server = open_core(0x67, AuthorId::SYSTEM, &schema);
@@ -6728,6 +6816,63 @@ fn seed_same_table_seeded_resource_fixture(
     (direct, transitive, hidden)
 }
 
+fn seed_same_table_string_seeded_resource_fixture(
+    server: &CoreDb,
+    member: AuthorId,
+    other: AuthorId,
+) -> (RowUuid, RowUuid, RowUuid) {
+    let direct_group = row(0x61);
+    let transitive_group = row(0x62);
+    let hidden_group = row(0x63);
+    let direct = row(0xf1);
+    let transitive = row(0xf2);
+    let hidden = row(0xf3);
+
+    for (group, identity, label) in [
+        (direct_group, member.0.to_string(), "direct"),
+        (transitive_group, "not-the-member".to_owned(), "transitive"),
+        (hidden_group, other.0.to_string(), "hidden"),
+    ] {
+        server
+            .insert_with_id(
+                "teams",
+                group,
+                same_table_team_string_cells(label, &identity),
+            )
+            .unwrap();
+    }
+    server
+        .insert_with_id(
+            "team_entries",
+            row(0xc6),
+            same_table_team_entry_cells(direct_group, transitive_group, false),
+        )
+        .unwrap();
+    for (resource, label) in [
+        (direct, "direct"),
+        (transitive, "transitive"),
+        (hidden, "hidden"),
+    ] {
+        server
+            .insert_with_id("resources", resource, same_table_resource_cells(label))
+            .unwrap();
+    }
+    for (edge, resource, group) in [
+        (row(0xb6), direct, direct_group),
+        (row(0xb7), transitive, transitive_group),
+        (row(0xb8), hidden, hidden_group),
+    ] {
+        server
+            .insert_with_id(
+                "resource_access",
+                edge,
+                same_table_resource_access_cells(resource, group, false),
+            )
+            .unwrap();
+    }
+    (direct, transitive, hidden)
+}
+
 fn seed_inherited_child_fixture(
     server: &CoreDb,
     member: AuthorId,
@@ -6832,6 +6977,16 @@ fn same_table_team_cells(name: &str, identity: AuthorId) -> RowCells {
     BTreeMap::from([
         ("name".to_owned(), Value::String(name.to_owned())),
         ("identity_key".to_owned(), Value::Uuid(identity.0)),
+    ])
+}
+
+fn same_table_team_string_cells(name: &str, identity: &str) -> RowCells {
+    BTreeMap::from([
+        ("name".to_owned(), Value::String(name.to_owned())),
+        (
+            "identity_key".to_owned(),
+            Value::String(identity.to_owned()),
+        ),
     ])
 }
 
