@@ -6,17 +6,27 @@ type UseAllOptions = {
   suspense?: boolean;
 };
 
+export type UseAllResult<T extends { id: string }> = {
+  data: T[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+};
+
 // A query that never arrives has nothing to fetch, so the suspense variant
 // suspends on this until one is supplied on a later render (the boundary shows
 // its fallback meanwhile). Distinct from a pending real query, which suspends on
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
   options?: UseAllOptions,
-): T[] | undefined {
+): T[] | UseAllResult<T> {
   const { suspense = false } = options ?? {};
   const { manager } = useJazzClient();
 
@@ -89,27 +99,38 @@ function useAllBase<T extends { id: string }>(
     return use(entry.promise as unknown as Usable<T[]>);
   }
 
-  return state?.status === "fulfilled" ? state.data : undefined;
+  if (!query || key === null) {
+    return { data: undefined, isLoading: false, error: null };
+  }
+
+  if (state?.status === "fulfilled") {
+    return { data: state.data, isLoading: false, error: null };
+  }
+
+  if (state?.status === "rejected") {
+    return { data: undefined, isLoading: false, error: toError(state.error) };
+  }
+
+  return { data: undefined, isLoading: true, error: null };
 }
 
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  *
- * Loading and error states are handled the React way: `undefined` means the
- * query has not resolved yet, and for error handling use {@link useAllSuspense}
- * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
- * capabilities idiomatically — Svelte's `QuerySubscription` via
- * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
+ * Loading and error states are returned alongside the rows, matching the other
+ * framework bindings. Use {@link useAllSuspense} when you want loading and
+ * errors to flow through Suspense and an error boundary instead.
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns the matching rows, or `undefined` if the query is not yet executed
+ * @returns `{ data, isLoading, error }`. `data` is `undefined` until the query
+ *   resolves or if the query fails.
  */
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): T[] | undefined {
-  return useAllBase(query, options, { suspense: false });
+): UseAllResult<T> {
+  return useAllBase(query, options, { suspense: false }) as UseAllResult<T>;
 }
 
 /**

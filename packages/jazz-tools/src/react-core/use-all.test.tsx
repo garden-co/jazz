@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Component, Suspense, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
@@ -97,7 +97,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-02");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -133,7 +133,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-03");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return <span>{(todos ?? []).length}</span>;
     }
 
@@ -154,7 +154,7 @@ describe("react-core/useAll", () => {
     manager.makeQueryKey(query, undefined, [{ id: "1", title: "seeded" }]);
 
     function List() {
-      const todos = useAll(query);
+      const { data: todos } = useAll(query);
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -174,14 +174,18 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it("a failed subscription leaves non-suspense useAll undefined and does not throw", () => {
+  it("a failed subscription surfaces a non-suspense useAll error and does not throw", async () => {
     const { client } = makeHarness("rc-all-05", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
 
     function List() {
-      const todos = useAll(makeQuery());
-      return <span>{todos === undefined ? "no-data" : String(todos.length)}</span>;
+      const result = useAll(makeQuery());
+      return (
+        <span>
+          {result.error?.message ?? (result.isLoading ? "loading" : String(result.data?.length))}
+        </span>
+      );
     }
 
     const { container } = render(
@@ -190,7 +194,7 @@ describe("react-core/useAll", () => {
       </JazzClientProvider>,
     );
 
-    expect(container.textContent).toBe("no-data");
+    await waitFor(() => expect(container.textContent).toBe("subscribe failed"));
   });
 
   it("useAllSuspense throws a failed subscription to the error boundary", () => {

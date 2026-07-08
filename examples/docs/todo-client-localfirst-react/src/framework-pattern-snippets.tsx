@@ -22,10 +22,10 @@ export function ProviderExample() {
 
 // #region live-query-react
 export function LiveQueryExample() {
-  const todos = useAll(app.todos.where({ done: false }));
+  const { data: todos = [], isLoading } = useAll(app.todos.where({ done: false }));
 
-  // undefined = not yet connected; [] = connected, no rows; [...] = rows present
-  if (todos === undefined) return <p>Loading...</p>;
+  // isLoading = not yet connected; [] = connected, no rows; [...] = rows present
+  if (isLoading) return <p>Loading...</p>;
 
   return (
     <ul>

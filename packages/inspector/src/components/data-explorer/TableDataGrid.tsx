@@ -1473,7 +1473,7 @@ function RelationCell({
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
   );
-  const relationRows = useAll<DynamicTableRow>(queryBuilder, queryOptions) ?? EMPTY_ROWS;
+  const { data: relationRows = EMPTY_ROWS } = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   const relationRow = relationRows[0];
   const displayColumn = useMemo(
     () => getRelationDisplayColumn(schema, relationTable),

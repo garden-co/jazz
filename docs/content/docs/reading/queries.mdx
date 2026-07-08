@@ -141,14 +141,14 @@ Each framework has a reactive binding that re-renders when query results change.
 
 | Framework  | API                            | Notes                                               |
 | ---------- | ------------------------------ | --------------------------------------------------- |
-| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`                          |
+| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                |
 | Vue        | `useAll(query)`                | Returns `{ data, error, loading }` refs             |
 | Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
 | Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
 
-### The `undefined` loading state
+### The loading state
 
-`useAll` (its `data` ref in Vue) and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+`useAll`'s `data` field (or Vue's `data` ref) and `QuerySubscription.current` are `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -174,7 +174,7 @@ Each framework has a reactive binding that re-renders when query results change.
 </Tabs>
 
 <Callout type="info">
-  You're unlikely to see `undefined` in practice unless you're awaiting a more [durable
+  You're unlikely to see `data: undefined` in practice unless you're awaiting a more [durable
   tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
   data exists yet.
 </Callout>
@@ -188,9 +188,9 @@ In practice this means:
 - Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
 - Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
 - Vue's `useAll` returns `{ data, error, loading }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
-- Solid's `useAll` returns a store, so Solid's fine-grained dependency tracking only re-runs computations that read changed fields.
+- React and Solid return `{ data, isLoading, error }`; React returns a fresh `data` array each tick, while Solid's store keeps fine-grained dependency tracking for fields that changed.
 
-React's `useAll` follows React's own re-render model and returns a fresh array each tick; the granularity benefit there comes from React's diffing, not from in-place reconciliation.
+React's granularity benefit comes from React's diffing, not from in-place reconciliation.
 
 ### Conditional queries
 
@@ -221,7 +221,7 @@ Pass `undefined` instead of a query to skip evaluation. This is useful when buil
 
 ### React Suspense and Transitions
 
-`useAllSuspense` is a React-specific variant that suspends instead of returning `undefined`, keeping the previous result visible while the next one loads.
+`useAllSuspense` is a React-specific variant that suspends instead of returning a loading state, keeping the previous result visible while the next one loads.
 
 <include cwd lang="tsx" meta='title="App.tsx"'>
   ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react

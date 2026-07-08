@@ -17,8 +17,9 @@ export const ChatList = () => {
 
   const myProfile = useMyProfile();
 
-  const memberships =
-    useAll(app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true })) ?? [];
+  const { data: memberships = [] } = useAll(
+    app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true }),
+  );
 
   const createPublicChat = async () => {
     if (!userId || !myProfile) return;

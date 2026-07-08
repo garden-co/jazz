@@ -16,7 +16,7 @@ export function TodoList() {
 
   const db = useDb();
   // #region reading-reactive-hooks-react
-  const todos = useAll(todosQuery) ?? [];
+  const { data: todos = [] } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;

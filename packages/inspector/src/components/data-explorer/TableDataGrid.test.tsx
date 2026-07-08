@@ -169,18 +169,24 @@ describe("TableDataGrid", () => {
           : null;
 
       if (!builtQuery || builtQuery.table === "todos") {
-        return currentRows;
+        return { data: currentRows, isLoading: false, error: null };
       }
 
       const tableRows = currentReferenceRowsByTable[builtQuery.table] ?? [];
-      return tableRows.filter((row) =>
-        builtQuery.conditions.every((condition: { column: string; op: string; value: unknown }) => {
-          if (condition.op !== "eq") {
-            return true;
-          }
-          return row[condition.column] === condition.value;
-        }),
-      );
+      return {
+        data: tableRows.filter((row) =>
+          builtQuery.conditions.every(
+            (condition: { column: string; op: string; value: unknown }) => {
+              if (condition.op !== "eq") {
+                return true;
+              }
+              return row[condition.column] === condition.value;
+            },
+          ),
+        ),
+        isLoading: false,
+        error: null,
+      };
     });
   });
 

@@ -122,9 +122,9 @@ export function addMember(
 
 // #region group-query-docs
 export function WorkspaceDocuments({ workspaceId }: { workspaceId: string }) {
-  const docs = useAll(app.documents.where({ workspaceId }));
+  const { data: docs = [], isLoading } = useAll(app.documents.where({ workspaceId }));
 
-  if (!docs) return <p>Loading…</p>;
+  if (isLoading) return <p>Loading…</p>;
 
   return (
     <ul>
@@ -138,9 +138,9 @@ export function WorkspaceDocuments({ workspaceId }: { workspaceId: string }) {
 
 // #region group-members-list
 export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
-  const members = useAll(app.workspaceMembers.where({ workspaceId }));
+  const { data: members = [], isLoading } = useAll(app.workspaceMembers.where({ workspaceId }));
 
-  if (!members) return <p>Loading…</p>;
+  if (isLoading) return <p>Loading…</p>;
 
   return (
     <ul>

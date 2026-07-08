@@ -1161,8 +1161,10 @@ export const app = s.defineApp(schema);
 
 ```tsx
 function Canvas({ canvasId }) {
-  const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const { data: letters = [] } = useAll(app.letters.where({ canvasId }));
+  const { data: cursors = [] } = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy"),
+  );
 
   return (
     <Stage>
@@ -1225,8 +1227,10 @@ export const app = s.defineApp(schema);
 
 ```tsx
 function Canvas({ canvasId }) {
-  const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const { data: letters = [] } = useAll(app.letters.where({ canvasId }));
+  const { data: cursors = [] } = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy"),
+  );
 
   return (
     <Stage>
@@ -1308,8 +1312,10 @@ export const app = s.defineApp(schema);
 
 ```tsx
 function Canvas({ canvasId }) {
-  const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const { data: letters = [] } = useAll(app.letters.where({ canvasId }));
+  const { data: cursors = [] } = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy"),
+  );
 
   return (
     <Stage>

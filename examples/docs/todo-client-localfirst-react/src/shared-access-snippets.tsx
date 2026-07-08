@@ -75,11 +75,11 @@ export function shareTodo(db: ReturnType<typeof useDb>, todoId: string, recipien
 // #region shared-query
 export function SharedWithMe() {
   const session = useSession();
-  const shares = useAll(
+  const { data: shares = [], isLoading } = useAll(
     app.todoShares.where({ user_id: session!.user_id }).include({ todo: true }),
   );
 
-  if (!shares) return <p>Loading…</p>;
+  if (isLoading) return <p>Loading…</p>;
 
   return (
     <ul>

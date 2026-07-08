@@ -66,22 +66,22 @@ export function useSync(playerId: string): SyncResult {
 
   // ---------------------------------------------------------------------------
   // Subscriptions — useAll streams live results from the server.
-  // undefined = not yet settled (subscription hasn't received its first result).
+  // isLoading = not yet settled (subscription hasn't received its first result).
   // ---------------------------------------------------------------------------
 
   // Other players (exclude self)
-  const allRemotePlayers = useAll(app.players.where({ playerId: { ne: playerId } })) ?? [];
+  const { data: allRemotePlayers = [] } = useAll(app.players.where({ playerId: { ne: playerId } }));
   const remotePlayers = useMemo(
     () => allRemotePlayers.filter((p) => p.lastSeen > staleCutoff),
     [allRemotePlayers, staleCutoff],
   );
 
   // Chat messages (ordered oldest-first for rendering)
-  const allChatMessages = useAll(app.chat_messages.orderBy("createdAt", "asc")) ?? [];
+  const { data: allChatMessages = [] } = useAll(app.chat_messages.orderBy("createdAt", "asc"));
 
   // Local player row — used to detect first join (no row yet) vs reconnect
-  const localPlayerRowsRaw = useAll(app.players.where({ playerId }));
-  const localPlayerRows = localPlayerRowsRaw ?? [];
+  const localPlayerRowsResult = useAll(app.players.where({ playerId }));
+  const localPlayerRows = localPlayerRowsResult.data ?? [];
   const localFuelType = localPlayerRows[0]?.requiredFuelType ?? FUEL_TYPES[0];
 
   // Per-type deposit limits: base + 1 extra for each player whose required type
@@ -99,12 +99,12 @@ export function useSync(playerId: string): SyncResult {
   }, [remotePlayers, localFuelType]);
 
   // Uncollected deposits — what the game renders on the surface.
-  // "edge" tier: undefined until the edge subscription connects, which drives settled detection.
+  // "edge" tier: loading until the edge subscription connects, which drives settled detection.
   const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).
-  const localCollectedDeposits = useAll(
+  const { data: localCollectedDeposits = [] } = useAll(
     app.fuel_deposits.where({ collected: true, collectedBy: playerId }),
   );
 
@@ -112,17 +112,17 @@ export function useSync(playerId: string): SyncResult {
   // other players. When Player A shares with B, B already has the row here
   // (it entered when A collected it), so collectedBy updating to B propagates
   // as a plain row update without needing WHERE re-evaluation.
-  const allCollectedDeposits = useAll(app.fuel_deposits.where({ collected: true }));
+  const { data: allCollectedDeposits = [] } = useAll(app.fuel_deposits.where({ collected: true }));
 
-  const settled = allUncollected !== undefined;
-  const uncollectedDeposits = allUncollected ?? [];
-  const myCollectedDeposits = localCollectedDeposits ?? [];
+  const settled = !allUncollected.isLoading;
+  const uncollectedDeposits = allUncollected.data ?? [];
+  const myCollectedDeposits = localCollectedDeposits;
 
   // Merge local + broad collected subscriptions so received shares show in inventory
   const effectiveMyCollected = useMemo(() => {
     const map = new Map<string, FuelDeposit>();
     for (const d of myCollectedDeposits) map.set(d.id, d);
-    for (const d of (allCollectedDeposits ?? []).filter((d) => d.collectedBy === playerId)) {
+    for (const d of allCollectedDeposits.filter((d) => d.collectedBy === playerId)) {
       map.set(d.id, d);
     }
     return [...map.values()] as FuelDeposit[];
@@ -174,7 +174,6 @@ export function useSync(playerId: string): SyncResult {
   );
 
   const chatMessages = useMemo(() => {
-    if (!allChatMessages) return [];
     const nowS = Math.floor(Date.now() / 1000);
     return allChatMessages.filter((m) => nowS - m.createdAt < 60);
   }, [allChatMessages]);
@@ -190,7 +189,7 @@ export function useSync(playerId: string): SyncResult {
 
   sync.setInputs({
     settled,
-    localPlayerSettled: localPlayerRowsRaw !== undefined,
+    localPlayerSettled: !localPlayerRowsResult.isLoading,
     uncollectedDeposits,
     myCollectedDeposits: effectiveMyCollected,
     allDepositsRaw,
@@ -216,7 +215,7 @@ export function useSync(playerId: string): SyncResult {
 
     syncInputs: sync.inputs,
     remotePlayerCount: remotePlayers.length,
-    chatMessageCount: allChatMessages?.length ?? 0,
+    chatMessageCount: allChatMessages.length,
     gameState: sync.latestState,
   };
 }

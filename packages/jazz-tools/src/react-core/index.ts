@@ -8,7 +8,7 @@ export {
   type JazzClientProviderProps,
   type JazzProviderProps,
 } from "./provider.js";
-export { useAll, useAllSuspense } from "./use-all.js";
+export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 export { useAuthState, type AuthStateInfo } from "./use-auth-state.js";
 export { useLocalFirstAuthWithStore, type LocalFirstAuth } from "./use-local-first-auth.js";
 

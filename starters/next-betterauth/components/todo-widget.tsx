@@ -5,7 +5,7 @@ import { app } from "@/schema";
 
 export function TodoWidget() {
   const db = useDb();
-  const todos = useAll(app.todos) ?? [];
+  const { data: todos = [] } = useAll(app.todos);
 
   function add(formData: FormData) {
     const title = formData.get("title") as string;

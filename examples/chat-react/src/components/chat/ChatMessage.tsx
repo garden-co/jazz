@@ -41,10 +41,10 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
   // Subscribe directly to the sender's profile so the name/avatar appears as
   // soon as the profile row syncs, even if the include in the parent query
   // fired before the profile was in the local store.
-  const senderProfiles = useAll(app.profiles.where({ id: message.senderId })) ?? [];
+  const { data: senderProfiles = [] } = useAll(app.profiles.where({ id: message.senderId }));
   const resolvedSender = (senderProfiles[0] as unknown as Profile) ?? sender;
 
-  const attachments = useAll(app.attachments.where({ messageId: message.id })) ?? [];
+  const { data: attachments = [] } = useAll(app.attachments.where({ messageId: message.id }));
 
   const canvasMatch = message.text?.match(/^\[Canvas: ([^\]]+)\]$/);
   const canvasId = canvasMatch?.[1] ?? null;
