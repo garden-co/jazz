@@ -477,7 +477,7 @@ describe("web/createJazzClient async subscription channel", () => {
     expect(db.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("routes false-context subscriptions to the local node by default", async () => {
+  it("routes synchronous-mode subscriptions to the local node by default", async () => {
     const db = createMockDb([{ id: "local-row", value: "from-local-node" }]);
     mocks.createDb.mockResolvedValue(db);
 
@@ -492,7 +492,7 @@ describe("web/createJazzClient async subscription channel", () => {
     expect(db.subscribeAll).toHaveBeenCalledTimes(1);
   });
 
-  it("routes async-declared false-context subscriptions through the channel", async () => {
+  it("routes async-declared synchronous-mode subscriptions through the channel", async () => {
     const db = createMockDb([{ id: "local-row", value: "from-local-node" }]);
     const channel = createTypedChannel([{ id: "async-row", value: "from-channel" }]);
     mocks.createDb.mockResolvedValue(db);
