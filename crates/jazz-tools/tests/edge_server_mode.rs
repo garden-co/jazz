@@ -4,13 +4,18 @@ mod support;
 
 use std::time::Duration;
 
+use jazz_tools::public_schema::{
+    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
+    RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
+};
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
-    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema, Value,
+    AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
+    SchemaBuilder, TableSchema, Value,
 };
-use support::{wait_for_edge_query_ready, wait_for_query};
+use serde_json::json;
+use support::{TestingClient, wait_for_edge_query_ready, wait_for_query};
 
 fn todo_schema() -> Schema {
     SchemaBuilder::new()
@@ -20,6 +25,133 @@ fn todo_schema() -> Schema {
                 .column("done", ColumnType::Boolean),
         )
         .build()
+}
+
+fn boredm_policy_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("resources")
+                .column("label", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(resource_access_policy())
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("teams")
+                .column("identity_key", ColumnType::Text)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("team_team_edges")
+                .fk_column("child_team", "teams")
+                .fk_column("parent_team", "teams")
+                .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+        )
+        .table(
+            TableSchema::builder("resource_access_edges")
+                .fk_column("resource", "resources")
+                .fk_column("team", "teams")
+                .column("grant_role", ColumnType::Text)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+        )
+        .build()
+}
+
+fn resource_access_policy() -> PolicyExpr {
+    PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::Gather {
+                    seed: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: "teams".into(),
+                            alias: None,
+                        }),
+                        predicate: RelPredicateExpr::Cmp {
+                            left: RelColumnRef {
+                                scope: Some("teams".to_owned()),
+                                column: "identity_key".to_owned(),
+                            },
+                            op: RelPredicateCmpOp::Eq,
+                            right: RelValueRef::SessionRef(vec!["sub".to_owned()]),
+                        },
+                    }),
+                    step: Box::new(RelExpr::Project {
+                        input: Box::new(RelExpr::Join {
+                            left: Box::new(RelExpr::Filter {
+                                input: Box::new(RelExpr::TableScan {
+                                    table: "team_team_edges".into(),
+                                    alias: None,
+                                }),
+                                predicate: RelPredicateExpr::Cmp {
+                                    left: RelColumnRef {
+                                        scope: Some("team_team_edges".to_owned()),
+                                        column: "child_team".to_owned(),
+                                    },
+                                    op: RelPredicateCmpOp::Eq,
+                                    right: RelValueRef::RowId(RowIdRef::Frontier),
+                                },
+                            }),
+                            right: Box::new(RelExpr::TableScan {
+                                table: "teams".into(),
+                                alias: Some("__recursive_hop_0".to_owned()),
+                            }),
+                            on: vec![RelJoinCondition {
+                                left: RelColumnRef {
+                                    scope: Some("team_team_edges".to_owned()),
+                                    column: "parent_team".to_owned(),
+                                },
+                                right: RelColumnRef {
+                                    scope: Some("__recursive_hop_0".to_owned()),
+                                    column: "id".to_owned(),
+                                },
+                            }],
+                            join_kind: RelJoinKind::Inner,
+                        }),
+                        columns: Vec::new(),
+                    }),
+                    frontier_key: RelKeyRef::RowId(RowIdRef::Current),
+                    bound: RelRecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: "resource_access_edges".into(),
+                    alias: Some("access".to_owned()),
+                }),
+                on: vec![RelJoinCondition {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                    right: RelColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "team".to_owned(),
+                    },
+                }],
+                join_kind: RelJoinKind::Inner,
+            }),
+            predicate: RelPredicateExpr::And(vec![
+                RelPredicateExpr::Cmp {
+                    left: RelColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "resource".to_owned(),
+                    },
+                    op: RelPredicateCmpOp::Eq,
+                    right: RelValueRef::RowId(RowIdRef::Outer),
+                },
+                RelPredicateExpr::Cmp {
+                    left: RelColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "grant_role".to_owned(),
+                    },
+                    op: RelPredicateCmpOp::Eq,
+                    right: RelValueRef::Literal(Value::Text("viewer".to_owned())),
+                },
+            ]),
+        },
+    }
 }
 
 fn todo_query() -> jazz_tools::Query {
@@ -61,6 +193,119 @@ async fn wait_for_row(
         },
     )
     .await;
+}
+
+async fn wait_edge_batch(client: &JazzClient, batch_id: jazz_tools::BatchId, label: &str) {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{label} timed out waiting for edge batch"))
+    .unwrap_or_else(|err| panic!("{label} failed waiting for edge batch: {err}"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = JazzServer::start().await;
+            let schema = boredm_policy_schema();
+            let app_id = server.app_id();
+            let response = reqwest::Client::new()
+                .post(format!("{}/apps/{app_id}/admin/schemas", server.base_url()))
+                .header("X-Jazz-Admin-Secret", server.admin_secret())
+                .json(&json!({ "schema": schema }))
+                .send()
+                .await
+                .expect("publish BoreDM-shaped schema");
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.expect("schema publish error body");
+                panic!("BoreDM-shaped schema publish failed: {status} {body}");
+            }
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("00000000-0000-4000-8000-0000000000a0")
+                .as_admin()
+                .connect()
+                .await;
+            let (seed_team, _, seed_batch) = admin
+                .insert(
+                    "teams",
+                    row_input!("identity_key" => "00000000-0000-4000-8000-0000000000b0"),
+                )
+                .expect("insert seed team");
+            wait_edge_batch(&admin, seed_batch, "seed team").await;
+            let (resource_team, _, resource_team_batch) = admin
+                .insert("teams", row_input!("identity_key" => "other-sub"))
+                .expect("insert resource team");
+            wait_edge_batch(&admin, resource_team_batch, "resource team").await;
+            let (_, _, edge_batch) = admin
+                .insert(
+                    "team_team_edges",
+                    row_input!("child_team" => seed_team, "parent_team" => resource_team),
+                )
+                .expect("insert team edge");
+            wait_edge_batch(&admin, edge_batch, "team edge").await;
+            let (resource, _, resource_batch) = admin
+                .insert("resources", row_input!("label" => "visible resource"))
+                .expect("insert resource");
+            wait_edge_batch(&admin, resource_batch, "resource").await;
+            let (_, _, access_batch) = admin
+                .insert(
+                    "resource_access_edges",
+                    row_input!("resource" => resource, "team" => resource_team, "grant_role" => "viewer"),
+                )
+                .expect("insert resource access edge");
+            wait_edge_batch(&admin, access_batch, "resource access").await;
+
+            let member = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("00000000-0000-4000-8000-0000000000b0")
+                .with_claims(json!({}))
+                .connect()
+                .await;
+            let member_rows = wait_for_query(
+                &member,
+                QueryBuilder::new("resources").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "member sees resource through seeded recursive access policy",
+                |rows| (rows.len() == 1 && rows[0].0 == resource).then_some(rows),
+            )
+            .await;
+            assert_eq!(
+                member_rows[0].1,
+                vec![Value::Text("visible resource".to_owned())]
+            );
+
+            let spy = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("00000000-0000-4000-8000-0000000000c0")
+                .with_claims(json!({}))
+                .connect()
+                .await;
+            wait_for_query(
+                &spy,
+                QueryBuilder::new("resources").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "spy sees no resources through seeded recursive access policy",
+                |rows| rows.is_empty().then_some(rows),
+            )
+            .await;
+
+            spy.shutdown().await.expect("shutdown spy");
+            member.shutdown().await.expect("shutdown member");
+            admin.shutdown().await.expect("shutdown admin");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

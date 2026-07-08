@@ -26,6 +26,7 @@ pub enum ValueRef {
     Literal(Value),
     SessionRef(Vec<String>),
     OuterColumn(ColumnRef),
+    RowId(RowIdRef),
 }
 
 /// Predicate comparison operators.
@@ -50,10 +51,65 @@ pub enum PredicateExpr {
     IsNull {
         column: ColumnRef,
     },
+    IsNotNull {
+        column: ColumnRef,
+    },
+    In {
+        left: ColumnRef,
+        values: Vec<ValueRef>,
+    },
+    Contains {
+        left: ColumnRef,
+        right: ValueRef,
+    },
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),
+    Not(Box<PredicateExpr>),
     True,
     False,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RowIdRef {
+    Current,
+    Outer,
+    Frontier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KeyRef {
+    Column(ColumnRef),
+    RowId(RowIdRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProjectExpr {
+    Column(ColumnRef),
+    RowId(RowIdRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProjectColumn {
+    pub alias: String,
+    pub expr: ProjectExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JoinCondition {
+    pub left: ColumnRef,
+    pub right: ColumnRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RecursionBound {
+    Fixpoint,
+    MaxDepth(usize),
 }
 
 /// Relation expression used by relation-backed policy `exists(...)`.
@@ -67,6 +123,26 @@ pub enum RelExpr {
     Filter {
         input: Box<RelExpr>,
         predicate: PredicateExpr,
+    },
+    Union {
+        inputs: Vec<RelExpr>,
+    },
+    Join {
+        left: Box<RelExpr>,
+        right: Box<RelExpr>,
+        on: Vec<JoinCondition>,
+        join_kind: JoinKind,
+    },
+    Project {
+        input: Box<RelExpr>,
+        columns: Vec<ProjectColumn>,
+    },
+    Gather {
+        seed: Box<RelExpr>,
+        step: Box<RelExpr>,
+        frontier_key: KeyRef,
+        bound: RecursionBound,
+        dedupe_key: Vec<KeyRef>,
     },
 }
 

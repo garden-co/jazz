@@ -1,5 +1,5 @@
 mod magic_columns;
-mod relation_ir;
+pub mod relation_ir;
 
 pub(crate) mod policy;
 pub(crate) mod query;
