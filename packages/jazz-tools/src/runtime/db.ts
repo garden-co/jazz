@@ -110,7 +110,7 @@ export interface DbConfig {
   asyncSubscriptionsOnly?: boolean;
   /**
    * Client-factory option used when `asyncSubscriptionsOnly` is true, or when a
-   * false-context subscription opts into `subscriptionMode: "async"`.
+   * synchronous-mode subscription opts into `subscriptionMode: "async"`.
    * `createDb` itself ignores this field.
    */
   subscriptionChannel?: SubscriptionChannel;
