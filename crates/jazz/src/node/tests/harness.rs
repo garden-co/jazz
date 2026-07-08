@@ -31,6 +31,7 @@ include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("policies_rls.rs");
 include!("sync.rs");
+include!("m3_differential.rs");
 include!("counter_merge.rs");
 include!("merge_heads.rs");
 include!("recovery.rs");
