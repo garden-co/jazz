@@ -2,7 +2,11 @@ import { loadWasmModule } from "../client.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
-import type { PersistentBrowserOpfsOwnerRequest } from "./persistent-browser-protocol.js";
+import {
+  isNativeRowDelta,
+  type PersistentBrowserOpfsOwnerRequest,
+  type PersistentBrowserSubscriptionFrame,
+} from "./persistent-browser-protocol.js";
 
 type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
 type WriteMessage = Extract<
@@ -16,7 +20,7 @@ const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
   onmessage: ((event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => void) | null;
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
 };
 
 workerScope.onmessage = (event: MessageEvent<PersistentBrowserOpfsOwnerRequest>) => {
@@ -79,8 +83,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       case "createExecutedSubscription": {
         const [ownerHandle, ...subscriptionArgs] = message.args;
         const result = getRuntime().createSubscription(...subscriptionArgs);
-        getRuntime().executeSubscription(result, (...args: unknown[]) => {
-          workerScope.postMessage({ subscription: ownerHandle, args });
+        getRuntime().executeSubscription(result, (delta: unknown) => {
+          const frame = subscriptionFrameFromDelta(delta);
+          workerScope.postMessage({ subscription: ownerHandle, frame }, [
+            frame.added,
+            frame.removed,
+            frame.updated,
+          ]);
         });
         postResult(message.id, result);
         return;
@@ -209,4 +218,32 @@ function postError(id: number, error: unknown): void {
         ? { name: error.name, message: error.message }
         : { message: String(error) },
   });
+}
+
+function subscriptionFrameFromDelta(delta: unknown): PersistentBrowserSubscriptionFrame {
+  if (!isNativeRowDelta(delta)) {
+    throw new Error(
+      "Persistent browser subscription channel received a non-encoded delta; encoded framing is required",
+    );
+  }
+  const added = transferableBuffer(delta.added);
+  const removed = transferableBuffer(delta.removed);
+  const updated = transferableBuffer(delta.updated);
+  return {
+    kind: "native-row-delta",
+    reset: delta.reset,
+    added,
+    removed,
+    updated,
+    addedCount: delta.addedCount,
+    removedCount: delta.removedCount,
+    updatedCount: delta.updatedCount,
+  };
+}
+
+function transferableBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer as ArrayBuffer;
+  }
+  return bytes.slice().buffer;
 }

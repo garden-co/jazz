@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WasmSchema } from "../../drivers/types.js";
+import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./native-codec.js";
 import {
   decodeWebSocketFrameBatch,
@@ -9,8 +9,16 @@ import {
 } from "./websocket.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
+import { decodeNativeDelta } from "../subscription-manager.js";
 
 const previousWebSocket = globalThis.WebSocket;
+
+function decodeTestDeltas(
+  deltas: unknown[],
+  columns: readonly ColumnDescriptor[] = testSchema.todos.columns,
+) {
+  return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
+}
 
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
@@ -578,7 +586,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "visible after scheduled tick" }],
       },
     ]);
-    expect(deltas).toEqual([
+    expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
       [
         {
           kind: 0,
@@ -1033,7 +1041,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    expect(deltas).toEqual([
+    expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
       [
         {
           kind: 0,
@@ -1369,7 +1377,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(calls).toEqual(["prepareQuery", "subscribe"]);
-    expect(deltas).toEqual([
+    const relationOutputColumns: ColumnDescriptor[] = [
+      relationSchema.users.columns[0]!,
+      {
+        name: "todosViaOwner",
+        column_type: {
+          type: "Array",
+          element: { type: "Row", columns: relationSchema.todos.columns },
+        },
+        nullable: false,
+      },
+    ];
+    expect(decodeTestDeltas(deltas, relationOutputColumns)).toEqual([
       [
         {
           kind: 0,
@@ -1555,7 +1574,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(calls).toEqual(["prepareQuery", "subscribe"]);
-    expect(deltas).toEqual([
+    expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
       [
         {
           kind: 0,
@@ -2260,7 +2279,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    expect(deltas).toEqual([
+    expect(decodeTestDeltas(deltas.slice(0, 2))).toEqual([
       [
         {
           kind: 0,
@@ -2306,6 +2325,8 @@ describe("NativeRuntimeAdapter server transport", () => {
           index: 0,
         },
       ],
+    ]);
+    expect(decodeTestDeltas(deltas.slice(2))).toEqual([
       [
         {
           kind: 1,
@@ -2794,7 +2815,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
     await Promise.resolve();
 
-    expect(deltas[0]).toHaveLength(2);
+    expect(decodeTestDeltas(deltas)[0]).toHaveLength(2);
     expect(readPreparedUuidComparison(preparedBytes!)).toMatchObject({
       table: "todos",
       predicateTag: 3,

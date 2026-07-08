@@ -408,6 +408,9 @@ export class SubscriptionsOrchestrator {
           for (const listener of Array.from(entry.listeners)) {
             if (wasPending) {
               listener.onfulfilled?.(delta.all);
+            } else if (delta.reset) {
+              listener.onReset?.();
+              listener.onfulfilled?.(delta.all);
             } else {
               listener.onDelta?.(delta);
             }

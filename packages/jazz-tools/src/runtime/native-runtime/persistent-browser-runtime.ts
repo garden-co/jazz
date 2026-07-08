@@ -1,7 +1,9 @@
 import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
+import type { NativeRowDelta } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type {
+  PersistentBrowserSubscriptionMessage,
   PersistentBrowserOpfsOwnerRequest,
   PersistentBrowserRequestArgs,
   PersistentBrowserWorkerMethod,
@@ -22,7 +24,7 @@ type PendingCall = {
 type WorkerResponse =
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: { name?: string; message?: string } }
-  | { subscription: number; args: unknown[] }
+  | PersistentBrowserSubscriptionMessage
   | { event: "authFailure"; reason: string };
 
 type CompletedTxState = "committed" | "rolled_back";
@@ -493,7 +495,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     if ("subscription" in message) {
       const callback = this.subscriptions.get(message.subscription);
-      callback?.(...message.args);
+      callback?.(nativeDeltaFromFrame(message));
       return;
     }
     const pending = this.pending.get(message.id);
@@ -519,6 +521,22 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     this.pending.clear();
   }
+}
+
+function nativeDeltaFromFrame(message: PersistentBrowserSubscriptionMessage): NativeRowDelta {
+  if (message.frame.kind !== "native-row-delta") {
+    throw new Error(`Unknown persistent browser subscription frame ${message.frame.kind}`);
+  }
+  return {
+    __jazzNativeRowDelta: true,
+    reset: message.frame.reset,
+    added: new Uint8Array(message.frame.added),
+    removed: new Uint8Array(message.frame.removed),
+    updated: new Uint8Array(message.frame.updated),
+    addedCount: message.frame.addedCount,
+    removedCount: message.frame.removedCount,
+    updatedCount: message.frame.updatedCount,
+  };
 }
 
 function ignoreExpectedShutdown(error: unknown): void {

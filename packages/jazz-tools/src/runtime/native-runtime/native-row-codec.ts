@@ -264,6 +264,17 @@ export function decodeNativeRow(
   return row;
 }
 
+export function encodeNativeRowValues(
+  columns: readonly ColumnDescriptor[],
+  values: readonly Value[],
+): Uint8Array {
+  const descriptor = descriptorFromColumns(columns);
+  return createRecord(
+    descriptor,
+    columns.map((column, index) => encodeValueForColumn(column, values[index])),
+  );
+}
+
 export function decodeNativeRowObject(
   id: string | undefined,
   columns: readonly ColumnDescriptor[],
@@ -336,6 +347,134 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
   }));
 }
 
+function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
+  if (!value || value.type === "Null") {
+    if (!column.nullable) {
+      throw new Error(`missing non-nullable value for ${column.name}`);
+    }
+    return encodeNullValue(columnValueType(column));
+  }
+  const encoded = encodeNonNullValue(column.column_type, value);
+  if (!column.nullable) return encoded;
+  const valueType = columnValueType(column);
+  const inner = valueType.inner ?? columnTypeToValueType(column.column_type);
+  if (fixedSize(inner) == null) {
+    return concatBytes([Uint8Array.of(1), encoded]);
+  }
+  const output = new Uint8Array(1 + encoded.length);
+  output[0] = 1;
+  output.set(encoded, 1);
+  return output;
+}
+
+function encodeNullValue(valueType: ValueType): Uint8Array {
+  const width = fixedSize(valueType);
+  return width == null ? Uint8Array.of(0) : new Uint8Array(width);
+}
+
+function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
+  switch (type.type) {
+    case "Boolean":
+      if (value.type !== "Boolean") throw new Error("expected Boolean value");
+      return Uint8Array.of(value.value ? 1 : 0);
+    case "Integer": {
+      if (value.type !== "Integer" || !Number.isSafeInteger(value.value)) {
+        throw new Error("expected Integer value");
+      }
+      const bytes = new Uint8Array(4);
+      new DataView(bytes.buffer).setUint32(0, (value.value ^ 0x80000000) >>> 0, true);
+      return bytes;
+    }
+    case "BigInt":
+    case "Timestamp": {
+      if (
+        (value.type !== "BigInt" && value.type !== "Timestamp") ||
+        !Number.isSafeInteger(value.value)
+      ) {
+        throw new Error(`expected ${type.type} value`);
+      }
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setBigUint64(0, BigInt(value.value), true);
+      return bytes;
+    }
+    case "Double": {
+      if (value.type !== "Double") throw new Error("expected Double value");
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setFloat64(0, value.value, true);
+      return bytes;
+    }
+    case "Text":
+    case "Json":
+    case "Enum":
+      if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
+      return new TextEncoder().encode(value.value);
+    case "Uuid":
+      if (value.type !== "Uuid") throw new Error("expected Uuid value");
+      return parseUuid(value.value);
+    case "Bytea":
+      if (value.type !== "Bytea") throw new Error("expected Bytea value");
+      return value.value;
+    case "Array":
+      if (value.type !== "Array") throw new Error("expected Array value");
+      return encodeArrayValue(type.element, value.value);
+    case "Row":
+      if (value.type !== "Row") throw new Error("expected Row value");
+      return encodeRowValue(type.columns, value.value);
+  }
+}
+
+function encodeRowValue(
+  columns: readonly ColumnDescriptor[],
+  value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> },
+): Uint8Array {
+  const values = value.valuesByColumn
+    ? columns.map(
+        (column) =>
+          value.valuesByColumn?.get(column.name) ??
+          (column.column_type.type === "Array"
+            ? ({ type: "Array", value: [] } satisfies Value)
+            : ({ type: "Null" } satisfies Value)),
+      )
+    : value.values;
+  const encodedValues = encodeNativeRowValues(columns, values);
+  const idBytes = value.id ? parseUuid(value.id) : new Uint8Array();
+  return concatBytes([
+    Uint8Array.of(value.id ? 1 : 0),
+    idBytes,
+    u32Le(encodedValues.byteLength),
+    encodedValues,
+  ]);
+}
+
+function encodeArrayValue(elementType: ColumnType, values: readonly Value[]): Uint8Array {
+  const encoded = values.map((value) => encodeNonNullValue(elementType, value));
+  const elementWidth = fixedSize(columnTypeToValueType(elementType));
+  if (elementWidth != null) return concatBytes(encoded);
+
+  const offsets = new Uint8Array(Math.max(0, values.length - 1) * 4);
+  const view = new DataView(offsets.buffer);
+  let nextOffset = 4 + offsets.byteLength;
+  encoded.slice(0, -1).forEach((chunk, index) => {
+    nextOffset += chunk.length;
+    view.setUint32(index * 4, nextOffset, true);
+  });
+  return concatBytes([u32Le(values.length), offsets, ...encoded]);
+}
+
+function u32Le(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, true);
+  return bytes;
+}
+
+function parseUuid(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    throw new Error(`invalid UUID value ${value}`);
+  }
+  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+}
+
 function columnValueType(column: ColumnDescriptor): ValueType {
   const valueType = columnTypeToValueType(column.column_type);
   return column.nullable ? { tag: 12, inner: valueType } : valueType;
@@ -363,7 +502,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Array":
       return { tag: 11, inner: columnTypeToValueType(type.element) };
     case "Row":
-      throw new Error("Core runtime does not encode nested row columns yet");
+      return { tag: 7 };
   }
 }
 
@@ -391,8 +530,28 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
     case "Row":
-      return { type: "Bytea", value: bytes.slice() };
+      return { type: "Row", value: decodeRowValue(type.columns, bytes) };
   }
+}
+
+function decodeRowValue(
+  columns: readonly ColumnDescriptor[],
+  bytes: Uint8Array,
+): { id?: string; values: Value[] } {
+  if (bytes.byteLength < 5) throw new Error("invalid nested row value");
+  const hasId = bytes[0] === 1;
+  let offset = 1;
+  let id: string | undefined;
+  if (hasId) {
+    id = formatUuid(bytes.subarray(offset, offset + 16));
+    offset += 16;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const len = view.getUint32(offset, true);
+  offset += 4;
+  const raw = bytes.subarray(offset, offset + len);
+  if (raw.byteLength !== len) throw new Error("invalid nested row value length");
+  return { id, values: decodeNativeRowValues(columns, raw) };
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {
