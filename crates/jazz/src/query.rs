@@ -1648,7 +1648,7 @@ fn validate_query_canonical_parts(
         }
     }
     let normalized = normalize_query(query);
-    let canonical = canonical_query_bytes(&normalized);
+    let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
 }
 
@@ -2407,6 +2407,33 @@ fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
     bytes
 }
 
+fn canonical_policy_branch_key_for_schema(
+    branch: &PolicyBranch,
+    schema: &JazzSchema,
+) -> Result<Vec<u8>, QueryError> {
+    let mut bytes = Vec::new();
+    put_len(&mut bytes, branch.filters.len());
+    for filter in &branch.filters {
+        put_bytes(&mut bytes, &canonical_predicate_key(filter));
+    }
+    put_len(&mut bytes, branch.joins.len());
+    for join in &branch.joins {
+        put_bytes(&mut bytes, &canonical_join_key(join));
+    }
+    put_len(&mut bytes, branch.reachable.len());
+    for reachable in &branch.reachable {
+        put_bytes(
+            &mut bytes,
+            &canonical_reachable_key_for_schema(reachable, schema)?,
+        );
+    }
+    put_len(&mut bytes, branch.inherits.len());
+    for inherits in &branch.inherits {
+        put_bytes(&mut bytes, &canonical_inherits_key(inherits));
+    }
+    Ok(bytes)
+}
+
 fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(match aggregate.function {
@@ -2471,6 +2498,32 @@ fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
 }
 
 fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
+    canonical_reachable_key_with_seed_type(reachable, None)
+}
+
+fn canonical_reachable_key_for_schema(
+    reachable: &ReachableVia,
+    schema: &JazzSchema,
+) -> Result<Vec<u8>, QueryError> {
+    let seed_value_type = reachable
+        .seed
+        .as_ref()
+        .and_then(|seed| seed.user_column.as_ref().map(|column| (seed, column)))
+        .map(|(seed, column)| {
+            table(schema, &seed.table)
+                .and_then(|table| planner_column_type(&table, column).cloned())
+        })
+        .transpose()?;
+    Ok(canonical_reachable_key_with_seed_type(
+        reachable,
+        seed_value_type.as_ref(),
+    ))
+}
+
+fn canonical_reachable_key_with_seed_type(
+    reachable: &ReachableVia,
+    seed_value_type: Option<&ColumnType>,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, &reachable.access_table);
     put_str(&mut bytes, &reachable.access_row_column);
@@ -2504,6 +2557,10 @@ fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
             bytes.push(b'u');
             put_str(&mut bytes, user_column);
             put_str(&mut bytes, user_claim);
+            if let Some(seed_value_type) = seed_value_type {
+                bytes.push(b't');
+                put_column_type(&mut bytes, seed_value_type);
+            }
         }
         put_str(&mut bytes, &seed.team_column);
         put_len(&mut bytes, seed.filters.len());
@@ -2676,7 +2733,10 @@ fn canonical_operand_key(operand: &Operand) -> Vec<u8> {
     bytes
 }
 
-fn canonical_query_bytes(query: &Query) -> Vec<u8> {
+fn canonical_query_bytes_for_schema(
+    query: &Query,
+    schema: &JazzSchema,
+) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"jazz-query-v0");
     put_str(&mut bytes, &query.table);
@@ -2692,14 +2752,20 @@ fn canonical_query_bytes(query: &Query) -> Vec<u8> {
         bytes.push(b'b');
         put_len(&mut bytes, query.policy_branches.len());
         for branch in &query.policy_branches {
-            put_bytes(&mut bytes, &canonical_policy_branch_key(branch));
+            put_bytes(
+                &mut bytes,
+                &canonical_policy_branch_key_for_schema(branch, schema)?,
+            );
         }
     }
     if !query.reachable.is_empty() {
         bytes.push(b'r');
         put_len(&mut bytes, query.reachable.len());
         for reachable in &query.reachable {
-            put_bytes(&mut bytes, &canonical_reachable_key(reachable));
+            put_bytes(
+                &mut bytes,
+                &canonical_reachable_key_for_schema(reachable, schema)?,
+            );
         }
     }
     if !query.inherits.is_empty() {
@@ -2767,7 +2833,7 @@ fn canonical_query_bytes(query: &Query) -> Vec<u8> {
         }
         put_len(&mut bytes, query.offset);
     }
-    bytes
+    Ok(bytes)
 }
 
 fn canonical_binding_bytes(values: &BTreeMap<String, Value>) -> Vec<u8> {
@@ -2897,6 +2963,43 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(13);
             bytes.push(1);
             put_value(bytes, value);
+        }
+    }
+}
+
+fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
+    match ty {
+        ColumnType::U8 => bytes.push(1),
+        ColumnType::U16 => bytes.push(2),
+        ColumnType::U32 => bytes.push(3),
+        ColumnType::U64 => bytes.push(4),
+        ColumnType::F64 => bytes.push(5),
+        ColumnType::Bool => bytes.push(6),
+        ColumnType::String => bytes.push(7),
+        ColumnType::Bytes => bytes.push(8),
+        ColumnType::Uuid => bytes.push(9),
+        ColumnType::Enum(schema) => {
+            bytes.push(10);
+            put_str(bytes, &schema.name);
+            put_len(bytes, schema.variants.len());
+            for variant in &schema.variants {
+                put_str(bytes, variant);
+            }
+        }
+        ColumnType::Tuple(types) => {
+            bytes.push(11);
+            put_len(bytes, types.len());
+            for ty in types {
+                put_column_type(bytes, ty);
+            }
+        }
+        ColumnType::Array(member) => {
+            bytes.push(12);
+            put_column_type(bytes, member);
+        }
+        ColumnType::Nullable(inner) => {
+            bytes.push(13);
+            put_column_type(bytes, inner);
         }
     }
 }
