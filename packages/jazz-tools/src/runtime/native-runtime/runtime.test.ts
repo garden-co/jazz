@@ -2493,6 +2493,53 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("encodes uuid-looking condition values as text for text columns", async () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        conditions: [
+          {
+            column: "title",
+            op: "eq",
+            value: "00000000-0000-0000-0000-000000000001",
+          },
+        ],
+      }),
+    );
+
+    expect(readPreparedComparison(preparedBytes!)).toEqual({
+      table: "todos",
+      predicateTag: 3,
+      column: "title",
+      literalTag: 6,
+      value: "00000000-0000-0000-0000-000000000001",
+      limit: undefined,
+    });
+  });
+
   it("preserves relation IR in literals for numeric and timestamp columns", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -3449,6 +3496,211 @@ describe("NativeRuntimeAdapter server transport", () => {
               tag: 3,
               column: "room_id",
               operand: { tag: 2, claim: "roomId" },
+            },
+          ],
+          nestedJoins: [],
+        },
+      ],
+      branches: [],
+    });
+  });
+
+  it("serializes direct Inherits through parent exists joins with source lookup", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        chats: {
+          columns: [{ name: "isPublic", column_type: { type: "Boolean" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "Exists",
+                table: "chatMembers",
+                condition: {
+                  type: "And",
+                  exprs: [
+                    {
+                      type: "Cmp",
+                      column: "chatId",
+                      op: "Eq",
+                      value: { type: "OuterRowRef", column: "id" } as never,
+                    },
+                    {
+                      type: "Cmp",
+                      column: "userId",
+                      op: "Eq",
+                      value: { type: "SessionRef", path: ["user_id"] },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        chatMembers: {
+          columns: [
+            {
+              name: "chatId",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "chats",
+            },
+            { name: "userId", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+        canvases: {
+          columns: [
+            {
+              name: "chatId",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "chats",
+            },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "Inherits",
+                operation: "Select",
+                via_column: "chatId",
+              },
+            },
+          },
+        },
+      }),
+      "canvases",
+    );
+
+    expect(policy).toEqual({
+      table: "canvases",
+      filters: [],
+      joins: [
+        {
+          table: "chatMembers",
+          onColumn: "chatId",
+          targetTag: 0,
+          sourceColumn: "id",
+          sourceLookup: {
+            table: "chats",
+            rowIdSourceColumn: "chatId",
+            valueColumn: "id",
+          },
+          filters: [
+            {
+              tag: 3,
+              column: "userId",
+              operand: { tag: 2, claim: "user_id" },
+            },
+          ],
+          nestedJoins: [],
+        },
+      ],
+      branches: [],
+    });
+  });
+
+  it("serializes nested Inherits through composed source lookups", () => {
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema({
+        chats: {
+          columns: [{ name: "isPublic", column_type: { type: "Boolean" }, nullable: false }],
+          policies: {
+            select: {
+              using: {
+                type: "Exists",
+                table: "chatMembers",
+                condition: {
+                  type: "And",
+                  exprs: [
+                    {
+                      type: "Cmp",
+                      column: "chatId",
+                      op: "Eq",
+                      value: { type: "OuterRowRef", column: "id" } as never,
+                    },
+                    {
+                      type: "Cmp",
+                      column: "userId",
+                      op: "Eq",
+                      value: { type: "SessionRef", path: ["user_id"] },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        chatMembers: {
+          columns: [
+            {
+              name: "chatId",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "chats",
+            },
+            { name: "userId", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+        canvases: {
+          columns: [
+            {
+              name: "chatId",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "chats",
+            },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "Inherits",
+                operation: "Select",
+                via_column: "chatId",
+              },
+            },
+          },
+        },
+        strokes: {
+          columns: [
+            {
+              name: "canvasId",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "canvases",
+            },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "Inherits",
+                operation: "Select",
+                via_column: "canvasId",
+              },
+            },
+          },
+        },
+      }),
+      "strokes",
+    );
+
+    expect(policy).toEqual({
+      table: "strokes",
+      filters: [],
+      joins: [
+        {
+          table: "chatMembers",
+          onColumn: "chatId",
+          targetTag: 0,
+          sourceColumn: "chatId",
+          sourceLookup: {
+            table: "canvases",
+            rowIdSourceColumn: "canvasId",
+            valueColumn: "chatId",
+          },
+          filters: [
+            {
+              tag: 3,
+              column: "userId",
+              operand: { tag: 2, claim: "user_id" },
             },
           ],
           nestedJoins: [],

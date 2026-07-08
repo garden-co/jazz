@@ -692,11 +692,15 @@ fn inherited_parent_branch_to_child_query(
             on_column,
             target,
             source_column,
-            source_lookup: _,
+            source_lookup,
             correlated_filters,
             filters,
             nested_joins,
         } = join;
+        let source_column = source_lookup
+            .as_ref()
+            .map(|lookup| lookup.row_id_source_column.clone())
+            .or(source_column);
         query = match target {
             JoinTarget::Column => {
                 if let Some(source_column) = source_column {
@@ -1682,6 +1686,67 @@ mod tests {
         let lookup = join.source_lookup.as_ref().unwrap();
         assert_eq!(lookup.table, "messages");
         assert_eq!(lookup.row_id_source_column, "messageId");
+        assert_eq!(lookup.value_column, "chatId");
+    }
+
+    #[test]
+    fn converts_nested_inherited_select_branch_with_composed_source_lookup() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("chatMembers")
+                    .fk_column("chatId", "chats")
+                    .column("userId", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("canvases")
+                    .fk_column("chatId", "chats")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
+                        table: "chatMembers".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "chatId".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "chatId".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "userId".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                            },
+                        ])),
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("strokes")
+                    .fk_column("canvasId", "canvases")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "canvasId".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let strokes = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "strokes")
+            .unwrap();
+        let policy = strokes.read_policy.as_ref().unwrap();
+        assert_eq!(policy.policy_branches.len(), 1);
+        let join = &policy.policy_branches[0].joins[0];
+        assert_eq!(join.table, "chatMembers");
+        assert_eq!(join.on_column, "chatId");
+        assert_eq!(join.target, JoinTarget::Column);
+        assert_eq!(join.source_column.as_deref(), Some("chatId"));
+        let lookup = join.source_lookup.as_ref().unwrap();
+        assert_eq!(lookup.table, "canvases");
+        assert_eq!(lookup.row_id_source_column, "canvasId");
         assert_eq!(lookup.value_column, "chatId");
     }
 
