@@ -1018,6 +1018,7 @@ where
             remote_read_tier,
             read_view: opts.read_view.clone(),
             snapshot: snapshot.clone(),
+            snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
         }));
@@ -3127,18 +3128,27 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, remote_read_tier, read_view, previous, previous_settled, author) = {
+        let (
+            read_tier,
+            remote_read_tier,
+            read_view,
+            previous,
+            previous_source,
+            previous_settled,
+            author,
+        ) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.remote_read_tier,
                 state.read_view.clone(),
                 state.snapshot.clone(),
+                state.snapshot_source,
                 state.settled,
                 state.author,
             )
         };
-        let (snapshot, settled, snapshot_tier) = {
+        let (snapshot, snapshot_source, settled, snapshot_tier) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
@@ -3157,27 +3167,41 @@ where
                             .read_view_key(),
                         })
                     });
+                    let maintained_update =
+                        if let Some(maintained) = maintained_subscription.as_mut() {
+                            node.borrow_mut()
+                                .drain_local_maintained_view_subscription(maintained)?
+                        } else {
+                            None
+                        };
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let snapshot = if remote_settled_tier.is_some() {
-                        node.borrow_mut().subscription_snapshot_for_link(
+                    let (snapshot, snapshot_source) = if let Some(update) = maintained_update {
+                        (update.snapshot, SubscriptionSnapshotSource::LocalMaintained)
+                    } else if remote_settled_tier.is_some() {
+                        let remote_snapshot = node.borrow_mut().subscription_snapshot_for_link(
                             shape,
                             binding,
                             snapshot_tier,
                             author,
-                        )?
-                    } else if let Some(maintained) = maintained_subscription.as_mut() {
-                        let update = {
-                            node.borrow_mut()
-                                .drain_local_maintained_view_subscription(maintained)?
-                        };
-                        if let Some(update) = update {
-                            update.snapshot
+                        )?;
+                        if maintained_subscription.is_some()
+                            && previous.root_count > 0
+                            && previous_source == SubscriptionSnapshotSource::LocalMaintained
+                            && remote_snapshot.root_count == 0
+                        {
+                            (previous.clone(), previous_source)
                         } else {
-                            previous.clone()
+                            (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                         }
+                    } else if maintained_subscription.is_some() {
+                        (previous.clone(), previous_source)
                     } else {
-                        node.borrow_mut()
-                            .subscription_snapshot_for_link(shape, binding, read_tier, author)?
+                        (
+                            node.borrow_mut().subscription_snapshot_for_link(
+                                shape, binding, read_tier, author,
+                            )?,
+                            SubscriptionSnapshotSource::LinkSnapshot,
+                        )
                     };
                     let settled_tier = remote_read_tier.unwrap_or(read_tier);
                     let settled = subscription_is_settled(
@@ -3187,7 +3211,7 @@ where
                         settled_tier,
                         read_view,
                     );
-                    (snapshot, settled, snapshot_tier)
+                    (snapshot, snapshot_source, settled, snapshot_tier)
                 }
             }
         };
@@ -3195,6 +3219,7 @@ where
             let mut state = state.borrow_mut();
             let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
             state.snapshot = snapshot;
+            state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
                 changed += 1;
@@ -5564,8 +5589,15 @@ struct SubscriptionState {
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
+    snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
     sender: UnboundedSender<SubscriptionEvent>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubscriptionSnapshotSource {
+    LocalMaintained,
+    LinkSnapshot,
 }
 
 enum SubscriptionKind {

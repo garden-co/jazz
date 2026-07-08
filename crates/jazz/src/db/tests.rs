@@ -424,6 +424,20 @@ fn owner_read_schema() -> JazzSchema {
     .with_write_policy(Policy::public())])
 }
 
+fn created_by_read_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("todos").filter(eq(col("$createdBy"), claim("sub"))),
+    ))
+    .with_write_policy(Policy::public())])
+}
+
 fn owner_write_schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
@@ -5868,6 +5882,128 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
         rows[0].cell(&schema.tables[0], "title"),
         Some(Value::String("for subscriber".to_owned()))
     );
+}
+
+#[test]
+fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
+    let schema = created_by_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0xa1, alice, &schema);
+    let query = Query::from("todos");
+    let prepared = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let write = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("created by alice".to_owned()),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let one_shot = prepared_all(&db, &query, ReadOpts::default());
+    assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
+
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity() {
+    let schema = created_by_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0xa1, alice, &schema);
+    let query = Query::from("todos");
+    let prepared = prepared(&db, &query);
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let write = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("created by alice".to_owned()),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let one_shot = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+    assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
+
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_seed() {
+    let schema = created_by_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    while let Some(event) = subscription.try_next_event() {
+        match event {
+            SubscriptionEvent::Opened { current, .. }
+            | SubscriptionEvent::Reset { current, .. }
+            | SubscriptionEvent::Delta { current, .. } => {
+                assert!(
+                    current.rows.is_empty(),
+                    "pre-insert coverage events must stay empty"
+                );
+            }
+            SubscriptionEvent::Closed => {}
+        }
+    }
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("created by alice".to_owned()),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let one_shot = prepared_all(&client, &query, ReadOpts::default());
+    assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
+
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![write.row_uuid()]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 }
 
 fn resource_test_cells(title: &str) -> RowCells {
