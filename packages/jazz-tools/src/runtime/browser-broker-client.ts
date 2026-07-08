@@ -11,9 +11,12 @@ import {
   createBrowserBrokerUnsupportedError,
   type BrowserBrokerUnsupportedCode,
 } from "./browser-broker-errors.js";
+import { createCoreTimerRegistry, type CoreTimerKey } from "./broker-core-timers.js";
 import { loadWasmModule } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import { resolveRuntimeConfigBrokerWorkerUrl } from "./runtime-config.js";
+
+const CLIENT_CLOSED_MESSAGE = "Browser broker client closed";
 
 export interface BrowserBrokerClientSnapshot {
   brokerInstanceId: string | null;
@@ -97,11 +100,6 @@ type TabClientCommand = {
   [key: string]: unknown;
 };
 
-type TabTimerKey = {
-  kind: string;
-  [key: string]: unknown;
-};
-
 type QueuedEvent = {
   event: Record<string, unknown>;
   heldPort: MessagePort | null;
@@ -129,7 +127,9 @@ export class BrowserBrokerClient {
   private readonly roleWaiters = new Map<number, PendingWaiter>();
   private readonly resetStartWaiters = new Map<number, PendingWaiter>();
   private readonly resetWaiters = new Map<number, PendingWaiter>();
-  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly timers = createCoreTimerRegistry<CoreTimerKey>((timer) => {
+    this.dispatch({ kind: "timerFired", timer });
+  });
   private readonly queuedEvents: QueuedEvent[] = [];
   private heldPort: MessagePort | null = null;
 
@@ -164,7 +164,7 @@ export class BrowserBrokerClient {
   async waitForRole(role: BrowserBrokerRole, timeoutMs = 5_000): Promise<void> {
     const snapshot = this.coreSnapshot();
     if (snapshot.closed) {
-      throw this.closedError ?? new Error("Browser broker client closed");
+      throw this.closedOrDefaultError();
     }
     if (snapshot.role === role && snapshot.leaderTabId !== null) {
       return;
@@ -225,14 +225,14 @@ export class BrowserBrokerClient {
 
   async requestStorageReset(requestId: string): Promise<void> {
     if (this.coreSnapshot().closed) {
-      throw this.closedError ?? new Error("Browser broker client closed");
+      throw this.closedOrDefaultError();
     }
     // A reconnect drops in-flight sends; wait for it to settle so the
     // reset request reaches the new broker instance instead of vanishing.
     while (this.coreSnapshot().reconnecting && this.reconnectDone) {
       await this.reconnectDone;
       if (this.coreSnapshot().closed) {
-        throw this.closedError ?? new Error("Browser broker client closed");
+        throw this.closedOrDefaultError();
       }
     }
 
@@ -261,7 +261,7 @@ export class BrowserBrokerClient {
 
   async shutdown(): Promise<void> {
     if (this.coreSnapshot().closed) return;
-    this.closedError ??= new Error("Browser broker client closed");
+    this.closedError ??= new Error(CLIENT_CLOSED_MESSAGE);
     this.dispatch({ kind: "shutdownRequested" });
   }
 
@@ -487,10 +487,10 @@ export class BrowserBrokerClient {
           this.port?.postMessage(command.message);
           break;
         case "setTimer":
-          this.setCoreTimer(command.timer as TabTimerKey, command.delayMs as number);
+          this.timers.set(command.timer as CoreTimerKey, command.delayMs as number);
           break;
         case "clearTimer":
-          this.clearCoreTimer(command.timer as TabTimerKey);
+          this.timers.clear(command.timer as CoreTimerKey);
           break;
         case "settleRoleWaiter":
           this.settleWaiter(
@@ -615,7 +615,7 @@ export class BrowserBrokerClient {
           break;
         }
         case "invokeOnClosed":
-          this.options.onClosed?.(this.closedError ?? new Error("Browser broker client closed"));
+          this.options.onClosed?.(this.closedOrDefaultError());
           break;
       }
     }
@@ -634,10 +634,14 @@ export class BrowserBrokerClient {
       return;
     }
     if (rejection.kind === "closedError") {
-      waiter.reject(this.closedError ?? new Error("Browser broker client closed"));
+      waiter.reject(this.closedOrDefaultError());
       return;
     }
     waiter.reject(new Error(rejection.message));
+  }
+
+  private closedOrDefaultError(): Error {
+    return this.closedError ?? new Error(CLIENT_CLOSED_MESSAGE);
   }
 
   private reportStorageResetReady(
@@ -698,26 +702,6 @@ export class BrowserBrokerClient {
       return respond();
     }
     return respond !== false;
-  }
-
-  private setCoreTimer(timer: TabTimerKey, delayMs: number): void {
-    const key = JSON.stringify(timer);
-    clearTimeout(this.timers.get(key));
-    this.timers.set(
-      key,
-      setTimeout(() => {
-        this.timers.delete(key);
-        this.dispatch({ kind: "timerFired", timer });
-      }, delayMs),
-    );
-  }
-
-  private clearCoreTimer(timer: TabTimerKey): void {
-    const key = JSON.stringify(timer);
-    const handle = this.timers.get(key);
-    if (!handle) return;
-    clearTimeout(handle);
-    this.timers.delete(key);
   }
 
   private detachBrokerPort(port: MessagePort): void {

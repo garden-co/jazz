@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+// Shared liveness defaults. The broker's eviction math and the tab client's
+// liveness timeout (ping + pong) both read these; a drift between the two
+// desynchronizes ping cadence from eviction timing.
+pub const DEFAULT_BROKER_PING_INTERVAL_MS: u64 = 1_000;
+pub const DEFAULT_BROKER_PONG_TIMEOUT_MS: u64 = 3_000;
+pub const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS: u64 = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
@@ -200,26 +207,11 @@ where
         .copied()
         .filter(|candidate| candidate.visibility == Visibility::Visible)
         .collect();
-    let pool = if visible.is_empty() { &all } else { &visible };
+    let pool = if visible.is_empty() { all } else { visible };
 
-    let mut selected: Option<&Candidate> = None;
-    for candidate in pool {
-        let Some(current) = selected else {
-            selected = Some(candidate);
-            continue;
-        };
-        if candidate.last_visible_at > current.last_visible_at
-            || (candidate.last_visible_at == current.last_visible_at
-                && candidate.tab_id > current.tab_id)
-        {
-            selected = Some(candidate);
-        }
-    }
-    selected
-}
-
-pub fn is_stale_leadership_id(incoming: u64, current: u64) -> bool {
-    incoming < current
+    // Tab ids are unique, so the (last_visible_at, tab_id) key has no ties.
+    pool.into_iter()
+        .max_by_key(|candidate| (candidate.last_visible_at, &candidate.tab_id))
 }
 
 pub fn normalize_positive_timeout(value: Option<f64>, fallback: u64) -> u64 {
@@ -231,7 +223,7 @@ pub fn normalize_positive_timeout(value: Option<f64>, fallback: u64) -> u64 {
 
 pub fn normalize_force_takeover_timeout(value: Option<f64>) -> u64 {
     match value {
-        Some(value) if value.is_finite() && value >= 0.0 => value.floor().max(0.0) as u64,
-        _ => 1_000,
+        Some(value) if value.is_finite() && value >= 0.0 => value.floor() as u64,
+        _ => DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS,
     }
 }

@@ -4,18 +4,16 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    ControlMessage, TabMessage, Visibility, normalize_force_takeover_timeout,
+    ControlMessage, DEFAULT_BROKER_PING_INTERVAL_MS, DEFAULT_BROKER_PONG_TIMEOUT_MS,
+    DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS, TabMessage, Visibility, normalize_force_takeover_timeout,
     normalize_positive_timeout, select_leader_candidate,
 };
 
-const DEFAULT_FORCE_TAKEOVER_TIMEOUT_MS: u64 = 1_000;
 const LEADER_FAILURE_RETRY_BACKOFF_MS: i64 = 1_000;
 const INITIAL_FOLLOWER_ATTACHMENT_TIMEOUT_MS: u64 = 1_000;
 const MAX_FOLLOWER_ATTACHMENT_TIMEOUT_MS: u64 = 30_000;
 const COMPLETED_STORAGE_RESET_OUTCOME_TTL_MS: i64 = 30_000;
 const MAX_COMPLETED_STORAGE_RESET_OUTCOMES: usize = 100;
-const DEFAULT_BROKER_PING_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_BROKER_PONG_TIMEOUT_MS: u64 = 3_000;
 const INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE: &str =
     "incompatible-browser-broker-configuration";
 
@@ -170,12 +168,8 @@ struct Namespace {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct TabState {
     tab_id: String,
-    app_id: String,
-    db_name: String,
-    fingerprint: String,
     schema_fingerprint: Option<String>,
     visibility: Visibility,
     last_visible_at: i64,
@@ -345,29 +339,21 @@ impl BrokerCore {
             return;
         };
 
-        if self.namespace.is_none() {
-            self.namespace = Some(Namespace {
-                app_id: app_id.clone(),
-                db_name: db_name.clone(),
-                fingerprint: fingerprint.clone(),
-                force_takeover_timeout_ms: normalize_force_takeover_timeout(
-                    force_takeover_timeout_ms,
-                ),
-                broker_ping_interval_ms: normalize_positive_timeout(
-                    broker_ping_interval_ms,
-                    DEFAULT_BROKER_PING_INTERVAL_MS,
-                ),
-                broker_pong_timeout_ms: normalize_positive_timeout(
-                    broker_pong_timeout_ms,
-                    DEFAULT_BROKER_PONG_TIMEOUT_MS,
-                ),
-                schema_fingerprint: None,
-            });
-        }
-
-        let Some(namespace) = &self.namespace else {
-            return;
-        };
+        let namespace = self.namespace.get_or_insert_with(|| Namespace {
+            app_id: app_id.clone(),
+            db_name: db_name.clone(),
+            fingerprint: fingerprint.clone(),
+            force_takeover_timeout_ms: normalize_force_takeover_timeout(force_takeover_timeout_ms),
+            broker_ping_interval_ms: normalize_positive_timeout(
+                broker_ping_interval_ms,
+                DEFAULT_BROKER_PING_INTERVAL_MS,
+            ),
+            broker_pong_timeout_ms: normalize_positive_timeout(
+                broker_pong_timeout_ms,
+                DEFAULT_BROKER_PONG_TIMEOUT_MS,
+            ),
+            schema_fingerprint: None,
+        });
 
         if namespace.app_id != app_id
             || namespace.db_name != db_name
@@ -401,9 +387,6 @@ impl BrokerCore {
             tab_id.clone(),
             TabState {
                 tab_id: tab_id.clone(),
-                app_id,
-                db_name,
-                fingerprint,
                 schema_fingerprint: None,
                 visibility,
                 last_visible_at: if visibility == Visibility::Visible {
@@ -431,23 +414,21 @@ impl BrokerCore {
             return;
         }
 
-        if self
+        if let Some(leadership_id) = self
             .leader
             .as_ref()
-            .is_some_and(|leader| leader.tab_id == tab_id)
+            .filter(|leader| leader.tab_id == tab_id)
+            .map(|leader| leader.leadership_id)
         {
-            let leadership_id = self.leader.as_ref().map(|leader| leader.leadership_id);
-            if let Some(leadership_id) = leadership_id {
-                self.clear_leader(
-                    leadership_id,
-                    ClearLeaderOptions {
-                        demote_leader: false,
-                        remove_leader_tab: false,
-                    },
-                    now_ms,
-                    commands,
-                );
-            }
+            self.clear_leader(
+                leadership_id,
+                ClearLeaderOptions {
+                    demote_leader: false,
+                    remove_leader_tab: false,
+                },
+                now_ms,
+                commands,
+            );
         }
 
         if let Some(leader) = self.leader.clone().filter(|leader| leader.ready) {
@@ -479,9 +460,9 @@ impl BrokerCore {
             if !self.warned_stale_instance_drop {
                 self.warned_stale_instance_drop = true;
                 commands.push(BrokerCommand::WarnStaleInstanceDrop {
-                    message_type,
+                    message_type: message_type.to_string(),
                     tab_id,
-                    stamped_instance_id: broker_instance_id,
+                    stamped_instance_id: broker_instance_id.to_string(),
                 });
             }
             return;
@@ -533,14 +514,16 @@ impl BrokerCore {
                 follower_tab_id,
                 ..
             } => {
-                let leader = self.leader.clone();
-                if leader.as_ref().is_some_and(|leader| {
-                    leader.tab_id == tab_id && leader.leadership_id == leadership_id
-                }) {
+                if let Some(leader) = self
+                    .leader
+                    .as_ref()
+                    .filter(|leader| {
+                        leader.tab_id == tab_id && leader.leadership_id == leadership_id
+                    })
+                    .cloned()
+                {
                     self.clear_follower_attachment_key(&follower_tab_id, leadership_id, commands);
-                    if let Some(leader) = leader {
-                        self.assign_follower_ports(&leader, commands);
-                    }
+                    self.assign_follower_ports(&leader, commands);
                 }
             }
             TabMessage::SchemaReady {
@@ -698,15 +681,13 @@ impl BrokerCore {
             return;
         }
 
-        if let Some(leader) = self.leader.as_mut() {
-            leader.ready = true;
-            leader.tab_lock_name = Some(tab_lock_name);
-            leader.worker_lock_name = Some(worker_lock_name);
-        }
-
-        let Some(leader) = self.leader.clone() else {
+        let Some(leader) = self.leader.as_mut() else {
             return;
         };
+        leader.ready = true;
+        leader.tab_lock_name = Some(tab_lock_name);
+        leader.worker_lock_name = Some(worker_lock_name);
+        let leader = leader.clone();
         self.announce_leader_ready(&leader, commands);
         self.start_leader_lock_monitors(&leader, commands);
         if self
@@ -778,16 +759,12 @@ impl BrokerCore {
     }
 
     fn handle_shutdown(&mut self, tab_id: &str, now_ms: i64, commands: &mut Vec<BrokerCommand>) {
-        if self
+        if let Some(leadership_id) = self
             .leader
             .as_ref()
-            .is_some_and(|leader| leader.tab_id == tab_id)
+            .filter(|leader| leader.tab_id == tab_id)
+            .map(|leader| leader.leadership_id)
         {
-            let Some(leadership_id) = self.leader.as_ref().map(|leader| leader.leadership_id)
-            else {
-                return;
-            };
-            let active_reset = self.reset_state.clone();
             self.remove_tab(
                 tab_id,
                 RemoveTabOptions {
@@ -797,28 +774,7 @@ impl BrokerCore {
                 now_ms,
                 commands,
             );
-            let cleared = self.clear_leader(
-                leadership_id,
-                ClearLeaderOptions {
-                    demote_leader: false,
-                    remove_leader_tab: false,
-                },
-                now_ms,
-                commands,
-            );
-            self.remove_tab_from_active_reset(tab_id, now_ms, commands);
-            if active_reset.is_some_and(|reset| {
-                reset.promoted_leadership_id == Some(leadership_id)
-                    && reset.phase != ResetPhase::Preparing
-            }) {
-                if let Some(reset) = self.reset_state.as_mut() {
-                    reset.promoted_leadership_id = None;
-                }
-                self.promote_reset_leader(now_ms, commands);
-                self.reset_if_idle(commands);
-                return;
-            }
-            self.schedule_replacement_election(cleared, now_ms, commands);
+            self.handle_leader_departure(tab_id, leadership_id, now_ms, commands);
         } else {
             self.remove_tab(
                 tab_id,
@@ -830,6 +786,41 @@ impl BrokerCore {
                 commands,
             );
             self.remove_tab_from_active_reset(tab_id, now_ms, commands);
+            self.reset_if_idle(commands);
+        }
+    }
+
+    /// Shared tail for a departed leader tab (graceful shutdown or eviction):
+    /// clear the leadership, drop the tab from any active reset, then either
+    /// promote a replacement reset leader or schedule a replacement election.
+    fn handle_leader_departure(
+        &mut self,
+        tab_id: &str,
+        leadership_id: u64,
+        now_ms: i64,
+        commands: &mut Vec<BrokerCommand>,
+    ) {
+        let active_reset = self.reset_state.clone();
+        let cleared = self.clear_leader(
+            leadership_id,
+            ClearLeaderOptions {
+                demote_leader: false,
+                remove_leader_tab: false,
+            },
+            now_ms,
+            commands,
+        );
+        self.remove_tab_from_active_reset(tab_id, now_ms, commands);
+        if active_reset.is_some_and(|reset| {
+            reset.promoted_leadership_id == Some(leadership_id)
+                && reset.phase != ResetPhase::Preparing
+        }) {
+            if let Some(reset) = self.reset_state.as_mut() {
+                reset.promoted_leadership_id = None;
+            }
+            self.promote_reset_leader(now_ms, commands);
+        } else {
+            self.schedule_replacement_election(cleared, now_ms, commands);
         }
         self.reset_if_idle(commands);
     }
@@ -987,16 +978,29 @@ impl BrokerCore {
             );
         }
 
-        let Some(tab) = self.tabs.get(&candidate_tab_id).cloned() else {
+        let Some(port_id) = self.tabs.get(&candidate_tab_id).map(|tab| tab.port_id) else {
             return;
         };
-        let Some((tab_lock_name, worker_lock_name)) = self.current_leader_lock_names() else {
+        let Some(lock_names) = self.current_leader_lock_names() else {
             return;
         };
 
+        self.promote_tab_to_leader(&candidate_tab_id, port_id, lock_names, None, commands);
+    }
+
+    /// Install a tab as the next leader under a fresh leadership id and post
+    /// its BecomeLeader message. Shared by elections and reset promotions.
+    fn promote_tab_to_leader(
+        &mut self,
+        tab_id: &str,
+        port_id: PortId,
+        (tab_lock_name, worker_lock_name): (String, String),
+        reset_request_id: Option<String>,
+        commands: &mut Vec<BrokerCommand>,
+    ) {
         self.current_leadership_id = self.current_leadership_id.saturating_add(1);
         self.leader = Some(LeaderState {
-            tab_id: tab.tab_id.clone(),
+            tab_id: tab_id.to_string(),
             leadership_id: self.current_leadership_id,
             ready: false,
             tab_lock_name: Some(tab_lock_name),
@@ -1006,11 +1010,11 @@ impl BrokerCore {
         });
 
         self.post(
-            tab.port_id,
+            port_id,
             ControlMessage::BecomeLeader {
                 broker_instance_id: self.broker_instance_id.clone(),
                 leadership_id: self.current_leadership_id,
-                reset_request_id: None,
+                reset_request_id,
             },
             commands,
         );
@@ -1116,15 +1120,8 @@ impl BrokerCore {
             self.clear_pending_follower_attachment(&key, commands);
         }
 
-        let attached_keys: Vec<AttachmentKey> = self
-            .attached_follower_ports
-            .iter()
-            .filter(|key| key.follower_tab_id == follower_tab_id)
-            .cloned()
-            .collect();
-        for key in attached_keys {
-            self.attached_follower_ports.shift_remove(&key);
-        }
+        self.attached_follower_ports
+            .retain(|key| key.follower_tab_id != follower_tab_id);
     }
 
     fn clear_follower_attachment_key(
@@ -1222,24 +1219,22 @@ impl BrokerCore {
             );
         }
 
-        if self
+        if let Some(leadership_id) = self
             .leader
             .as_ref()
-            .is_some_and(|leader| leader.tab_id == tab_id)
+            .filter(|leader| leader.tab_id == tab_id)
+            .map(|leader| leader.leadership_id)
         {
-            let leadership_id = self.leader.as_ref().map(|leader| leader.leadership_id);
-            if let Some(leadership_id) = leadership_id {
-                let cleared = self.clear_leader(
-                    leadership_id,
-                    ClearLeaderOptions {
-                        demote_leader: true,
-                        remove_leader_tab: false,
-                    },
-                    now_ms,
-                    commands,
-                );
-                self.schedule_replacement_election(cleared, now_ms, commands);
-            }
+            let cleared = self.clear_leader(
+                leadership_id,
+                ClearLeaderOptions {
+                    demote_leader: true,
+                    remove_leader_tab: false,
+                },
+                now_ms,
+                commands,
+            );
+            self.schedule_replacement_election(cleared, now_ms, commands);
         }
     }
 
@@ -1283,27 +1278,17 @@ impl BrokerCore {
         }
     }
 
-    fn announce_leader_ready(
-        &mut self,
-        next_leader: &LeaderState,
-        commands: &mut Vec<BrokerCommand>,
-    ) {
-        let posts: Vec<(PortId, ControlMessage)> = self
-            .tabs
-            .values()
-            .map(|tab| {
-                (
-                    tab.port_id,
-                    ControlMessage::LeaderReady {
-                        broker_instance_id: self.broker_instance_id.clone(),
-                        leader_tab_id: next_leader.tab_id.clone(),
-                        leadership_id: next_leader.leadership_id,
-                    },
-                )
-            })
-            .collect();
-        for (port_id, message) in posts {
-            self.post(port_id, message, commands);
+    fn announce_leader_ready(&self, next_leader: &LeaderState, commands: &mut Vec<BrokerCommand>) {
+        for tab in self.tabs.values() {
+            self.post(
+                tab.port_id,
+                ControlMessage::LeaderReady {
+                    broker_instance_id: self.broker_instance_id.clone(),
+                    leader_tab_id: next_leader.tab_id.clone(),
+                    leadership_id: next_leader.leadership_id,
+                },
+                commands,
+            );
         }
     }
 
@@ -1392,15 +1377,12 @@ impl BrokerCore {
             );
         }
 
-        let close_posts: Vec<PortId> = self
-            .tabs
-            .values()
-            .filter(|tab| tab.tab_id != current.tab_id)
-            .map(|tab| tab.port_id)
-            .collect();
-        for port_id in close_posts {
+        for tab in self.tabs.values() {
+            if tab.tab_id == current.tab_id {
+                continue;
+            }
             self.post(
-                port_id,
+                tab.port_id,
                 ControlMessage::CloseFollowerPort {
                     broker_instance_id: self.broker_instance_id.clone(),
                     leadership_id,
@@ -1508,10 +1490,9 @@ impl BrokerCore {
             );
         }
 
-        let posts: Vec<PortId> = self.tabs.values().map(|tab| tab.port_id).collect();
-        for port_id in posts {
+        for tab in self.tabs.values() {
             self.post(
-                port_id,
+                tab.port_id,
                 ControlMessage::StorageResetBegin {
                     broker_instance_id: self.broker_instance_id.clone(),
                     request_id: request_id.clone(),
@@ -1617,7 +1598,11 @@ impl BrokerCore {
             return;
         };
         let candidates = self.eligible_leader_candidates(now_ms);
-        let Some(candidate) = select_leader_candidate(candidates.iter()) else {
+        let promoted = select_leader_candidate(candidates.iter())
+            .and_then(|candidate| self.tabs.get(&candidate.tab_id))
+            .map(|tab| (tab.tab_id.clone(), tab.port_id))
+            .zip(self.current_leader_lock_names());
+        let Some(((tab_id, port_id), lock_names)) = promoted else {
             self.finish_storage_reset(
                 active_reset,
                 false,
@@ -1628,50 +1613,16 @@ impl BrokerCore {
             return;
         };
 
-        let Some(tab) = self.tabs.get(&candidate.tab_id).cloned() else {
-            self.finish_storage_reset(
-                active_reset,
-                false,
-                Some("No connected tab is available to reset storage".to_string()),
-                now_ms,
-                commands,
-            );
-            return;
-        };
-        let Some((tab_lock_name, worker_lock_name)) = self.current_leader_lock_names() else {
-            self.finish_storage_reset(
-                active_reset,
-                false,
-                Some("No connected tab is available to reset storage".to_string()),
-                now_ms,
-                commands,
-            );
-            return;
-        };
-
-        self.current_leadership_id = self.current_leadership_id.saturating_add(1);
+        self.promote_tab_to_leader(
+            &tab_id,
+            port_id,
+            lock_names,
+            Some(active_reset.request_id),
+            commands,
+        );
         if let Some(reset) = self.reset_state.as_mut() {
             reset.promoted_leadership_id = Some(self.current_leadership_id);
         }
-        self.leader = Some(LeaderState {
-            tab_id: tab.tab_id.clone(),
-            leadership_id: self.current_leadership_id,
-            ready: false,
-            tab_lock_name: Some(tab_lock_name),
-            worker_lock_name: Some(worker_lock_name),
-            tab_lock_monitor: None,
-            worker_lock_monitor: None,
-        });
-
-        self.post(
-            tab.port_id,
-            ControlMessage::BecomeLeader {
-                broker_instance_id: self.broker_instance_id.clone(),
-                leadership_id: self.current_leadership_id,
-                reset_request_id: Some(active_reset.request_id),
-            },
-            commands,
-        );
     }
 
     fn finish_storage_reset(
@@ -1696,10 +1647,9 @@ impl BrokerCore {
             error_message,
             now_ms,
         );
-        let ports: Vec<PortId> = self.tabs.values().map(|tab| tab.port_id).collect();
-        for port_id in ports {
+        for tab in self.tabs.values() {
             for outcome in &outcomes {
-                self.post_storage_reset_outcome(port_id, outcome, commands);
+                self.post_storage_reset_outcome(tab.port_id, outcome, commands);
             }
         }
 
@@ -1745,18 +1695,13 @@ impl BrokerCore {
         commands: &mut Vec<BrokerCommand>,
     ) {
         self.prune_completed_storage_reset_outcomes(now_ms);
-        let outcomes: Vec<StorageResetOutcome> = self
-            .completed_storage_reset_outcomes
-            .values()
-            .cloned()
-            .collect();
-        for outcome in outcomes {
-            self.post_storage_reset_outcome(port_id, &outcome, commands);
+        for outcome in self.completed_storage_reset_outcomes.values() {
+            self.post_storage_reset_outcome(port_id, outcome, commands);
         }
     }
 
     fn post_storage_reset_outcome(
-        &mut self,
+        &self,
         port_id: PortId,
         outcome: &StorageResetOutcome,
         commands: &mut Vec<BrokerCommand>,
@@ -1924,12 +1869,10 @@ impl BrokerCore {
     ) {
         match purpose {
             TakeoverPurpose::ReplacementElection { generation } => {
-                if self.replacement_election_generation == generation {
-                    self.replacement_election_in_flight = false;
-                }
                 if self.replacement_election_generation != generation {
                     return;
                 }
+                self.replacement_election_in_flight = false;
                 self.elect_if_needed(now_ms, commands);
             }
             TakeoverPurpose::StorageReset { request_id } => {
@@ -1985,14 +1928,19 @@ impl BrokerCore {
         if self.namespace.is_none() {
             return;
         }
-        let tab_snapshot: Vec<TabState> = self.tabs.values().cloned().collect();
-        for tab in tab_snapshot {
-            if self.is_broker_pong_timed_out(&tab, now_ms) {
-                self.evict_tab(&tab.tab_id, now_ms, commands);
+        // Snapshot the loop inputs: evict_tab mutates self.tabs mid-iteration.
+        let tab_snapshot: Vec<(String, PortId, i64)> = self
+            .tabs
+            .values()
+            .map(|tab| (tab.tab_id.clone(), tab.port_id, tab.last_pong_at))
+            .collect();
+        for (tab_id, port_id, last_pong_at) in tab_snapshot {
+            if self.is_broker_pong_timed_out(last_pong_at, now_ms) {
+                self.evict_tab(&tab_id, now_ms, commands);
                 continue;
             }
             self.post(
-                tab.port_id,
+                port_id,
                 ControlMessage::BrokerPing {
                     broker_instance_id: self.broker_instance_id.clone(),
                 },
@@ -2005,17 +1953,21 @@ impl BrokerCore {
         if self.namespace.is_none() {
             return;
         }
-        let tab_snapshot: Vec<TabState> = self.tabs.values().cloned().collect();
-        for tab in tab_snapshot {
-            if self.is_broker_pong_timed_out(&tab, now_ms) {
-                self.evict_tab(&tab.tab_id, now_ms, commands);
+        let tab_snapshot: Vec<(String, i64)> = self
+            .tabs
+            .values()
+            .map(|tab| (tab.tab_id.clone(), tab.last_pong_at))
+            .collect();
+        for (tab_id, last_pong_at) in tab_snapshot {
+            if self.is_broker_pong_timed_out(last_pong_at, now_ms) {
+                self.evict_tab(&tab_id, now_ms, commands);
             }
         }
     }
 
-    fn is_broker_pong_timed_out(&self, tab: &TabState, now_ms: i64) -> bool {
+    fn is_broker_pong_timed_out(&self, last_pong_at: i64, now_ms: i64) -> bool {
         self.namespace.as_ref().is_some_and(|namespace| {
-            now_ms - tab.last_pong_at > namespace.broker_pong_timeout_ms as i64
+            now_ms - last_pong_at > namespace.broker_pong_timeout_ms as i64
         })
     }
 
@@ -2033,42 +1985,17 @@ impl BrokerCore {
             commands,
         );
 
-        if self
+        if let Some(leadership_id) = self
             .leader
             .as_ref()
-            .is_some_and(|leader| leader.tab_id == tab_id)
+            .filter(|leader| leader.tab_id == tab_id)
+            .map(|leader| leader.leadership_id)
         {
-            let Some(leadership_id) = self.leader.as_ref().map(|leader| leader.leadership_id)
-            else {
-                return;
-            };
-            let active_reset = self.reset_state.clone();
-            let cleared = self.clear_leader(
-                leadership_id,
-                ClearLeaderOptions {
-                    demote_leader: false,
-                    remove_leader_tab: false,
-                },
-                now_ms,
-                commands,
-            );
-            self.remove_tab_from_active_reset(tab_id, now_ms, commands);
-            if active_reset.is_some_and(|reset| {
-                reset.promoted_leadership_id == Some(leadership_id)
-                    && reset.phase != ResetPhase::Preparing
-            }) {
-                if let Some(reset) = self.reset_state.as_mut() {
-                    reset.promoted_leadership_id = None;
-                }
-                self.promote_reset_leader(now_ms, commands);
-                self.reset_if_idle(commands);
-                return;
-            }
-            self.schedule_replacement_election(cleared, now_ms, commands);
+            self.handle_leader_departure(tab_id, leadership_id, now_ms, commands);
         } else {
             self.remove_tab_from_active_reset(tab_id, now_ms, commands);
+            self.reset_if_idle(commands);
         }
-        self.reset_if_idle(commands);
     }
 
     fn assign_follower_ports(
@@ -2083,18 +2010,22 @@ impl BrokerCore {
         {
             return;
         }
-        let Some(leader_tab) = self.tabs.get(&next_leader.tab_id).cloned() else {
+        let Some(leader_port_id) = self.tabs.get(&next_leader.tab_id).map(|tab| tab.port_id) else {
             return;
         };
 
-        let followers: Vec<TabState> = self.tabs.values().cloned().collect();
-        for follower in followers {
-            if !self.should_assign_follower_port(&follower, next_leader) {
-                continue;
-            }
+        // Snapshot the eligible followers: mark_follower_port_pending mutates
+        // the attachment bookkeeping mid-iteration.
+        let followers: Vec<(String, PortId)> = self
+            .tabs
+            .values()
+            .filter(|tab| self.should_assign_follower_port(tab, next_leader))
+            .map(|tab| (tab.tab_id.clone(), tab.port_id))
+            .collect();
+        for (follower_tab_id, follower_port_id) in followers {
             let key = AttachmentKey {
                 leadership_id: next_leader.leadership_id,
-                follower_tab_id: follower.tab_id.clone(),
+                follower_tab_id: follower_tab_id.clone(),
             };
             if self.pending_follower_attachments.contains(&key) {
                 continue;
@@ -2103,12 +2034,12 @@ impl BrokerCore {
                 continue;
             }
 
-            self.mark_follower_port_pending(&follower.tab_id, next_leader.leadership_id, commands);
+            self.mark_follower_port_pending(&follower_tab_id, next_leader.leadership_id, commands);
             commands.push(BrokerCommand::AttachFollowerChannel {
-                leader_port_id: leader_tab.port_id,
-                follower_port_id: follower.port_id,
+                leader_port_id,
+                follower_port_id,
                 leader_tab_id: next_leader.tab_id.clone(),
-                follower_tab_id: follower.tab_id,
+                follower_tab_id,
                 leadership_id: next_leader.leadership_id,
             });
         }
@@ -2321,12 +2252,7 @@ impl BrokerCore {
         }
     }
 
-    fn post(
-        &mut self,
-        port_id: PortId,
-        message: ControlMessage,
-        commands: &mut Vec<BrokerCommand>,
-    ) {
+    fn post(&self, port_id: PortId, message: ControlMessage, commands: &mut Vec<BrokerCommand>) {
         commands.push(BrokerCommand::Post { port_id, message });
     }
 
@@ -2369,50 +2295,34 @@ struct LeaderReadyInput<'a> {
     now_ms: i64,
 }
 
-fn broker_instance_stamp(message: &TabMessage) -> Option<(String, String)> {
+fn broker_instance_stamp(message: &TabMessage) -> Option<(&str, &'static str)> {
     match message {
         TabMessage::Hello { .. } | TabMessage::Unknown => None,
         TabMessage::Visibility {
             broker_instance_id, ..
-        } => Some((broker_instance_id.clone(), "visibility".to_string())),
+        } => Some((broker_instance_id, "visibility")),
         TabMessage::LeaderReady {
             broker_instance_id, ..
-        } => Some((broker_instance_id.clone(), "leader-ready".to_string())),
+        } => Some((broker_instance_id, "leader-ready")),
         TabMessage::LeaderFailed {
             broker_instance_id, ..
-        } => Some((broker_instance_id.clone(), "leader-failed".to_string())),
+        } => Some((broker_instance_id, "leader-failed")),
         TabMessage::FollowerPortAttached {
             broker_instance_id, ..
-        } => Some((
-            broker_instance_id.clone(),
-            "follower-port-attached".to_string(),
-        )),
+        } => Some((broker_instance_id, "follower-port-attached")),
         TabMessage::FollowerPortClosed {
             broker_instance_id, ..
-        } => Some((
-            broker_instance_id.clone(),
-            "follower-port-closed".to_string(),
-        )),
+        } => Some((broker_instance_id, "follower-port-closed")),
         TabMessage::SchemaReady {
             broker_instance_id, ..
-        } => Some((broker_instance_id.clone(), "schema-ready".to_string())),
+        } => Some((broker_instance_id, "schema-ready")),
         TabMessage::StorageResetRequest {
             broker_instance_id, ..
-        } => Some((
-            broker_instance_id.clone(),
-            "storage-reset-request".to_string(),
-        )),
+        } => Some((broker_instance_id, "storage-reset-request")),
         TabMessage::StorageResetReady {
             broker_instance_id, ..
-        } => Some((
-            broker_instance_id.clone(),
-            "storage-reset-ready".to_string(),
-        )),
-        TabMessage::Shutdown { broker_instance_id } => {
-            Some((broker_instance_id.clone(), "shutdown".to_string()))
-        }
-        TabMessage::BrokerPong { broker_instance_id } => {
-            Some((broker_instance_id.clone(), "broker-pong".to_string()))
-        }
+        } => Some((broker_instance_id, "storage-reset-ready")),
+        TabMessage::Shutdown { broker_instance_id } => Some((broker_instance_id, "shutdown")),
+        TabMessage::BrokerPong { broker_instance_id } => Some((broker_instance_id, "broker-pong")),
     }
 }

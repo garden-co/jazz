@@ -1,6 +1,6 @@
 use jazz_browser_broker::protocol::{
-    Candidate, ControlMessage, TabMessage, Visibility, is_stale_leadership_id,
-    normalize_force_takeover_timeout, normalize_positive_timeout, select_leader_candidate,
+    Candidate, ControlMessage, TabMessage, Visibility, normalize_force_takeover_timeout,
+    normalize_positive_timeout, select_leader_candidate,
 };
 
 #[test]
@@ -40,13 +40,6 @@ fn timeout_normalization_matches_the_typescript_helpers() {
     assert_eq!(normalize_force_takeover_timeout(Some(-1.0)), 1_000);
     assert_eq!(normalize_force_takeover_timeout(Some(0.0)), 0);
     assert_eq!(normalize_force_takeover_timeout(Some(2.9)), 2);
-}
-
-#[test]
-fn leadership_ids_are_stale_only_when_strictly_less_than_current() {
-    assert!(is_stale_leadership_id(1, 2));
-    assert!(!is_stale_leadership_id(2, 2));
-    assert!(!is_stale_leadership_id(3, 2));
 }
 
 #[test]

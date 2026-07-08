@@ -1,4 +1,8 @@
 import initBrokerWasm, { WasmBrokerCore } from "jazz-broker-wasm";
+import {
+  createCoreTimerRegistry,
+  type CoreTimerKey as TimerKey,
+} from "../runtime/broker-core-timers.js";
 import { createRandomId } from "../runtime/browser-broker-protocol.js";
 import {
   monitorWebLockRelease,
@@ -26,15 +30,12 @@ type BrokerCommand = {
   [key: string]: unknown;
 };
 
-type TimerKey = {
-  kind: string;
-  [key: string]: unknown;
-};
-
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const brokerInstanceId = createRandomId("broker");
 const ports = new Map<PortId, MessagePort>();
-const timers = new Map<string, ReturnType<typeof setTimeout>>();
+const timers = createCoreTimerRegistry<TimerKey>((timer) => {
+  dispatchToCore({ kind: "timerFired", timer });
+});
 const lockMonitors = new Map<MonitorId, WebLockMonitor>();
 const queuedEvents: BrokerEvent[] = [];
 
@@ -130,10 +131,10 @@ function executeCommands(commands: BrokerCommand[]): void {
         attachFollowerChannel(command);
         break;
       case "setTimer":
-        setBrokerTimer(command.timer as TimerKey, command.delayMs as number);
+        timers.set(command.timer as TimerKey, command.delayMs as number);
         break;
       case "clearTimer":
-        clearBrokerTimer(command.timer as TimerKey);
+        timers.clear(command.timer as TimerKey);
         break;
       case "probeLocks":
         void probeLocks(command.probeId as ProbeId, command.lockNames as string[]);
@@ -192,29 +193,6 @@ function attachFollowerChannel(command: BrokerCommand): void {
   );
 }
 
-function setBrokerTimer(timer: TimerKey, delayMs: number): void {
-  const key = timerKey(timer);
-  clearTimeout(timers.get(key));
-  timers.set(
-    key,
-    setTimeout(() => {
-      timers.delete(key);
-      dispatchToCore({
-        kind: "timerFired",
-        timer,
-      });
-    }, delayMs),
-  );
-}
-
-function clearBrokerTimer(timer: TimerKey): void {
-  const key = timerKey(timer);
-  const handle = timers.get(key);
-  if (!handle) return;
-  clearTimeout(handle);
-  timers.delete(key);
-}
-
 async function probeLocks(probeId: ProbeId, lockNames: string[]): Promise<void> {
   const leases = await Promise.all(lockNames.map((lockName) => tryAcquireWebLock(lockName)));
   for (const lease of leases) {
@@ -271,10 +249,6 @@ function warnStaleInstanceDrop(command: BrokerCommand): void {
       command.stampedInstanceId,
     )}, current is ${brokerInstanceId}. This usually means tabs are running different jazz-tools versions against one broker.`,
   );
-}
-
-function timerKey(timer: TimerKey): string {
-  return JSON.stringify(timer);
 }
 
 function decodeBase64Bytes(base64: string): Uint8Array {

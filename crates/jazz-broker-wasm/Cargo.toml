@@ -15,4 +15,7 @@ serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "-g"]
+wasm-opt = ["-Oz"]
+
+[package.metadata.wasm-pack.profile.broker-wasm]
+wasm-opt = ["-Oz"]

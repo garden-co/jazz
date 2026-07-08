@@ -8,6 +8,6 @@
   "main": "pkg/jazz_broker_wasm.js",
   "types": "pkg/jazz_broker_wasm.d.ts",
   "scripts": {
-    "build": "wasm-pack build --target web --release"
+    "build": "wasm-pack build --target web --profile broker-wasm"
   }
 }

@@ -20,8 +20,10 @@ const outfile = fileURLToPath(new URL("../dist/worker/jazz-broker-worker.js", im
 const wasmBytesModule = fileURLToPath(
   new URL("../src/worker/jazz-broker-wasm-bytes.ts", import.meta.url),
 );
+// Resolve through the declared workspace dependency (the wasm sits next to
+// the package's `main`) so this keeps working if the crate moves.
 const brokerWasm = fileURLToPath(
-  new URL("../../../crates/jazz-broker-wasm/pkg/jazz_broker_wasm_bg.wasm", import.meta.url),
+  new URL("jazz_broker_wasm_bg.wasm", import.meta.resolve("jazz-broker-wasm")),
 );
 
 await build({

@@ -59,97 +59,10 @@ export interface BrowserBrokerFingerprintInput {
   storageFormatVersion?: string;
 }
 
-export interface BrowserBrokerHelloMessage {
-  type: "hello";
-  tabId: string;
-  appId: string;
-  dbName: string;
-  fingerprint: string;
-  visibility: BrowserBrokerVisibility;
-  forceTakeoverTimeoutMs?: number;
-  brokerPingIntervalMs?: number;
-  brokerPongTimeoutMs?: number;
-}
-
-export interface BrowserBrokerVisibilityMessage extends BrokerInstanceMessage {
-  type: "visibility";
-  visibility: BrowserBrokerVisibility;
-}
-
-export interface BrowserBrokerLeaderReadyMessage extends BrokerInstanceMessage {
-  type: "leader-ready";
-  leadershipId: number;
-  tabLockName: string;
-  workerLockName: string;
-  /**
-   * Set by a reset-promoted leader that has no client to rebuild a worker
-   * bridge from (fresh namespace). Tells the broker to finish the storage
-   * reset and step this leader down instead of treating it as ready.
-   */
-  bridgelessStorageReset?: boolean;
-}
-
-export interface BrowserBrokerLeaderFailedMessage extends BrokerInstanceMessage {
-  type: "leader-failed";
-  leadershipId: number;
-  reason: string;
-}
-
-export interface BrowserBrokerFollowerPortAttachedMessage extends BrokerInstanceMessage {
-  type: "follower-port-attached";
-  leadershipId: number;
-  followerTabId: string;
-}
-
-export interface BrowserBrokerFollowerPortClosedMessage extends BrokerInstanceMessage {
-  type: "follower-port-closed";
-  leadershipId: number;
-  followerTabId: string;
-}
-
-export interface BrowserBrokerSchemaReadyMessage extends BrokerInstanceMessage {
-  type: "schema-ready";
-  schemaFingerprint: string;
-}
-
-export interface BrowserBrokerStorageResetRequestMessage extends BrokerInstanceMessage {
-  type: "storage-reset-request";
-  requestId: string;
-}
-
-export interface BrowserBrokerStorageResetReadyMessage extends BrokerInstanceMessage {
-  type: "storage-reset-ready";
-  requestId: string;
-  success: boolean;
-  errorMessage?: string;
-}
-
-export interface BrowserBrokerShutdownMessage extends BrokerInstanceMessage {
-  type: "shutdown";
-}
-
-export interface BrowserBrokerPongMessage extends BrokerInstanceMessage {
-  type: "broker-pong";
-}
-
-export type BrowserBrokerTabMessage =
-  | BrowserBrokerHelloMessage
-  | BrowserBrokerVisibilityMessage
-  | BrowserBrokerLeaderReadyMessage
-  | BrowserBrokerLeaderFailedMessage
-  | BrowserBrokerFollowerPortAttachedMessage
-  | BrowserBrokerFollowerPortClosedMessage
-  | BrowserBrokerSchemaReadyMessage
-  | BrowserBrokerStorageResetRequestMessage
-  | BrowserBrokerStorageResetReadyMessage
-  | BrowserBrokerShutdownMessage
-  | BrowserBrokerPongMessage;
-
-type WithoutBrokerInstance<T> = T extends BrokerInstanceMessage ? Omit<T, "brokerInstanceId"> : T;
-
-export type BrowserBrokerTabMessageInput =
-  | BrowserBrokerHelloMessage
-  | WithoutBrokerInstance<Exclude<BrowserBrokerTabMessage, BrowserBrokerHelloMessage>>;
+// Outbound tab->broker message shapes live in the Rust core
+// (crates/jazz-browser-broker/src/protocol.rs `TabMessage`); the shells only
+// relay them. The broker->tab control messages below are still consumed by
+// the TS connection manager, so their types stay here.
 
 export interface BrowserBrokerHelloResponse extends BrokerInstanceMessage {
   type: "broker-hello";

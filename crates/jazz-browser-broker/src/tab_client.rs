@@ -1,10 +1,11 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ControlMessage, TabMessage, Visibility, normalize_positive_timeout};
+use crate::protocol::{
+    ControlMessage, DEFAULT_BROKER_PING_INTERVAL_MS, DEFAULT_BROKER_PONG_TIMEOUT_MS, TabMessage,
+    Visibility, normalize_positive_timeout,
+};
 
-const DEFAULT_BROKER_PING_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_BROKER_PONG_TIMEOUT_MS: u64 = 3_000;
 const DEFAULT_STORAGE_RESET_TIMEOUT_MS: u64 = 5_000;
 
 const CLIENT_CLOSED_MESSAGE: &str = "Browser broker client closed";
@@ -869,10 +870,7 @@ impl TabClientCore {
             commands,
         );
 
-        if self.has_port {
-            self.has_port = false;
-            commands.push(TabClientCommand::DetachPort);
-        }
+        self.detach_port_if_attached(commands);
 
         commands.push(TabClientCommand::StartReconnect {
             previous_role,
@@ -921,10 +919,7 @@ impl TabClientCore {
         {
             commands.push(TabClientCommand::PostToBroker { message });
         }
-        if self.has_port {
-            self.has_port = false;
-            commands.push(TabClientCommand::DetachPort);
-        }
+        self.detach_port_if_attached(commands);
         let rejection = WaiterRejection::Message {
             message: CLIENT_CLOSED_MESSAGE.to_string(),
         };
@@ -947,13 +942,17 @@ impl TabClientCore {
         });
         self.stop_liveness_timer(commands);
         self.queued_messages.clear();
+        self.detach_port_if_attached(commands);
+        self.reject_role_waiters(WaiterRejection::ClosedError, commands);
+        self.reject_all_reset_waiters(WaiterRejection::ClosedError, commands);
+        commands.push(TabClientCommand::InvokeOnClosed);
+    }
+
+    fn detach_port_if_attached(&mut self, commands: &mut Vec<TabClientCommand>) {
         if self.has_port {
             self.has_port = false;
             commands.push(TabClientCommand::DetachPort);
         }
-        self.reject_role_waiters(WaiterRejection::ClosedError, commands);
-        self.reject_all_reset_waiters(WaiterRejection::ClosedError, commands);
-        commands.push(TabClientCommand::InvokeOnClosed);
     }
 }
 
