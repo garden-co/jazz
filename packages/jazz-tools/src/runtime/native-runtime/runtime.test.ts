@@ -3463,6 +3463,119 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("serializes allowedTo insert, update, and delete as native inherits policy atoms", () => {
+    const baseSchema: WasmSchema = {
+      resources: {
+        columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+      },
+      data_entries: {
+        columns: [
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "resources",
+          },
+          { name: "label", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const app = {
+      wasmSchema: baseSchema,
+      resources: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      data_entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
+    };
+    const permissions = definePermissions(app, ({ policy, allowedTo }) => {
+      policy.data_entries.allowInsert.where(allowedTo.insert("resource"));
+      policy.data_entries.allowUpdate
+        .whereOld(allowedTo.update("resource"))
+        .whereNew(allowedTo.update("resource"));
+      policy.data_entries.allowDelete.where(allowedTo.delete("resource"));
+    });
+
+    const encoded = encodeSchema(mergePermissionsIntoWasmSchema(baseSchema, permissions));
+
+    expect(readSchemaPolicyInherits(encoded, "data_entries", "insert")).toEqual({
+      inherits: [{ parentColumn: "resource" }],
+      joinCount: 0,
+    });
+    expect(readSchemaPolicyInherits(encoded, "data_entries", "updateUsing")).toEqual({
+      inherits: [{ parentColumn: "resource" }],
+      joinCount: 0,
+    });
+    expect(readSchemaPolicyInherits(encoded, "data_entries", "updateCheck")).toEqual({
+      inherits: [{ parentColumn: "resource" }],
+      joinCount: 0,
+    });
+    expect(readSchemaPolicyInherits(encoded, "data_entries", "delete")).toEqual({
+      inherits: [{ parentColumn: "resource" }],
+      joinCount: 0,
+    });
+  });
+
+  it("serializes authored inherited policies byte-identically to native schema atoms", () => {
+    const baseSchema: WasmSchema = {
+      resources: {
+        columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+        policies: {
+          select: { using: { type: "True" } },
+          insert: { with_check: { type: "True" } },
+          update: { using: { type: "True" }, with_check: { type: "True" } },
+          delete: { using: { type: "True" } },
+        },
+      },
+      data_entries: {
+        columns: [
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "resources",
+          },
+          { name: "label", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const app = {
+      wasmSchema: baseSchema,
+      resources: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      data_entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
+    };
+    const permissions = definePermissions(app, ({ policy, allowedTo }) => {
+      policy.data_entries.allowRead.where(allowedTo.read("resource"));
+      policy.data_entries.allowInsert.where(allowedTo.insert("resource"));
+      policy.data_entries.allowUpdate
+        .whereOld(allowedTo.update("resource"))
+        .whereNew(allowedTo.update("resource"));
+      policy.data_entries.allowDelete.where(allowedTo.delete("resource"));
+    });
+    const nativeSchema: WasmSchema = {
+      ...baseSchema,
+      data_entries: {
+        ...baseSchema.data_entries,
+        policies: {
+          select: {
+            using: { type: "Inherits", operation: "Select", via_column: "resource" },
+          },
+          insert: {
+            with_check: { type: "Inherits", operation: "Insert", via_column: "resource" },
+          },
+          update: {
+            using: { type: "Inherits", operation: "Update", via_column: "resource" },
+            with_check: { type: "Inherits", operation: "Update", via_column: "resource" },
+          },
+          delete: {
+            using: { type: "Inherits", operation: "Delete", via_column: "resource" },
+          },
+        },
+      },
+    };
+
+    expect(encodeSchema(mergePermissionsIntoWasmSchema(baseSchema, permissions))).toEqual(
+      encodeSchema(nativeSchema),
+    );
+  });
+
   it("rejects ExistsRel Gather policies without a concrete MaxDepth bound", () => {
     expect(() =>
       encodeSchema({
@@ -3601,8 +3714,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("serializes direct Inherits delete through the parent delete policy", () => {
-    const policy = readSchemaPolicyBranches(
+  it("serializes direct Inherits delete as a native inherits policy atom", () => {
+    const policy = readSchemaPolicyInherits(
       encodeSchema({
         messages: {
           columns: [{ name: "room_id", column_type: { type: "Uuid" }, nullable: false }],
@@ -3642,26 +3755,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(policy).toEqual({
-      table: "reactions",
-      filters: [],
-      joins: [
-        {
-          table: "messages",
-          onColumn: "id",
-          targetTag: 1,
-          sourceColumn: "message_id",
-          sourceLookup: undefined,
-          filters: [
-            {
-              tag: 3,
-              column: "room_id",
-              operand: { tag: 2, claim: "roomId" },
-            },
-          ],
-          nestedJoins: [],
-        },
-      ],
-      branches: [],
+      inherits: [{ parentColumn: "message_id" }],
+      joinCount: 0,
     });
   });
 
@@ -3826,8 +3921,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("serializes direct Inherits without a parent operation policy as fail-closed", () => {
-    const policy = readSchemaPolicyBranches(
+  it("serializes direct Inherits without a parent operation policy as a native inherits policy atom", () => {
+    const policy = readSchemaPolicyInherits(
       encodeSchema({
         messages: {
           columns: [{ name: "body", column_type: { type: "Text" }, nullable: false }],
@@ -3857,10 +3952,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(policy).toEqual({
-      table: "reactions",
-      filters: [{ tag: 1, children: [] }],
-      joins: [],
-      branches: [],
+      inherits: [{ parentColumn: "message_id" }],
+      joinCount: 0,
     });
   });
 });
@@ -4386,6 +4479,14 @@ function readSchemaSelectPolicyInherits(
   schemaBytes: Uint8Array,
   tableName: string,
 ): { inherits: TestPolicyInherits[]; joinCount: number } {
+  return readSchemaPolicyInherits(schemaBytes, tableName, "select");
+}
+
+function readSchemaPolicyInherits(
+  schemaBytes: Uint8Array,
+  tableName: string,
+  operation: "select" | "insert" | "updateUsing" | "updateCheck" | "delete",
+): { inherits: TestPolicyInherits[]; joinCount: number } {
   const reader = new PostcardReader(schemaBytes);
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
@@ -4400,23 +4501,25 @@ function readSchemaSelectPolicyInherits(
       tableReader.string();
       tableReader.string();
     }
-    const select = tableReader.option(readPolicyQueryWithInheritsForTest);
-    tableReader.option(readPolicyQueryWithInheritsForTest);
-    tableReader.option(readPolicyQueryWithInheritsForTest);
-    tableReader.option(readPolicyQueryWithInheritsForTest);
-    tableReader.option(readPolicyQueryWithInheritsForTest);
+    const policies = {
+      select: tableReader.option(readPolicyQueryWithInheritsForTest),
+      insert: tableReader.option(readPolicyQueryWithInheritsForTest),
+      updateUsing: tableReader.option(readPolicyQueryWithInheritsForTest),
+      updateCheck: tableReader.option(readPolicyQueryWithInheritsForTest),
+      delete: tableReader.option(readPolicyQueryWithInheritsForTest),
+    };
     tableReader.u64();
     const indexCount = tableReader.u64();
     for (let index = 0; index < indexCount; index += 1) {
       tableReader.string();
       tableReader.readVec((indexReader) => indexReader.string());
     }
-    return { table, select };
+    return { table, policy: policies[operation] };
   });
   reader.option(() => undefined);
   reader.option(() => undefined);
   return (
-    tables.find((table) => table.table === tableName)?.select ?? { inherits: [], joinCount: 0 }
+    tables.find((table) => table.table === tableName)?.policy ?? { inherits: [], joinCount: 0 }
   );
 }
 
