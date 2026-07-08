@@ -43,6 +43,7 @@ pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 const DECODED_WINDOW_CACHE_CAPACITY: usize = 32;
+const STAGED_POINT_READS_BEFORE_INDEX: usize = 16;
 /// Callback form used by scans so storage implementations do not have to
 /// materialize large ranges before the caller can process them.
 pub type ScanVisitor<'visitor> =
@@ -245,6 +246,19 @@ fn current_winner_key(
 /// transaction semantics; `commit_batch` owns the tick ordering above this
 /// layer.
 pub trait OrderedKvStorage {
+    /// Begin an encoded storage transaction over this backend.
+    ///
+    /// The transaction buffers already-encoded key/value writes and presents
+    /// read-your-own-writes semantics for point reads and ordered scans. Commit
+    /// applies the buffered operations through one backend `write_many` call,
+    /// preserving the caller's higher-level tick/commit boundary.
+    fn begin_txn(&self) -> StorageTransaction<'_, Self>
+    where
+        Self: Sized,
+    {
+        StorageTransaction::new(self)
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
@@ -1573,11 +1587,189 @@ impl OwnedWriteOperation {
 
 pub struct StagedWriteOverlay<'a, S> {
     base: &'a S,
-    staged_writes: &'a RefCell<Vec<OwnedWriteOperation>>,
+    staged_writes: &'a RefCell<StagedWriteState>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StagedWriteState {
+    operations: Vec<OwnedWriteOperation>,
+    latest_by_key: Option<HashMap<(String, Vec<u8>), usize>>,
+    point_reads_without_index: usize,
+}
+
+impl StagedWriteState {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    pub(crate) fn stage(&mut self, operation: OwnedWriteOperation) {
+        let index = self.operations.len();
+        if let Some(latest_by_key) = &mut self.latest_by_key {
+            latest_by_key.insert((operation.cf().to_owned(), operation.key().to_vec()), index);
+        }
+        self.operations.push(operation);
+    }
+
+    pub(crate) fn extend(&mut self, operations: impl IntoIterator<Item = OwnedWriteOperation>) {
+        for operation in operations {
+            self.stage(operation);
+        }
+    }
+
+    pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
+        self.operations
+    }
+
+    fn latest_index(&mut self, cf: &ColumnFamilyName, key: &Key) -> Option<usize> {
+        if self.latest_by_key.is_none() {
+            if self.point_reads_without_index < STAGED_POINT_READS_BEFORE_INDEX {
+                self.point_reads_without_index += 1;
+                return self
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, operation)| {
+                        (operation.cf() == cf && operation.key() == key).then_some(index)
+                    });
+            }
+
+            let mut latest_by_key = HashMap::with_capacity(self.operations.len());
+            for (index, operation) in self.operations.iter().enumerate() {
+                latest_by_key.insert((operation.cf().to_owned(), operation.key().to_vec()), index);
+            }
+            self.latest_by_key = Some(latest_by_key);
+        }
+
+        self.latest_by_key
+            .as_ref()
+            .and_then(|latest_by_key| latest_by_key.get(&(cf.to_owned(), key.to_vec())).copied())
+    }
+}
+
+impl From<Vec<OwnedWriteOperation>> for StagedWriteState {
+    fn from(operations: Vec<OwnedWriteOperation>) -> Self {
+        let mut state = Self::default();
+        state.extend(operations);
+        state
+    }
+}
+
+/// Encoded storage transaction with read-your-own-writes semantics.
+///
+/// This type is intentionally storage-shaped: it knows only column-family
+/// names plus encoded keys/values. It does not understand record descriptors,
+/// schemas, IVM deltas, or Jazz transaction semantics.
+pub struct StorageTransaction<'a, S> {
+    base: &'a S,
+    staged_writes: RefCell<StagedWriteState>,
+}
+
+impl<'a, S> StorageTransaction<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    pub fn new(base: &'a S) -> Self {
+        Self {
+            base,
+            staged_writes: RefCell::new(StagedWriteState::default()),
+        }
+    }
+
+    pub fn commit(self) -> Result<(), Error> {
+        let operations = self.staged_writes.into_inner().into_operations();
+        let borrowed = operations
+            .iter()
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        self.base.write_many(&borrowed)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.staged_writes.borrow().is_empty()
+    }
+
+    pub fn stage_owned_operations(
+        &self,
+        operations: impl IntoIterator<Item = OwnedWriteOperation>,
+    ) {
+        self.staged_writes.borrow_mut().extend(operations);
+    }
+}
+
+impl<S> OrderedKvStorage for StorageTransaction<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).get(cf, key)
+    }
+
+    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).last_with_prefix(cf, prefix)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes).write_many(operations)
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
 }
 
 impl<'a, S> StagedWriteOverlay<'a, S> {
-    pub fn new(base: &'a S, staged_writes: &'a RefCell<Vec<OwnedWriteOperation>>) -> Self {
+    pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
             base,
             staged_writes,
@@ -1585,11 +1777,12 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     }
 
     pub fn stage(&self, operation: OwnedWriteOperation) {
-        self.staged_writes.borrow_mut().push(operation);
+        self.staged_writes.borrow_mut().stage(operation);
     }
 
     pub fn drain_into(&self, target: &mut Vec<OwnedWriteOperation>) {
-        target.extend(self.staged_writes.borrow_mut().drain(..));
+        let state = std::mem::take(&mut *self.staged_writes.borrow_mut());
+        target.extend(state.into_operations());
     }
 }
 
@@ -1598,17 +1791,21 @@ where
     S: OrderedKvStorage,
 {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        for operation in self.staged_writes.borrow().iter().rev() {
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if let Some(index) = staged_writes.latest_index(cf, key) {
+            let operation = &staged_writes.operations[index];
             if operation.cf() == cf && operation.key() == key {
-                return match operation {
-                    OwnedWriteOperation::Set { value, .. } => Ok(Some(value.clone())),
-                    OwnedWriteOperation::Delete { .. } => Ok(None),
-                    OwnedWriteOperation::Delta { .. } => break,
-                };
+                match operation {
+                    OwnedWriteOperation::Set { value, .. } => return Ok(Some(value.clone())),
+                    OwnedWriteOperation::Delete { .. } => return Ok(None),
+                    OwnedWriteOperation::Delta { .. } => {}
+                }
             }
         }
+        drop(staged_writes);
+
         let mut value = self.base.get(cf, key)?;
-        for operation in self.staged_writes.borrow().iter() {
+        for operation in self.staged_writes.borrow().operations.iter() {
             if operation.cf() != cf || operation.key() != key {
                 continue;
             }
@@ -1686,11 +1883,17 @@ where
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        if self.staged_writes.borrow().iter().any(|operation| {
-            operation.cf() == cf
-                && operation.key().starts_with(prefix)
-                && matches!(operation, OwnedWriteOperation::Delta { .. })
-        }) {
+        if self
+            .staged_writes
+            .borrow()
+            .operations
+            .iter()
+            .any(|operation| {
+                operation.cf() == cf
+                    && operation.key().starts_with(prefix)
+                    && matches!(operation, OwnedWriteOperation::Delta { .. })
+            })
+        {
             let mut values = self.base.prefix(cf, prefix)?;
             overlay_values(
                 &mut values,
@@ -1746,7 +1949,7 @@ where
         prefix: &Key,
     ) -> Result<Option<KeyValue>, Error> {
         let mut needs_full_merge = false;
-        for operation in self.staged_writes.borrow().iter() {
+        for operation in self.staged_writes.borrow().operations.iter() {
             if operation.cf() != cf || !operation.key().starts_with(prefix) {
                 continue;
             }
@@ -1801,13 +2004,13 @@ fn overlay_values(
     values: &mut Vec<KeyValue>,
     cf: &ColumnFamilyName,
     include: impl Fn(&[u8]) -> bool,
-    staged_writes: &RefCell<Vec<OwnedWriteOperation>>,
+    staged_writes: &RefCell<StagedWriteState>,
 ) -> Result<(), Error> {
     let mut overlay = values
         .drain(..)
         .map(|(key, value)| (key, Some(value)))
         .collect::<BTreeMap<_, _>>();
-    for operation in staged_writes.borrow().iter() {
+    for operation in staged_writes.borrow().operations.iter() {
         if operation.cf() != cf || !include(operation.key()) {
             continue;
         }
@@ -1836,10 +2039,10 @@ fn overlay_values(
 fn staged_prefix_overlay_desc(
     cf: &ColumnFamilyName,
     prefix: &Key,
-    staged_writes: &RefCell<Vec<OwnedWriteOperation>>,
+    staged_writes: &RefCell<StagedWriteState>,
 ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     let mut overlay = BTreeMap::new();
-    for operation in staged_writes.borrow().iter() {
+    for operation in staged_writes.borrow().operations.iter() {
         if operation.cf() != cf || !operation.key().starts_with(prefix) {
             continue;
         }
@@ -2445,7 +2648,7 @@ mod tests {
         let storage = MemoryStorage::new(&["indices"]);
         storage.set("indices", b"a", b"base-a").unwrap();
         storage.set("indices", b"b", b"base-b").unwrap();
-        let staged = RefCell::new(vec![
+        let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
                 key: b"a".to_vec(),
@@ -2460,7 +2663,7 @@ mod tests {
                 key: b"c".to_vec(),
                 value: b"staged-c".to_vec(),
             },
-        ]);
+        ]));
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
@@ -2482,6 +2685,51 @@ mod tests {
         assert_eq!(
             storage.get("indices", b"a").unwrap(),
             Some(b"base-a".to_vec())
+        );
+    }
+
+    #[test]
+    fn storage_transaction_reads_own_writes_and_commits_atomically() {
+        let storage = MemoryStorage::new(&["records"]);
+        storage.set("records", b"a", b"base-a").unwrap();
+        storage.set("records", b"b", b"base-b").unwrap();
+
+        let txn = storage.begin_txn();
+        txn.set("records", b"a", b"txn-a").unwrap();
+        txn.delete("records", b"b").unwrap();
+        txn.set("records", b"c", b"txn-c").unwrap();
+
+        assert_eq!(txn.get("records", b"a").unwrap(), Some(b"txn-a".to_vec()));
+        assert_eq!(txn.get("records", b"b").unwrap(), None);
+        assert_eq!(txn.get("records", b"c").unwrap(), Some(b"txn-c".to_vec()));
+        assert_eq!(
+            txn.prefix("records", b"").unwrap(),
+            vec![
+                (b"a".to_vec(), b"txn-a".to_vec()),
+                (b"c".to_vec(), b"txn-c".to_vec()),
+            ]
+        );
+
+        assert_eq!(
+            storage.get("records", b"a").unwrap(),
+            Some(b"base-a".to_vec())
+        );
+        assert_eq!(
+            storage.get("records", b"b").unwrap(),
+            Some(b"base-b".to_vec())
+        );
+        assert_eq!(storage.get("records", b"c").unwrap(), None);
+
+        txn.commit().unwrap();
+
+        assert_eq!(
+            storage.get("records", b"a").unwrap(),
+            Some(b"txn-a".to_vec())
+        );
+        assert_eq!(storage.get("records", b"b").unwrap(), None);
+        assert_eq!(
+            storage.get("records", b"c").unwrap(),
+            Some(b"txn-c".to_vec())
         );
     }
 
@@ -2624,7 +2872,7 @@ mod tests {
                 storage.set("indices", key, value).unwrap();
             }
             storage.set("indices", b"view:1", b"base-view").unwrap();
-            let staged = RefCell::new(staged_rows);
+            let staged = RefCell::new(StagedWriteState::from(staged_rows));
             let overlay = StagedWriteOverlay::new(&storage, &staged);
             let default_reverse = DefaultReverse(&overlay);
 
@@ -2838,7 +3086,7 @@ mod tests {
         let storage = CountingStorage::new(MemoryStorage::new(&["indices"]));
         storage.set("indices", b"user:1", b"base-1").unwrap();
         storage.set("indices", b"user:2", b"base-2").unwrap();
-        let staged = RefCell::new(vec![
+        let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
                 key: b"user:3".to_vec(),
@@ -2849,7 +3097,7 @@ mod tests {
                 key: b"user:0".to_vec(),
                 value: b"staged-0".to_vec(),
             },
-        ]);
+        ]));
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
