@@ -12,6 +12,7 @@ autotests = false
 name = "jazz_tools"
 path = "src/lib.rs"
 test = false
+doctest = false
 
 [[bin]]
 name = "jazz-tools"

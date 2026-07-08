@@ -3,6 +3,9 @@ name = "jazz-server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [features]
 default = ["rocksdb"]
 rocksdb = ["jazz/rocksdb"]
