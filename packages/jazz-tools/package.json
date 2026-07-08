@@ -27,6 +27,10 @@
       "types": "./dist/better-auth-adapter/index.d.ts",
       "default": "./dist/better-auth-adapter/index.js"
     },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
