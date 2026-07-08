@@ -905,9 +905,47 @@ where
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
         self.ensure_batch_storage_txn(batch)?;
+        let table_schema = self.table(table)?;
+        let primary_key = table_schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
+        if key.len() != primary_key.columns.len() {
+            return Err(Error::PrimaryKeyArity {
+                table: table.to_owned(),
+                expected: primary_key.columns.len(),
+                actual: key.len(),
+            });
+        }
+        let descriptor = self
+            .ivm_runtime
+            .table_descriptor(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let mut encoded_key = Vec::new();
+        for (value, column) in key.iter().zip(&primary_key.columns) {
+            ensure_primary_key_value_type(table_schema, column, value)?;
+            encode_primary_key_part(&mut encoded_key, value);
+        }
+        let staged_contains_key = batch
+            .txn_operations
+            .borrow_mut()
+            .contains_key(table, &encoded_key);
+        if !staged_contains_key {
+            let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+            let key_descriptor = primary_key_descriptor(primary_key);
+            let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
+            return Ok(store
+                .get_raw(&encoded_key)?
+                .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)));
+        }
+
         let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.primary_key_get_raw_with_storage(&storage, table, key)
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
+        Ok(store
+            .get_raw(&encoded_key)?
+            .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)))
     }
 
     fn primary_key_get_raw_with_storage<'a, T>(
@@ -1652,18 +1690,16 @@ where
         &self,
         pending: &PendingTableWrite,
     ) -> Result<OwnedWriteOperation, Error> {
-        let descriptor = self.table_descriptor(pending.table())?;
-        let key_descriptor = self
-            .table(pending.table())
-            .ok()
-            .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-        let store =
-            record_store_for_table(&self.storage, pending.table(), key_descriptor, &descriptor);
         Ok(match pending {
-            PendingTableWrite::Set { key, record, .. } => {
-                owned_write_operation(&store.set(key, record))
-            }
-            PendingTableWrite::Delete { key, .. } => owned_write_operation(&store.delete(key)),
+            PendingTableWrite::Set { key, record, .. } => OwnedWriteOperation::Set {
+                cf: pending.table().to_owned(),
+                key: key.clone(),
+                value: record.clone(),
+            },
+            PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
+                cf: pending.table().to_owned(),
+                key: key.clone(),
+            },
         })
     }
 
