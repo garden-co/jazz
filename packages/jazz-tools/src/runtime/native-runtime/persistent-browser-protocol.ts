@@ -1,5 +1,6 @@
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
+import type { NativeRowDelta } from "../../drivers/types.js";
 
 type OpenRequest = {
   id: number;
@@ -125,3 +126,27 @@ type RequestForMethod<Method extends PersistentBrowserWorkerMethod> = Extract<
 >;
 export type PersistentBrowserRequestArgs<Method extends PersistentBrowserWorkerMethod> =
   RequestForMethod<Method>["args"];
+
+export type PersistentBrowserSubscriptionFrame = {
+  kind: "native-row-delta";
+  reset?: boolean;
+  added: ArrayBuffer;
+  removed: ArrayBuffer;
+  updated: ArrayBuffer;
+  addedCount: number;
+  removedCount: number;
+  updatedCount: number;
+};
+
+export type PersistentBrowserSubscriptionMessage = {
+  subscription: number;
+  frame: PersistentBrowserSubscriptionFrame;
+};
+
+export function isNativeRowDelta(value: unknown): value is NativeRowDelta {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as Partial<NativeRowDelta>).__jazzNativeRowDelta === true
+  );
+}

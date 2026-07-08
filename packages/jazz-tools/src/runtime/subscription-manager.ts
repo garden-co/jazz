@@ -43,6 +43,12 @@ export interface SubscriptionDelta<T> {
   all: T[];
   /** Ordered list of changes for this delta */
   delta: RowDelta<T>[];
+  /**
+   * True when the producer is sending a complete replacement snapshot. Empty
+   * reset snapshots are semantically different from empty incremental deltas:
+   * consumers must replace their current state with `all`.
+   */
+  reset?: boolean;
 }
 
 /**
@@ -82,10 +88,14 @@ export class SubscriptionManager<T extends { id: string }> {
     nativeColumns?: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
     if (isNativeRowDelta(delta)) {
+      const reset = delta.reset === true;
       if (!nativeColumns) {
         throw new Error("Native subscription delta requires output columns for decoding");
       }
-      return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform);
+      if (reset) {
+        this.clear();
+      }
+      return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform, reset);
     }
 
     return this.handleWireDelta(delta, transform);
@@ -105,6 +115,7 @@ export class SubscriptionManager<T extends { id: string }> {
   private handleWireDelta(
     delta: WireRowDelta,
     transform: (row: WasmRow) => T,
+    reset = false,
   ): SubscriptionDelta<T> {
     return this.handleTypedDelta(
       delta.map((change) => {
@@ -127,10 +138,11 @@ export class SubscriptionManager<T extends { id: string }> {
             };
         }
       }),
+      reset,
     );
   }
 
-  private handleTypedDelta(delta: RowDelta<T>[]): SubscriptionDelta<T> {
+  private handleTypedDelta(delta: RowDelta<T>[], reset = false): SubscriptionDelta<T> {
     delta.sort((a, b) => a.index - b.index);
 
     for (const change of delta) {
@@ -162,6 +174,7 @@ export class SubscriptionManager<T extends { id: string }> {
         .map((id) => this.currentResults.get(id))
         .filter((item): item is T => item !== undefined),
       delta,
+      ...(reset ? { reset: true } : {}),
     };
   }
 
@@ -183,7 +196,7 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 }
 
-function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
+export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
   return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
 }
 
@@ -197,11 +210,39 @@ function readUuid(bytes: Uint8Array, offset: number): string {
   )}-${hex.slice(20)}`;
 }
 
-function decodeNativeDelta(
+export function decodeNativeDelta(
   native: NativeRowDelta,
   columns: readonly ColumnDescriptor[],
 ): WireRowDelta {
   const delta: WireRowDelta = [];
+
+  {
+    const bytes = native.updated;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    for (let i = 0; i < native.updatedCount; i++) {
+      const id = readUuid(bytes, offset);
+      offset += 16;
+      const index = view.getUint32(offset, true);
+      offset += 4;
+      const flags = bytes[offset] ?? 0;
+      offset += 1;
+      if (flags & 1) {
+        const len = view.getUint32(offset, true);
+        offset += 4;
+        const data = bytes.subarray(offset, offset + len);
+        offset += len;
+        delta.push({
+          kind: RowChangeKind.Updated,
+          id,
+          index,
+          row: decodeNativeRow(id, columns, data),
+        });
+      } else {
+        delta.push({ kind: RowChangeKind.Updated, id, index });
+      }
+    }
+  }
 
   {
     const bytes = native.added;
@@ -235,34 +276,6 @@ function decodeNativeDelta(
       const index = view.getUint32(offset, true);
       offset += 4;
       delta.push({ kind: RowChangeKind.Removed, id, index });
-    }
-  }
-
-  {
-    const bytes = native.updated;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let offset = 0;
-    for (let i = 0; i < native.updatedCount; i++) {
-      const id = readUuid(bytes, offset);
-      offset += 16;
-      const index = view.getUint32(offset, true);
-      offset += 4;
-      const flags = bytes[offset] ?? 0;
-      offset += 1;
-      if (flags & 1) {
-        const len = view.getUint32(offset, true);
-        offset += 4;
-        const data = bytes.subarray(offset, offset + len);
-        offset += len;
-        delta.push({
-          kind: RowChangeKind.Updated,
-          id,
-          index,
-          row: decodeNativeRow(id, columns, data),
-        });
-      } else {
-        delta.push({ kind: RowChangeKind.Updated, id, index });
-      }
     }
   }
 

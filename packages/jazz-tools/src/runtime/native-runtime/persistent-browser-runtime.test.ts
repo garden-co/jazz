@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WasmSchema } from "../../drivers/types.js";
+import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
   PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
@@ -46,6 +46,57 @@ class FakeWorker {
       this.onmessage?.({ data: { id, ok: false, error: { message } } } as MessageEvent);
     });
   }
+
+  emitSubscription(subscription: number, delta: NativeRowDelta): void {
+    queueMicrotask(() => {
+      this.onmessage?.({
+        data: {
+          subscription,
+          frame: {
+            kind: "native-row-delta",
+            reset: delta.reset,
+            added: delta.added.buffer.slice(
+              delta.added.byteOffset,
+              delta.added.byteOffset + delta.added.byteLength,
+            ),
+            removed: delta.removed.buffer.slice(
+              delta.removed.byteOffset,
+              delta.removed.byteOffset + delta.removed.byteLength,
+            ),
+            updated: delta.updated.buffer.slice(
+              delta.updated.byteOffset,
+              delta.updated.byteOffset + delta.updated.byteLength,
+            ),
+            addedCount: delta.addedCount,
+            removedCount: delta.removedCount,
+            updatedCount: delta.updatedCount,
+          },
+        },
+      } as MessageEvent);
+    });
+  }
+}
+
+function uuidBytes(id: string): Uint8Array {
+  return Uint8Array.from(
+    id
+      .replaceAll("-", "")
+      .match(/../g)!
+      .map((hex) => Number.parseInt(hex, 16)),
+  );
+}
+
+function pushU32(target: number[], value: number): void {
+  target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+}
+
+function nativeAddedRecord(id: string, index: number, text: string): Uint8Array {
+  const raw = new TextEncoder().encode(text);
+  const bytes: number[] = [...uuidBytes(id)];
+  pushU32(bytes, index);
+  pushU32(bytes, raw.byteLength);
+  bytes.push(...raw);
+  return Uint8Array.from(bytes);
 }
 
 describe("PersistentBrowserOpfsRuntime", () => {
@@ -282,6 +333,65 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     await expect(queryPromise).resolves.toEqual([]);
     expect(createSubscriptionMessage?.args[0]).toBe(subscriptionHandle);
+
+    await runtime.close();
+  });
+
+  it("decodes transferable encoded subscription frames from the worker", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-encoded-subscription-frame-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const subscriptionHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      null,
+    );
+    const updates: NativeRowDelta[] = [];
+    runtime.executeSubscription(subscriptionHandle, (delta: NativeRowDelta) => {
+      updates.push(delta);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    const createSubscriptionMessage = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    );
+    expect(createSubscriptionMessage?.args[0]).toBe(subscriptionHandle);
+    worker.respond(createSubscriptionMessage!.id, 7);
+
+    const added = nativeAddedRecord("00000000-0000-4000-8000-000000000001", 0, "encoded");
+    worker.emitSubscription(subscriptionHandle, {
+      __jazzNativeRowDelta: true,
+      added,
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 1,
+      removedCount: 0,
+      updatedCount: 0,
+    });
+
+    await vi.waitFor(() => {
+      expect(updates).toHaveLength(1);
+    });
+    expect(updates[0]).toMatchObject({
+      __jazzNativeRowDelta: true,
+      addedCount: 1,
+      removedCount: 0,
+      updatedCount: 0,
+    });
+    expect([...updates[0]!.added]).toEqual([...added]);
 
     await runtime.close();
   });

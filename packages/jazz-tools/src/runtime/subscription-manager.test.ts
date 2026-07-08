@@ -128,6 +128,44 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("clears tracked state before applying native reset frames", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const first = "00000000-0000-4000-8000-000000000001";
+    const second = "00000000-0000-4000-8000-000000000002";
+
+    manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRecord(first, 0, "first", 1),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        reset: true,
+        added: nativeAddedRecord(second, 0, "second", 2),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id: second, name: "second", count: 2 }]);
+    expect(manager.size).toBe(1);
+  });
+
   it("tracks content updates", () => {
     const manager = new SubscriptionManager<TestItem>();
 

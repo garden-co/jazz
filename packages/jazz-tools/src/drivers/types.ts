@@ -62,6 +62,7 @@ export type RowDelta = WireRowChange[];
 
 export interface NativeRowDelta {
   __jazzNativeRowDelta: true;
+  reset?: boolean;
   added: Uint8Array;
   removed: Uint8Array;
   updated: Uint8Array;

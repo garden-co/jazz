@@ -336,7 +336,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     });
 
-    expect(updates).toEqual([{ all: [], delta: [] }]);
+    expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
 
     const inserted = runtime.insert("todos", {
       title: { type: "Text", value: "direct napi subscribed row" },
@@ -500,13 +500,19 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const bobSession = JSON.stringify({ user_id: BOB_ID });
     const query = JSON.stringify({ table: "todos" });
     const aliceUpdates: unknown[] = [];
+    const decodeAliceDelta = (delta: unknown) =>
+      new SubscriptionManager<WasmRow>().handleDelta(
+        delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
+        (row) => row,
+        OWNED_TODOS_SCHEMA.todos.columns,
+      );
 
     const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
     });
 
-    expect(aliceUpdates).toEqual([[]]);
+    expect(decodeAliceDelta(aliceUpdates[0])).toEqual({ all: [], delta: [], reset: true });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -539,22 +545,48 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       expect.objectContaining({ id: bobTodo.id }),
     ]);
 
-    expect(aliceUpdates).toEqual([
-      [],
-      [
-        expect.objectContaining({
-          kind: 0,
-          id: aliceTodo.id,
-          row: expect.objectContaining({
+    expect(aliceUpdates).toHaveLength(2);
+    expect(decodeAliceDelta(aliceUpdates[1])).toEqual(
+      expect.objectContaining({
+        all: [expect.objectContaining({ id: aliceTodo.id })],
+        delta: [
+          expect.objectContaining({
+            kind: 0,
             id: aliceTodo.id,
-            values: [
-              { type: "Text", value: "alice subscribed row" },
-              { type: "Boolean", value: false },
-              { type: "Text", value: ALICE_ID },
-            ],
+            item: expect.objectContaining({
+              id: aliceTodo.id,
+              values: [
+                { type: "Text", value: "alice subscribed row" },
+                { type: "Boolean", value: false },
+                { type: "Text", value: ALICE_ID },
+              ],
+            }),
           }),
+        ],
+      }),
+    );
+    expect(aliceUpdates).toEqual([
+      expect.objectContaining({ __jazzNativeRowDelta: true, addedCount: 0 }),
+      expect.objectContaining({
+        __jazzNativeRowDelta: true,
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
+      }),
+    ]);
+    expect(decodeAliceDelta(aliceUpdates[1]).delta).toEqual([
+      expect.objectContaining({
+        kind: 0,
+        id: aliceTodo.id,
+        item: expect.objectContaining({
+          id: aliceTodo.id,
+          values: [
+            { type: "Text", value: "alice subscribed row" },
+            { type: "Boolean", value: false },
+            { type: "Text", value: ALICE_ID },
+          ],
         }),
-      ],
+      }),
     ]);
 
     runtime.unsubscribe(aliceHandle);

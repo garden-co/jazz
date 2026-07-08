@@ -9,6 +9,8 @@ import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
 import { encodeSchema } from "./native-runtime-adapter.js";
+import { decodeNativeDelta, isNativeRowDelta } from "../subscription-manager.js";
+import type { SubscriptionWireDelta } from "../../drivers/types.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -21,6 +23,15 @@ const schema = {
     ],
   },
 } satisfies WasmSchema;
+
+function normalizeTestDelta(delta: SubscriptionWireDelta, testSchema: WasmSchema) {
+  if (isNativeRowDelta(delta)) {
+    const columns = testSchema.todos?.columns ?? testSchema.binary_large_values?.columns;
+    if (!columns) throw new Error("test schema has no decodable subscription table");
+    return decodeNativeDelta(delta, columns);
+  }
+  return delta;
+}
 
 const writableTodoSchema = {
   todos: {
@@ -79,8 +90,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         clientB.subscribe(
           JSON.stringify({ table: "todos" }),
           (delta) => {
-            if (!Array.isArray(delta)) return;
-            for (const change of delta) {
+            for (const change of normalizeTestDelta(delta, schema)) {
               const firstValue = "row" in change ? change.row?.values[0] : undefined;
               if (firstValue?.type === "Text") {
                 resolve(firstValue.value);
@@ -223,8 +233,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         reader.subscribe(
           JSON.stringify({ table: "todos" }),
           (delta) => {
-            if (!Array.isArray(delta)) return;
-            for (const change of delta) {
+            for (const change of normalizeTestDelta(delta, schema)) {
               if ("row" in change && change.row?.id === inserted.value.id) {
                 const firstValue = change.row.values[0];
                 if (firstValue?.type === "Text") {
@@ -297,8 +306,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
       reader.subscribe(
         JSON.stringify({ table: "binary_large_values" }),
         (delta) => {
-          if (!Array.isArray(delta)) return;
-          for (const change of delta) {
+          for (const change of normalizeTestDelta(delta, binaryLargeValueSchema)) {
             if ("row" in change && change.row?.id === inserted.value.id) {
               const firstValue = change.row.values[0];
               if (firstValue?.type === "Bytea") {
@@ -379,8 +387,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         reader.subscribe(
           JSON.stringify({ table: "todos" }),
           (delta) => {
-            if (!Array.isArray(delta)) return;
-            for (const change of delta) {
+            for (const change of normalizeTestDelta(delta, schema)) {
               if ("row" in change && change.row?.id === inserted.value.id) {
                 const firstValue = change.row.values[0];
                 if (firstValue?.type === "Text") {
