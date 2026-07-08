@@ -3425,6 +3425,44 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("serializes allowedTo.read as a native inherits policy atom", () => {
+    const baseSchema: WasmSchema = {
+      resources: {
+        columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+      },
+      data_entries: {
+        columns: [
+          {
+            name: "resource",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "resources",
+          },
+          { name: "label", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+    const app = {
+      wasmSchema: baseSchema,
+      resources: { _rowType: {} as never, where: (_input: unknown) => undefined },
+      data_entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
+    };
+    const permissions = definePermissions(app, ({ policy, allowedTo }) => {
+      policy.resources.allowRead.where({ label: "visible" });
+      policy.data_entries.allowRead.where(allowedTo.read("resource"));
+    });
+
+    const policy = readSchemaSelectPolicyInherits(
+      encodeSchema(mergePermissionsIntoWasmSchema(baseSchema, permissions)),
+      "data_entries",
+    );
+
+    expect(policy).toEqual({
+      inherits: [{ parentColumn: "resource" }],
+      joinCount: 0,
+    });
+  });
+
   it("rejects ExistsRel Gather policies without a concrete MaxDepth bound", () => {
     expect(() =>
       encodeSchema({
@@ -3628,7 +3666,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it("serializes direct Inherits through parent exists joins with source lookup", () => {
-    const policy = readSchemaSelectPolicyBranches(
+    const policy = readSchemaSelectPolicyInherits(
       encodeSchema({
         chats: {
           columns: [{ name: "isPublic", column_type: { type: "Boolean" }, nullable: false }],
@@ -3693,35 +3731,13 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(policy).toEqual({
-      table: "canvases",
-      filters: [],
-      joins: [
-        {
-          table: "chatMembers",
-          onColumn: "chatId",
-          targetTag: 0,
-          sourceColumn: "id",
-          sourceLookup: {
-            table: "chats",
-            rowIdSourceColumn: "chatId",
-            valueColumn: "id",
-          },
-          filters: [
-            {
-              tag: 3,
-              column: "userId",
-              operand: { tag: 2, claim: "user_id" },
-            },
-          ],
-          nestedJoins: [],
-        },
-      ],
-      branches: [],
+      inherits: [{ parentColumn: "chatId" }],
+      joinCount: 0,
     });
   });
 
   it("serializes nested Inherits through composed source lookups", () => {
-    const policy = readSchemaSelectPolicyBranches(
+    const policy = readSchemaSelectPolicyInherits(
       encodeSchema({
         chats: {
           columns: [{ name: "isPublic", column_type: { type: "Boolean" }, nullable: false }],
@@ -3805,30 +3821,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(policy).toEqual({
-      table: "strokes",
-      filters: [],
-      joins: [
-        {
-          table: "chatMembers",
-          onColumn: "chatId",
-          targetTag: 0,
-          sourceColumn: "chatId",
-          sourceLookup: {
-            table: "canvases",
-            rowIdSourceColumn: "canvasId",
-            valueColumn: "chatId",
-          },
-          filters: [
-            {
-              tag: 3,
-              column: "userId",
-              operand: { tag: 2, claim: "user_id" },
-            },
-          ],
-          nestedJoins: [],
-        },
-      ],
-      branches: [],
+      inherits: [{ parentColumn: "canvasId" }],
+      joinCount: 0,
     });
   });
 
@@ -4341,7 +4335,7 @@ function readPolicyQueryForTest(reader: PostcardReader): {
   const joins = reader.readVec(readPolicyJoinForTest);
   const branches = reader.readVec(readPolicyBranchForTest);
   reader.readVec(skipPolicyReachableForTest);
-  reader.readVec(() => undefined);
+  reader.readVec(readPolicyInheritsForTest);
   reader.readVec(() => undefined);
   reader.readVec(() => undefined);
   reader.option(() => undefined);
@@ -4388,6 +4382,44 @@ function readSchemaSelectPolicyReachables(
   return tables.find((table) => table.table === tableName)?.select?.reachables ?? [];
 }
 
+function readSchemaSelectPolicyInherits(
+  schemaBytes: Uint8Array,
+  tableName: string,
+): { inherits: TestPolicyInherits[]; joinCount: number } {
+  const reader = new PostcardReader(schemaBytes);
+  const tables = reader.readVec((tableReader) => {
+    const table = tableReader.string();
+    tableReader.readVec((columnReader) => {
+      columnReader.string();
+      skipSchemaValueType(columnReader);
+      columnReader.option(() => undefined);
+      columnReader.option(() => undefined);
+    });
+    const referenceCount = tableReader.u64();
+    for (let index = 0; index < referenceCount; index += 1) {
+      tableReader.string();
+      tableReader.string();
+    }
+    const select = tableReader.option(readPolicyQueryWithInheritsForTest);
+    tableReader.option(readPolicyQueryWithInheritsForTest);
+    tableReader.option(readPolicyQueryWithInheritsForTest);
+    tableReader.option(readPolicyQueryWithInheritsForTest);
+    tableReader.option(readPolicyQueryWithInheritsForTest);
+    tableReader.u64();
+    const indexCount = tableReader.u64();
+    for (let index = 0; index < indexCount; index += 1) {
+      tableReader.string();
+      tableReader.readVec((indexReader) => indexReader.string());
+    }
+    return { table, select };
+  });
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  return (
+    tables.find((table) => table.table === tableName)?.select ?? { inherits: [], joinCount: 0 }
+  );
+}
+
 function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
   reachables: TestPolicyReachable[];
 } {
@@ -4407,12 +4439,36 @@ function readPolicyQueryWithReachablesForTest(reader: PostcardReader): {
   return { reachables };
 }
 
+function readPolicyQueryWithInheritsForTest(reader: PostcardReader): {
+  inherits: TestPolicyInherits[];
+  joinCount: number;
+} {
+  reader.string();
+  reader.readVec(readPolicyPredicateForTest);
+  const joinCount = reader.readVec(readPolicyJoinForTest).length;
+  reader.readVec(readPolicyBranchForTest);
+  reader.readVec(skipPolicyReachableForTest);
+  const inherits = reader.readVec(readPolicyInheritsForTest);
+  reader.readVec(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.readVec(() => undefined);
+  reader.option(() => undefined);
+  reader.option(() => undefined);
+  reader.u64();
+  return { inherits, joinCount };
+}
+
 function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
   const filters = reader.readVec(readPolicyPredicateForTest);
   const joins = reader.readVec(readPolicyJoinForTest);
   reader.readVec(skipPolicyReachableForTest);
-  reader.readVec(() => undefined);
+  reader.readVec(readPolicyInheritsForTest);
   return { filters, joins };
+}
+
+function readPolicyInheritsForTest(reader: PostcardReader): TestPolicyInherits {
+  return { parentColumn: reader.string() };
 }
 
 function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
@@ -4512,6 +4568,10 @@ function skipSchemaValueType(reader: PostcardReader): void {
 type TestPolicyBranch = {
   filters: TestPolicyPredicate[];
   joins: TestPolicyJoin[];
+};
+
+type TestPolicyInherits = {
+  parentColumn: string;
 };
 
 type TestPolicyJoin = {

@@ -19,6 +19,11 @@ type PolicyQueryShape = {
   filters: PolicyExpr[];
   joins: PolicyJoin[];
   reachable: PolicyReachable[];
+  inherits: PolicyInherits[];
+};
+
+type PolicyInherits = {
+  parentColumn: string;
 };
 
 type PolicyJoin = {
@@ -214,7 +219,10 @@ function writePolicyQuery(
     (reachable, index) => writePolicyReachable(reachable, query.reachable[index]!),
     query.reachable.length,
   );
-  writer.vec(() => undefined, 0);
+  writer.vec(
+    (inherits, index) => writePolicyInherits(inherits, query.inherits[index]!),
+    query.inherits.length,
+  );
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.none();
@@ -392,7 +400,14 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
     (reachable, index) => writePolicyReachable(reachable, branch.reachable[index]!),
     branch.reachable.length,
   );
-  writer.vec(() => undefined, 0);
+  writer.vec(
+    (inherits, index) => writePolicyInherits(inherits, branch.inherits[index]!),
+    branch.inherits.length,
+  );
+}
+
+function writePolicyInherits(writer: PostcardWriter, inherits: PolicyInherits): void {
+  writer.string(inherits.parentColumn);
 }
 
 function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable): void {
@@ -446,7 +461,7 @@ function policyExprToAlternatives(
   table: string,
   expr: PolicyExpr,
 ): PolicyQueryShape[] {
-  if (expr.type === "Inherits") {
+  if (expr.type === "Inherits" && expr.operation !== "Select") {
     return inheritedPolicyToQueryShapes(schema, table, expr.operation, expr.via_column);
   }
   if (expr.type === "InheritsReferencing") {
@@ -471,10 +486,11 @@ function policyExprToAlternatives(
           filters: [...left.filters, ...right.filters],
           joins: [...left.joins, ...right.joins],
           reachable: [...left.reachable, ...right.reachable],
+          inherits: [...left.inherits, ...right.inherits],
         })),
       );
     },
-    [{ filters: [], joins: [], reachable: [] }],
+    [{ filters: [], joins: [], reachable: [], inherits: [] }],
   );
 }
 
@@ -483,8 +499,10 @@ function policyExprToQueryShape(
   table: string,
   expr: PolicyExpr,
 ): PolicyQueryShape {
-  if (expr.type === "True") return { filters: [], joins: [], reachable: [] };
-  if (expr.type === "False") return { filters: [expr], joins: [], reachable: [] };
+  if (expr.type === "True") return { filters: [], joins: [], reachable: [], inherits: [] };
+  if (expr.type === "False") {
+    return { filters: [expr], joins: [], reachable: [], inherits: [] };
+  }
   if (expr.type === "And") {
     return expr.exprs.reduce<PolicyQueryShape>(
       (shape, child) => {
@@ -492,28 +510,37 @@ function policyExprToQueryShape(
         shape.filters.push(...childShape.filters);
         shape.joins.push(...childShape.joins);
         shape.reachable.push(...childShape.reachable);
+        shape.inherits.push(...childShape.inherits);
         return shape;
       },
-      { filters: [], joins: [], reachable: [] },
+      { filters: [], joins: [], reachable: [], inherits: [] },
     );
   }
   if (expr.type === "Exists") {
-    return { filters: [], joins: [policyExistsToJoin(schema, expr)], reachable: [] };
+    return { filters: [], joins: [policyExistsToJoin(schema, expr)], reachable: [], inherits: [] };
   }
   if (expr.type === "ExistsRel") {
     return policyExistsRelToQueryShape(schema, table, expr.rel);
   }
   if (expr.type === "Inherits") {
-    const alternatives = inheritedPolicyToQueryShapes(
-      schema,
-      table,
-      expr.operation,
-      expr.via_column,
-    );
-    if (alternatives.length !== 1) {
-      throw new Error("Core runtime schema Inherits policy alternatives must be branch-lowered.");
+    if (expr.operation !== "Select") {
+      const alternatives = inheritedPolicyToQueryShapes(
+        schema,
+        table,
+        expr.operation,
+        expr.via_column,
+      );
+      if (alternatives.length !== 1) {
+        throw new Error("Core runtime schema Inherits policy alternatives must be branch-lowered.");
+      }
+      return alternatives[0]!;
     }
-    return alternatives[0]!;
+    return {
+      filters: [],
+      joins: [],
+      reachable: [],
+      inherits: [{ parentColumn: expr.via_column }],
+    };
   }
   if (expr.type === "InheritsReferencing") {
     const alternatives = inheritedReferencingPolicyToQueryShapes(
@@ -529,7 +556,7 @@ function policyExprToQueryShape(
     }
     return alternatives[0]!;
   }
-  return { filters: [expr], joins: [], reachable: [] };
+  return { filters: [expr], joins: [], reachable: [], inherits: [] };
 }
 
 type RelExprObject = Record<string, unknown>;
@@ -541,7 +568,7 @@ function policyExistsRelToQueryShape(
 ): PolicyQueryShape {
   const lowered = lowerExistsRel(rel);
   const join = policyExistsRelLoweredToJoin(schema, rootTable, lowered);
-  return { filters: [], joins: join ? [join] : [], reachable: lowered.reachable };
+  return { filters: [], joins: join ? [join] : [], reachable: lowered.reachable, inherits: [] };
 }
 
 function policyExistsRelLoweredToJoin(
@@ -676,6 +703,7 @@ function normalizePolicyQueryShape(schema: WasmSchema, shape: PolicyQueryShape):
     filters: shape.filters,
     joins: shape.joins.map((join) => normalizePolicyJoinTable(schema, join)),
     reachable: shape.reachable,
+    inherits: shape.inherits,
   };
 }
 
@@ -684,6 +712,7 @@ function lowerExistsRel(rel: unknown): {
   filters: LoweredPolicyExpr[];
   joins: PolicyJoin[];
   reachable: PolicyReachable[];
+  inherits: PolicyInherits[];
   pendingReachable?: PendingPolicyReachable;
 } {
   if (!isRecord(rel)) throw new Error("Core runtime schema ExistsRel relation must be an object.");
@@ -693,7 +722,7 @@ function lowerExistsRel(rel: unknown): {
     if (typeof table !== "string") {
       throw new Error("Core runtime schema ExistsRel TableScan is missing table.");
     }
-    return { table, filters: [], joins: [], reachable: [] };
+    return { table, filters: [], joins: [], reachable: [], inherits: [] };
   }
 
   if (isRecord(rel.Filter)) {
@@ -735,6 +764,7 @@ function lowerExistsRel(rel: unknown): {
         ],
         joins: left.joins,
         reachable: [...left.reachable, ...right.reachable],
+        inherits: [...left.inherits, ...right.inherits],
         pendingReachable: left.pendingReachable,
       };
     }
@@ -759,6 +789,7 @@ function lowerExistsRel(rel: unknown): {
         filters: [...rightFilters, ...correlatedLeftFilters],
         joins: right.joins,
         reachable: [...left.reachable, ...right.reachable],
+        inherits: [...left.inherits, ...right.inherits],
         pendingReachable: right.pendingReachable,
       };
     }
@@ -780,6 +811,7 @@ function lowerExistsRel(rel: unknown): {
             accessFilters: [],
           },
         ],
+        inherits: [...left.inherits, ...right.inherits],
       };
     }
 
@@ -797,6 +829,7 @@ function lowerExistsRel(rel: unknown): {
       filters: leftFilters,
       joins: [...left.joins, join],
       reachable: [...left.reachable, ...right.reachable],
+      inherits: [...left.inherits, ...right.inherits],
       pendingReachable: left.pendingReachable,
     };
   }
@@ -814,6 +847,7 @@ function lowerGatherRel(gather: RelExprObject): LoweredRelExpr {
     filters: [],
     joins: [],
     reachable: [],
+    inherits: [],
     pendingReachable: {
       from: seed.from,
       seed: seed.seed,
@@ -1236,7 +1270,7 @@ function inheritedParentBranchToChildQuery(
   branch: PolicyQueryShape,
 ): PolicyQueryShape {
   if (isFalseFilterSet(branch.filters)) {
-    return { filters: branch.filters, joins: [], reachable: [] };
+    return { filters: branch.filters, joins: [], reachable: [], inherits: [] };
   }
 
   const joins: PolicyJoin[] = [];
@@ -1264,7 +1298,7 @@ function inheritedParentBranchToChildQuery(
             },
     });
   }
-  return { filters: [], joins, reachable: [] };
+  return { filters: [], joins, reachable: [], inherits: [] };
 }
 
 function inheritedReferencingPolicyToQueryShapes(
@@ -1294,6 +1328,7 @@ function inheritedReferencingPolicyToQueryShapes(
       },
     ],
     reachable: [],
+    inherits: [],
   }));
 }
 
