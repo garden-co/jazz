@@ -1225,67 +1225,6 @@ function policyExistsToJoin(
   };
 }
 
-function inheritedPolicyToQueryShapes(
-  schema: WasmSchema,
-  table: string,
-  operation: "Select" | "Insert" | "Update" | "Delete",
-  viaColumn: string,
-): PolicyQueryShape[] {
-  const parentTable = schema[table]?.columns.find(
-    (column) => column.name === viaColumn,
-  )?.references;
-  if (!parentTable) {
-    throw new Error(
-      `Core runtime schema Inherits policy ${table}.${viaColumn} is not a reference.`,
-    );
-  }
-  const parentPolicy = sourceOperationPolicy(schema[parentTable]?.policies, operation) ?? {
-    type: "False" as const,
-  };
-
-  const parentAlternatives = policyExprToAlternatives(schema, parentTable, parentPolicy);
-  return parentAlternatives.map((branch) =>
-    inheritedParentBranchToChildQuery(parentTable, viaColumn, branch),
-  );
-}
-
-function inheritedParentBranchToChildQuery(
-  parentTable: string,
-  viaColumn: string,
-  branch: PolicyQueryShape,
-): PolicyQueryShape {
-  if (isFalseFilterSet(branch.filters)) {
-    return { filters: branch.filters, joins: [], reachable: [], inherits: [] };
-  }
-
-  const joins: PolicyJoin[] = [];
-  if (branch.filters.length > 0) {
-    joins.push({
-      table: parentTable,
-      onColumn: "id",
-      target: "RowId",
-      sourceColumn: viaColumn,
-      filters: branch.filters,
-    });
-  }
-  for (const join of branch.joins) {
-    const sourceColumn = join.sourceLookup?.rowIdSourceColumn ?? join.sourceColumn;
-    joins.push({
-      ...join,
-      sourceColumn,
-      sourceLookup:
-        sourceColumn == null
-          ? undefined
-          : {
-              table: parentTable,
-              rowIdSourceColumn: viaColumn,
-              valueColumn: sourceColumn,
-            },
-    });
-  }
-  return { filters: [], joins, reachable: [], inherits: [] };
-}
-
 function inheritedReferencingPolicyToQueryShapes(
   schema: WasmSchema,
   operation: "Select" | "Insert" | "Update" | "Delete",
@@ -1331,10 +1270,6 @@ function sourceOperationPolicy(
     case "Delete":
       return policies?.delete?.using;
   }
-}
-
-function isFalseFilterSet(filters: PolicyExpr[]): boolean {
-  return filters.length === 1 && filters[0]?.type === "False";
 }
 
 function isOuterRowEquality(expr: PolicyExpr): boolean {
