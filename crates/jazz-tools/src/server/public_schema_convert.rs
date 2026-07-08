@@ -239,6 +239,17 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
+    convert_policy_with_mode(schema, table_schema, table, path, expr, true)
+}
+
+fn convert_policy_with_mode(
+    schema: &Schema,
+    table_schema: &TableSchema,
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+    native_select_inherits: bool,
+) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -254,6 +265,7 @@ fn convert_policy(
                     &format!("{path}.And[{index}]"),
                     query,
                     expr,
+                    native_select_inherits,
                 )?;
             }
             Ok(query)
@@ -261,12 +273,13 @@ fn convert_policy(
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
             for (index, expr) in exprs.iter().enumerate() {
-                let branch = convert_policy(
+                let branch = convert_policy_with_mode(
                     schema,
                     table_schema,
                     table,
                     &format!("{path}.Or[{index}]"),
                     expr,
+                    native_select_inherits,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -286,6 +299,7 @@ fn convert_policy(
             Query::from(table.as_str()),
             *operation,
             via_column,
+            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -348,6 +362,7 @@ fn append_policy_clause(
     path: &str,
     query: Query,
     expr: &PolicyExpr,
+    native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::Inherits {
@@ -362,6 +377,7 @@ fn append_policy_clause(
             query,
             *operation,
             via_column,
+            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -450,12 +466,13 @@ fn append_inherited_referencing_policy(
     match source_filter {
         Ok(source_filter) => Ok(query.join_via(source_table, via_column, [source_filter])),
         Err(_) if policy_requires_branch(source_policy) => {
-            let source_query = convert_policy(
+            let source_query = convert_policy_with_mode(
                 schema,
                 source_schema,
                 &source_table_name,
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
+                false,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -1200,6 +1217,7 @@ fn rel_value_to_policy_operand(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_inherited_policy(
     schema: &Schema,
     table_schema: &TableSchema,
@@ -1208,6 +1226,7 @@ fn append_inherited_policy(
     query: Query,
     operation: Operation,
     via_column: &str,
+    native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -1238,6 +1257,18 @@ fn append_inherited_policy(
             format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
+    if operation == Operation::Select
+        && native_select_inherits
+        && inherited_select_requires_native_atom(
+            schema,
+            parent_schema,
+            parent_table,
+            path,
+            parent_policy,
+        )
+    {
+        return Ok(query.inherits(via_column));
+    }
     let parent_filter = convert_policy_predicate(
         parent_table,
         &format!("{path}.Inherits[{parent_table}]"),
@@ -1248,12 +1279,13 @@ fn append_inherited_policy(
             Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
         }
         Err(_) if policy_requires_branch(parent_policy) => {
-            let parent_query = convert_policy(
+            let parent_query = convert_policy_with_mode(
                 schema,
                 parent_schema,
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
+                native_select_inherits,
             )?;
             append_inherited_policy_branches(
                 table,
@@ -1266,6 +1298,29 @@ fn append_inherited_policy(
         }
         Err(err) => Err(err),
     }
+}
+
+fn inherited_select_requires_native_atom(
+    schema: &Schema,
+    parent_schema: &TableSchema,
+    parent_table: &TableName,
+    path: &str,
+    parent_policy: &PolicyExpr,
+) -> bool {
+    let Ok(parent_query) = convert_policy_with_mode(
+        schema,
+        parent_schema,
+        parent_table,
+        &format!("{path}.Inherits[{parent_table}]"),
+        parent_policy,
+        false,
+    ) else {
+        return true;
+    };
+
+    PolicyBranch::alternatives_from_query(parent_query)
+        .into_iter()
+        .any(|branch| !branch.reachable.is_empty() || !branch.inherits.is_empty())
 }
 
 fn append_inherited_policy_branches(

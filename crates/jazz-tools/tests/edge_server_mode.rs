@@ -4,6 +4,7 @@ mod support;
 
 use std::time::Duration;
 
+use jazz_tools::Operation;
 use jazz_tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
@@ -35,6 +36,36 @@ fn boredm_policy_schema() -> Schema {
                 .policies(
                     TablePolicies::new()
                         .with_select(resource_access_policy())
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("data_entries")
+                .fk_column("resource", "resources")
+                .column("label", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Select, "resource"))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("mapping_rules")
+                .fk_column("resource", "resources")
+                .column("label", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Select, "resource"))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("data_entry_entries")
+                .fk_column("data_entry", "data_entries")
+                .column("label", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Select, "data_entry"))
                         .with_insert(PolicyExpr::True),
                 ),
         )
@@ -261,6 +292,27 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 )
                 .expect("insert resource access edge");
             wait_edge_batch(&admin, access_batch, "resource access").await;
+            let (data_entry, _, data_entry_batch) = admin
+                .insert(
+                    "data_entries",
+                    row_input!("resource" => resource, "label" => "visible data entry"),
+                )
+                .expect("insert inherited data entry");
+            wait_edge_batch(&admin, data_entry_batch, "data entry").await;
+            let (mapping_rule, _, mapping_rule_batch) = admin
+                .insert(
+                    "mapping_rules",
+                    row_input!("resource" => resource, "label" => "visible mapping rule"),
+                )
+                .expect("insert inherited mapping rule");
+            wait_edge_batch(&admin, mapping_rule_batch, "mapping rule").await;
+            let (data_entry_entry, _, data_entry_entry_batch) = admin
+                .insert(
+                    "data_entry_entries",
+                    row_input!("data_entry" => data_entry, "label" => "visible data entry child"),
+                )
+                .expect("insert inherited data entry child");
+            wait_edge_batch(&admin, data_entry_entry_batch, "data entry child").await;
 
             let member = TestingClient::builder()
                 .with_server(&server)
@@ -282,6 +334,33 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 member_rows[0].1,
                 vec![Value::Text("visible resource".to_owned())]
             );
+            wait_for_query(
+                &member,
+                QueryBuilder::new("data_entries").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "member sees data entry through inherits over seeded resource policy",
+                |rows| (rows.len() == 1 && rows[0].0 == data_entry).then_some(rows),
+            )
+            .await;
+            wait_for_query(
+                &member,
+                QueryBuilder::new("mapping_rules").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "member sees sibling mapping rule through inherits over seeded resource policy",
+                |rows| (rows.len() == 1 && rows[0].0 == mapping_rule).then_some(rows),
+            )
+            .await;
+            wait_for_query(
+                &member,
+                QueryBuilder::new("data_entry_entries").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "member sees grandchild through nested inherits over seeded resource policy",
+                |rows| (rows.len() == 1 && rows[0].0 == data_entry_entry).then_some(rows),
+            )
+            .await;
 
             let spy = TestingClient::builder()
                 .with_server(&server)
@@ -296,6 +375,15 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 Some(DurabilityTier::EdgeServer),
                 Duration::from_secs(30),
                 "spy sees no resources through seeded recursive access policy",
+                |rows| rows.is_empty().then_some(rows),
+            )
+            .await;
+            wait_for_query(
+                &spy,
+                QueryBuilder::new("data_entries").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(30),
+                "spy sees no inherited data entries through seeded recursive access policy",
                 |rows| rows.is_empty().then_some(rows),
             )
             .await;
