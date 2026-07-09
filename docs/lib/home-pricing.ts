@@ -14,16 +14,16 @@ export const pricingMeters = [
   {
     name: "Compute",
     price: "$0.039",
-    unit: "per CU/h",
-    note: "1 CU ≈ 2 GB RAM ",
-    included: "360 CU-hours/month included",
+    unit: "per 0.5vCPU / 2GB RAM instance",
+    note: "Auto-scaling available soon",
+    included: "1GB RAM instance always included",
   },
   {
     name: "Storage",
     price: "$0.45",
-    unit: "per GB-month",
+    unit: "per GB/month",
     note: "Includes backups and caches.",
-    included: "1GB-month included",
+    included: "1GB/month included",
   },
   {
     name: "Egress",
@@ -39,33 +39,29 @@ export const frequencyOptions = [
     value: "multiple-daily",
     label: "Multiple times daily",
     activeDaysPerMonth: 22,
-    activeMinutesPerActiveDay: 90,
+    visitsPerUserPerMonth: 44,
     blobFetchRatio: 0.4,
-    peakConcurrencyFraction: 0.12,
   },
   {
     value: "daily",
     label: "Daily",
     activeDaysPerMonth: 20,
-    activeMinutesPerActiveDay: 30,
+    visitsPerUserPerMonth: 20,
     blobFetchRatio: 0.22,
-    peakConcurrencyFraction: 0.06,
   },
   {
     value: "weekly",
     label: "Weekly",
     activeDaysPerMonth: 4,
-    activeMinutesPerActiveDay: 45,
+    visitsPerUserPerMonth: 4,
     blobFetchRatio: 0.1,
-    peakConcurrencyFraction: 0.025,
   },
   {
     value: "monthly",
     label: "Monthly",
     activeDaysPerMonth: 1,
-    activeMinutesPerActiveDay: 60,
+    visitsPerUserPerMonth: 1,
     blobFetchRatio: 0.04,
-    peakConcurrencyFraction: 0.01,
   },
 ] as const;
 
@@ -73,27 +69,27 @@ export const realtimeOptions = [
   {
     value: "mostly-form-like",
     label: "Mostly form-like apps",
-    cadenceLabel: "~1 interaction every 30s while active",
-    interactionRateHz: 1 / 30,
-    structuredEgressKbPerInteraction: 3,
+    sessionLabel: "~3 minute sessions over the active window",
+    averageSessionMinutes: 3,
+    structuredEgressMbPerVisit: 0.5,
     egressFanoutMultiplier: 1,
     structuredStoragePerUserMb: 8,
   },
   {
     value: "collaborative",
     label: "Collaborative / shared state",
-    cadenceLabel: "~1 interaction every second while active",
-    interactionRateHz: 1,
-    structuredEgressKbPerInteraction: 4,
+    sessionLabel: "~20 minute sessions over the active window",
+    averageSessionMinutes: 20,
+    structuredEgressMbPerVisit: 2,
     egressFanoutMultiplier: 2.5,
     structuredStoragePerUserMb: 16,
   },
   {
     value: "live",
     label: "Live streams / fan-out",
-    cadenceLabel: "~30 interactions every second while active",
-    interactionRateHz: 30,
-    structuredEgressKbPerInteraction: 2,
+    sessionLabel: "~45 minute sessions in a concentrated event window",
+    averageSessionMinutes: 45,
+    structuredEgressMbPerVisit: 4,
     egressFanoutMultiplier: 10,
     structuredStoragePerUserMb: 28,
   },
@@ -103,9 +99,10 @@ export type FrequencyOption = (typeof frequencyOptions)[number]["value"];
 export type RealtimeOption = (typeof realtimeOptions)[number]["value"];
 
 const MB_PER_GB = 1024;
-const KB_PER_GB = 1024 * 1024;
-const SECONDS_PER_HOUR = 60 * 60;
+const HOURS_PER_DAY = 24;
 const HOURS_PER_MONTH = 24 * 30;
+const IDLE_SHUTDOWN_GRACE_MINUTES = 15;
+const SIMULTANEOUS_USERS_PER_INSTANCE = 200;
 
 function clampNonNegative(value: number) {
   if (!Number.isFinite(value)) return 0;
@@ -131,12 +128,29 @@ export function estimatePricing({
   const monthlyActiveUsers = clampNonNegative(mau);
   const blobStorageMb = clampNonNegative(blobStoragePerUserMb);
 
-  const monthlyActiveSecondsPerUser =
-    selectedFrequency.activeDaysPerMonth * selectedFrequency.activeMinutesPerActiveDay * 60;
-  const monthlyActiveSeconds = monthlyActiveUsers * monthlyActiveSecondsPerUser;
-  const monthlyActiveHours = monthlyActiveSeconds / SECONDS_PER_HOUR;
-  const estimatedComputeUptimeHours = Math.min(monthlyActiveHours, HOURS_PER_MONTH);
-  const monthlyInteractions = monthlyActiveSeconds * selectedRealtime.interactionRateHz;
+  const monthlyVisits = monthlyActiveUsers * selectedFrequency.visitsPerUserPerMonth;
+  const dailyVisits =
+    selectedFrequency.activeDaysPerMonth > 0
+      ? monthlyVisits / selectedFrequency.activeDaysPerMonth
+      : 0;
+  const sessionFootprintHours =
+    (selectedRealtime.averageSessionMinutes + IDLE_SHUTDOWN_GRACE_MINUTES) / 60;
+  const dailyComputeUptimeHours =
+    HOURS_PER_DAY * (1 - Math.exp(-(dailyVisits * sessionFootprintHours) / HOURS_PER_DAY));
+  const estimatedSingleInstanceUptimeHours = Math.min(
+    selectedFrequency.activeDaysPerMonth * dailyComputeUptimeHours,
+    HOURS_PER_MONTH,
+  );
+  const estimatedSimultaneousUsers =
+    estimatedSingleInstanceUptimeHours > 0
+      ? (monthlyVisits * sessionFootprintHours) / estimatedSingleInstanceUptimeHours
+      : 0;
+  const computeInstanceMultiplier = Math.max(
+    1,
+    Math.ceil(estimatedSimultaneousUsers / SIMULTANEOUS_USERS_PER_INSTANCE),
+  );
+  const estimatedComputeUptimeHours =
+    estimatedSingleInstanceUptimeHours * computeInstanceMultiplier;
 
   const structuredStorageGb =
     (monthlyActiveUsers * selectedRealtime.structuredStoragePerUserMb) / MB_PER_GB;
@@ -144,10 +158,10 @@ export function estimatePricing({
   const storageGbMonth = structuredStorageGb + blobStorageGb;
 
   const structuredEgressGb =
-    (monthlyInteractions *
-      selectedRealtime.structuredEgressKbPerInteraction *
+    (monthlyVisits *
+      selectedRealtime.structuredEgressMbPerVisit *
       selectedRealtime.egressFanoutMultiplier) /
-    KB_PER_GB;
+    MB_PER_GB;
   const blobEgressGb = blobStorageGb * selectedFrequency.blobFetchRatio;
   const egressGb = structuredEgressGb + blobEgressGb;
 
@@ -165,11 +179,14 @@ export function estimatePricing({
   const egressCost = billableEgressGb * selfServePricing.egressPerGb;
   const totalMonthlyCost = computeCost + storageCost + egressCost;
 
-  const peakConcurrentUsers = monthlyActiveUsers * selectedFrequency.peakConcurrencyFraction;
-
   return {
-    monthlyActiveSecondsPerUser,
-    monthlyInteractions,
+    monthlyVisits,
+    dailyVisits,
+    sessionFootprintHours,
+    dailyComputeUptimeHours,
+    estimatedSingleInstanceUptimeHours,
+    estimatedSimultaneousUsers,
+    computeInstanceMultiplier,
     estimatedComputeUptimeHours,
     structuredStorageGb,
     blobStorageGb,
@@ -181,7 +198,6 @@ export function estimatePricing({
     billableStorageGbMonth,
     billableEgressGb,
     isWithinFreeTier,
-    peakConcurrentUsers,
     computeCost,
     storageCost,
     egressCost,

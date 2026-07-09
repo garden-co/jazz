@@ -62,13 +62,6 @@ function formatCount(value: number) {
   return `${Math.round(value)}`;
 }
 
-function formatData(value: number) {
-  if (value >= 100) return `${value.toFixed(0)} GB`;
-  if (value >= 10) return `${value.toFixed(1)} GB`;
-  if (value >= 1) return `${value.toFixed(2)} GB`;
-  return `${(value * 1024).toFixed(0)} MB`;
-}
-
 function parseNumber(value: string) {
   const next = Number(value);
   if (!Number.isFinite(next)) return 0;
@@ -204,13 +197,13 @@ export function PricingCalculator() {
         </div>
         <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
           <p>
-            {selectedFrequency.label} assumes about{" "}
-            {(selectedFrequency.activeDaysPerMonth * selectedFrequency.activeMinutesPerActiveDay) /
-              60}{" "}
-            active hours per user each month.
+            {selectedFrequency.label} estimates about {selectedFrequency.visitsPerUserPerMonth}{" "}
+            visits per monthly active user across {selectedFrequency.activeDaysPerMonth} active{" "}
+            {selectedFrequency.activeDaysPerMonth === 1 ? "day" : "days"} each month.
           </p>
           <p>
-            {selectedRealtime.label} assumes {selectedRealtime.cadenceLabel}
+            {selectedRealtime.label} assumes {selectedRealtime.sessionLabel}, plus a short idle
+            shutdown grace period.
           </p>
         </div>
         <div className="space-y-8 border-t pt-8">
@@ -235,8 +228,7 @@ export function PricingCalculator() {
               </p>
               {estimate.isWithinFreeTier ? (
                 <p className="mt-2 text-sm leading-relaxed text-fd-muted-foreground">
-                  This estimate fits within the free tier: up to 360 CU-hours of compute (0.5 CU
-                  running all month).
+                  Includes the free monthly allowance.
                 </p>
               ) : null}
             </div>
@@ -245,41 +237,6 @@ export function PricingCalculator() {
             Rough self-serve estimate based on the draft public meters on this page. Enterprise
             contracts can still diverge.
           </p>
-          {/* <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Compute uptime
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {Math.round(estimate.estimatedComputeUptimeHours)} h
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.computeCost)} at $0.039 per CU/h
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Stored data
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatData(estimate.storageGbMonth)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.storageCost)} at $0.45 per GB-month
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Egress
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatData(estimate.egressGb)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.egressCost)} at $0.09 per GB out
-              </p>
-            </div>
-          </div>*/}
         </div>
       </div>
     </div>
