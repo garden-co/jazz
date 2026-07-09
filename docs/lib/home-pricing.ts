@@ -14,7 +14,7 @@ export const pricingMeters = [
   {
     name: "Compute",
     price: "$0.039",
-    unit: "per 0.5vCPU / 2GB RAM instance",
+    unit: "per hour of 2GB RAM instance",
     note: "Auto-scaling available soon",
     included: "1GB RAM instance always included",
   },
@@ -40,6 +40,7 @@ export const frequencyOptions = [
     label: "Multiple times daily",
     activeDaysPerMonth: 22,
     visitsPerUserPerMonth: 44,
+    structuredStorageMultiplier: 1,
     blobFetchRatio: 0.4,
   },
   {
@@ -47,6 +48,7 @@ export const frequencyOptions = [
     label: "Daily",
     activeDaysPerMonth: 20,
     visitsPerUserPerMonth: 20,
+    structuredStorageMultiplier: 1,
     blobFetchRatio: 0.22,
   },
   {
@@ -54,6 +56,7 @@ export const frequencyOptions = [
     label: "Weekly",
     activeDaysPerMonth: 4,
     visitsPerUserPerMonth: 4,
+    structuredStorageMultiplier: 1,
     blobFetchRatio: 0.1,
   },
   {
@@ -61,6 +64,7 @@ export const frequencyOptions = [
     label: "Monthly",
     activeDaysPerMonth: 1,
     visitsPerUserPerMonth: 1,
+    structuredStorageMultiplier: 0.75,
     blobFetchRatio: 0.04,
   },
 ] as const;
@@ -153,7 +157,10 @@ export function estimatePricing({
     estimatedSingleInstanceUptimeHours * computeInstanceMultiplier;
 
   const structuredStorageGb =
-    (monthlyActiveUsers * selectedRealtime.structuredStoragePerUserMb) / MB_PER_GB;
+    (monthlyActiveUsers *
+      selectedRealtime.structuredStoragePerUserMb *
+      selectedFrequency.structuredStorageMultiplier) /
+    MB_PER_GB;
   const blobStorageGb = (monthlyActiveUsers * blobStorageMb) / MB_PER_GB;
   const storageGbMonth = structuredStorageGb + blobStorageGb;
 
