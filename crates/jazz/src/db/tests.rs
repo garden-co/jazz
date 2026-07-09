@@ -2417,6 +2417,107 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
 }
 
 #[test]
+fn array_subquery_subscription_projects_late_root_and_existing_forward_target() {
+    let schema = relation_schema();
+    let db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+    )
+    .unwrap();
+    let query = Query::from("todos")
+        .select(["title"])
+        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(opened.rows.is_empty());
+
+    db.insert_with_id(
+        "todos",
+        row(0x52),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("late root".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(snapshot.root_count, 1);
+    let root = snapshot
+        .rows
+        .iter()
+        .find(|candidate| candidate.table() == "todos" && candidate.row_uuid() == row(0x52))
+        .expect("late root should be present");
+    assert_eq!(
+        root.cell(schema_table(&schema, "todos"), "title"),
+        Some(Value::String("late root".to_owned()))
+    );
+    assert_eq!(root.cell(schema_table(&schema, "todos"), "owner_id"), None);
+    assert_eq!(
+        sorted_related_text_values(
+            &snapshot,
+            &schema,
+            "todos",
+            row(0x52),
+            "owner",
+            "users",
+            "name"
+        ),
+        vec!["owner".to_owned()]
+    );
+}
+
+#[test]
+fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forward_target() {
+    let schema = issue_schema();
+    let db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
+    db.insert_with_id(
+        "projects",
+        row(0xa2),
+        BTreeMap::from([("name".to_owned(), Value::String("project".to_owned()))]),
+    )
+    .unwrap();
+    let query = Query::from("issues").select(["title"]).array_subquery(
+        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
+    );
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(opened.rows.is_empty());
+
+    db.insert_with_id(
+        "issues",
+        row(0x53),
+        issue_cells(
+            "late issue",
+            "open",
+            AuthorId::from_bytes([0xa8; 16]),
+            row(0xa2),
+            1,
+            &[],
+            None,
+        ),
+    )
+    .unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(
+        sorted_related_text_values(
+            &snapshot,
+            &schema,
+            "issues",
+            row(0x53),
+            "project",
+            "projects",
+            "name"
+        ),
+        vec!["project".to_owned()]
+    );
+}
+
+#[test]
 fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let schema = relation_schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
