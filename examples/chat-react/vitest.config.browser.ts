@@ -23,6 +23,7 @@ export default defineConfig({
     },
     include: ["tests/browser/**/*.test.tsx"],
     globalSetup: ["tests/browser/global-setup.ts"],
+    fileParallelism: false,
     testTimeout: 30000,
   },
 });

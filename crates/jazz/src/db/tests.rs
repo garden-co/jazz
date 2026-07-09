@@ -263,17 +263,6 @@ fn assert_unsupported_subscription_include_deleted(error: Error) {
     );
 }
 
-fn assert_unsupported_propagated_subscription_tier(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error
-            .message
-            .contains("support only local/none or global remote coverage tiers"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
 fn assert_unsupported_branch_deletion_witness(error: Error) {
     assert!(
         matches!(error.code, ErrorCode::Query | ErrorCode::Protocol),
@@ -5436,25 +5425,37 @@ fn local_live_subscription_requests_global_upstream_coverage() {
 }
 
 #[test]
-fn edge_live_subscription_with_full_propagation_rejects_before_upstream_coverage() {
+fn edge_live_subscription_requests_global_upstream_coverage() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
-    let (client_transport, mut upstream_transport) = duplex();
+    let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
-    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
-        &client,
-        &query,
-        edge_subscribe_opts(),
-    )));
+    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
 
     client.tick().unwrap();
-    assert!(
-        upstream_transport.try_recv().is_none(),
-        "unsupported edge-tier subscription must not register upstream coverage"
-    );
+    server.tick().unwrap();
+
+    // Edge-tier is the local visible tier for browser clients, but propagated
+    // upstream coverage is still registered at global tier. Edge serving is
+    // link-local; the subscription's settled contract is satisfied when the
+    // globally settled coverage arrives back at the client.
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber {
+        coverage_groups, ..
+    } = &subscriber_ref.link
+    else {
+        panic!("expected subscriber connection");
+    };
+    assert_eq!(coverage_groups.len(), 1);
+    let coverage = coverage_groups.keys().next().unwrap();
+    assert_eq!(coverage.opts.tier, DurabilityTier::Global);
+    assert!(coverage.opts.read_view.is_default());
 }
 
 #[test]
@@ -6060,11 +6061,16 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
     let query = Query::from("chats");
-    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
-        &client,
-        &query,
-        edge_subscribe_opts(),
-    )));
+    let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected subscription delta after upstream coverage");
+    };
+    assert_eq!(added.len(), 1);
 }
 
 #[test]
@@ -6329,11 +6335,8 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let (bob_transport, server_bob_transport) = duplex();
     let _bob_upstream = bob_db.connect_upstream(bob_transport);
     let _bob_subscriber = server.accept_subscriber(server_bob_transport, bob);
-    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
-        &bob_db,
-        &query,
-        edge_subscribe_opts(),
-    )));
+    let mut subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
     assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
 }
 
@@ -6373,11 +6376,8 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
     let query = Query::from("messages");
-    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
-        &reader,
-        &query,
-        edge_subscribe_opts(),
-    )));
+    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }
 
@@ -6450,11 +6450,8 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
     let query = Query::from("messages");
-    assert_unsupported_propagated_subscription_tier(expect_error(prepared_subscribe(
-        &reader,
-        &query,
-        edge_subscribe_opts(),
-    )));
+    let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
 
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }

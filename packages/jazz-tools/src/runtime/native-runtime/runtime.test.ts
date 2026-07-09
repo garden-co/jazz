@@ -1286,6 +1286,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readPreparedSelect(preparedBytes!)).toEqual(["title"]);
   });
 
+  it("encodes public typed-builder root orderBy into native query bytes", () => {
+    let preparedBytes: Uint8Array | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: (query: Uint8Array) => {
+              preparedBytes = query;
+              return {};
+            },
+            subscribe: () => new ReadableStream(),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [["createdAt", "desc"]],
+        limit: 10,
+      }),
+    );
+
+    expect(handle).toBe(1);
+    expect(readPreparedQueryShape(preparedBytes!)).toEqual({
+      table: "todos",
+      predicates: [],
+      orderBy: [{ column: "createdAt", directionTag: 1 }],
+      limit: 10,
+      offset: 0,
+    });
+  });
+
   it("encodes negative integer query literals as signed i32 bits for core", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
