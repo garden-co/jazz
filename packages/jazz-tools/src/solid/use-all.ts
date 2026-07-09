@@ -70,8 +70,12 @@ export function useAll<T extends { id: string }>(
                   applyDelta(current, delta);
                 }),
               );
-            } else {
+            } else if (delta.reset) {
               setState("data", reconcile(delta.all));
+            } else {
+              const current: T[] = [];
+              applyDelta(current, delta);
+              setState("data", reconcile(current));
             }
             setState("isLoading", false);
             setState("error", null);

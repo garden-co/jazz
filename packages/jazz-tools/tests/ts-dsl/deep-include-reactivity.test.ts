@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { createDb, type Db } from "../../src/runtime/db.js";
-import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
+import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
 const schema = {
   orgs: s.table({
@@ -64,27 +64,28 @@ describe("deep-include reactivity", () => {
       value: { id: todoId },
     } = db.insert(app.todos, { title: "ship it", org_id: orgId });
 
-    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const current: Todo[] = [];
+    const snapshots: Todo[][] = [];
     const unsubscribe = db.subscribeAll(app.todos.include({ user_checksViaTodo: true }), (delta) =>
-      deltas.push(delta),
+      snapshots.push([...applySubscriptionDelta(current, delta)]),
     );
 
     await waitForCondition(
-      () => deltas.length > 0 && deltas[deltas.length - 1]!.all.length === 1,
+      () => snapshots.length > 0 && snapshots[snapshots.length - 1]!.length === 1,
       4000,
       "expected initial snapshot",
     );
 
-    const initialSnapshotCount = deltas.length;
+    const initialSnapshotCount = snapshots.length;
     const {
       value: { id: userCheckId },
     } = db.insert(app.user_checks, { todo_id: todoId });
 
     await waitForCondition(
       () => {
-        if (deltas.length <= initialSnapshotCount) return false;
-        const latest = deltas[deltas.length - 1]!;
-        const todo = latest.all[0] as
+        if (snapshots.length <= initialSnapshotCount) return false;
+        const latest = snapshots[snapshots.length - 1]!;
+        const todo = latest[0] as
           | undefined
           | {
               user_checksViaTodo?: Array<{ id: string }>;
@@ -107,28 +108,29 @@ describe("deep-include reactivity", () => {
       value: { id: todoId },
     } = db.insert(app.todos, { title: "ship it", org_id: orgId });
 
-    const deltas: Array<SubscriptionDelta<Org>> = [];
+    const current: Org[] = [];
+    const snapshots: Org[][] = [];
     const unsubscribe = db.subscribeAll(
       app.orgs.include({ todosViaOrg: { user_checksViaTodo: true } }),
-      (delta) => deltas.push(delta),
+      (delta) => snapshots.push([...applySubscriptionDelta(current, delta)]),
     );
 
     await waitForCondition(
-      () => deltas.length > 0 && deltas[deltas.length - 1]!.all.length === 1,
+      () => snapshots.length > 0 && snapshots[snapshots.length - 1]!.length === 1,
       4000,
       "expected initial snapshot",
     );
 
-    const initialSnapshotCount = deltas.length;
+    const initialSnapshotCount = snapshots.length;
     const {
       value: { id: userCheckId },
     } = db.insert(app.user_checks, { todo_id: todoId });
 
     await waitForCondition(
       () => {
-        if (deltas.length <= initialSnapshotCount) return false;
-        const latest = deltas[deltas.length - 1]!;
-        const org = latest.all[0] as
+        if (snapshots.length <= initialSnapshotCount) return false;
+        const latest = snapshots[snapshots.length - 1]!;
+        const org = latest[0] as
           | undefined
           | {
               todosViaOrg?: Array<{
@@ -156,30 +158,31 @@ describe("deep-include reactivity", () => {
       value: { id: userCheckId },
     } = db.insert(app.user_checks, { todo_id: todoId });
 
-    const deltas: Array<SubscriptionDelta<Org>> = [];
+    const current: Org[] = [];
+    const snapshots: Org[][] = [];
     const unsubscribe = db.subscribeAll(
       app.orgs.include({
         todosViaOrg: { user_checksViaTodo: { check_notesViaUser_check: true } },
       }),
-      (delta) => deltas.push(delta),
+      (delta) => snapshots.push([...applySubscriptionDelta(current, delta)]),
     );
 
     await waitForCondition(
-      () => deltas.length > 0 && deltas[deltas.length - 1]!.all.length === 1,
+      () => snapshots.length > 0 && snapshots[snapshots.length - 1]!.length === 1,
       4000,
       "expected initial snapshot",
     );
 
-    const initialSnapshotCount = deltas.length;
+    const initialSnapshotCount = snapshots.length;
     const {
       value: { id: noteId },
     } = db.insert(app.check_notes, { body: "looks good", user_check_id: userCheckId });
 
     await waitForCondition(
       () => {
-        if (deltas.length <= initialSnapshotCount) return false;
-        const latest = deltas[deltas.length - 1]!;
-        const org = latest.all[0] as
+        if (snapshots.length <= initialSnapshotCount) return false;
+        const latest = snapshots[snapshots.length - 1]!;
+        const org = latest[0] as
           | undefined
           | {
               todosViaOrg?: Array<{

@@ -172,6 +172,7 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.reset).toBe(true);
+    if (!result.reset) throw new Error("expected reset delta");
     expect(result.all).toEqual([{ id: second, name: "second", count: 2 }]);
     expect(manager.size).toBe(1);
   });
