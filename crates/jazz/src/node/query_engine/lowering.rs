@@ -2044,19 +2044,25 @@ fn lower_correlated_path_plan(
         child_source,
         request,
     )?;
-    let parent_key_nullable = source_field_is_nullable(root_source, &parent_key);
-    let child_key_nullable = source_field_is_nullable(child_source, &child_key);
-    let parent = unwrap_join_key_if_nullable(parent.graph, parent_key.clone(), parent_key_nullable);
-    let child = unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable);
+    let parent_key_nullable_depth = source_field_nullable_depth(root_source, &parent_key);
+    let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
+    let child =
+        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
 
     let lowered = match path.requirement {
         CorrelationRequirement::Optional => Ok(LoweredRelationInput {
-            graph: parent,
+            graph: parent.graph,
             root_source: Some(root_source.clone()),
             fields: source_fields(root_source).collect(),
             nullable_fields: source_nullable_fields(root_source),
+            nullable_field_depths: source_nullable_field_depths(root_source),
         }),
         CorrelationRequirement::AtLeastOne => {
+            let parent = unwrap_join_key_if_nullable(
+                parent.graph,
+                parent_key.clone(),
+                parent_key_nullable_depth,
+            );
             let joined =
                 GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
                     project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
@@ -2070,9 +2076,15 @@ fn lower_correlated_path_plan(
                 root_source: Some(root_source.clone()),
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
+                nullable_field_depths: source_nullable_field_depths(root_source),
             })
         }
         CorrelationRequirement::MatchCorrelationCardinality => {
+            let parent = unwrap_join_key_if_nullable(
+                parent.graph,
+                parent_key.clone(),
+                parent_key_nullable_depth,
+            );
             lower_cardinality_complete_parent_graph(
                 parent,
                 child,
@@ -2085,6 +2097,7 @@ fn lower_correlated_path_plan(
                 root_source: Some(root_source.clone()),
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
+                nullable_field_depths: source_nullable_field_depths(root_source),
             })
         }
     }
@@ -2207,9 +2220,13 @@ fn lower_correlated_path_relation_graph_from_parent(
             child_root
         ))
     })?;
+    let child_plan = LinearCurrentRoot {
+        root: path.child.root.clone(),
+        steps: child_steps_for_relation_edges(&path.child.steps),
+    };
     let child = lower_linear_plan_steps(
         child_source.graph.clone(),
-        &path.child,
+        &child_plan,
         child_source,
         resolved_sources,
         request,
@@ -2224,24 +2241,54 @@ fn lower_correlated_path_relation_graph_from_parent(
         child_source,
         request,
     )?;
-    let parent_key_nullable = source_field_is_nullable(parent_source, &parent_key);
-    let child_key_nullable = source_field_is_nullable(child_source, &child_key);
-    let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable);
-    let child = unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable);
+    let parent_key_nullable_depth = source_field_nullable_depth(parent_source, &parent_key);
+    let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
+    let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable_depth);
+    let child =
+        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
     Ok(LoweredRelationInput {
         graph: GraphBuilder::join(parent, child, [parent_key], [child_key]),
         root_source: None,
         fields: BTreeSet::new(),
         nullable_fields: BTreeSet::new(),
+        nullable_field_depths: BTreeMap::new(),
     })
 }
 
-fn unwrap_join_key_if_nullable(graph: GraphBuilder, field: String, nullable: bool) -> GraphBuilder {
-    if nullable {
-        graph.unwrap_nullable(field)
-    } else {
-        graph
+fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
+    let mut previous_was_order_by = false;
+    let mut filtered = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            LinearStep::Slice { .. } if !previous_was_order_by => {
+                previous_was_order_by = false;
+            }
+            _ => {
+                previous_was_order_by = matches!(step, LinearStep::OrderBy(_));
+                filtered.push(step.clone());
+            }
+        }
     }
+    filtered
+}
+
+fn unwrap_join_key_if_nullable(
+    mut graph: GraphBuilder,
+    field: String,
+    nullable_depth: usize,
+) -> GraphBuilder {
+    for _ in 0..nullable_depth {
+        graph = graph.unwrap_nullable(field.clone());
+    }
+    graph
+}
+
+fn unwrap_nullable_join_key(
+    graph: GraphBuilder,
+    field: String,
+    nullable_depth: usize,
+) -> GraphBuilder {
+    unwrap_join_key_if_nullable(graph, field, nullable_depth)
 }
 
 #[derive(Clone, Debug)]
@@ -2250,6 +2297,7 @@ struct LoweredRelationInput {
     root_source: Option<ResolvedSource>,
     fields: BTreeSet<String>,
     nullable_fields: BTreeSet<String>,
+    nullable_field_depths: BTreeMap<String, usize>,
 }
 
 fn lower_relation_input(
@@ -2364,6 +2412,7 @@ fn lower_union_inputs(
     let mut root_source = first.root_source;
     let fields = first.fields;
     let mut nullable_fields = first.nullable_fields;
+    let mut nullable_field_depths = first.nullable_field_depths;
     for branch in lowered {
         if branch.fields != fields {
             return Err(UnsupportedReason::Operator(
@@ -2371,6 +2420,12 @@ fn lower_union_inputs(
             ));
         }
         nullable_fields.extend(branch.nullable_fields);
+        for (field, depth) in branch.nullable_field_depths {
+            nullable_field_depths
+                .entry(field)
+                .and_modify(|existing| *existing = (*existing).max(depth))
+                .or_insert(depth);
+        }
         if root_source.as_ref().map(|source| &source.row_shape.source)
             != branch
                 .root_source
@@ -2386,6 +2441,7 @@ fn lower_union_inputs(
         root_source,
         fields,
         nullable_fields,
+        nullable_field_depths,
     })
 }
 
@@ -2409,16 +2465,23 @@ fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
 }
 
 fn source_nullable_fields(source: &ResolvedSource) -> BTreeSet<String> {
-    source
-        .row_shape
-        .descriptor
-        .fields()
-        .iter()
-        .filter_map(|field| {
-            let name = field.name.as_ref()?;
-            matches!(&field.value_type, ValueType::Nullable(_)).then(|| name.clone())
-        })
-        .collect()
+    source_nullable_field_depths(source).into_keys().collect()
+}
+
+fn source_nullable_field_depths(source: &ResolvedSource) -> BTreeMap<String, usize> {
+    let mut depths = BTreeMap::new();
+    for name in source_fields(source) {
+        if let Some((field, depth)) = {
+            let depth = source_field_nullable_depth(source, &name);
+            (depth > 0).then_some((name, depth))
+        } {
+            if let Some(logical) = field.strip_prefix(USER_COLUMN_PREFIX) {
+                depths.insert(logical.to_owned(), depth);
+            }
+            depths.insert(field, depth);
+        }
+    }
+    depths
 }
 
 fn lower_recursive_relation(
@@ -2478,6 +2541,7 @@ fn lower_recursive_relation(
         root_source: Some(root_source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),
+        nullable_field_depths: BTreeMap::new(),
     })
 }
 
@@ -2510,8 +2574,18 @@ fn lower_linear_plan_steps(
     } else {
         BTreeSet::new()
     };
+    let mut nullable_field_depths = if matches!(plan.root, LinearRoot::Source { .. }) {
+        source_nullable_field_depths(root_source)
+    } else {
+        BTreeMap::new()
+    };
     let mut pending_order: Option<Vec<OrderKey>> = None;
-    let mut last_join_right: Option<(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)> = None;
+    let mut last_join_right: Option<(
+        RelationInputPlan,
+        BTreeSet<String>,
+        BTreeMap<String, usize>,
+        BTreeSet<String>,
+    )> = None;
     let mut available_route_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
         root_source.routing_fields.clone()
     } else {
@@ -2565,23 +2639,41 @@ fn lower_linear_plan_steps(
                         if source_field_is_nullable(root_source, left_key)
                             && unwrapped_left_keys.insert(left_key.clone())
                         {
-                            graph = graph.unwrap_nullable(left_key.clone());
+                            graph = unwrap_nullable_join_key(
+                                graph,
+                                left_key.clone(),
+                                source_field_nullable_depth(root_source, left_key),
+                            );
                         }
                     }
                 }
                 let right_nullable_fields = lowered_right.nullable_fields.clone();
+                let right_nullable_field_depths = lowered_right.nullable_field_depths.clone();
                 let mut right_graph = lowered_right.graph;
                 let mut unwrapped_right_keys = BTreeSet::new();
                 for right_key in &right_keys {
                     if lowered_right.nullable_fields.contains(right_key)
                         && unwrapped_right_keys.insert(right_key.clone())
                     {
-                        right_graph = right_graph.unwrap_nullable(right_key.clone());
+                        right_graph = unwrap_nullable_join_key(
+                            right_graph,
+                            right_key.clone(),
+                            lowered_right
+                                .nullable_field_depths
+                                .get(right_key)
+                                .copied()
+                                .unwrap_or(1),
+                        );
                     }
                 }
                 graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
                 let right_fields = lowered_right.fields.clone();
-                last_join_right = Some(((**right).clone(), right_nullable_fields, right_fields));
+                last_join_right = Some((
+                    (**right).clone(),
+                    right_nullable_fields,
+                    right_nullable_field_depths,
+                    right_fields,
+                ));
                 let next_is_project =
                     matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
                 if matches!(&plan.root, LinearRoot::Source { .. }) && !next_is_project {
@@ -2599,6 +2691,7 @@ fn lower_linear_plan_steps(
                     fields.extend(available_route_fields.iter().cloned());
                     fields.extend(introduced_route_fields.iter().cloned());
                     nullable_fields = source_nullable_fields(root_source);
+                    nullable_field_depths = source_nullable_field_depths(root_source);
                     available_route_fields.extend(introduced_route_fields);
                     last_join_right = None;
                 }
@@ -2630,7 +2723,7 @@ fn lower_linear_plan_steps(
                     .map(|field| field.output_name.clone())
                     .collect::<BTreeSet<_>>();
                 match last_join_right.as_ref() {
-                    Some((_, _, right_fields)) => {
+                    Some((_, _, _, right_fields)) => {
                         for field in &available_route_fields {
                             if !projected_outputs.contains(field) {
                                 project_fields
@@ -2665,6 +2758,7 @@ fn lower_linear_plan_steps(
                     .collect();
                 fields.extend(retained_route_fields.iter().cloned());
                 nullable_fields = BTreeSet::new();
+                nullable_field_depths = BTreeMap::new();
                 available_route_fields = retained_route_fields;
                 last_join_right = None;
             }
@@ -2705,6 +2799,7 @@ fn lower_linear_plan_steps(
                 graph = lowered.graph;
                 fields = lowered.fields;
                 nullable_fields = BTreeSet::new();
+                nullable_field_depths = BTreeMap::new();
                 available_route_fields = BTreeSet::new();
             }
         }
@@ -2736,6 +2831,7 @@ fn lower_linear_plan_steps(
         root_source: Some(root_source.clone()),
         fields,
         nullable_fields,
+        nullable_field_depths,
     })
 }
 
@@ -3272,7 +3368,12 @@ fn lower_projection_field(
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
     fields: &BTreeSet<String>,
-    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
+    last_join_right: Option<&(
+        RelationInputPlan,
+        BTreeSet<String>,
+        BTreeMap<String, usize>,
+        BTreeSet<String>,
+    )>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeSet::new();
@@ -3317,7 +3418,12 @@ fn lower_projection_source(
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
     fields: &BTreeSet<String>,
-    last_join_right: Option<&(RelationInputPlan, BTreeSet<String>, BTreeSet<String>)>,
+    last_join_right: Option<&(
+        RelationInputPlan,
+        BTreeSet<String>,
+        BTreeMap<String, usize>,
+        BTreeSet<String>,
+    )>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
@@ -3343,7 +3449,7 @@ fn lower_projection_source(
             nullable: false,
         });
     }
-    if let Some((right, nullable_fields, _)) = last_join_right {
+    if let Some((right, nullable_fields, _, _)) = last_join_right {
         if let Some(field) = lower_relation_projection_ref(value, right, request)? {
             let nullable = nullable_fields.contains(&field);
             return Ok(ProjectionSource::Field {
@@ -3611,8 +3717,23 @@ fn lower_join_key_ref(
 }
 
 fn source_field_is_nullable(source: &ResolvedSource, field: &str) -> bool {
-    source_field_type(source, field)
+    source_field_nullable_depth(source, field) > 0
+}
+
+fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
+    let mut depth = 0;
+    if source_field_type(source, field)
         .is_some_and(|field_type| matches!(field_type, ValueType::Nullable(_)))
+    {
+        depth += 1;
+    }
+    let logical_field = field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field);
+    if source.table_schema.columns.iter().any(|column| {
+        column.name == logical_field && matches!(column.column_type, ColumnType::Nullable(_))
+    }) {
+        depth += 1;
+    }
+    depth
 }
 
 fn source_field_type<'a>(source: &'a ResolvedSource, field: &str) -> Option<&'a ValueType> {
@@ -3620,6 +3741,10 @@ fn source_field_type<'a>(source: &'a ResolvedSource, field: &str) -> Option<&'a 
         .row_shape
         .descriptor
         .field_index(field)
+        .or_else(|| {
+            let user_field = user_column_field(field);
+            source.row_shape.descriptor.field_index(&user_field)
+        })
         .and_then(|index| source.row_shape.descriptor.fields().get(index))
         .map(|field| &field.value_type)
 }
@@ -3747,6 +3872,7 @@ fn lower_aggregate(
         root_source: Some(source.clone()),
         fields,
         nullable_fields: BTreeSet::new(),
+        nullable_field_depths: BTreeMap::new(),
     })
 }
 
@@ -4718,7 +4844,7 @@ fn reachable_contribution_membership_graph(
     }
     let mut contribution_graph = lowered.graph;
     if lowered.nullable_fields.contains(&join_field) {
-        contribution_graph = contribution_graph.unwrap_nullable(join_field.clone());
+        contribution_graph = unwrap_nullable_join_key(contribution_graph, join_field.clone(), 1);
     }
     Ok(GraphBuilder::join(
         visible_root,
@@ -4777,7 +4903,7 @@ fn join_contribution_membership_graph(
         if lowered.nullable_fields.contains(join_key)
             && unwrapped_join_keys.insert(join_key.clone())
         {
-            contribution_graph = contribution_graph.unwrap_nullable(join_key.clone());
+            contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
         }
     }
     Ok(
