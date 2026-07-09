@@ -495,7 +495,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     if ("subscription" in message) {
       const callback = this.subscriptions.get(message.subscription);
-      callback?.(nativeDeltaFromFrame(message));
+      if ("error" in message) {
+        callback?.(
+          new Error(message.error.message ?? "Persistent browser subscription failed"),
+          null,
+        );
+      } else {
+        callback?.(nativeDeltaFromFrame(message));
+      }
       return;
     }
     const pending = this.pending.get(message.id);
@@ -523,7 +530,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   }
 }
 
-function nativeDeltaFromFrame(message: PersistentBrowserSubscriptionMessage): NativeRowDelta {
+function nativeDeltaFromFrame(
+  message: Extract<PersistentBrowserSubscriptionMessage, { frame: unknown }>,
+): NativeRowDelta {
   if (message.frame.kind !== "native-row-delta") {
     throw new Error(`Unknown persistent browser subscription frame ${message.frame.kind}`);
   }

@@ -75,6 +75,17 @@ class FakeWorker {
       } as MessageEvent);
     });
   }
+
+  emitSubscriptionError(subscription: number, message: string): void {
+    queueMicrotask(() => {
+      this.onmessage?.({
+        data: {
+          subscription,
+          error: { name: "Error", message },
+        },
+      } as MessageEvent);
+    });
+  }
 }
 
 function uuidBytes(id: string): Uint8Array {
@@ -392,6 +403,51 @@ describe("PersistentBrowserOpfsRuntime", () => {
       updatedCount: 0,
     });
     expect([...updates[0]!.added]).toEqual([...added]);
+
+    await runtime.close();
+  });
+
+  it("surfaces worker-owned subscription errors to the subscription callback", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-subscription-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    const subscriptionHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      null,
+    );
+    const updates: unknown[][] = [];
+    runtime.executeSubscription(subscriptionHandle, (...args: unknown[]) => {
+      updates.push(args);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    const createSubscriptionMessage = worker.messages.find(
+      (message) => message.method === "createExecutedSubscription",
+    );
+    worker.respond(createSubscriptionMessage!.id, 7);
+
+    worker.emitSubscriptionError(subscriptionHandle, "server transport died");
+
+    await vi.waitFor(() => {
+      expect(updates).toHaveLength(1);
+    });
+    expect(updates[0]![0]).toBeInstanceOf(Error);
+    expect((updates[0]![0] as Error).message).toBe("server transport died");
+    expect(updates[0]![1]).toBeNull();
 
     await runtime.close();
   });
