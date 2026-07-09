@@ -265,7 +265,9 @@ fn assert_unsupported_subscription_include_deleted(error: Error) {
 fn assert_unsupported_propagated_subscription_tier(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
-        error.message.contains("global-tier remote coverage"),
+        error
+            .message
+            .contains("support only local/none or global remote coverage tiers"),
         "unexpected error message: {}",
         error.message
     );
