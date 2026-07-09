@@ -84,6 +84,13 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         const [ownerHandle, ...subscriptionArgs] = message.args;
         const result = getRuntime().createSubscription(...subscriptionArgs);
         getRuntime().executeSubscription(result, (delta: unknown) => {
+          if (delta instanceof Error) {
+            workerScope.postMessage({
+              subscription: ownerHandle,
+              error: { name: delta.name, message: delta.message },
+            });
+            return;
+          }
           const frame = subscriptionFrameFromDelta(delta);
           workerScope.postMessage({ subscription: ownerHandle, frame }, [
             frame.added,

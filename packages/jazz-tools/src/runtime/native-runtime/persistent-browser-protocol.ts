@@ -140,8 +140,10 @@ export type PersistentBrowserSubscriptionFrame = {
 
 export type PersistentBrowserSubscriptionMessage = {
   subscription: number;
-  frame: PersistentBrowserSubscriptionFrame;
-};
+} & (
+  | { frame: PersistentBrowserSubscriptionFrame }
+  | { error: { name?: string; message?: string } }
+);
 
 export function isNativeRowDelta(value: unknown): value is NativeRowDelta {
   return (
