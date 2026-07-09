@@ -1,20 +1,5 @@
 # Files in Jazz — the design, explained
 
-Date: 2026-07-09
-Audience: humans. The implementation-facing PRD is
-`2026-07-09-files-spec.md`; the grilled design rationale is
-`2026-07-08-files-design.md` (this document and the PRD supersede its
-file-table data model, its private-files split, and its SDK read surface).
-This document explains the design in plain language, with diagrams and API
-examples.
-
-## The one-sentence version
-
-A file in Jazz is a value in one of your own rows — a small immutable
-descriptor in a cell — while the bytes live on a public-read bucket: created
-offline like any write, uploaded in the background, and read the way the web
-reads everything, through one stable public URL.
-
 ```ts
 const avatar = await jazz.files.fromBlob(blob);        // offline-capable
 await db.profiles.update(me.id, { avatar });           // a normal column write
@@ -24,9 +9,10 @@ await db.profiles.update(me.id, { avatar });           // a normal column write
 
 ## The big picture: two planes
 
-The core split is that **metadata and bytes travel completely different
-roads**. The descriptor rides the existing Jazz machinery like any cell
-value. The bytes never touch it.
+Metadata and bytes follow two different roads:
+
+- metadata is stored as column data (like for s.json())
+- bytes are uploaded to S3
 
 ```mermaid
 flowchart LR
@@ -61,9 +47,6 @@ today:
   serving bytes at `GET /files/{app}/{file-id}`, every file works in
   `<img>`, `<video>`, and pasted links with zero SDK involvement on the read
   path.
-- **History hygiene.** Rows are editable and versioned; bodies are immutable
-  and huge. Keeping bodies out of the database keeps history, branches, and
-  sync payloads small.
 
 ## Choice 1: a file is a value in your row
 
@@ -152,28 +135,6 @@ What the permissions system does and does not cover:
                  └──────────────────────────────────┘
 ```
 
-The only thing standing between the world and the bytes is the file id — so
-the id is not allowed to be weak. **The protocol mandates ids minted from a
-cryptographic RNG with at least UUIDv4 entropy**, and the bucket denies
-listing so ids can't be enumerated from the store side.
-
-Two hardening rules keep the public surface from becoming an attack
-surface:
-
-- **No overwrites, ever.** File ids are public (they're in every URL), and
-  they're also the object key — so nothing may ever accept an upload to an
-  existing key. Grant issuance refuses any id the claim ledger has ever
-  seen, and every presigned PUT carries `If-None-Match: *`, so the store
-  itself rejects a write to an occupied key. "Immutable" is enforced by the
-  bucket, not by politeness.
-- **No script serving.** `Content-Type` and `Content-Disposition` are
-  pinned into the presigned PUT at grant time (a client can't deviate), the
-  serving layer adds `X-Content-Type-Options: nosniff` on everything, and
-  only an allowlist of render-safe types (image, video, audio, PDF) is
-  served `inline` — never `text/html`, never SVG. Everything else downloads
-  as `attachment`. Your files domain cannot be turned into an XSS or
-  phishing host.
-
 Why public-only instead of the classic published/private split:
 
 - **Caching gets trivial.** Immutable bodies at never-expiring public URLs
@@ -235,11 +196,11 @@ sequenceDiagram
 
 The decisions hiding in that diagram:
 
-- **The hold takes the whole transaction — and that's a feature.** The
+- **The hold takes the whole transaction** The
   transaction that writes a fresh descriptor (including its sibling
   columns) waits at the outbox until the body is confirmed. So when the
   message above arrives at another device, the attachment is already
-  fetchable: **a descriptor you can see is a file you can get**.
+  fetchable.
 - **Independent writes bypass; you choose early visibility.** Later,
   unrelated commit units skip past the held one — one slow 2 GB video never
   stalls the session. An app that wants the message text visible before the
@@ -314,38 +275,49 @@ One honest caveat: the URL goes live at **acceptance**. Before that it
 acceptance is the device that just created it, and that device is already
 holding the Blob (see the API section).
 
-## Choice 5: reads are the web's — no SDK read API, no offline reads
+## Choice 5: reads are the web's — offline lives _below_ the URL
 
-The SDK has **no `toBlob`, no `toStream`, no read cache**. Reading a file is
-`fetch(file.url())` — userland, like any other web resource. This is a
-deliberate subtraction:
-
-- The dominant read path is a URL in an `<img>`/`<video>` tag, whose bytes
-  never pass through the SDK anyway. An SDK read API would be a second,
-  rarely-used path pretending to be the main one.
-- Blob derivation is two lines of userland:
+The SDK has **no `toBlob`, no `toStream`**. Reading a file is
+`fetch(file.url())` — userland, like any other web resource:
 
 ```ts
 const blob = await (await fetch(msg.attachment.url())).blob();
 ```
 
-- **Offline reads don't exist in v1**, and the design says so instead of
-  half-promising them. The honest baseline: the browser's HTTP cache holds
-  immutable bodies well, so recently-viewed files often work offline — but
-  nothing guarantees it. Real offline file reading is a future
-  **service-worker integration** intercepting `/files/*` — the same
-  mechanism the web uses for every other offline asset, and the only one
-  that also covers plain `<img>` tags. It serves both directions: cached
-  downloads when offline, and this device's _staged_ bodies before
-  acceptance — making `url()` render immediately on the creating device,
-  offline included, with no fallback code. (Which is why the staging store
-  should live somewhere a SW can read, and why the Blob-in-hand preview
-  never fully dies: no SW controls the page on its first load.)
+The dominant read path is a URL in an `<img>`/`<video>` tag, whose bytes
+never pass through the SDK — so an SDK-level cache could never make files
+work offline. The offline layer therefore sits _below_ the URL, as a
+**per-platform interceptor** that every URL load passes through. Both
+interceptors run the same three-step logic over the device file store:
+serve this device's **staged** body (own files render immediately —
+offline, even before acceptance), else serve the **cached** body, else
+fetch through and write the cache.
 
-The device file store still exists, but it is **upload staging only**: it
-holds bodies this device created, from `fromBlob` until the writing
-transaction is accepted upstream (surviving restarts so uploads resume),
-then drops them. It is never read back by the SDK.
+- **Web: a Jazz-shipped service worker** intercepting `/files/*` — the
+  mechanism the web uses for every other offline asset, and the only one
+  that also covers plain `<img>` tags. The app registers it once. Caveat:
+  no SW controls the very first page load, so requests then fall through
+  to the network — the Blob-in-hand preview never fully dies.
+- **React Native: a loopback HTTP server** inside the Jazz native module —
+  there are no service workers on RN, and images/video load through native
+  networking that JS can't intercept, so the interception point becomes a
+  local URL. On RN, `file.url()` returns
+  `http://127.0.0.1:<port>/<secret>/files/{app}/{file-id}`, which makes
+  `<Image>`, video components, and WebViews work unmodified. One Rust
+  implementation over the same device file store. Bound to loopback only,
+  random port, per-boot secret path segment (other apps on the device can
+  reach localhost); it dies when the app is suspended — fine, nothing
+  renders then. URLs you store or share must be canonical:
+  `url({ canonical: true })`.
+
+The device file store accordingly holds two classes of bodies, and only
+interceptors read it: **staged** (created here, kept until the writing
+transaction is accepted — never evicted before that; possibly the only
+copy in existence) and **cached** (keyed by file id — safe, bodies are
+immutable — LRU-evicted under a configurable budget; eviction is
+reversible, bodies are refetchable by URL). Any file opened once is
+readable offline, and your own files are readable offline from the moment
+you create them.
 
 ## Choice 6: deletion is "the cell died"
 
@@ -419,20 +391,20 @@ Exact builder spellings like `s.file` may shift during implementation.)
 
 ## What we deliberately didn't build
 
-| Not built                          | Because                                                                                                  |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| A file table / built-in file rows  | the column subsumes it (a files table is a table with a file column) and puts files where the data is    |
-| Private files / signed URLs        | would poison caching and flat-cost serving; metadata permissions + mandated-entropy ids are the v1 story |
-| SDK read API (`toBlob`/`toStream`) | the real read path is the URL; blob derivation is two lines of userland `fetch`                          |
-| Offline reads                      | only a service worker can honestly provide them (it also covers `<img>` tags); future work               |
-| `fromStream` / unknown-size upload | the descriptor and the grant both need `size` up front; a Blob knows it, a stream doesn't                |
-| Content hashing & dedup            | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe           |
-| Descriptor move/copy between cells | needs refcounting or a transfer protocol; v1 is one file id, one live cell                               |
-| Lists of files in one cell         | one file column per cell in v1; use multiple columns or a side table                                     |
-| Upload through Jazz servers        | our bandwidth would pay for every upload                                                                 |
-| Standalone file service            | second deployable + duplicated policy evaluation; revisit when traffic warrants                          |
-| General orphan GC                  | ledger-coordinated grant leases + a lifecycle backstop close the abuse faucet                            |
-| Rate limits / per-identity quotas  | leases bound storage abuse in v1; rate limits on grants and egress are planned future work               |
+| Not built                          | Because                                                                                                                           |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| A file table / built-in file rows  | the column subsumes it (a files table is a table with a file column) and puts files where the data is                             |
+| Private files / signed URLs        | would poison caching and flat-cost serving; metadata permissions + mandated-entropy ids are the v1 story                          |
+| SDK read API (`toBlob`/`toStream`) | the real read path is the URL; blob derivation is two lines of userland `fetch`                                                   |
+| SDK-level offline reads            | only URL interceptors can honestly provide offline (they cover `<img>` tags); v1 ships a web SW and an RN loopback server instead |
+| `fromStream` / unknown-size upload | the descriptor and the grant both need `size` up front; a Blob knows it, a stream doesn't                                         |
+| Content hashing & dedup            | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe                                    |
+| Descriptor move/copy between cells | needs refcounting or a transfer protocol; v1 is one file id, one live cell                                                        |
+| Lists of files in one cell         | one file column per cell in v1; use multiple columns or a side table                                                              |
+| Upload through Jazz servers        | our bandwidth would pay for every upload                                                                                          |
+| Standalone file service            | second deployable + duplicated policy evaluation; revisit when traffic warrants                                                   |
+| General orphan GC                  | ledger-coordinated grant leases + a lifecycle backstop close the abuse faucet                                                     |
+| Rate limits / per-identity quotas  | leases bound storage abuse in v1; rate limits on grants and egress are planned future work                                        |
 
 Each of these is expanded in the design doc's "Rejected alternatives"
 section — required reading before reopening any of them.

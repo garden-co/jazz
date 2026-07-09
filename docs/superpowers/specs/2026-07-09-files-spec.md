@@ -15,10 +15,12 @@ these deliberate amendments in this spec:
    core vocabulary already records (a file is "a column type whose cell holds
    a descriptor of exactly one immutable body"); the design doc's file-table
    data model is superseded.
-3. **Reads are URL-only.** The SDK has no byte-read API (`toBlob`/`toStream`
-   are gone); apps fetch the URL themselves and derive blobs in userland.
-   There are no offline reads in v1 — a future service-worker story provides
-   them.
+3. **Reads are URL-only, with offline provided below the URL.** The SDK has
+   no byte-read API (`toBlob`/`toStream` are gone); apps fetch the URL and
+   derive blobs in userland. Offline reads ship in v1 as URL interceptors:
+   a service worker on web, a loopback HTTP server inside the native module
+   on React Native — both serving staged bodies (own files, pre-acceptance)
+   and a read-through body cache.
 4. **The bucket is public-read** (GetObject only, listing denied). The
    serving path is `GET /files/{app}/{file-id}` and redirects to the plain
    public object URL — no presigned GETs anywhere.
@@ -73,13 +75,16 @@ Reading a file _is the web_: one stable, unauthenticated, public URL —
 `GET /files/{app}/{file-id}` — redirecting to the public object URL. Bodies
 are immutable, so every response carries long-lived immutable cache headers
 with no signature expiry asterisk: trivially CDN-cacheable, cheap to serve,
-cheap to bill. The SDK offers no byte-read API and no offline reads: apps
-`fetch` the URL and derive blobs in userland; offline reading arrives later
-via a service-worker integration. There are no private files, no signed
-URLs, and no per-download policy checks: the value Jazz provides is the
-integrated experience (files as values in your own rows, synced and
-permission-gated as metadata) plus offline-capable creation, not byte-level
-access control. Bytes never transit Jazz nodes and never enter Jazz storage,
+cheap to bill. The SDK offers no byte-read API: apps `fetch` the URL and
+derive blobs in userland. Offline reads are provided _below_ the URL by
+per-platform interceptors — a Jazz-shipped service worker on web, a
+loopback HTTP server inside the native module on React Native — each
+serving this device's staged bodies (so `url()` renders own files
+immediately, offline and pre-acceptance) and a read-through, LRU-bounded
+body cache of downloads. There are no private files, no signed URLs, and no
+per-download policy checks: the value Jazz provides is the integrated
+experience (files as values in your own rows, synced and permission-gated
+as metadata) plus offline capability, not byte-level access control. Bytes never transit Jazz nodes and never enter Jazz storage,
 the sync lane, or the content channel.
 
 ## User Stories
@@ -142,10 +147,10 @@ the sync lane, or the content channel.
     referencing row syncs immediately — so that "message text now,
     attachment when uploaded" is my app's decision, not a forced protocol
     semantic.
-17. As an app developer, I want the body staged in the device file store
-    only until the writing transaction is accepted upstream (then dropped),
-    so that upload resume works across restarts without the device growing a
-    permanent byte store.
+17. As an app developer, I want the body staged in the device file store at
+    least until the writing transaction is accepted upstream (never evicted
+    before then — it may be the only copy), so that upload resume works
+    across restarts and my own files render offline from day one.
 
 ### Reading & serving
 
@@ -172,66 +177,83 @@ the sync lane, or the content channel.
     policy (inline only for an allowlist of render-safe types; everything
     else `attachment`), so that my files domain cannot be turned into an XSS
     or phishing host.
-24. As an end user, I want offline reading of files to arrive later via a
-    service-worker integration that caches `/files/*` responses, so that v1
-    stays honest instead of half-promising offline media.
+24. As an end user on web, I want a Jazz-shipped service worker
+    intercepting `/files/*` — serving this device's staged bodies and a
+    read-through cache of downloads — so that my own files render
+    immediately (offline, pre-acceptance) and any file opened once is
+    readable offline, all through plain `<img>` tags.
+25. As an end user on React Native, I want the native module to run a
+    loopback HTTP server with the same serve-staged/serve-cached/
+    proxy-and-cache behavior, with `file.url()` returning the loopback URL
+    on RN, so that `<Image>`, video components, and WebViews get the same
+    offline story with no per-component code.
+26. As an app developer on RN, I want a canonical-URL accessor alongside
+    the loopback `url()` (e.g. `url({ canonical: true })`), so that URLs I
+    store, sync, or share never leak a device-local address.
+27. As an operator, I want the loopback server bound to 127.0.0.1 on a
+    random port with a per-boot secret path segment, so that other apps on
+    the device cannot enumerate or fetch bodies through it.
+28. As an app developer, I want the interceptor's body cache LRU-evicted
+    under a configurable budget (staged bodies exempt until acceptance),
+    so that offline availability never grows device storage without bound —
+    eviction is reversible; bodies are refetchable by URL.
 
 ### Permissions & integrity
 
-25. As an app developer, I want the host table's row policies — read,
+29. As an app developer, I want the host table's row policies — read,
     update, delete — to be the only permission surface for files, gating
     metadata sync, descriptor swaps, and deletion exactly as on any column,
     so that there is nothing file-specific to learn and nothing that can
     silently disagree with row permissions.
-26. As an app developer, I want file ids mandated to be minted from a
+30. As an app developer, I want file ids mandated to be minted from a
     cryptographic RNG with at least UUIDv4 entropy, so that the one value
     guarding all bytes is a real barrier, not a `Math.random()` accident.
-27. As an app developer, I want grant issuance to refuse any file id the
+31. As an app developer, I want grant issuance to refuse any file id the
     claim ledger has ever seen, and the presigned PUT to carry a
     conditional-write guard (`If-None-Match: *`), so that no client —
     however malicious — can ever overwrite an existing body.
-28. As an app developer, I want each upload grant claimable exactly once,
+32. As an app developer, I want each upload grant claimable exactly once,
     atomically at the core's acceptance step, so that one file id lives in
     exactly one cell — across edges, races, and retries — and deletion stays
     well-defined without refcounting.
-29. As an app developer, I want release and acceptance to be idempotent — a
+33. As an app developer, I want release and acceptance to be idempotent — a
     retried release for an already-claimed grant returns the recorded
     outcome — so that a dropped ack never makes an accepted file look
     rejected.
-30. As an app developer, I want a transaction whose body is absent or whose
+34. As an app developer, I want a transaction whose body is absent or whose
     size mismatches the descriptor to be rejected whole and surfaced on the
     write handle like any rejected transaction (with the local cell reverted
     and the staged body dropped), so that integrity failures are loud and
     local state is cleaned up.
-31. As an operator, I want unclaimed upload grants to expire as leases —
+35. As an operator, I want unclaimed upload grants to expire as leases —
     atomically marked expired at the core before their objects and
     multipart uploads are swept — so that an identity farming grants
     accumulates nothing past the lease horizon and the sweep can never race
     an acceptance.
-32. As an operator, I want the lease window to be my knob trading
+36. As an operator, I want the lease window to be my knob trading
     abuse-window against resume-window, so that I can tune it per
     deployment; per-identity rate limits and quotas on grant issuance come
     later.
 
 ### Deletion & history
 
-33. As an end user, I want a file's body deleted when its cell dies —
+37. As an end user, I want a file's body deleted when its cell dies —
     overwritten with a new descriptor, set to null, or the row deleted
     (all policy-gated, ordinary writes) — so that removing a file is one
     action with no second cleanup step.
-34. As an operator, I want the core to be the single owner of object
+38. As an operator, I want the core to be the single owner of object
     deletion — observing the cell death settle, appending to a durable
     queue, issuing idempotent retried DELETEs — so that there are no racing
     edge deletes and no orphaned responsibility.
-35. As an app developer, I want historical reads and branches to surface a
+39. As an app developer, I want historical reads and branches to surface a
     descriptor at a past cut even after its object is deleted, so that
     bodyless history is a defined semantic rather than a crash (the URL
     404s; there is no SDK body read to error).
-36. As an end user, I want a deleted file's URL to stop serving bytes once
+40. As an end user, I want a deleted file's URL to stop serving bytes once
     the object is deleted (with CDN-cached copies aging out on their own),
     so that killing the cell is the way to withdraw a file, with the CDN
     caveat stated honestly.
-37. As an app developer, I want two devices concurrently swapping the same
+41. As an app developer, I want two devices concurrently swapping the same
     cell offline to resolve like any conflicting column write — one
     descriptor wins, the loser's accepted-then-overwritten descriptor is
     ordinary cell death and its body is queued for deletion — so that
@@ -239,20 +261,20 @@ the sync lane, or the content channel.
 
 ### Operations & deployment
 
-38. As an operator, I want the backend contract to be exactly the
+42. As an operator, I want the backend contract to be exactly the
     S3-compatible API (conditional presigned single/multipart PUT, public
     GET, HEAD, DELETE, multipart create/complete/abort), so that S3, R2,
     minio, and Tigris all work unchanged.
-39. As an operator, I want the bucket policy to be public GetObject with
+43. As an operator, I want the bucket policy to be public GetObject with
     listing denied, so that unguessable ids actually protect bodies and the
     bucket can sit directly behind a CDN.
-40. As an operator, I want edges and the core to hold the object-store
+44. As an operator, I want edges and the core to hold the object-store
     credentials (edges presign and verify; the core deletes and sweeps),
     so that clients never see store credentials.
-41. As an operator, I want a recommended S3 lifecycle rule expiring
+45. As an operator, I want a recommended S3 lifecycle rule expiring
     incomplete multipart uploads — set longer than the lease window so it
     never aborts a live upload — as a backstop behind the lease sweep.
-42. As a developer running tests or local dev, I want the file plane to run
+46. As a developer running tests or local dev, I want the file plane to run
     against minio or an in-process fake, so that no cloud account is needed
     to develop or CI-test file features.
 
@@ -344,20 +366,36 @@ the sync lane, or the content channel.
   (AbortMultipartUpload via the stored `UploadId`) cleaned up. The
   recommended S3 lifecycle rule for incomplete multiparts is a backstop and
   must be configured longer than the lease window.
-- **The device file store is upload staging only.** It holds bodies this
-  device created, from `fromBlob` until the writing transaction is accepted
-  upstream (surviving restarts for resume), then drops them. It is not a
-  read cache; the SDK never reads bodies back from it.
-- **Reads are URL-only; no offline reads in v1.** The SDK exposes no
-  `toBlob`/`toStream`: apps `fetch(file.url())` and derive blobs in
-  userland. Before acceptance the URL 404s — apps preview from the Blob
-  they already hold (they just created it). Offline reading of files is
-  future work via a service-worker integration on `/files/*` that serves
-  both directions: locally staged bodies (making `url()` live immediately
-  on the creating device, even offline and pre-acceptance — which
-  constrains the staging store to somewhere a SW can read) and cached
-  downloads. Until then the spec makes no offline-read promise the primary
-  read path can't keep.
+- **The device file store holds staged bodies and a read-through cache,
+  read only by the interceptors.** Staged: bodies this device created, from
+  `fromBlob` until the writing transaction is accepted upstream (surviving
+  restarts for resume; never evicted before acceptance — they may be the
+  only copy). Cached: bodies fetched through an interceptor, keyed by file
+  id (safe — immutable and 1:1), LRU-evicted under a configurable budget;
+  eviction is reversible since bodies are refetchable by URL. The store
+  must live where the platform's interceptor can read it (browser:
+  SW-readable — OPFS/Cache API). The SDK itself never exposes reads from
+  it.
+- **Reads are URL-only; offline reads are interceptors below the URL.**
+  The SDK exposes no `toBlob`/`toStream`: apps `fetch(file.url())` and
+  derive blobs in userland. Offline capability ships in v1 as per-platform
+  URL interceptors with identical behavior — serve staged (own files:
+  `url()` renders immediately, offline and pre-acceptance), else serve
+  cached, else fetch through and write the cache:
+  - **Web:** a Jazz-shipped service worker intercepting `/files/*`; the
+    app registers it. On the very first page load (no controlling SW yet)
+    requests fall through to the network — the Blob-in-hand preview
+    (`URL.createObjectURL`) remains the guaranteed pre-acceptance path.
+  - **React Native:** a loopback HTTP server inside the Jazz native
+    module (one Rust implementation over the same device file store),
+    bound to 127.0.0.1 on a random port with a per-boot secret path
+    segment (localhost is reachable by other apps); it dies with the app
+    process, which is fine — nothing renders then. On RN, `file.url()`
+    returns the loopback URL so `<Image>`, video components, and WebViews
+    work unmodified; `url({ canonical: true })` returns the shareable
+    public URL — device-local addresses must never be stored in rows or
+    shared. Cleartext-to-localhost exemptions apply (ATS allows localhost;
+    Android needs the manifest exemption).
 - **The core owns object deletion, triggered by cell death:** when a
   descriptor's cell is overwritten, nulled, or its row deleted — and the
   core observes that settle globally — it appends the file id to a durable
@@ -375,8 +413,9 @@ the sync lane, or the content channel.
 - **TS API:** `fromBlob(blob, opts)` (create; returns a descriptor handle
   to write into cells, background upload; creation input is a Blob so
   `size` is always known — there is no `fromStream`), `file.url()` (the
-  stable public URL, computed synchronously and locally), and an observable
-  upload state on the handle:
+  stable public URL on web/server, the loopback URL on RN; computed
+  synchronously and locally; `url({ canonical: true })` always returns the
+  public one), and an observable upload state on the handle:
   `local → uploading(progress) → released → accepted | rejected`. Nothing
   else: reads, previews, and blob derivation are userland.
 - **Vocabulary amendments to the Files section of the core context doc**
@@ -426,7 +465,12 @@ the sync lane, or the content channel.
   before acceptance and after cell death once the object is gone;
   descriptor swap uploading the new body and deleting the old one;
   concurrent same-cell swaps resolving to one live descriptor and one
-  queued deletion; bodyless historical read after object deletion.
+  queued deletion; bodyless historical read after object deletion;
+  interceptor behavior (web SW and RN loopback): staged body served
+  offline and pre-acceptance, cached body served offline after one online
+  read, fetch-through writing the cache, LRU eviction respecting the
+  budget and never evicting pre-acceptance staged bodies, and the RN
+  loopback refusing requests without the per-boot secret path.
 - **Prior art:** the existing jazz-tools integration suites for
   permissions, claims, client restart, and large-blob permissions are the
   closest templates on the Rust side; the client/db `.test.ts` suites in
@@ -434,10 +478,10 @@ the sync lane, or the content channel.
 
 ## Out of Scope
 
-- Offline reads of file bodies (a future service-worker integration on
-  `/files/*`, serving staged bodies pre-acceptance and cached downloads
-  offline), and any SDK byte-read API (`toBlob`/`toStream` — blob
-  derivation is userland).
+- Any SDK byte-read API (`toBlob`/`toStream` — blob derivation is
+  userland; offline reads are the interceptors' job, not an API).
+- Interceptors beyond web SW and RN loopback (e.g. desktop webview
+  shells); they can reuse the loopback design later.
 - `fromStream` / unknown-length uploads (creation takes a Blob; size must
   be known at descriptor time).
 - Per-identity rate limits and quotas on grant issuance and download
@@ -471,7 +515,9 @@ the sync lane, or the content channel.
   written in the same transaction as a fresh descriptor becoming visible
   only at acceptance — and being lost with it if verification rejects the
   unit (apps wanting early visibility or blast-radius isolation model the
-  file cell in its own row); no offline reads in v1; CDN-cached copies of a
+  file cell in its own row); on web, no SW controls the very first page
+  load, so requests then fall through to the network and the Blob-in-hand
+  preview remains the guaranteed pre-acceptance path; CDN-cached copies of a
   deleted file's bytes persisting until cache eviction (immutable caching
   makes purge best-effort at most); permanent local-first data loss if the
   creating device dies before release (the handle's upload state is the
