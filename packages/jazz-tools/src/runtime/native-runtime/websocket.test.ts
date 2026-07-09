@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { PostcardWriter } from "./native-codec.js";
+import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
+  CLIENT_WIRE_FEATURES,
+  MAX_WIRE_PROTOCOL_VERSION,
+  MIN_WIRE_PROTOCOL_VERSION,
   WebSocketCarrier,
   decodeWireError,
   decodeWebSocketFrameBatch,
@@ -56,9 +59,15 @@ describe("websocket frame carrier", () => {
 
   it("encodes the client wire hello as a websocket-negotiation frame", () => {
     const hello = encodeWireClientHello();
+    const reader = new PostcardReader(hello);
 
     expect(isWireHello(hello)).toBe(true);
     expect(isWireMessage(hello)).toBe(false);
+    expect(reader.u64()).toBe(0);
+    expect(reader.u64()).toBe(MIN_WIRE_PROTOCOL_VERSION);
+    expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
+    expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
+    expect(reader.u64()).toBe(0);
   });
 
   it("decodes structured wire error frames", () => {
