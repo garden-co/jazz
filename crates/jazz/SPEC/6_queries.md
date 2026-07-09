@@ -122,17 +122,16 @@ root row membership unless the array subquery has an explicit requirement.
 Unreadable child rows and their edges are omitted, while readable parents remain
 visible for optional array subqueries (`INV-QUERY-21`).
 
-Alpha-style relation traversal also has an output-changing query surface:
-`hopTo` returns rows from the terminal hop table, and `gather` returns the
-recursive relation's reached rows. That surface is distinct from the current
-`JoinVia` and `ReachableVia` fields: those fields filter a fixed root query and
-collect witnesses for that root, but they do not retarget the public output
-table. The replacement API must therefore lower `hopTo`/`gather` to a native
-core relation-query surface (or extend `Query` with an explicit relation root)
-rather than emulating them in TypeScript or encoding them as ordinary
-root-filtering joins. Relation-query shapes canonicalize to the same normalized
-row-set shape vocabulary and `ShapeId` identity as table-rooted queries; they do
-not get a separate sync, subscription, or validation engine.
+Alpha-style relation traversal also has an output-changing query surface.
+Supported single-hop traversal (`hopTo` shapes that project one terminal table)
+is facade syntax: the core normalizes it into the same table-rooted query program
+used by ordinary includes and `join_via`, then evaluates one-shot reads,
+maintained subscriptions, registration, known-state, and chunked snapshot serving
+through that single program family. Relation-query shapes canonicalize through
+the normalized row-set vocabulary and do not get a separate sync, subscription,
+or validation engine. Multi-hop traversal and `gather` remain explicit
+unsupported relation operators until they can be normalized into the same program
+family with matching maintained semantics.
 
 ## 6.5 Query-driven sync
 

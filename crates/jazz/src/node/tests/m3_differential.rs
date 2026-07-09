@@ -14,6 +14,7 @@
 // | seeded reachable closure, same-table string seed | `string_resources_same_table_seeded_reachable` |
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
+// | relation traversal facade, forward hop       | `docs_relation_facade_direct_access`        |
 // | recursive membership                         | both reachable shapes include transitive hops |
 // | aggregate                                    | `docs_count`                                |
 
@@ -515,6 +516,10 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
             .validate(schema)
             .unwrap(),
     );
+    push(
+        "docs_relation_facade_direct_access",
+        relation_doc_access_shape().validate(schema).unwrap(),
+    );
     specs
 }
 
@@ -523,6 +528,51 @@ fn created_by_shape(schema: &JazzSchema) -> ValidatedQuery {
         .filter(eq(col("createdBy"), claim("sub")))
         .validate(schema)
         .unwrap()
+}
+
+fn relation_doc_access_shape() -> Query {
+    crate::query::relation_query_to_query(&RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "docs".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "doc_access".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("docs".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "doc".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("docs".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                },
+                RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("docs".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+            ],
+        },
+    })
+    .expect("single-hop relation facade should normalize")
 }
 
 fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {

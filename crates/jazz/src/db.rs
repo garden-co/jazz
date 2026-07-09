@@ -5270,7 +5270,7 @@ fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result
     }
     Err(Error::new(
         ErrorCode::Query,
-        "propagated live subscriptions require global-tier remote coverage until unified maintained lowering supports other tiers",
+        "propagated live subscriptions support only local/none or global remote coverage tiers",
     ))
 }
 
@@ -5287,7 +5287,7 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
     if opts.tier != DurabilityTier::Global {
         return Err(Error::new(
             ErrorCode::Query,
-            "sync subscription serving requires global tier until unified maintained lowering supports other tiers",
+            "sync subscription serving supports only global-tier registration",
         ));
     }
     Ok(())
