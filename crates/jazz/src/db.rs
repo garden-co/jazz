@@ -3149,27 +3149,18 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (
-            read_tier,
-            remote_read_tier,
-            read_view,
-            previous,
-            previous_source,
-            previous_settled,
-            author,
-        ) = {
+        let (read_tier, remote_read_tier, read_view, previous_source, previous_settled, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.remote_read_tier,
                 state.read_view.clone(),
-                state.snapshot.clone(),
                 state.snapshot_source,
                 state.settled,
                 state.author,
             )
         };
-        let (snapshot, snapshot_source, settled, snapshot_tier, maintained_update) = {
+        let (snapshot, snapshot_source, settled, snapshot_tier) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
@@ -3177,6 +3168,8 @@ where
                     binding,
                     maintained_subscription,
                 } => {
+                    let shape = shape.clone();
+                    let binding = binding.clone();
                     let remote_settled_tier = remote_read_tier.filter(|tier| {
                         node.borrow().has_settled_result_set(BindingViewKey {
                             shape_id: shape.shape_id(),
@@ -3212,76 +3205,80 @@ where
                         } else {
                             None
                         };
+                    let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let (snapshot, snapshot_source, maintained_update) = if let Some(update) =
-                        maintained_update
-                    {
-                        (
-                            maintained_snapshot_after_update(&previous, &update),
-                            SubscriptionSnapshotSource::LocalMaintained,
-                            Some(update),
-                        )
-                    } else if remote_settled_tier.is_some() {
+                    if let Some(update) = maintained_update {
+                        let mut event = apply_maintained_update_to_snapshot(
+                            &mut state_ref.snapshot,
+                            &update,
+                            snapshot_tier,
+                            previous_settled,
+                        );
+                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        state_ref.settled = settled;
+                        retained.push(Rc::downgrade(&state));
+                        if let SubscriptionEvent::Delta {
+                            settled: event_settled,
+                            ..
+                        } = &mut event
+                        {
+                            *event_settled = settled;
+                        }
+                        if state_ref.sender.unbounded_send(event).is_ok() {
+                            changed += 1;
+                        }
+                        continue;
+                    }
+                    let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                        let previous = state_ref.snapshot.clone();
                         let remote_snapshot = node.borrow_mut().subscription_snapshot_for_link(
-                            shape,
-                            binding,
+                            &shape,
+                            &binding,
                             snapshot_tier,
                             author,
                         )?;
-                        if maintained_subscription.is_some()
+                        if has_maintained_subscription
                             && previous.root_count > 0
                             && previous_source == SubscriptionSnapshotSource::LocalMaintained
                             && remote_snapshot.root_count == 0
                         {
-                            (previous.clone(), previous_source, None)
+                            (previous.clone(), previous_source)
                         } else {
-                            (
-                                remote_snapshot,
-                                SubscriptionSnapshotSource::LinkSnapshot,
-                                None,
-                            )
+                            (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                         }
-                    } else if maintained_subscription.is_some() {
-                        (previous.clone(), previous_source, None)
+                    } else if has_maintained_subscription {
+                        let previous = state_ref.snapshot.clone();
+                        (previous.clone(), previous_source)
                     } else {
                         (
                             node.borrow_mut().subscription_snapshot_for_link(
-                                shape, binding, read_tier, author,
+                                &shape, &binding, read_tier, author,
                             )?,
                             SubscriptionSnapshotSource::LinkSnapshot,
-                            None,
                         )
                     };
                     let settled = subscription_is_settled(
                         &node.borrow(),
-                        shape,
-                        binding,
+                        &shape,
+                        &binding,
                         settled_tier,
                         read_view,
                     );
-                    (
-                        snapshot,
-                        snapshot_source,
-                        settled,
-                        snapshot_tier,
-                        maintained_update,
-                    )
+                    (snapshot, snapshot_source, settled, snapshot_tier)
                 }
             }
         };
+        let previous = state.borrow().snapshot.clone();
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = if let Some(update) = &maintained_update {
-                subscription_delta_event_from_maintained_update(
-                    snapshot_tier,
-                    settled,
-                    &previous,
-                    &snapshot,
-                    update,
-                )
-            } else {
-                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
-            };
+            let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
             state.snapshot = snapshot;
             state.snapshot_source = snapshot_source;
             state.settled = settled;
@@ -6192,45 +6189,131 @@ fn subscription_delta_event(
     }
 }
 
-fn subscription_delta_event_from_maintained_update(
+fn apply_maintained_update_to_snapshot(
+    snapshot: &mut RelationSnapshot,
+    update: &LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
-    previous: &RelationSnapshot,
-    current: &RelationSnapshot,
-    update: &LocalMaintainedViewSubscriptionUpdate,
 ) -> SubscriptionEvent {
-    let previous_by_id = previous
-        .rows
-        .iter()
-        .map(|row| (subscription_row_key(row), row))
-        .collect::<BTreeMap<_, _>>();
     let mut added = Vec::new();
     let mut updated = Vec::new();
+    let mut removed = Vec::new();
+
     for row in &update.added {
-        match previous_by_id.get(&subscription_row_key(row)) {
-            None => added.push(row.clone()),
-            Some(previous_row) if *previous_row != row => updated.push(row.clone()),
-            Some(_) => {}
+        let key = subscription_row_key(row);
+        if let Some(position) = snapshot
+            .rows
+            .iter()
+            .take(snapshot.root_count)
+            .position(|current| subscription_row_key(current) == key)
+        {
+            if snapshot.rows[position] != *row {
+                snapshot.rows[position] = row.clone();
+                updated.push(row.clone());
+            }
+        } else {
+            snapshot.rows.insert(snapshot.root_count, row.clone());
+            snapshot.root_count += 1;
+            added.push(row.clone());
         }
     }
-    let added_keys = update
-        .added
-        .iter()
-        .map(subscription_row_key)
-        .collect::<BTreeSet<_>>();
+
+    let mut index = 0;
+    while index < snapshot.root_count {
+        if update.removed.iter().any(|(table, row_uuid)| {
+            subscription_row_key(&snapshot.rows[index]) == (table.clone(), *row_uuid)
+        }) {
+            let row = snapshot.rows.remove(index);
+            snapshot.root_count -= 1;
+            removed.push(RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+            });
+        } else {
+            index += 1;
+        }
+    }
+
+    snapshot
+        .edges
+        .retain(|edge| !update.removed_edges.iter().any(|removed| removed == edge));
+
+    for (edge, row) in &update.added_edges {
+        if !snapshot.edges.iter().any(|current| current == edge) {
+            snapshot.edges.push(edge.clone());
+        }
+        let Some(row) = row else {
+            continue;
+        };
+        let key = subscription_row_key(row);
+        if snapshot
+            .rows
+            .iter()
+            .take(snapshot.root_count)
+            .any(|root| subscription_row_key(root) == key)
+        {
+            continue;
+        }
+        if let Some(position) = snapshot
+            .rows
+            .iter()
+            .skip(snapshot.root_count)
+            .position(|current| subscription_row_key(current) == key)
+        {
+            let position = snapshot.root_count + position;
+            snapshot.rows[position] = row.clone();
+        } else {
+            snapshot.rows.push(row.clone());
+        }
+    }
+
+    for removed_edge in &update.removed_edges {
+        let still_referenced = snapshot.edges.iter().any(|edge| {
+            edge.target_table == removed_edge.target_table
+                && edge.target_row == removed_edge.target_row
+        });
+        let removed_key = (removed_edge.target_table.clone(), removed_edge.target_row);
+        let is_root = snapshot
+            .rows
+            .iter()
+            .take(snapshot.root_count)
+            .any(|row| subscription_row_key(row) == removed_key);
+        if !still_referenced && !is_root {
+            snapshot
+                .rows
+                .retain(|row| subscription_row_key(row) != removed_key);
+        }
+    }
+
+    let mut current_rows = Vec::new();
+    current_rows.extend(added.iter().cloned());
+    current_rows.extend(updated.iter().cloned());
+    let root_count = current_rows.len();
+    for (_, row) in &update.added_edges {
+        if let Some(row) = row {
+            let key = subscription_row_key(row);
+            if !current_rows
+                .iter()
+                .any(|current| subscription_row_key(current) == key)
+            {
+                current_rows.push(row.clone());
+            }
+        }
+    }
+
     SubscriptionEvent::Delta {
-        current: current.clone(),
+        current: RelationSnapshot {
+            root_count,
+            rows: current_rows,
+            edges: update
+                .added_edges
+                .iter()
+                .map(|(edge, _)| edge.clone())
+                .collect(),
+        },
         added,
         updated,
-        removed: update
-            .removed
-            .iter()
-            .filter(|key| !added_keys.contains(*key))
-            .map(|(table, row_uuid)| RemovedRow {
-                table: table.clone(),
-                row_uuid: *row_uuid,
-            })
-            .collect(),
+        removed,
         added_edges: update
             .added_edges
             .iter()
@@ -6239,65 +6322,6 @@ fn subscription_delta_event_from_maintained_update(
         removed_edges: update.removed_edges.clone(),
         settled,
         tier,
-    }
-}
-
-fn maintained_snapshot_after_update(
-    previous: &RelationSnapshot,
-    update: &LocalMaintainedViewSubscriptionUpdate,
-) -> RelationSnapshot {
-    let removed_roots = update.removed.iter().cloned().collect::<BTreeSet<_>>();
-    let mut roots = previous
-        .rows
-        .iter()
-        .take(previous.root_count)
-        .filter(|row| !removed_roots.contains(&subscription_row_key(row)))
-        .map(|row| (subscription_row_key(row), row.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for row in &update.added {
-        roots.insert(subscription_row_key(row), row.clone());
-    }
-
-    let removed_edges = update
-        .removed_edges
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut edges = previous
-        .edges
-        .iter()
-        .filter(|edge| !removed_edges.contains(*edge))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for (edge, _) in &update.added_edges {
-        edges.insert(edge.clone());
-    }
-
-    let root_keys = roots.keys().cloned().collect::<BTreeSet<_>>();
-    let mut included = previous
-        .rows
-        .iter()
-        .skip(previous.root_count)
-        .map(|row| (subscription_row_key(row), row.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for (_, row) in &update.added_edges {
-        if let Some(row) = row {
-            included.insert(subscription_row_key(row), row.clone());
-        }
-    }
-    let referenced = edges
-        .iter()
-        .map(|edge| (edge.target_table.clone(), edge.target_row))
-        .collect::<BTreeSet<_>>();
-    included.retain(|key, _| referenced.contains(key) && !root_keys.contains(key));
-
-    let root_count = roots.len();
-    let mut rows = roots.into_values().collect::<Vec<_>>();
-    rows.extend(included.into_values());
-    RelationSnapshot {
-        root_count,
-        rows,
-        edges: edges.into_iter().collect(),
     }
 }
 
