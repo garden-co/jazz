@@ -36,8 +36,9 @@ use crate::ids::{AuthorId, NodeUuid, RowUuid};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
-    LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlanHandle,
-    RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
+    NodeState, OpenTxId, PreparedQueryPlanHandle, RelationEdge, RelationSnapshot, RowProvenance,
+    ViewUpdateParts,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -790,7 +791,11 @@ where
     ///     },
     /// ))?;
     /// let opened = block_on(subscription.next_event()).unwrap();
-    /// assert!(opened.current_rows().unwrap().is_empty());
+    /// let SubscriptionEvent::Delta { reset, added, .. } = opened else {
+    ///     panic!("expected reset delta");
+    /// };
+    /// assert!(reset);
+    /// assert!(added.is_empty());
     ///
     /// db.insert("todos", todo_cells("notify subscribers", false))?;
     /// let changed = block_on(subscription.next_event()).unwrap();
@@ -1016,6 +1021,7 @@ where
             opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
+        let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
@@ -1027,7 +1033,7 @@ where
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
-            snapshot: snapshot.clone(),
+            snapshot: state_snapshot,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
@@ -1035,11 +1041,7 @@ where
         state
             .borrow()
             .sender
-            .unbounded_send(SubscriptionEvent::Opened {
-                current: snapshot,
-                settled,
-                tier: read_tier,
-            })
+            .unbounded_send(subscription_reset_event(read_tier, settled, snapshot))
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
         self.node
             .subscriptions
@@ -3145,21 +3147,12 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (
-            read_tier,
-            remote_read_tier,
-            read_view,
-            previous,
-            previous_source,
-            previous_settled,
-            author,
-        ) = {
+        let (read_tier, remote_read_tier, read_view, previous_source, previous_settled, author) = {
             let state = state.borrow();
             (
                 state.read_tier,
                 state.remote_read_tier,
                 state.read_view.clone(),
-                state.snapshot.clone(),
                 state.snapshot_source,
                 state.settled,
                 state.author,
@@ -3173,6 +3166,8 @@ where
                     binding,
                     maintained_subscription,
                 } => {
+                    let shape = shape.clone();
+                    let binding = binding.clone();
                     let remote_settled_tier = remote_read_tier.filter(|tier| {
                         node.borrow().has_settled_result_set(BindingViewKey {
                             shape_id: shape.shape_id(),
@@ -3184,6 +3179,23 @@ where
                             .read_view_key(),
                         })
                     });
+                    let settled_tier = remote_read_tier.unwrap_or(read_tier);
+                    let settled_binding_view = BindingViewKey {
+                        shape_id: shape.shape_id(),
+                        binding_id: binding.binding_id(),
+                        read_view: RegisterShapeOptions {
+                            tier: settled_tier,
+                            read_view: read_view.clone(),
+                        }
+                        .read_view_key(),
+                    };
+                    if node
+                        .borrow()
+                        .publication_deferred_for_binding_view(settled_binding_view)
+                    {
+                        retained.push(Rc::downgrade(&state));
+                        continue;
+                    }
                     let maintained_update =
                         if let Some(maintained) = maintained_subscription.as_mut() {
                             node.borrow_mut()
@@ -3191,17 +3203,46 @@ where
                         } else {
                             None
                         };
+                    let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let (snapshot, snapshot_source) = if let Some(update) = maintained_update {
-                        (update.snapshot, SubscriptionSnapshotSource::LocalMaintained)
-                    } else if remote_settled_tier.is_some() {
+                    if let Some(update) = maintained_update {
+                        let mut event = apply_maintained_update_to_snapshot(
+                            &mut state_ref.snapshot,
+                            &update,
+                            snapshot_tier,
+                            previous_settled,
+                        );
+                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        state_ref.settled = settled;
+                        retained.push(Rc::downgrade(&state));
+                        if let SubscriptionEvent::Delta {
+                            settled: event_settled,
+                            ..
+                        } = &mut event
+                        {
+                            *event_settled = settled;
+                        }
+                        if state_ref.sender.unbounded_send(event).is_ok() {
+                            changed += 1;
+                        }
+                        continue;
+                    }
+                    let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                        let previous = state_ref.snapshot.clone();
                         let remote_snapshot = node.borrow_mut().subscription_snapshot_for_link(
-                            shape,
-                            binding,
+                            &shape,
+                            &binding,
                             snapshot_tier,
                             author,
                         )?;
-                        if maintained_subscription.is_some()
+                        if has_maintained_subscription
                             && previous.root_count > 0
                             && previous_source == SubscriptionSnapshotSource::LocalMaintained
                             && remote_snapshot.root_count == 0
@@ -3210,21 +3251,21 @@ where
                         } else {
                             (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                         }
-                    } else if maintained_subscription.is_some() {
+                    } else if has_maintained_subscription {
+                        let previous = state_ref.snapshot.clone();
                         (previous.clone(), previous_source)
                     } else {
                         (
                             node.borrow_mut().subscription_snapshot_for_link(
-                                shape, binding, read_tier, author,
+                                &shape, &binding, read_tier, author,
                             )?,
                             SubscriptionSnapshotSource::LinkSnapshot,
                         )
                     };
-                    let settled_tier = remote_read_tier.unwrap_or(read_tier);
                     let settled = subscription_is_settled(
                         &node.borrow(),
-                        shape,
-                        binding,
+                        &shape,
+                        &binding,
                         settled_tier,
                         read_view,
                     );
@@ -3232,10 +3273,11 @@ where
                 }
             }
         };
+        let previous = state.borrow().snapshot.clone();
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
             let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
-            state.snapshot = snapshot;
+            state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -5939,28 +5981,28 @@ pub struct RemovedRow {
 /// Materialized relation edge removed from a subscription result.
 pub type RemovedRelationEdge = RelationEdge;
 
-/// Materialized event emitted by a database subscription stream.
+/// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
-    /// Initial materialized result for the subscription.
-    Opened {
-        /// Complete materialized rows visible at subscription open.
-        current: RelationSnapshot,
-        /// Whether the result is complete at the requested read tier.
-        settled: bool,
-        /// Read tier used to materialize the rows.
-        tier: DurabilityTier,
-    },
-    /// Incremental materialized result change.
+    /// Incremental or reset result change.
     Delta {
-        /// Complete materialized rows after applying this change.
-        current: RelationSnapshot,
+        /// Whether this delta replaces all previously observed rows and edges.
+        ///
+        /// Fresh subscriptions start with a reset delta from the empty result.
+        reset: bool,
         /// Rows newly visible to the subscription.
         added: Vec<CurrentRow>,
         /// Rows still visible with changed projected cells.
         updated: Vec<CurrentRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
+        /// Related rows newly referenced by relation edges.
+        ///
+        /// Relation subscriptions reduce `added`, `updated`, `removed`,
+        /// `added_related`, `added_edges`, and `removed_edges` into their local
+        /// view. The producer does not attach a full current snapshot to
+        /// incremental deltas.
+        added_related: Vec<CurrentRow>,
         /// Relation edges newly visible to the subscription.
         added_edges: Vec<RelationEdge>,
         /// Relation edges no longer visible to the subscription.
@@ -5970,36 +6012,8 @@ pub enum SubscriptionEvent {
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
     },
-    /// Full replacement result, reserved for future stream resumption and
-    /// internal invalidation cases where a precise delta is unavailable.
-    Reset {
-        /// Complete replacement materialized rows.
-        current: RelationSnapshot,
-        /// Whether the result is complete at the requested read tier.
-        settled: bool,
-        /// Read tier used to materialize the rows.
-        tier: DurabilityTier,
-    },
     /// The subscription stream was closed by the producer.
     Closed,
-}
-
-impl SubscriptionEvent {
-    /// Return full materialized rows for snapshot-like events.
-    pub fn current_rows(&self) -> Option<&[CurrentRow]> {
-        match self {
-            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(&current.rows),
-            Self::Delta { .. } | Self::Closed => None,
-        }
-    }
-
-    /// Return the complete materialized relation snapshot for snapshot-like events.
-    pub fn current_snapshot(&self) -> Option<&RelationSnapshot> {
-        match self {
-            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(current),
-            Self::Delta { .. } | Self::Closed => None,
-        }
-    }
 }
 
 /// Stream of materialized subscription events.
@@ -6082,6 +6096,34 @@ fn subscription_delta_event(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
 ) -> SubscriptionEvent {
+    subscription_delta_event_with_reset(tier, settled, previous, current, false)
+}
+
+fn subscription_reset_event(
+    tier: DurabilityTier,
+    settled: bool,
+    current: RelationSnapshot,
+) -> SubscriptionEvent {
+    SubscriptionEvent::Delta {
+        reset: true,
+        added: current.rows,
+        updated: Vec::new(),
+        removed: Vec::new(),
+        added_related: Vec::new(),
+        added_edges: current.edges,
+        removed_edges: Vec::new(),
+        settled,
+        tier,
+    }
+}
+
+fn subscription_delta_event_with_reset(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+    reset: bool,
+) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
         previous_by_id.insert(subscription_row_key(row), row);
@@ -6124,15 +6166,208 @@ fn subscription_delta_event(
     }
 
     SubscriptionEvent::Delta {
-        current: current.clone(),
+        reset,
         added,
         updated,
         removed,
+        added_related: Vec::new(),
         added_edges,
         removed_edges,
         settled,
         tier,
     }
+}
+
+fn apply_maintained_update_to_snapshot(
+    snapshot: &mut RelationSnapshot,
+    update: &LocalMaintainedViewSubscriptionUpdate,
+    tier: DurabilityTier,
+    settled: bool,
+) -> SubscriptionEvent {
+    fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
+        row.table() == table && row.row_uuid() == row_uuid
+    }
+
+    if snapshot.rows.is_empty()
+        && snapshot.edges.is_empty()
+        && snapshot.root_count == 0
+        && update.removed.is_empty()
+        && update.removed_edges.is_empty()
+    {
+        let mut added = Vec::with_capacity(update.added.len());
+        let mut added_related = Vec::new();
+        let mut seen_rows = BTreeSet::new();
+        for row in &update.added {
+            seen_rows.insert((row.table().to_owned(), row.row_uuid()));
+            added.push(row.clone());
+        }
+
+        let mut seen_edges = BTreeSet::new();
+        for (edge, row) in &update.added_edges {
+            if seen_edges.insert(edge.clone()) {
+                snapshot.edges.push(edge.clone());
+            }
+            let Some(row) = row else {
+                continue;
+            };
+            if seen_rows.insert((row.table().to_owned(), row.row_uuid())) {
+                added_related.push(row.clone());
+            }
+        }
+
+        snapshot.root_count = added.len();
+        snapshot.rows.reserve(added.len() + added_related.len());
+        snapshot.rows.extend(added.iter().cloned());
+        snapshot.rows.extend(added_related.iter().cloned());
+
+        return SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated: Vec::new(),
+            removed: Vec::new(),
+            added_related,
+            added_edges: update
+                .added_edges
+                .iter()
+                .map(|(edge, _)| edge.clone())
+                .collect(),
+            removed_edges: Vec::new(),
+            settled,
+            tier,
+        };
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    let mut added_related = Vec::new();
+
+    for row in &update.added {
+        let table = row.table();
+        let row_uuid = row.row_uuid();
+        if let Some(position) = snapshot
+            .rows
+            .iter()
+            .take(snapshot.root_count)
+            .position(|current| row_matches(current, table, row_uuid))
+        {
+            if snapshot.rows[position] != *row {
+                snapshot.rows[position] = row.clone();
+                updated.push(row.clone());
+            }
+        } else {
+            snapshot.rows.insert(snapshot.root_count, row.clone());
+            snapshot.root_count += 1;
+            added.push(row.clone());
+        }
+    }
+
+    let mut index = 0;
+    while index < snapshot.root_count {
+        if update
+            .removed
+            .iter()
+            .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
+        {
+            let row = snapshot.rows.remove(index);
+            snapshot.root_count -= 1;
+            removed.push(RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+            });
+        } else {
+            index += 1;
+        }
+    }
+
+    snapshot
+        .edges
+        .retain(|edge| !update.removed_edges.iter().any(|removed| removed == edge));
+
+    for (edge, row) in &update.added_edges {
+        if !snapshot.edges.iter().any(|current| current == edge) {
+            snapshot.edges.push(edge.clone());
+        }
+        let Some(row) = row else {
+            continue;
+        };
+        let table = row.table();
+        let row_uuid = row.row_uuid();
+        if snapshot
+            .rows
+            .iter()
+            .take(snapshot.root_count)
+            .any(|root| row_matches(root, table, row_uuid))
+        {
+            continue;
+        }
+        if let Some(position) = snapshot
+            .rows
+            .iter()
+            .skip(snapshot.root_count)
+            .position(|current| row_matches(current, table, row_uuid))
+        {
+            let position = snapshot.root_count + position;
+            snapshot.rows[position] = row.clone();
+        } else {
+            snapshot.rows.push(row.clone());
+        }
+        added_related.push(row.clone());
+    }
+
+    for removed_edge in &update.removed_edges {
+        let still_referenced = snapshot.edges.iter().any(|edge| {
+            edge.target_table == removed_edge.target_table
+                && edge.target_row == removed_edge.target_row
+        });
+        let is_root = snapshot.rows.iter().take(snapshot.root_count).any(|row| {
+            row_matches(
+                row,
+                removed_edge.target_table.as_str(),
+                removed_edge.target_row,
+            )
+        });
+        if !still_referenced && !is_root {
+            snapshot.rows.retain(|row| {
+                !row_matches(
+                    row,
+                    removed_edge.target_table.as_str(),
+                    removed_edge.target_row,
+                )
+            });
+        }
+    }
+
+    SubscriptionEvent::Delta {
+        reset: false,
+        added,
+        updated,
+        removed,
+        added_related,
+        added_edges: update
+            .added_edges
+            .iter()
+            .map(|(edge, _)| edge.clone())
+            .collect(),
+        removed_edges: update.removed_edges.clone(),
+        settled,
+        tier,
+    }
+}
+
+fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {
+    let mut snapshot = snapshot.clone();
+    reserve_relation_snapshot_delta_slack(&mut snapshot);
+    snapshot
+}
+
+fn reserve_relation_snapshot_delta_slack(snapshot: &mut RelationSnapshot) {
+    fn slack(len: usize) -> usize {
+        (len / 8).max(64)
+    }
+
+    snapshot.rows.reserve(slack(snapshot.rows.len()));
+    snapshot.edges.reserve(slack(snapshot.edges.len()));
 }
 
 fn subscription_is_settled<S>(

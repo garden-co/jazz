@@ -216,17 +216,16 @@ fn subscription_fields(
             break;
         };
         match event {
-            SubscriptionEvent::Opened { current, .. }
-            | SubscriptionEvent::Reset { current, .. } => {
-                rows.clear();
-                ingest_current_rows(&mut rows, table, &current.rows);
-            }
             SubscriptionEvent::Delta {
+                reset,
                 added,
                 updated,
                 removed,
                 ..
             } => {
+                if reset {
+                    rows.clear();
+                }
                 for removed in removed {
                     rows.remove(&removed.row_uuid);
                 }

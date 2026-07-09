@@ -27,6 +27,7 @@ export type EncodedSubscriptionRowDelta =
 
 export interface EncodedSubscriptionDelta {
   all: EncodedSubscriptionRow[];
+  reset?: true;
   delta: EncodedSubscriptionRowDelta[];
 }
 
@@ -267,5 +268,6 @@ export function decodeEncodedSubscriptionDelta<T extends { id: string }>(
         item: decodeRow(change.row),
       } as RowDelta<T>;
     }),
+    reset: true,
   };
 }

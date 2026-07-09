@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
 import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
 import type { QueryBuilder, QueryOptions, TableProxy } from "../runtime/db.js";
-import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "../runtime/subscription-manager.js";
 import {
   decodeEncodedSubscriptionDelta,
   type EncodedSubscriptionDelta,
@@ -63,6 +63,7 @@ const table = query as QueryBuilder<TestRow> & TableProxy<TestRow, TestInit>;
 function delta(rows: TestRow[]): SubscriptionDelta<TestRow> {
   return {
     all: rows,
+    reset: true,
     delta: rows.map((item, index) => ({
       kind: 0,
       id: item.id,
@@ -80,6 +81,7 @@ function encodeRows(rows: TestRow[]): EncodedSubscriptionDelta {
   }));
   return {
     all: encodedRows,
+    reset: true,
     delta: encodedRows.map((row, index) => ({
       kind: 0 as const,
       id: row.id,
@@ -87,6 +89,10 @@ function encodeRows(rows: TestRow[]): EncodedSubscriptionDelta {
       row,
     })),
   };
+}
+
+function reduceTestRows(current: TestRow[], next: SubscriptionDelta<TestRow>): TestRow[] {
+  return [...applySubscriptionDelta(current, next)];
 }
 
 function createChannel(rows: TestRow[]): SubscriptionChannel & {
@@ -516,8 +522,9 @@ describe("web/createJazzClient async subscription channel", () => {
 
     const channel = createBrowserWorkerSubscriptionChannel({ appId: "direct-channel" });
     const updates: TestRow[][] = [];
+    const current: TestRow[] = [];
     const unsubscribe = channel.subscribeAll(query, (next) => {
-      updates.push(next.all);
+      updates.push(reduceTestRows(current, next));
     });
 
     await vi.waitFor(() => {
@@ -588,12 +595,14 @@ describe("web/createJazzClient async subscription channel", () => {
     });
     const updatesA: TestRow[][] = [];
     const updatesB: TestRow[][] = [];
+    const currentA: TestRow[] = [];
+    const currentB: TestRow[] = [];
 
     const unsubscribeA = tabA.subscribeAll(query, (next) => {
-      updatesA.push(next.all);
+      updatesA.push(reduceTestRows(currentA, next));
     });
     const unsubscribeB = tabB.subscribeAll(query, (next) => {
-      updatesB.push(next.all);
+      updatesB.push(reduceTestRows(currentB, next));
     });
 
     await vi.waitFor(() => {
@@ -629,8 +638,9 @@ describe("web/createJazzClient async subscription channel", () => {
       dbName: "handoff-db",
     });
     const firstUpdates: TestRow[][] = [];
+    const firstCurrent: TestRow[] = [];
     const unsubscribeFirst = firstTab.subscribeAll(query, (next) => {
-      firstUpdates.push(next.all);
+      firstUpdates.push(reduceTestRows(firstCurrent, next));
     });
     await vi.waitFor(() => {
       expect(firstUpdates).toEqual([[{ id: "before-handoff", value: "old-leader" }]]);
@@ -643,8 +653,9 @@ describe("web/createJazzClient async subscription channel", () => {
       dbName: "handoff-db",
     });
     const replacementUpdates: TestRow[][] = [];
+    const replacementCurrent: TestRow[] = [];
     const unsubscribeReplacement = replacementTab.subscribeAll(query, (next) => {
-      replacementUpdates.push(next.all);
+      replacementUpdates.push(reduceTestRows(replacementCurrent, next));
     });
 
     await vi.waitFor(() => {

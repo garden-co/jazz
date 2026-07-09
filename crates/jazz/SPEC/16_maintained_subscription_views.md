@@ -59,6 +59,30 @@ facts as needed, then maps those terminal rows to subscription or sync events.
 App-row projection and internal fact emission are separate outputs of the same
 program; projection must not become a second diffing path.
 
+## 16.1.1 Application subscription delta contract
+
+The application-facing subscription stream is a stream of result deltas. A
+delta contains row additions, row updates, row removals, ordered-position data
+for ordered shapes, relation edge additions/removals where the query includes
+relations, settled/tier metadata, and a `reset` flag. There is no separate
+snapshot event type. The first delivery for a fresh subscription is a reset
+delta from the empty result set; reducing that delta yields the initial view.
+
+Consumers own the materialized result set. The contract is that applying the
+delta reducer to events in stream order produces the same result as a one-shot
+read at the corresponding frontier. Non-reset deltas do not carry a complete
+`current`/`all` result. Reset deltas replace all previously reduced state and
+then apply their additions; chunked initial hydration is coalesced below this
+contract and presents as one logical reset delta whose settled state is reported
+at the final chunk boundary.
+
+Windowed ordered shapes expose window-membership transitions as ordinary
+deltas. If a row leaves a finite `order_by`/`limit` window and another row enters
+because of that boundary movement, the stream emits the corresponding remove
+and add/update changes even when the entering row's stored cells did not change.
+Per-event work is expected to be O(changed rows), not O(result set); this is the
+application-surface form of `INV-INC-1`.
+
 ## 16.2 Policy composition
 
 For non-system peers, the maintained graph begins from the shared
@@ -166,14 +190,10 @@ Maintained-lowering gaps:
   relation/path lowering or relation-edge terminal deltas are represented in
   groove. Serving code must not compensate by recursively subscribing to
   coarse child shapes for sync coverage;
-- relation delivery currently has a known `INV-INC-1` violation in the local
-  maintained path: relation/include publication rebuilds and diffs accumulated
-  relation state after small child changes. The fix is in flight on the
-  coldpath delta-native work and the ignored mechanism canary in
-  `crates/jazz/tests/incremental_delivery_canary.rs` is the pending activation
-  receipt. The canary is at the `Db` facade level because the current
-  `jazz-tools::JazzClient` subscription surface rejects relation/include
-  queries as non-simple table queries;
+- relation delivery is covered by the active `INV-INC-1` mechanism canary in
+  `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
+  `Db` facade level because the current `jazz-tools::JazzClient` subscription
+  surface rejects relation/include queries as non-simple table queries;
 - application-column projection is a materialization concern layered over the
   maintained membership/version stream; projected subscription payloads must not
   become a second diff engine;

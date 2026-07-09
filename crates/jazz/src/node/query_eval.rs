@@ -397,7 +397,10 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
-    pub(crate) snapshot: RelationSnapshot,
+    pub(crate) added: Vec<CurrentRow>,
+    pub(crate) removed: Vec<(String, RowUuid)>,
+    pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
+    pub(crate) removed_edges: Vec<RelationEdge>,
 }
 
 enum CurrentQueryProgramOutput {
@@ -3840,6 +3843,15 @@ where
             .contains_key(&binding_view_key)
     }
 
+    pub(crate) fn publication_deferred_for_binding_view(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        self.query
+            .deferred_publication_binding_views
+            .contains(&binding_view_key)
+    }
+
     pub(crate) fn settled_result_transitions_for_subscription(
         &self,
         subscription: SubscriptionKey,
@@ -5648,8 +5660,10 @@ where
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
         };
-        let initial = self.apply_local_maintained_view_transitions(&mut local, transitions)?;
-        Ok((local, initial.snapshot))
+        let _initial_delta =
+            self.apply_local_maintained_view_transitions(&mut local, transitions)?;
+        let initial = self.materialize_local_maintained_relation_snapshot(&local)?;
+        Ok((local, initial))
     }
 
     pub(crate) fn drain_local_maintained_view_subscription(
@@ -5730,23 +5744,10 @@ where
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
-        let mut changed = false;
-        for member in transitions.adds {
-            if member.table_name() != Some(local.result_table.as_str()) {
-                continue;
-            }
-            if local.result_set.insert(member) {
-                changed = true;
-            }
-        }
-        for member in transitions.removes {
-            if member.table_name() != Some(local.result_table.as_str()) {
-                continue;
-            }
-            if local.result_set.remove(&member) {
-                changed = true;
-            }
-        }
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut added_edges = Vec::new();
+        let mut removed_edges = Vec::new();
         for member in transitions.result_payload_removes {
             local.result_payloads.remove(&member);
         }
@@ -5755,19 +5756,75 @@ where
                 local.result_payloads.insert(member, payload);
             }
         }
+        for member in transitions.adds {
+            if member.table_name() != Some(local.result_table.as_str()) {
+                continue;
+            }
+            if local.result_set.insert(member.clone()) {
+                if let Some(row) =
+                    self.materialize_local_maintained_view_result_member(local, &member)?
+                {
+                    added.push(row);
+                }
+            }
+        }
+        for member in transitions.removes {
+            if member.table_name() != Some(local.result_table.as_str()) {
+                continue;
+            }
+            if local.result_set.remove(&member) {
+                if let Some((table, row_uuid, _)) = member.as_row() {
+                    removed.push((table.to_string(), row_uuid));
+                }
+            }
+        }
         for fact in transitions.program_fact_removes {
             if local.program_facts.remove(&fact) {
-                changed = true;
+                if let ProgramFactEntry::RelationEdge(edge) = fact {
+                    removed_edges.push(RelationEdge {
+                        source_table: edge.source_table.to_string(),
+                        source_row: edge.source_row,
+                        relation: edge.path,
+                        target_table: edge.target_table.to_string(),
+                        target_row: edge.target_row,
+                    });
+                }
             }
         }
         for fact in transitions.program_fact_adds {
-            if local.program_facts.insert(fact) {
-                changed = true;
+            let edge = match &fact {
+                ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
+                _ => None,
+            };
+            if local.program_facts.insert(fact)
+                && let Some(edge) = edge
+            {
+                let relation_edge = RelationEdge {
+                    source_table: edge.source_table.to_string(),
+                    source_row: edge.source_row,
+                    relation: edge.path.clone(),
+                    target_table: edge.target_table.to_string(),
+                    target_row: edge.target_row,
+                };
+                let row = if let Some(version) = &edge.target_version {
+                    self.materialize_local_maintained_view_relation_edge_row(
+                        local,
+                        edge.target_table.as_str(),
+                        edge.target_row,
+                        version.tx,
+                    )?
+                } else {
+                    None
+                };
+                added_edges.push((relation_edge, row));
             }
         }
-        let _ = changed;
-        self.materialize_local_maintained_relation_snapshot(local)
-            .map(|snapshot| LocalMaintainedViewSubscriptionUpdate { snapshot })
+        Ok(LocalMaintainedViewSubscriptionUpdate {
+            added,
+            removed,
+            added_edges,
+            removed_edges,
+        })
     }
 
     fn materialize_local_maintained_relation_snapshot(
