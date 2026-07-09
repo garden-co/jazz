@@ -384,6 +384,59 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.received).toEqual([]);
   });
 
+  it("fails active subscriptions when the websocket reports a fatal wire error", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const subscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            subscribe: () => subscription,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+    await Promise.resolve();
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(5, 3, "server died")]));
+    await Promise.resolve();
+
+    expect(subscription.closed).toBe(true);
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates.mock.calls[0]![0]).toBeInstanceOf(Error);
+    expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
+    expect(updates.mock.calls[0]![1]).toBeNull();
+  });
+
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
     const write = {

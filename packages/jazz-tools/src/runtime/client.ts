@@ -343,7 +343,11 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
 
 function normalizeSubscriptionCallbackArgs(
   args: unknown[],
-): SubscriptionWireDelta | string | undefined {
+): Error | SubscriptionWireDelta | string | undefined {
+  if (args.length === 2 && args[0] instanceof Error) {
+    return args[0];
+  }
+
   if (args.length === 1) {
     return args[0] as SubscriptionWireDelta | string;
   }
@@ -983,6 +987,9 @@ export class JazzClient {
       const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
       if (deltaJsonOrObject === undefined) {
         return;
+      }
+      if (deltaJsonOrObject instanceof Error) {
+        throw deltaJsonOrObject;
       }
 
       const delta: SubscriptionWireDelta =
