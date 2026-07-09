@@ -366,8 +366,7 @@ impl IvmRuntime {
                 evaluator.metrics.notification_encoded_bytes +=
                     multisink_deltas_encoded_bytes(&records);
             }
-            let queued =
-                QueuedMultisinkDeltas::new(records, eval_memo_drain_pins(evaluator.eval_memo));
+            let queued = QueuedMultisinkDeltas::new(records);
             if !queued.deltas.is_empty() && subscription.sender.send(queued).is_err() {
                 dropped_subscriptions.push(*subscription_id);
             }
@@ -442,8 +441,7 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        self.eval_memo
-            .retain(|key, entry| key.tick_epoch.is_none() || entry.is_pinned());
+        self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
         self.recompute_eval_memo_bytes();
         if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
             && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
@@ -462,13 +460,6 @@ impl IvmRuntime {
             {
                 break;
             }
-            if self
-                .eval_memo
-                .get(&key)
-                .is_some_and(EvalMemoEntry::is_pinned)
-            {
-                continue;
-            }
             if let Some(entry) = self.eval_memo.remove(&key) {
                 self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
             }
@@ -485,8 +476,7 @@ impl IvmRuntime {
 
     #[cfg(test)]
     fn evict_eval_memo_for_tests(&mut self, max_entries: usize, max_bytes: usize) {
-        self.eval_memo
-            .retain(|key, entry| key.tick_epoch.is_none() || entry.is_pinned());
+        self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
         self.recompute_eval_memo_bytes();
         let mut entries = self
             .eval_memo
@@ -498,13 +488,6 @@ impl IvmRuntime {
             if self.eval_memo.len() <= max_entries && self.eval_memo_bytes <= max_bytes {
                 break;
             }
-            if self
-                .eval_memo
-                .get(&key)
-                .is_some_and(EvalMemoEntry::is_pinned)
-            {
-                continue;
-            }
             if let Some(entry) = self.eval_memo.remove(&key) {
                 self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
             }
@@ -512,7 +495,7 @@ impl IvmRuntime {
     }
 
     fn queued_multisink_deltas(&self, deltas: MultisinkDeltas) -> QueuedMultisinkDeltas {
-        QueuedMultisinkDeltas::new(deltas, eval_memo_drain_pins(&self.eval_memo))
+        QueuedMultisinkDeltas::new(deltas)
     }
 
     fn hydration_snapshot<S>(
@@ -2756,11 +2739,6 @@ struct EvalMemoEntry {
     input_watermark: u64,
     payload_bytes: usize,
     last_used: u64,
-    // Temporary mitigation for the cache/channel coupling documented at the
-    // subscription drain boundary below: memo entries whose outputs may still
-    // be consumed by a queued maintained drain must not be evicted. The planned
-    // split is a pure recompute cache plus an explicit shared output channel.
-    drain_pin: Arc<()>,
 }
 
 impl EvalMemoEntry {
@@ -2775,27 +2753,8 @@ impl EvalMemoEntry {
             input_watermark,
             payload_bytes,
             last_used,
-            drain_pin: Arc::new(()),
         }
     }
-
-    fn is_pinned(&self) -> bool {
-        Arc::strong_count(&self.drain_pin) > 1
-    }
-}
-
-#[derive(Clone, Debug)]
-struct EvalMemoDrainPin {
-    _pin: Arc<()>,
-}
-
-fn eval_memo_drain_pins(eval_memo: &HashMap<EvalMemoKey, EvalMemoEntry>) -> Vec<EvalMemoDrainPin> {
-    eval_memo
-        .values()
-        .map(|entry| EvalMemoDrainPin {
-            _pin: Arc::clone(&entry.drain_pin),
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3031,20 +2990,15 @@ pub struct MultisinkDeltas {
 
 #[derive(Debug)]
 struct QueuedMultisinkDeltas {
+    // Explicit fragment-output drain channel: once a tick or hydration computes
+    // subscription output, this queue owns delivery until the receiver drains
+    // it. Eval memo is only a recompute cache and may be evicted independently.
     deltas: MultisinkDeltas,
-    // These pins deliberately live until the receiver drains this message. The
-    // eval memo currently doubles as the shared output channel for same-frontier
-    // maintained attach/probe; until that is split, queued drains must protect
-    // their source entries from LRU or tick-boundary eviction.
-    _memo_pins: Vec<EvalMemoDrainPin>,
 }
 
 impl QueuedMultisinkDeltas {
-    fn new(deltas: MultisinkDeltas, memo_pins: Vec<EvalMemoDrainPin>) -> Self {
-        Self {
-            deltas,
-            _memo_pins: memo_pins,
-        }
+    fn new(deltas: MultisinkDeltas) -> Self {
+        Self { deltas }
     }
 }
 
@@ -7731,11 +7685,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_subscription_drains_match_unbounded_with_capacity_zero_except_pins() {
+    fn pending_subscription_drains_match_unbounded_when_eval_memo_is_evicted_before_drain() {
         let schema = albums_schema();
         let albums = schema.table("albums").unwrap().record_schema();
 
-        let run = |force_capacity_zero: bool| {
+        let run = |evict_before_drain: bool| {
             let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
             let storage = crate::storage::MemoryStorage::new(&["albums"]);
             let subscription = runtime
@@ -7760,21 +7714,21 @@ mod tests {
                 )
                 .unwrap();
 
-            if force_capacity_zero {
+            if evict_before_drain {
                 runtime.evict_eval_memo_for_tests(0, 0);
                 assert!(
-                    runtime.eval_memo.values().any(EvalMemoEntry::is_pinned),
-                    "forced eviction must keep entries pinned by an undrained subscription message"
+                    runtime.eval_memo.is_empty(),
+                    "the eval memo is a pure cache and may be fully evicted while subscription output is pending"
                 );
             }
 
             let delivered = subscription.recv().unwrap();
 
-            if force_capacity_zero {
+            if evict_before_drain {
                 runtime.evict_eval_memo_for_tests(0, 0);
                 assert!(
-                    runtime.eval_memo.values().all(|entry| !entry.is_pinned()),
-                    "draining the subscription message must release memo pins"
+                    runtime.eval_memo.is_empty(),
+                    "draining subscription output must not depend on eval memo entries"
                 );
             }
 
