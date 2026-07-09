@@ -899,8 +899,12 @@ fn analyze_root_node(
         } => {
             visited.insert(request.input.shape.root.clone());
             let parent = analyze_linear_root(input, request, &mut visited)?;
-            let child =
-                analyze_linear_subplan(child_input, &request.input.shape.nodes, &mut visited)?;
+            let child = analyze_correlated_child_subplan(
+                child_input,
+                path,
+                &request.input.shape.nodes,
+                &mut visited,
+            )?;
             validate_result_source(
                 request,
                 parent.root.source().ok_or_else(|| {
@@ -1027,7 +1031,12 @@ fn analyze_correlated_path_root(
             requirement,
         } => {
             let parent = analyze_linear_root(input, request, visited)?;
-            let child = analyze_linear_subplan(child_input, &request.input.shape.nodes, visited)?;
+            let child = analyze_correlated_child_subplan(
+                child_input,
+                path,
+                &request.input.shape.nodes,
+                visited,
+            )?;
             Ok(CorrelatedPathPlan {
                 parent,
                 child,
@@ -1101,7 +1110,7 @@ fn collect_nested_correlated_paths(
         let parent = analyze_linear_subplan(input, nodes, &mut parent_visited)?;
         visited.extend(parent_visited);
         let mut child_visited = BTreeSet::new();
-        let child = analyze_linear_subplan(child_input, nodes, &mut child_visited)?;
+        let child = analyze_correlated_child_subplan(child_input, path, nodes, &mut child_visited)?;
         visited.extend(child_visited);
         paths.push(CorrelatedPathPlan {
             parent,
@@ -1114,6 +1123,24 @@ fn collect_nested_correlated_paths(
         });
     }
     Ok(paths)
+}
+
+fn analyze_correlated_child_subplan(
+    child_input: &RowSetNodeId,
+    path: &ProgramPathId,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<LinearCurrentRoot, UnsupportedReason> {
+    if let Some(RowSetExpr::CorrelatedPathProjection {
+        input,
+        path: nested_path,
+        ..
+    }) = nodes.get(child_input)
+        && nested_path.owner == path.child
+    {
+        return analyze_linear_subplan(input, nodes, visited);
+    }
+    analyze_linear_subplan(child_input, nodes, visited)
 }
 
 fn analyze_linear_root(
@@ -1432,9 +1459,9 @@ fn analyze_current_node(
             unsupported_marker_message(keys)
                 .unwrap_or_else(|| "distinct row-set nodes are not lowered yet".to_owned()),
         )),
-        RowSetExpr::CorrelatedPathProjection { .. } => Err(UnsupportedReason::Operator(
-            "correlated path projection row-set nodes are not lowered yet".to_owned(),
-        )),
+        RowSetExpr::CorrelatedPathProjection { input, .. } => {
+            analyze_current_node(input, nodes, visited)
+        }
         RowSetExpr::Aggregate {
             input,
             group_by,

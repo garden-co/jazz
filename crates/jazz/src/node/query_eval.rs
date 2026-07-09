@@ -2520,22 +2520,7 @@ fn normalize_array_subquery(
         child_current = slice_node;
     }
 
-    for (nested_index, nested) in subquery.nested_arrays.iter().enumerate() {
-        let mut nested_path = path.to_vec();
-        nested_path.push(nested_index);
-        let nested_parent_input = child_current.clone();
-        let nested_node = normalize_array_subquery(
-            nodes,
-            nested_parent_input,
-            &child_source,
-            nested,
-            &nested_path,
-        )?;
-        if !matches!(nested.requirement, ArraySubqueryRequirement::Optional) {
-            child_current = nested_node;
-        }
-    }
-
+    let nested_parent_input = child_current.clone();
     let path_node = RowSetNodeId(format!("array_subquery:{path_id}:path"));
     nodes.insert(
         path_node.clone(),
@@ -2561,6 +2546,17 @@ fn normalize_array_subquery(
             requirement: array_requirement(subquery.requirement),
         },
     );
+    for (nested_index, nested) in subquery.nested_arrays.iter().enumerate() {
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_index);
+        normalize_array_subquery(
+            nodes,
+            nested_parent_input.clone(),
+            &child_source,
+            nested,
+            &nested_path,
+        )?;
+    }
     Ok(path_node)
 }
 

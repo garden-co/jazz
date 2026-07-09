@@ -1828,6 +1828,113 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
 }
 
 #[test]
+fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
+    let schema = JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
+            ],
+        )
+        .with_reference("ownerId", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let user = db
+        .insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    let todo = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible todo".to_owned())),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
+                ),
+            ]),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(user.0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(row_ids(&snapshot.rows), vec![user, todo]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].source_row, user);
+    assert_eq!(snapshot.edges[0].target_row, todo);
+}
+
+#[test]
+fn relation_snapshot_reverse_array_limit_reads_local_child() {
+    let schema = JazzSchema::new([
+        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("projectId", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("projectId", "projects")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+        )
+        .unwrap()
+        .row_uuid();
+    let todo = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible todo".to_owned())),
+                ("projectId".to_owned(), Value::Uuid(project.0)),
+            ]),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let query = Query::from("projects")
+        .filter(eq(col("id"), lit(Value::Uuid(project.0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaProject", "todos", "projectId", "id")
+                .select(["title"])
+                .limit(1),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(row_ids(&snapshot.rows), vec![project, todo]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].source_row, project);
+    assert_eq!(snapshot.edges[0].target_row, todo);
+}
+
+#[test]
 fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
     let schema = JazzSchema::new([
         TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])

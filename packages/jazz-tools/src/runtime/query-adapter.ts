@@ -872,6 +872,8 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     typeof builder.limit === "number" &&
     typeof builder.offset === "number" &&
     builder.offset > 0;
+  const clientLimit = typeof builder.limit === "number" ? builder.limit : undefined;
+  const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {
     table: builder.table,
     conditions: toFlatConditions(builder.conditions),
@@ -881,14 +883,14 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     ...(orderBy.length > 0 ? { order_by: orderBy } : {}),
     ...(clientPagesAfterRequiredIncludes
       ? {
-          limit: builder.limit + builder.offset,
+          limit: clientLimit! + clientOffset!,
           offset: 0,
-          __jazz_client_limit: builder.limit,
-          __jazz_client_offset: builder.offset,
+          __jazz_client_limit: clientLimit,
+          __jazz_client_offset: clientOffset,
         }
       : {
-          ...(typeof builder.limit === "number" ? { limit: builder.limit } : {}),
-          ...(typeof builder.offset === "number" ? { offset: builder.offset } : {}),
+          ...(clientLimit !== undefined ? { limit: clientLimit } : {}),
+          ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
         }),
   };
 
