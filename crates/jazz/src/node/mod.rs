@@ -3339,7 +3339,7 @@ pub(super) fn validate_registered_transform(transform: &str) -> Result<(), Error
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentRow {
     table: groove::Intern<String>,
-    record: OwnedRecord,
+    record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
 }
 
@@ -3387,7 +3387,7 @@ impl CurrentRow {
     pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
         Self {
             table: groove::Intern::new(table.into()),
-            record,
+            record: std::sync::Arc::new(record),
             deleted: false,
         }
     }
