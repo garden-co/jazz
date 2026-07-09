@@ -36,8 +36,9 @@ use crate::ids::{AuthorId, NodeUuid, RowUuid};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
-    LocalMaintainedViewSubscription, MergeableCommit, NodeState, OpenTxId, PreparedQueryPlanHandle,
-    RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
+    NodeState, OpenTxId, PreparedQueryPlanHandle, RelationEdge, RelationSnapshot, RowProvenance,
+    ViewUpdateParts,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -3168,7 +3169,7 @@ where
                 state.author,
             )
         };
-        let (snapshot, snapshot_source, settled, snapshot_tier) = {
+        let (snapshot, snapshot_source, settled, snapshot_tier, maintained_update) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
@@ -3212,8 +3213,14 @@ where
                             None
                         };
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let (snapshot, snapshot_source) = if let Some(update) = maintained_update {
-                        (update.snapshot, SubscriptionSnapshotSource::LocalMaintained)
+                    let (snapshot, snapshot_source, maintained_update) = if let Some(update) =
+                        maintained_update
+                    {
+                        (
+                            maintained_snapshot_after_update(&previous, &update),
+                            SubscriptionSnapshotSource::LocalMaintained,
+                            Some(update),
+                        )
                     } else if remote_settled_tier.is_some() {
                         let remote_snapshot = node.borrow_mut().subscription_snapshot_for_link(
                             shape,
@@ -3226,18 +3233,23 @@ where
                             && previous_source == SubscriptionSnapshotSource::LocalMaintained
                             && remote_snapshot.root_count == 0
                         {
-                            (previous.clone(), previous_source)
+                            (previous.clone(), previous_source, None)
                         } else {
-                            (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                            (
+                                remote_snapshot,
+                                SubscriptionSnapshotSource::LinkSnapshot,
+                                None,
+                            )
                         }
                     } else if maintained_subscription.is_some() {
-                        (previous.clone(), previous_source)
+                        (previous.clone(), previous_source, None)
                     } else {
                         (
                             node.borrow_mut().subscription_snapshot_for_link(
                                 shape, binding, read_tier, author,
                             )?,
                             SubscriptionSnapshotSource::LinkSnapshot,
+                            None,
                         )
                     };
                     let settled = subscription_is_settled(
@@ -3247,13 +3259,29 @@ where
                         settled_tier,
                         read_view,
                     );
-                    (snapshot, snapshot_source, settled, snapshot_tier)
+                    (
+                        snapshot,
+                        snapshot_source,
+                        settled,
+                        snapshot_tier,
+                        maintained_update,
+                    )
                 }
             }
         };
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
+            let event = if let Some(update) = &maintained_update {
+                subscription_delta_event_from_maintained_update(
+                    snapshot_tier,
+                    settled,
+                    &previous,
+                    &snapshot,
+                    update,
+                )
+            } else {
+                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
+            };
             state.snapshot = snapshot;
             state.snapshot_source = snapshot_source;
             state.settled = settled;
@@ -6161,6 +6189,115 @@ fn subscription_delta_event(
         removed_edges,
         settled,
         tier,
+    }
+}
+
+fn subscription_delta_event_from_maintained_update(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+    update: &LocalMaintainedViewSubscriptionUpdate,
+) -> SubscriptionEvent {
+    let previous_by_id = previous
+        .rows
+        .iter()
+        .map(|row| (subscription_row_key(row), row))
+        .collect::<BTreeMap<_, _>>();
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    for row in &update.added {
+        match previous_by_id.get(&subscription_row_key(row)) {
+            None => added.push(row.clone()),
+            Some(previous_row) if *previous_row != row => updated.push(row.clone()),
+            Some(_) => {}
+        }
+    }
+    let added_keys = update
+        .added
+        .iter()
+        .map(subscription_row_key)
+        .collect::<BTreeSet<_>>();
+    SubscriptionEvent::Delta {
+        current: current.clone(),
+        added,
+        updated,
+        removed: update
+            .removed
+            .iter()
+            .filter(|key| !added_keys.contains(*key))
+            .map(|(table, row_uuid)| RemovedRow {
+                table: table.clone(),
+                row_uuid: *row_uuid,
+            })
+            .collect(),
+        added_edges: update
+            .added_edges
+            .iter()
+            .map(|(edge, _)| edge.clone())
+            .collect(),
+        removed_edges: update.removed_edges.clone(),
+        settled,
+        tier,
+    }
+}
+
+fn maintained_snapshot_after_update(
+    previous: &RelationSnapshot,
+    update: &LocalMaintainedViewSubscriptionUpdate,
+) -> RelationSnapshot {
+    let removed_roots = update.removed.iter().cloned().collect::<BTreeSet<_>>();
+    let mut roots = previous
+        .rows
+        .iter()
+        .take(previous.root_count)
+        .filter(|row| !removed_roots.contains(&subscription_row_key(row)))
+        .map(|row| (subscription_row_key(row), row.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for row in &update.added {
+        roots.insert(subscription_row_key(row), row.clone());
+    }
+
+    let removed_edges = update
+        .removed_edges
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut edges = previous
+        .edges
+        .iter()
+        .filter(|edge| !removed_edges.contains(*edge))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for (edge, _) in &update.added_edges {
+        edges.insert(edge.clone());
+    }
+
+    let root_keys = roots.keys().cloned().collect::<BTreeSet<_>>();
+    let mut included = previous
+        .rows
+        .iter()
+        .skip(previous.root_count)
+        .map(|row| (subscription_row_key(row), row.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (_, row) in &update.added_edges {
+        if let Some(row) = row {
+            included.insert(subscription_row_key(row), row.clone());
+        }
+    }
+    let referenced = edges
+        .iter()
+        .map(|edge| (edge.target_table.clone(), edge.target_row))
+        .collect::<BTreeSet<_>>();
+    included.retain(|key, _| referenced.contains(key) && !root_keys.contains(key));
+
+    let root_count = roots.len();
+    let mut rows = roots.into_values().collect::<Vec<_>>();
+    rows.extend(included.into_values());
+    RelationSnapshot {
+        root_count,
+        rows,
+        edges: edges.into_iter().collect(),
     }
 }
 

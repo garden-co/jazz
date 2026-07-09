@@ -70,7 +70,9 @@ mod recovery;
 mod source_resolution;
 pub mod text_oplog;
 mod views;
-pub(crate) use query_eval::LocalMaintainedViewSubscription;
+pub(crate) use query_eval::{
+    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
+};
 pub(crate) use views::MaintainedViewBundleInputs;
 
 use branches::BranchRecord;
