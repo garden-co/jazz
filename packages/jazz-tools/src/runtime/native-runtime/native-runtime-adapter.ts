@@ -18,10 +18,13 @@ import {
   openConfig,
   queryWithPredicates,
   readNativeRowBatch,
+  readNativeRelationSubscriptionDelta,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
   writeValueType,
   type NativeRelationSubscriptionSnapshot,
+  type NativeRelationSubscriptionDelta,
+  type NativeRelationSubscriptionEdge,
   type NativeRowBatch,
   type NativeRemovedRow,
   type QueryArraySubquery,
@@ -242,13 +245,23 @@ type SubscriptionState = {
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
-  rootTable: string | null;
+  relationRows: RowState[];
+  relationRootCount: number;
+  relationEdges: NativeRelationSubscriptionEdge[];
+  relationMaterialization: RelationMaterializationSpec;
   outputColumns: ColumnDescriptor[] | null;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
   callback?: Function;
   cancelled: boolean;
+};
+
+type RelationMaterializationSpec = {
+  rootTable: string | null;
+  arraySubqueries: QueryArraySubquery[];
+  clientLimit: number | null;
+  clientOffset: number;
 };
 
 type SubscriptionSourceState = {
@@ -675,7 +688,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
             this.schema,
-            queryTable(coreQueryJson),
+            relationMaterializationSpec(coreQueryJson, this.schema),
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -685,7 +698,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
-          queryTable(coreQueryJson),
+          relationMaterializationSpec(coreQueryJson, this.schema),
         );
       }
       const rows = session
@@ -750,7 +763,12 @@ export class NativeRuntimeAdapter implements Runtime {
       identity,
       rows: [],
       rowIndexByKey: new Map(),
-      rootTable: usesNativeRelationApi ? null : queryTable(queryJson),
+      relationRows: [],
+      relationRootCount: 0,
+      relationEdges: [],
+      relationMaterialization: usesNativeRelationApi
+        ? emptyRelationMaterializationSpec()
+        : relationMaterializationSpec(queryJson, this.schema),
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
@@ -940,10 +958,10 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!subscription.query) continue;
 
       const previousRows = subscription.rows;
-      const rowsBytes = subscription.identity
-        ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
-        : this.db.all(subscription.query, subscription.opts);
-      const nextRows = rowsFromBatches(readRowBatches(rowsBytes), this.schema);
+      const nextRows =
+        subscription.relationMaterialization.arraySubqueries.length > 0
+          ? this.refreshRelationSubscriptionRows(subscription)
+          : this.refreshPlainSubscriptionRows(subscription);
       const delta = nativeDeltaFromRows(
         nextRows,
         previousRows,
@@ -955,6 +973,41 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.callback(delta);
     }
+  }
+
+  private refreshPlainSubscriptionRows(subscription: SubscriptionState): RowState[] {
+    if (!subscription.query) return [];
+    const rowsBytes = subscription.identity
+      ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
+      : this.db.all(subscription.query, subscription.opts);
+    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
+  }
+
+  private refreshRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
+    if (!subscription.query) return [];
+    if (
+      !this.db.allRelationSnapshot ||
+      (subscription.identity && !this.db.allRelationSnapshotForIdentity)
+    ) {
+      return this.refreshPlainSubscriptionRows(subscription);
+    }
+    const payload = subscription.identity
+      ? this.db.allRelationSnapshotForIdentity!(
+          subscription.query,
+          subscription.identity,
+          subscription.opts,
+        )
+      : this.db.allRelationSnapshot(subscription.query, subscription.opts);
+    const snapshot = readRelationSnapshot(payload);
+    subscription.relationRows = rowsFromBatches(snapshot.rows, this.schema);
+    subscription.relationRootCount = snapshot.rootCount;
+    subscription.relationEdges = snapshot.edges;
+    return materializeRelationRows(
+      subscription.relationRows,
+      subscription.relationEdges,
+      subscription.relationRootCount,
+      subscription.relationMaterialization,
+    );
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
@@ -1240,10 +1293,14 @@ export class NativeRuntimeAdapter implements Runtime {
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
-      subscription.rows = rowsFromRelationSnapshot(
-        chunk.snapshot,
-        this.schema,
-        subscription.rootTable,
+      subscription.relationRows = rowsFromBatches(chunk.snapshot.rows, this.schema);
+      subscription.relationRootCount = chunk.snapshot.rootCount;
+      subscription.relationEdges = chunk.snapshot.edges;
+      subscription.rows = materializeRelationRows(
+        subscription.relationRows,
+        subscription.relationEdges,
+        subscription.relationRootCount,
+        subscription.relationMaterialization,
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1256,6 +1313,29 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription.outputColumns,
             )
           : nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
+      );
+    } else if (
+      chunk.relationSnapshot &&
+      subscription.relationMaterialization.arraySubqueries.length > 0
+    ) {
+      const previousRows = subscription.rows;
+      subscription.relationRows = rowsFromBatches(chunk.relationSnapshot.rows, this.schema);
+      subscription.relationRootCount = chunk.relationSnapshot.rootCount;
+      subscription.relationEdges = chunk.relationSnapshot.edges;
+      subscription.rows = materializeRelationRows(
+        subscription.relationRows,
+        subscription.relationEdges,
+        subscription.relationRootCount,
+        subscription.relationMaterialization,
+      );
+      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
+      subscription.callback?.(
+        nativeDeltaFromRows(
+          subscription.rows,
+          previousRows,
+          this.schema,
+          subscription.outputColumns,
+        ),
       );
     } else {
       const applied = applySubscriptionDeltaWithWireDelta(
@@ -1721,12 +1801,34 @@ function unqualifiedColumn(column: string): string {
   return column.split(".").at(-1) ?? column;
 }
 
-function queryTable(queryJson: string): string {
-  const table = (JSON.parse(queryJson) as { table?: unknown }).table;
-  if (typeof table !== "string") {
-    throw new Error("Native runtime only supports table queries in this slice");
+function emptyRelationMaterializationSpec(): RelationMaterializationSpec {
+  return {
+    rootTable: null,
+    arraySubqueries: [],
+    clientLimit: null,
+    clientOffset: 0,
+  };
+}
+
+function relationMaterializationSpec(
+  queryJson: string,
+  schema: WasmSchema,
+): RelationMaterializationSpec {
+  const parsed = JSON.parse(queryJson) as {
+    table?: unknown;
+    array_subqueries?: unknown;
+    __jazz_client_limit?: unknown;
+    __jazz_client_offset?: unknown;
+  };
+  if (typeof parsed.table !== "string") {
+    return emptyRelationMaterializationSpec();
   }
-  return table;
+  return {
+    rootTable: parsed.table,
+    arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
+    clientLimit: parsed.__jazz_client_limit == null ? null : readLimit(parsed.__jazz_client_limit),
+    clientOffset: parsed.__jazz_client_offset == null ? 0 : readOffset(parsed.__jazz_client_offset),
+  };
 }
 
 function subscriptionOutputColumns(queryJson: string, schema: WasmSchema): ColumnDescriptor[] {
@@ -2824,12 +2926,21 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
 function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
-  rootTable: string | null,
+  materialization: RelationMaterializationSpec,
 ): RowState[] {
   const rows = rowsFromBatches(snapshot.rows, schema);
+  return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
+}
+
+function materializeRelationRows(
+  rows: RowState[],
+  edges: NativeRelationSubscriptionEdge[],
+  rootCount: number,
+  materialization: RelationMaterializationSpec,
+): RowState[] {
   const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
   const childRowsBySourceAndRelation = new Map<string, RowState[]>();
-  for (const edge of snapshot.edges) {
+  for (const edge of edges) {
     const targetKey = rowKey(edge.targetTable, formatUuid(edge.targetRowId));
     const child = rowsByKey.get(targetKey);
     if (!child) continue;
@@ -2839,29 +2950,56 @@ function rowsFromRelationSnapshot(
     childRowsBySourceAndRelation.set(key, children);
   }
   const materialized = new Map<string, RowState>();
-  return rows
-    .slice(0, rootTable === null ? rows.length : snapshot.rootCount)
-    .map((row) => materializeRelationRow(row, childRowsBySourceAndRelation, materialized));
+  let roots = rows
+    .slice(0, materialization.rootTable === null ? rows.length : rootCount)
+    .map((row) =>
+      materializeRelationRow(
+        row,
+        materialization.arraySubqueries,
+        childRowsBySourceAndRelation,
+        materialized,
+      ),
+    )
+    .filter((result) => result.satisfiesRequirements)
+    .map((result) => result.row);
+  if (materialization.clientOffset > 0 || materialization.clientLimit !== null) {
+    const offset = materialization.clientOffset;
+    const limit = materialization.clientLimit ?? roots.length;
+    roots = roots.slice(offset, offset + limit);
+  }
+  return roots;
 }
 
 function materializeRelationRow(
   row: RowState,
+  subqueries: readonly QueryArraySubquery[],
   childRowsBySourceAndRelation: Map<string, RowState[]>,
   materialized: Map<string, RowState>,
-): RowState {
+): { row: RowState; satisfiesRequirements: boolean } {
   const rowKeyValue = rowKey(row.table, row.id);
   const cached = materialized.get(rowKeyValue);
-  if (cached) return cached;
+  if (cached) return { row: cached, satisfiesRequirements: true };
   materialized.set(rowKeyValue, row);
   const valuesByColumn = new Map(row.valuesByColumn ?? []);
   const relationValues: Value[] = [];
-  const prefix = `${row.table}\0${row.id}\0`;
-  for (const [key, children] of childRowsBySourceAndRelation) {
-    if (!key.startsWith(prefix)) continue;
-    const relation = key.slice(prefix.length);
-    const materializedChildren = children.map((child) =>
-      materializeRelationRow(child, childRowsBySourceAndRelation, materialized),
+  let satisfiesRequirements = true;
+  for (const subquery of subqueries) {
+    const key = relationKey(row.table, row.id, subquery.columnName);
+    const children = childRowsBySourceAndRelation.get(key) ?? [];
+    const childResults = children.map((child) =>
+      materializeRelationRow(
+        child,
+        subquery.nestedArrays ?? [],
+        childRowsBySourceAndRelation,
+        materialized,
+      ),
     );
+    const materializedChildren = childResults
+      .filter((child) => child.satisfiesRequirements)
+      .map((child) => child.row);
+    if (!arraySubqueryRequirementSatisfied(row, subquery, materializedChildren.length)) {
+      satisfiesRequirements = false;
+    }
     const value: Value = {
       type: "Array",
       value: materializedChildren.map((child) => ({
@@ -2869,9 +3007,9 @@ function materializeRelationRow(
         value: rowValueWithValuesByColumn(child),
       })),
     } as Value;
-    valuesByColumn.set(relation, value);
-    const publicRelation = publicIncludeRelationName(relation);
-    if (publicRelation !== relation) {
+    valuesByColumn.set(subquery.columnName, value);
+    const publicRelation = publicIncludeRelationName(subquery.columnName);
+    if (publicRelation !== subquery.columnName) {
       valuesByColumn.set(publicRelation, value);
     }
     relationValues.push(value);
@@ -2884,7 +3022,31 @@ function materializeRelationRow(
     valuesByColumn,
   );
   materialized.set(rowKeyValue, next);
-  return next;
+  return { row: next, satisfiesRequirements };
+}
+
+function arraySubqueryRequirementSatisfied(
+  row: RowState,
+  subquery: QueryArraySubquery,
+  childCount: number,
+): boolean {
+  switch (subquery.requirement ?? "Optional") {
+    case "Optional":
+      return true;
+    case "AtLeastOne":
+      return childCount > 0;
+    case "MatchCorrelationCardinality":
+      return childCount === correlationCardinality(row, subquery.outerColumn);
+  }
+}
+
+function correlationCardinality(row: RowState, column: string): number {
+  const valuesByColumn = row.valuesByColumn ?? new Map<string, Value>();
+  const value = valuesByColumn.get(stripParentQualifier(column, row.table));
+  if (!value) return 0;
+  if (value.type === "Array") return value.value.length;
+  if (value.type === "Nullable") return value.value === null ? 0 : 1;
+  return 1;
 }
 
 function publicIncludeRelationName(relation: string): string {
@@ -3089,11 +3251,20 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
+      relationDelta?: NativeRelationSubscriptionDelta;
+      relationSnapshot?: NativeRelationSubscriptionSnapshot;
       settled?: boolean;
     }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
-  const record = chunk as { type?: unknown; rows?: unknown; delta?: unknown; settled?: unknown };
+  const record = chunk as {
+    type?: unknown;
+    rows?: unknown;
+    delta?: unknown;
+    relation_delta?: unknown;
+    relation_snapshot?: unknown;
+    settled?: unknown;
+  };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
   }
@@ -3110,6 +3281,18 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
+      relationDelta:
+        record.relation_delta === undefined
+          ? undefined
+          : readNativeRelationSubscriptionDelta(
+              new PostcardReader(assertBytes(record.relation_delta, "relation subscription delta")),
+            ),
+      relationSnapshot:
+        record.relation_snapshot === undefined
+          ? undefined
+          : readRelationSnapshot(
+              assertBytes(record.relation_snapshot, "relation subscription snapshot"),
+            ),
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
