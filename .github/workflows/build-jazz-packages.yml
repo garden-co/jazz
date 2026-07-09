@@ -133,7 +133,7 @@ jobs:
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
-          tool: wasm-pack@0.13.1
+          tool: wasm-pack@0.14.0
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
