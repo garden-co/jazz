@@ -3063,7 +3063,7 @@ function correlationCardinality(row: RowState, column: string): number {
   const value = valuesByColumn.get(stripParentQualifier(column, row.table));
   if (!value) return 0;
   if (value.type === "Array") return value.value.length;
-  if (value.type === "Nullable") return value.value === null ? 0 : 1;
+  if (value.type === "Null") return 0;
   return 1;
 }
 
