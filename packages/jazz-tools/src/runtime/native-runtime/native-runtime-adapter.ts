@@ -1324,7 +1324,25 @@ export class NativeRuntimeAdapter implements Runtime {
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") return;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
+    this.failActiveSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
+  }
+
+  private failActiveSubscriptions(error: Error): void {
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.cancelled) continue;
+      subscription.cancelled = true;
+      for (const source of subscription.sources) {
+        closeSubscriptionSource(source.source);
+      }
+      try {
+        subscription.callback?.(error, null);
+      } catch (callbackError) {
+        setTimeout(() => {
+          throw callbackError;
+        }, 0);
+      }
+    }
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
