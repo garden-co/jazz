@@ -6049,6 +6049,14 @@ where
         let Some(edges) = snapshots.get("maintained.relation_edges") else {
             return Ok(snapshot);
         };
+        #[derive(Clone)]
+        struct RelationEdgeCandidate {
+            edge: RelationEdge,
+            target_tx_time: TxTime,
+            target_tx_node: NodeAlias,
+        }
+
+        let limits = Self::relation_snapshot_no_order_limits(&shape.query().array_subqueries);
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
@@ -6057,6 +6065,7 @@ where
         let target_row_idx = required_field_idx(descriptor, "target_row")?;
         let target_tx_time_idx = required_field_idx(descriptor, "target_tx_time")?;
         let target_tx_node_idx = required_field_idx(descriptor, "target_tx_node_id")?;
+        let mut candidates = Vec::new();
         for (record, weight) in edges.iter() {
             if weight <= 0 {
                 continue;
@@ -6068,27 +6077,65 @@ where
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
             let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
-            snapshot.edges.push(RelationEdge {
-                source_table,
-                source_row,
-                relation,
-                target_table: target_table_name.clone(),
-                target_row,
+            candidates.push(RelationEdgeCandidate {
+                edge: RelationEdge {
+                    source_table,
+                    source_row,
+                    relation,
+                    target_table: target_table_name,
+                    target_row,
+                },
+                target_tx_time,
+                target_tx_node,
             });
-            if row_keys.insert((target_table_name.clone(), target_row)) {
+        }
+        candidates.sort_by(|left, right| {
+            (
+                &left.edge.source_table,
+                left.edge.source_row,
+                &left.edge.relation,
+                left.edge.target_row,
+            )
+                .cmp(&(
+                    &right.edge.source_table,
+                    right.edge.source_row,
+                    &right.edge.relation,
+                    right.edge.target_row,
+                ))
+        });
+        let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
+        for candidate in candidates {
+            let group = (
+                candidate.edge.source_table.clone(),
+                candidate.edge.source_row,
+                candidate.edge.relation.clone(),
+            );
+            let count = counts.entry(group).or_default();
+            if limits
+                .get(&candidate.edge.relation)
+                .is_some_and(|limit| *count >= *limit)
+            {
+                continue;
+            }
+            *count += 1;
+            if row_keys.insert((
+                candidate.edge.target_table.clone(),
+                candidate.edge.target_row,
+            )) {
                 let target_table = self
-                    .table_in_schema(&target_table_name, shape.schema_version())?
+                    .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
                     .clone();
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
                     &target_table,
-                    &target_table_name,
-                    target_row,
-                    target_tx_time,
-                    target_tx_node,
+                    &candidate.edge.target_table,
+                    candidate.edge.target_row,
+                    candidate.target_tx_time,
+                    candidate.target_tx_node,
                 )?;
                 snapshot.rows.push(row);
             }
+            snapshot.edges.push(candidate.edge);
         }
         Ok(snapshot)
     }
@@ -6131,6 +6178,21 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "relation edge target branch row is missing",
             ))
+    }
+
+    fn relation_snapshot_no_order_limits(subqueries: &[ArraySubquery]) -> BTreeMap<String, usize> {
+        let mut limits = BTreeMap::new();
+        for subquery in subqueries {
+            if subquery.order_by.is_empty()
+                && let Some(limit) = subquery.limit
+            {
+                limits.insert(subquery.column_name.clone(), limit);
+            }
+            limits.extend(Self::relation_snapshot_no_order_limits(
+                &subquery.nested_arrays,
+            ));
+        }
+        limits
     }
 
     fn materialize_relation_snapshot_root_rows(

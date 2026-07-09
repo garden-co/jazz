@@ -1702,6 +1702,214 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
 }
 
 #[test]
+fn relation_snapshot_reverse_array_skips_deleted_children() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    db.delete("todos", row(0x11)).unwrap();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+}
+
+#[test]
+fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() {
+    let schema = JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
+            ],
+        )
+        .with_reference("ownerId", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    let joined_before_delete = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined_before_delete), vec![row(0xa1), row(0xa1)]);
+    db.delete("todos", row(0x11)).unwrap();
+
+    let joined = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined), vec![row(0xa1)]);
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+}
+
+#[test]
+fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
+    let schema = JazzSchema::new([
+        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+                ColumnSchema::new("tags", ColumnType::Array(Box::new(ColumnType::String))),
+                ColumnSchema::new("projectId", ColumnType::Uuid),
+                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
+                ColumnSchema::new(
+                    "assigneesIds",
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                ),
+            ],
+        )
+        .with_reference("projectId", "projects")
+        .with_reference("ownerId", "users")
+        .with_reference("assigneesIds", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "projects",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("Write tests".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "tags".to_owned(),
+                Value::Array(vec![Value::String("dev".to_owned())]),
+            ),
+            ("projectId".to_owned(), Value::Uuid(row(0xa1).0)),
+            ("ownerId".to_owned(), Value::Nullable(None)),
+            ("assigneesIds".to_owned(), Value::Array(Vec::new())),
+        ]),
+    )
+    .unwrap();
+
+    let query = Query::from("projects")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaProject", "todos", "projectId", "id")
+                .select([
+                    "title",
+                    "done",
+                    "tags",
+                    "projectId",
+                    "ownerId",
+                    "assigneesIds",
+                    "$createdAt",
+                    "$updatedAt",
+                ])
+                .limit(1),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    let child = snapshot
+        .rows
+        .iter()
+        .find(|candidate| candidate.row_uuid() == row(0x22))
+        .expect("child row is materialized");
+    let (descriptor, _) = child.encoded_record();
+    assert!(descriptor.field_index("$createdAt").is_some());
+    assert!(descriptor.field_index("$updatedAt").is_some());
+}
+
+#[test]
 fn include_deleted_fails_closed_on_live_subscription_apis() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let query = db.table("todos");
