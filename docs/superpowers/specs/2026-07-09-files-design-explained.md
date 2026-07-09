@@ -270,29 +270,38 @@ trip, no async step, no expiry:
 <video src={msg.attachment.url()} />
 ```
 
-## Choice 5: offline reads through the device cache
+## Choice 5: the device file store is upload staging, not a mirror
 
-The device file store holds two kinds of bodies:
+The device file store holds one kind of body: **pinned** — bodies this
+device created, kept at least until the writing transaction is accepted
+upstream. They may be the only copy in existence, so they cannot be
+evicted; and because they're local, **your own files always read back
+offline**, by construction.
 
-- **Pinned** — bodies this device created, kept at least until the writing
-  transaction is accepted upstream (they may be the only copy in
-  existence).
-- **Cached** — downloaded bodies, keyed by file id (safe: bodies are
-  immutable and 1:1 with file ids), LRU-evicted under a configurable
-  budget.
+There is deliberately **no SDK-managed download cache**. The reason is the
+design's own read path: bytes flow browser → CDN → `<img>` via a plain URL
+and never pass through the SDK, so an SDK byte cache could not see the
+reads that dominate real apps. It would duplicate the browser's HTTP cache
+for the minority of reads that use `toBlob`, while the promise it suggests
+— "anything opened once works offline" — would be false for every image
+rendered through `url()`.
+
+What downloads get instead is the honest version: the immutable cache
+headers make the **browser/OS HTTP cache** unusually effective (a body, once
+fetched, never needs revalidation), so repeat views are fast and often work
+offline — opportunistically, with no guarantee.
 
 ```ts
-const blob = await jazz.files.toBlob(msg.attachment); // cache first
-const stream = await jazz.files.toStream(msg.attachment); // same, streaming
+const blob = await jazz.files.toBlob(msg.attachment);
+// own pinned body → read locally; otherwise fetched by URL
 ```
 
-Reads check the cache before the network and write fetched bodies through
-it, so **any file opened once is readable offline**. Eviction is the
-reversible kind — an evicted body is refetchable by URL. A cold-cache read
-with no network fails with a typed "body unavailable offline" error (the
-analogue of today's `IncompleteFileDataError`), so apps render a real
-fallback instead of a spinner. No automatic prefetch in v1; offline
-availability is earned by opening the file.
+An offline read with no local body fails with a typed "body unavailable
+offline" error (the analogue of today's `IncompleteFileDataError`), so apps
+render a real fallback instead of a spinner. Guaranteed offline media —
+an explicit pin/prefetch API, possibly a service-worker story that also
+covers `<img>` tags — is future work, designed when someone needs it rather
+than promised now and half-true.
 
 ## Choice 6: deletion is "the cell died"
 
@@ -317,7 +326,8 @@ One deliberate wrinkle: **bodyless history**. Historical reads and branches
 can surface a descriptor at a past cut after its object is deleted. That is
 correct, not a bug — bodies live outside history, so deleting an object is
 truncation-like for the bytes while the descriptor stays readable. Reading
-such a body fails with the same typed missing-body error as a cold cache.
+such a body fails with the same typed missing-body error as an offline read
+with no local body.
 
 ## The API, end to end
 
@@ -360,18 +370,18 @@ builder spellings like `s.file` may shift during implementation.)
 
 ## What we deliberately didn't build
 
-| Not built                          | Because                                                                                               |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| A file table / built-in file rows  | the column subsumes it (a files table is a table with a file column) and puts files where the data is |
-| Private files / signed URLs        | would poison caching and flat-cost serving; metadata permissions + unguessable ids are the v1 story   |
-| Content hashing & dedup            | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe        |
-| Descriptor move/copy between cells | needs refcounting or a transfer protocol; v1 is one file id, one live cell                            |
-| Lists of files in one cell         | one file column per cell in v1; use multiple columns or a side table                                  |
-| Upload through Jazz servers        | our bandwidth would pay for every upload                                                              |
-| Standalone file service            | second deployable + duplicated policy evaluation; revisit when traffic warrants                       |
-| General orphan GC                  | grant leases + an S3 lifecycle rule already close the abuse faucet                                    |
-| Automatic prefetch                 | the read-through cache covers offline; prefetch is policy, apps know theirs                           |
-| Per-identity quotas                | leases bound abuse; accounting is future work                                                         |
+| Not built                                            | Because                                                                                                                                           |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A file table / built-in file rows                    | the column subsumes it (a files table is a table with a file column) and puts files where the data is                                             |
+| Private files / signed URLs                          | would poison caching and flat-cost serving; metadata permissions + unguessable ids are the v1 story                                               |
+| Content hashing & dedup                              | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe                                                    |
+| Descriptor move/copy between cells                   | needs refcounting or a transfer protocol; v1 is one file id, one live cell                                                                        |
+| Lists of files in one cell                           | one file column per cell in v1; use multiple columns or a side table                                                                              |
+| Upload through Jazz servers                          | our bandwidth would pay for every upload                                                                                                          |
+| Standalone file service                              | second deployable + duplicated policy evaluation; revisit when traffic warrants                                                                   |
+| General orphan GC                                    | grant leases + an S3 lifecycle rule already close the abuse faucet                                                                                |
+| SDK download cache / offline guarantee for downloads | the URL read path bypasses the SDK, so the guarantee would be false; HTTP cache covers it opportunistically; explicit pin/prefetch is future work |
+| Per-identity quotas                                  | leases bound abuse; accounting is future work                                                                                                     |
 
 Each of these is expanded in the design doc's "Rejected alternatives"
 section — required reading before reopening any of them.

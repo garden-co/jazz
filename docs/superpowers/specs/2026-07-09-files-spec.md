@@ -149,17 +149,20 @@ sync lane, or the content channel.
 20. As an operator, I want downloads to be a redirect to the object store or
     CDN with zero policy evaluation and zero Jazz DB involvement, so that
     serving cost is flat and storage/egress is what I bill.
-21. As an app developer, I want `toBlob`/`toStream` reads to go through a
-    device cache before the network, so that any file opened once is
-    readable offline.
+21. As an app developer, I want `toBlob`/`toStream` to read my own pinned
+    bodies locally and otherwise fetch by URL, so that one read API covers
+    the creating device and everyone else without a parallel byte store.
 22. As an end user, I want files I created pinned locally at least until the
     writing transaction is accepted upstream, so that the only copy of my
-    file can't be evicted before it's safe elsewhere.
-23. As an app developer, I want the device cache LRU-evicted under a
-    configurable budget, so that offline availability doesn't grow device
-    storage without bound.
+    file can't be evicted before it's safe elsewhere — and so my own files
+    read back offline.
+23. As an app developer, I want downloaded bodies to ride the browser/OS
+    HTTP cache (which the immutable cache headers make effective), so that
+    repeat views are fast and often work offline without Jazz maintaining a
+    second byte store it can't guarantee anyway.
 24. As an app developer, I want a typed "body unavailable offline" error on
-    a cold-cache offline read, so that I can render a sensible fallback.
+    an offline read that has no local body, so that I can render a sensible
+    fallback.
 
 ### Permissions & integrity
 
@@ -287,12 +290,22 @@ sync lane, or the content channel.
   redirect to object store or CDN. `Content-Type` and download filename are
   set as object metadata at upload from the descriptor. Serving cost is
   flat; storage and egress are the billable dimensions.
-- **Device file store holds pinned bodies** (created here, kept at least
-  until the writing transaction is accepted upstream) **and cached bodies**
-  (downloaded, keyed by file id — safe, since bodies are immutable and 1:1
-  with file ids — LRU under a configurable budget; eviction is reversible
-  since bodies are refetchable by URL). SDK reads check the cache first and
-  write fetched bodies through it. No automatic prefetch in v1.
+- **The device file store is upload staging, not a download mirror.** It
+  holds **pinned bodies**: bodies this device created, kept at least until
+  the writing transaction is accepted upstream (they may be the only copy
+  in existence), and readable locally — the creating device's files work
+  offline by construction. There is no SDK-managed download cache in v1:
+  the primary read path is the URL straight into `<img>`/`<video>`, whose
+  bytes never pass through the SDK, so an SDK byte cache could not cover
+  real usage — it would double-store bytes next to the browser's HTTP cache
+  and still miss most reads. Downloaded bodies instead ride the browser/OS
+  HTTP cache, which the immutable cache headers make effective; offline
+  reads of downloaded files are opportunistic, not guaranteed. `toBlob`/
+  `toStream` read pinned bodies locally and otherwise fetch by URL
+  (benefiting from the HTTP cache); an offline read with no local body
+  fails with the typed "body unavailable offline" error. Guaranteed offline
+  availability of downloaded files (an explicit pin/prefetch API, a service
+  worker story) is future work.
 - **The core owns object deletion, triggered by cell death:** when a
   descriptor's cell is overwritten, nulled, or its row deleted — and the
   core observes that settle globally — it appends the file id to a durable
@@ -307,8 +320,8 @@ sync lane, or the content channel.
   holds them for deletion. Dev and tests run minio or an in-process fake.
 - **TS API re-backs the existing file-storage runtime shapes** onto the file
   plane: `fromBlob`/`fromStream` (create; returns a descriptor handle to
-  write into cells, background upload), `toBlob`/`toStream` (cache-through
-  reads, taking a descriptor or handle), `file.url()` (the stable public
+  write into cells, background upload), `toBlob`/`toStream` (pinned-local
+  or URL-fetched reads, taking a descriptor or handle), `file.url()` (the stable public
   URL, computed synchronously and locally from the file id), and an
   observable upload state on the handle:
   `local → uploading(progress) → released → accepted | rejected`.
@@ -351,8 +364,8 @@ sync lane, or the content channel.
   host row the fetching identity's read policy would hide (deliberately
   asserting the public-bytes semantic); an independent transaction bypassing
   a held file-writing transaction, and a dependent one queuing behind it;
-  offline create → later release; offline read from warm cache and the typed
-  cold-cache error; descriptor swap uploading the new body and deleting the
+  offline create → later release; offline read of an own pinned body, and
+  the typed error on an offline read with no local body; descriptor swap uploading the new body and deleting the
   old one; bodyless historical read after object deletion; the URL 404ing
   after cell death once the object is gone.
 - **Prior art:** the existing jazz-tools integration suites for permissions,
@@ -371,8 +384,12 @@ sync lane, or the content channel.
   need the same content twice).
 - Lists of files in one cell (`list(file)` columns); model one file column
   per cell, or rows in a side table, in v1.
-- Automatic body prefetch for subscriptions — offline reads rely on the
-  read-through cache.
+- An SDK-managed download cache, and any guarantee that downloaded files
+  are readable offline. The primary read path (URL into `<img>`/`<video>`)
+  bypasses the SDK, so it cannot honestly make that guarantee; downloads
+  ride the browser/OS HTTP cache opportunistically. Guaranteed offline
+  media — an explicit pin/prefetch API, possibly a service-worker
+  integration — is future work.
 - Per-identity storage quotas (grant leases bound abuse; accounting is
   future work).
 - A standalone file service (second deployable, inter-service tokens,
