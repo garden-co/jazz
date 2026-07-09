@@ -3,6 +3,7 @@ import { schema as s, schemaToWasm, TypedTableQueryBuilder } from "../../src/ind
 import { schemaDefinitionToAst } from "../../src/migrations.js";
 import type { CompiledPermissions } from "../../src/permissions/index.js";
 import { createDb, type Db } from "../../src/runtime/db.js";
+import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { mergePermissionsIntoSchema } from "../../src/schema-permissions.js";
 import { uniqueDbName } from "./factories";
 
@@ -82,12 +83,14 @@ describe("TS transformed columns", () => {
     const nextUpdate = new Promise<s.RowOf<typeof priorityApp.priorities>[]>((resolve) => {
       resolveUpdate = resolve;
     });
+    const current: s.RowOf<typeof priorityApp.priorities>[] = [];
 
     const unsubscribe = activeDb.subscribeAll(
       priorityAppWithPermissions.priorities.where({}),
-      ({ all }) => {
+      (delta) => {
+        const all = applySubscriptionDelta(current, delta);
         if (all.some((row) => row.id === inserted.id && row.score === "medium")) {
-          resolveUpdate(all);
+          resolveUpdate([...all]);
         }
       },
     );
