@@ -1064,41 +1064,52 @@ where
         if !self.window_marker_present()? {
             return Ok(None);
         }
-        if let Some(prefix) = self.first_key_field_prefix(key)?
-            && let Some((latest_key, _)) = self.last_logical_with_prefix(&prefix)?
-            && latest_key.as_slice() < key
+        let mut upper = key.to_vec();
+        while let Some((raw_key, raw_value)) =
+            self.storage
+                .last_with_prefix_before_or_at(self.column_family, b"", &upper)?
         {
-            return Ok(None);
-        }
-        let mut found = None;
-        self.storage
-            .scan_prefix_reverse(self.column_family, b"", &mut |raw_key, raw_value| {
-                if is_window_meta_key(raw_key) {
-                    return Ok(());
-                }
-                if found.is_some() || raw_key > key {
-                    return Ok(());
-                }
-                let Some(window) = decode_window_value(raw_value)? else {
-                    return Ok(());
+            if is_window_meta_key(&raw_key) {
+                let Some(previous) = lexicographic_predecessor(&raw_key) else {
+                    return Ok(None);
                 };
-                if key <= window.max_key {
-                    found = self.lookup_window_record(raw_key, window.codec, key)?;
-                }
-                Ok(())
-            })?;
-        Ok(found)
+                upper = previous;
+                continue;
+            }
+            let Some(window) = decode_window_value(&raw_value)? else {
+                let Some(previous) = lexicographic_predecessor(&raw_key) else {
+                    return Ok(None);
+                };
+                upper = previous;
+                continue;
+            };
+            if key <= window.max_key {
+                return self.lookup_window_record(&raw_key, window.codec, key);
+            }
+            let Some(previous) = lexicographic_predecessor(&raw_key) else {
+                return Ok(None);
+            };
+            upper = previous;
+        }
+        Ok(None)
     }
 
     fn last_logical_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
-        let Some((raw_key, raw_value)) =
-            self.storage.last_with_prefix(self.column_family, prefix)?
-        else {
+        let mut candidate = self.storage.last_with_prefix(self.column_family, prefix)?;
+        while let Some((raw_key, _)) = candidate
+            .as_ref()
+            .filter(|(key, _)| is_window_meta_key(key))
+        {
+            let Some(upper) = lexicographic_predecessor(raw_key) else {
+                return Ok(None);
+            };
+            candidate =
+                self.storage
+                    .last_with_prefix_before_or_at(self.column_family, prefix, &upper)?;
+        }
+        let Some((raw_key, raw_value)) = candidate else {
             return Ok(None);
         };
-        if is_window_meta_key(&raw_key) {
-            return Ok(self.prefix(prefix)?.pop());
-        }
         let Some(window) = decode_window_value(&raw_value)? else {
             return Ok(Some((raw_key, raw_value)));
         };
@@ -1118,20 +1129,6 @@ where
             .find(|(key, _)| {
                 key.starts_with(prefix) && upper.is_none_or(|upper| key.as_slice() <= upper)
             }))
-    }
-
-    fn first_key_field_prefix(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
-        let Some(key_descriptor) = &self.key_descriptor else {
-            return Ok(None);
-        };
-        if key_descriptor.fields().is_empty() {
-            return Ok(None);
-        }
-        let values = decode_key_record(key, key_descriptor)?;
-        let Some(first_value) = values.into_iter().next() else {
-            return Ok(None);
-        };
-        encode_key_record(vec![first_value]).map(Some)
     }
 
     fn run_aware_records(
@@ -1258,6 +1255,17 @@ const WINDOW_CURSOR_KEY: &[u8] = b"\xffGWIN2-CURSOR";
 
 fn is_window_meta_key(key: &[u8]) -> bool {
     key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY
+}
+
+fn lexicographic_predecessor(key: &[u8]) -> Option<Vec<u8>> {
+    let mut predecessor = key.to_vec();
+    for byte in predecessor.iter_mut().rev() {
+        if *byte > 0 {
+            *byte -= 1;
+            return Some(predecessor);
+        }
+    }
+    None
 }
 
 struct DecodedWindowValue<'a> {
@@ -1769,6 +1777,16 @@ where
         StagedWriteOverlay::new(self.base, &self.staged_writes).last_with_prefix(cf, prefix)
     }
 
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         StagedWriteOverlay::new(self.base, &self.staged_writes).write_many(operations)
     }
@@ -2020,6 +2038,68 @@ where
         Ok(values.pop())
     }
 
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.last_with_prefix_before_or_at(cf, prefix, upper);
+        }
+
+        let mut needs_full_merge = false;
+        for operation in self.staged_writes.borrow().operations.iter() {
+            if operation.cf() != cf
+                || !operation.key().starts_with(prefix)
+                || operation.key() > upper
+            {
+                continue;
+            }
+            match operation {
+                OwnedWriteOperation::Set { .. } => {}
+                OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. } => {
+                    needs_full_merge = true
+                }
+            }
+        }
+
+        if !needs_full_merge {
+            let largest_staged_set =
+                staged_prefix_overlay_desc_before_or_at(cf, prefix, upper, self.staged_writes)
+                    .into_iter()
+                    .find_map(|(key, value)| value.map(|value| (key, value)));
+            return match (
+                self.base.last_with_prefix_before_or_at(cf, prefix, upper)?,
+                largest_staged_set,
+            ) {
+                (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                (Some(base), _) => Ok(Some(base)),
+                (None, staged) => Ok(staged),
+            };
+        }
+
+        let mut values = Vec::new();
+        self.base.scan_range(
+            cf,
+            prefix,
+            &exclusive_upper_bound(upper),
+            &mut |key, value| {
+                if key.starts_with(prefix) {
+                    values.push((key.to_vec(), value.to_vec()));
+                }
+                Ok(())
+            },
+        )?;
+        overlay_values(
+            &mut values,
+            cf,
+            |key| key.starts_with(prefix) && key <= upper,
+            self.staged_writes,
+        )?;
+        Ok(values.pop())
+    }
+
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         for operation in operations {
             match operation {
@@ -2095,6 +2175,43 @@ fn staged_prefix_overlay_desc(
         }
     }
     overlay.into_iter().rev().collect()
+}
+
+fn staged_prefix_overlay_desc_before_or_at(
+    cf: &ColumnFamilyName,
+    prefix: &Key,
+    upper: &Key,
+    staged_writes: &RefCell<StagedWriteState>,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let mut overlay = BTreeMap::new();
+    for operation in staged_writes.borrow().operations.iter() {
+        if operation.cf() != cf || !operation.key().starts_with(prefix) || operation.key() > upper {
+            continue;
+        }
+        match operation {
+            OwnedWriteOperation::Set { key, value, .. } => {
+                overlay.insert(key.clone(), Some(value.clone()));
+            }
+            OwnedWriteOperation::Delete { key, .. } => {
+                overlay.insert(key.clone(), None);
+            }
+            OwnedWriteOperation::Delta { .. } => {}
+        }
+    }
+    overlay.into_iter().rev().collect()
+}
+
+fn exclusive_upper_bound(key: &[u8]) -> Vec<u8> {
+    let mut upper = key.to_vec();
+    if let Some(index) = upper.iter().rposition(|byte| *byte != 0xFF) {
+        upper[index] += 1;
+        upper.truncate(index + 1);
+        upper
+    } else {
+        let mut end = key.to_vec();
+        end.push(0);
+        end
+    }
 }
 
 impl<'a> WriteOperation<'a> {
@@ -3317,6 +3434,137 @@ mod tests {
                 expected_target.2.as_bytes()
             ))
         );
+    }
+
+    #[test]
+    fn windowed_record_store_exact_get_uses_predecessor_seek_not_prefix_scan() {
+        struct CountingStorage<S> {
+            inner: S,
+            prefix_scans: Cell<usize>,
+            reverse_prefix_scans: Cell<usize>,
+            last_calls: Cell<usize>,
+            last_before_calls: Cell<usize>,
+        }
+
+        impl<S> CountingStorage<S> {
+            fn new(inner: S) -> Self {
+                Self {
+                    inner,
+                    prefix_scans: Cell::new(0),
+                    reverse_prefix_scans: Cell::new(0),
+                    last_calls: Cell::new(0),
+                    last_before_calls: Cell::new(0),
+                }
+            }
+        }
+
+        impl<S> OrderedKvStorage for CountingStorage<S>
+        where
+            S: OrderedKvStorage,
+        {
+            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+                self.inner.get(cf, key)
+            }
+
+            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+                self.inner.set(cf, key, value)
+            }
+
+            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+                self.inner.delete(cf, key)
+            }
+
+            fn scan_range(
+                &self,
+                cf: &ColumnFamilyName,
+                start: &Key,
+                end: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.inner.scan_range(cf, start, end, visit)
+            }
+
+            fn scan_prefix(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.prefix_scans.set(self.prefix_scans.get() + 1);
+                self.inner.scan_prefix(cf, prefix, visit)
+            }
+
+            fn scan_prefix_reverse(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                visit: &mut ScanVisitor<'_>,
+            ) -> Result<(), Error> {
+                self.reverse_prefix_scans
+                    .set(self.reverse_prefix_scans.get() + 1);
+                self.inner.scan_prefix_reverse(cf, prefix, visit)
+            }
+
+            fn last_with_prefix(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+            ) -> Result<Option<KeyValue>, Error> {
+                self.last_calls.set(self.last_calls.get() + 1);
+                self.inner.last_with_prefix(cf, prefix)
+            }
+
+            fn last_with_prefix_before_or_at(
+                &self,
+                cf: &ColumnFamilyName,
+                prefix: &Key,
+                upper: &Key,
+            ) -> Result<Option<KeyValue>, Error> {
+                self.last_before_calls.set(self.last_before_calls.get() + 1);
+                self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+            }
+
+            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+                self.inner.write_many(operations)
+            }
+        }
+
+        let storage = CountingStorage::new(MemoryStorage::new(&["jazz_docs_history"]));
+        let descriptor = window_value_descriptor();
+        let expected = seed_window_records(&storage, descriptor, 12);
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(12).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 12
+            }
+        );
+        storage.prefix_scans.set(0);
+        storage.reverse_prefix_scans.set(0);
+        storage.last_calls.set(0);
+        storage.last_before_calls.set(0);
+
+        assert_eq!(
+            store.get_raw(&expected[8].0).unwrap(),
+            Some(expected[8].1.clone())
+        );
+        assert_eq!(storage.last_before_calls.get(), 1);
+        assert_eq!(storage.prefix_scans.get(), 0);
+        assert_eq!(storage.reverse_prefix_scans.get(), 0);
+
+        storage.prefix_scans.set(0);
+        storage.reverse_prefix_scans.set(0);
+        storage.last_calls.set(0);
+        storage.last_before_calls.set(0);
+        assert_eq!(
+            store.last_with_prefix(b"").unwrap(),
+            expected.last().cloned()
+        );
+        assert_eq!(storage.last_calls.get(), 1);
+        assert_eq!(storage.last_before_calls.get(), 1);
+        assert_eq!(storage.prefix_scans.get(), 0);
+        assert_eq!(storage.reverse_prefix_scans.get(), 0);
     }
 
     #[test]

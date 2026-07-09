@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, ReopenableStorage, ScanVisitor, Value,
-    WriteOperation, apply_storage_delta,
+    WriteOperation, apply_storage_delta, key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -162,6 +162,41 @@ impl OrderedKvStorage for MemoryStorage {
             visit(&key, &value)?;
         }
         Ok(())
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<super::KeyValue>, Error> {
+        self.with_cf(cf, |values| {
+            if let Some(upper) = key_codec::prefix_upper_bound(prefix) {
+                values
+                    .range(prefix.to_vec()..upper)
+                    .next_back()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+            } else {
+                values
+                    .range(prefix.to_vec()..)
+                    .next_back()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+            }
+        })
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<super::KeyValue>, Error> {
+        self.with_cf(cf, |values| {
+            values
+                .range(prefix.to_vec()..=upper.to_vec())
+                .rev()
+                .find(|(key, _)| key.starts_with(prefix))
+                .map(|(key, value)| (key.clone(), value.clone()))
+        })
     }
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {

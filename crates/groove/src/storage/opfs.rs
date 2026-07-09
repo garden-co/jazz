@@ -207,6 +207,26 @@ where
         Ok(())
     }
 
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<super::KeyValue>, Error> {
+        let start = self.encoded_key(cf, prefix)?;
+        let upper_user_key = upper;
+        let upper = self.encoded_key(cf, upper_user_key)?;
+        let mut end = upper.clone();
+        end.push(0);
+        for (key, value) in self.tree.borrow_mut().range_reverse(&start, &end, 1)? {
+            let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+            if user_key.starts_with(prefix) && user_key <= upper_user_key {
+                return Ok(Some((user_key.to_vec(), value)));
+            }
+        }
+        Ok(None)
+    }
+
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.prevalidate_write_many(operations)?;
         let mut encoded_operations = Vec::with_capacity(operations.len());
