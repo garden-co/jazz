@@ -42,12 +42,14 @@ use crate::node::{
 use crate::peer::PeerState;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
-    MigrationLens, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+    MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SchemaVersion, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
 };
 use crate::protocol_limits::{
-    validate_content_extents, validate_fetch_row_versions, validate_known_state_declaration,
-    validate_shape_ast_size, validate_sync_message_len, validate_wire_frame_len,
+    MAX_SYNC_MESSAGE_BYTES, validate_content_extents, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
+    validate_wire_frame_len,
 };
 use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
 use crate::schema::{JazzSchema, TableSchema};
@@ -3621,7 +3623,7 @@ where
         };
         self.last_resume_bytes = Some(serialized_sync_message_len(&update));
         let subscription = view_update_subscription(&update);
-        self.transport.send(update).map_err(transport_error)?;
+        send_sync_message_chunked(self.transport.as_mut(), update)?;
         if let Some(subscription) = subscription {
             served_current_rows.insert(subscription, table.to_owned());
         }
@@ -3838,10 +3840,12 @@ where
                                     &repair.requests,
                                     version_bundles,
                                 )?;
-                                node.apply_sync_message(repair.update)?;
                             }
+                            pending_view_updates
+                                .push(view_update_parts_from_message(repair.update));
                         }
-                        message @ SyncMessage::ViewUpdate { subscription, .. } => {
+                        message @ (SyncMessage::ViewUpdate { subscription, .. }
+                        | SyncMessage::ViewUpdateChunk { subscription, .. }) => {
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
@@ -3849,32 +3853,7 @@ where
                                 node.missing_known_state_row_version_refs(&message)?
                             };
                             if missing.is_empty() {
-                                let SyncMessage::ViewUpdate {
-                                    subscription,
-                                    settled_through,
-                                    reset_result_set,
-                                    version_bundles,
-                                    peer_payload_inventory,
-                                    result_member_adds,
-                                    result_member_removes,
-                                    program_fact_adds,
-                                    program_fact_removes,
-                                } = message
-                                else {
-                                    unreachable!("matched ViewUpdate above")
-                                };
-                                pending_view_updates.push(ViewUpdateParts {
-                                    subscription,
-                                    settled_through,
-                                    reset_result_set,
-                                    version_bundles,
-                                    peer_complete_tx_payload_refs: peer_payload_inventory
-                                        .complete_tx_payloads,
-                                    result_member_adds,
-                                    result_member_removes,
-                                    program_fact_adds,
-                                    program_fact_removes,
-                                });
+                                pending_view_updates.push(view_update_parts_from_message(message));
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "upstream applied view update {}",
@@ -4383,6 +4362,57 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     encode_sync_message(message).map_or(0, |bytes| bytes.len())
 }
 
+fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
+    match message {
+        SyncMessage::ViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
+        SyncMessage::ViewUpdateChunk {
+            subscription,
+            settled_through,
+            reset_result_set,
+            final_chunk,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: !final_chunk,
+            reset_result_set,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
+        _ => unreachable!("expected view update message"),
+    }
+}
+
 fn transport_error(error: TransportError) -> Error {
     match error {
         TransportError::Backpressure => {
@@ -4492,6 +4522,30 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             program_fact_adds.len(),
             program_fact_removes.len()
         ),
+        SyncMessage::ViewUpdateChunk {
+            subscription,
+            settled_through,
+            reset_result_set,
+            final_chunk,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        } => format!(
+            "ViewUpdateChunk {} settled={} reset={} final={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            summarize_subscription_key(*subscription),
+            settled_through.0,
+            reset_result_set,
+            final_chunk,
+            version_bundles.len(),
+            peer_payload_inventory.complete_tx_payloads.len(),
+            result_member_adds.len(),
+            result_member_removes.len(),
+            program_fact_adds.len(),
+            program_fact_removes.len()
+        ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
             format!("FateUpdate tx={tx_id:?} fate={fate:?}")
@@ -4519,7 +4573,7 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let extents = match &message {
-        SyncMessage::ViewUpdate { .. } => BTreeSet::new(),
+        SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
     };
     let mut extents_by_row = BTreeMap::new();
@@ -4546,7 +4600,185 @@ where
         "transport send {}",
         summarize_sync_message(&message)
     ));
-    transport.send(message).map_err(transport_error)
+    send_sync_message_chunked(transport, message)
+}
+
+fn send_sync_message_chunked(
+    transport: &mut dyn Transport,
+    message: SyncMessage,
+) -> Result<(), Error> {
+    for message in split_oversized_view_update(message)? {
+        #[cfg(feature = "sync-autopsy")]
+        sync_autopsy::record(format!(
+            "transport send chunk {}",
+            summarize_sync_message(&message)
+        ));
+        transport.send(message).map_err(transport_error)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum ViewUpdateChunkItem {
+    VersionBundle(VersionBundle),
+    CompleteTxPayload(TxId),
+    ResultMemberAdd(ResultMemberEntry),
+    ResultMemberRemove(ResultMemberEntry),
+    ProgramFactAdd(ProgramFactEntry),
+    ProgramFactRemove(ProgramFactEntry),
+}
+
+fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
+    if validate_sync_message_len(serialized_sync_message_len(&message)).is_ok() {
+        return Ok(vec![message]);
+    }
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+    } = message
+    else {
+        return Ok(vec![message]);
+    };
+
+    let mut items = Vec::new();
+    items.extend(
+        version_bundles
+            .into_iter()
+            .map(ViewUpdateChunkItem::VersionBundle),
+    );
+    items.extend(
+        peer_payload_inventory
+            .complete_tx_payloads
+            .into_iter()
+            .map(ViewUpdateChunkItem::CompleteTxPayload),
+    );
+    items.extend(
+        result_member_adds
+            .into_iter()
+            .map(ViewUpdateChunkItem::ResultMemberAdd),
+    );
+    items.extend(
+        result_member_removes
+            .into_iter()
+            .map(ViewUpdateChunkItem::ResultMemberRemove),
+    );
+    items.extend(
+        program_fact_adds
+            .into_iter()
+            .map(ViewUpdateChunkItem::ProgramFactAdd),
+    );
+    items.extend(
+        program_fact_removes
+            .into_iter()
+            .map(ViewUpdateChunkItem::ProgramFactRemove),
+    );
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let reset_chunk = chunks.is_empty() && reset_result_set;
+        let remaining = items.len() - start;
+        let mut low = 1;
+        let mut high = remaining;
+        let mut best = 0;
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let candidate = view_update_chunk_from_items(
+                subscription,
+                settled_through,
+                reset_chunk,
+                &items[start..start + mid],
+            );
+            if serialized_sync_message_len(&candidate) <= MAX_SYNC_MESSAGE_BYTES {
+                best = mid;
+                low = mid + 1;
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        }
+        if best == 0 {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "single view update chunk item exceeds sync message limit",
+            ));
+        }
+        chunks.push(view_update_chunk_from_items(
+            subscription,
+            settled_through,
+            reset_chunk,
+            &items[start..start + best],
+        ));
+        start += best;
+    }
+    if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {
+        *final_chunk = true;
+    }
+    Ok(chunks)
+}
+
+fn empty_view_update_chunk(
+    subscription: SubscriptionKey,
+    settled_through: GlobalSeq,
+    reset_result_set: bool,
+) -> SyncMessage {
+    SyncMessage::ViewUpdateChunk {
+        subscription,
+        settled_through,
+        reset_result_set,
+        final_chunk: false,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    }
+}
+
+fn view_update_chunk_from_items(
+    subscription: SubscriptionKey,
+    settled_through: GlobalSeq,
+    reset_result_set: bool,
+    items: &[ViewUpdateChunkItem],
+) -> SyncMessage {
+    let mut chunk = empty_view_update_chunk(subscription, settled_through, reset_result_set);
+    for item in items {
+        chunk = push_view_update_chunk_item(chunk, item.clone());
+    }
+    chunk
+}
+
+fn push_view_update_chunk_item(mut message: SyncMessage, item: ViewUpdateChunkItem) -> SyncMessage {
+    let SyncMessage::ViewUpdateChunk {
+        version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+        ..
+    } = &mut message
+    else {
+        unreachable!("view update chunk item can only be pushed to chunk messages")
+    };
+    match item {
+        ViewUpdateChunkItem::VersionBundle(item) => version_bundles.push(item),
+        ViewUpdateChunkItem::CompleteTxPayload(item) => {
+            peer_payload_inventory.complete_tx_payloads.push(item)
+        }
+        ViewUpdateChunkItem::ResultMemberAdd(item) => result_member_adds.push(item),
+        ViewUpdateChunkItem::ResultMemberRemove(item) => result_member_removes.push(item),
+        ViewUpdateChunkItem::ProgramFactAdd(item) => program_fact_adds.push(item),
+        ViewUpdateChunkItem::ProgramFactRemove(item) => program_fact_removes.push(item),
+    }
+    message
 }
 
 fn send_with_local_content_extents<S>(
@@ -4588,14 +4820,17 @@ where
 
 fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
+        SyncMessage::ViewUpdate { subscription, .. }
+        | SyncMessage::ViewUpdateChunk { subscription, .. } => Some(*subscription),
         _ => None,
     }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
-    if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
-        *subscription = target;
+    match &mut message {
+        SyncMessage::ViewUpdate { subscription, .. }
+        | SyncMessage::ViewUpdateChunk { subscription, .. } => *subscription = target,
+        _ => {}
     }
     message
 }
@@ -4641,6 +4876,16 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
 fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate {
+            reset_result_set,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        }
+        | SyncMessage::ViewUpdateChunk {
             reset_result_set,
             version_bundles,
             peer_payload_inventory,

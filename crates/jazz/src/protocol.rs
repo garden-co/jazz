@@ -127,6 +127,36 @@ pub enum SyncMessage {
         /// Non-row program fact removals, such as relation edges.
         program_fact_removes: Vec<ProgramFactEntry>,
     },
+    /// Bounded chunk of a downstream current-row view update.
+    ///
+    /// Chunks carry the same record payload types as [`SyncMessage::ViewUpdate`]
+    /// but split an otherwise oversized snapshot across multiple sync messages.
+    /// Receivers may ingest non-final chunks immediately, but must not publish
+    /// subscription settlement until `final_chunk` is true.
+    ViewUpdateChunk {
+        /// Query binding result set addressed by this update.
+        subscription: SubscriptionKey,
+        /// Serving node's contiguous applied global watermark when the original
+        /// update was assembled.
+        settled_through: GlobalSeq,
+        /// Whether receiver result_set should be reset first.
+        reset_result_set: bool,
+        /// Whether this chunk completes the logical view update.
+        final_chunk: bool,
+        /// Version bundles not previously shipped on the peer.
+        version_bundles: Vec<VersionBundle>,
+        /// Peer-scoped payload coverage that may be referenced instead of
+        /// resending bytes.
+        peer_payload_inventory: PeerPayloadInventory,
+        /// Typed result membership additions for the subscription.
+        result_member_adds: Vec<ResultMemberEntry>,
+        /// Typed result membership removals for the subscription.
+        result_member_removes: Vec<ResultMemberEntry>,
+        /// Non-row program fact additions, such as relation edges.
+        program_fact_adds: Vec<ProgramFactEntry>,
+        /// Non-row program fact removals, such as relation edges.
+        program_fact_removes: Vec<ProgramFactEntry>,
+    },
     /// Bulk-lane request for bytes backing one content extent.
     FetchContentExtent {
         /// Owner/version/read-view context used for authorization and membership checks.

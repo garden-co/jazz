@@ -14,11 +14,11 @@ use crate::protocol::{
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_SHAPE_AST_BYTES, MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
-    ArraySubquery, Include, JoinMode, OrderDirection, all_of, any_of, claim, col, contains, eq, gt,
-    in_list, is_null, lit, lte, ne, not,
+    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, ShapeId, all_of, any_of, claim,
+    col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::wire::{
@@ -4013,6 +4013,55 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(prepared_read(&client, &query).len(), 2);
+}
+
+#[test]
+fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
+    let subscription = SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let facts = (0..700)
+        .map(|idx| {
+            crate::protocol::ProgramFactEntry::SourceCoverage(
+                crate::protocol::SourceCoverageEntry {
+                    source: format!("source-{idx}"),
+                    table: "todos".to_owned().into(),
+                    row: None,
+                    coverage: vec![idx as u8; 4096],
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let update = SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(42),
+        reset_result_set: true,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: Default::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: facts,
+        program_fact_removes: Vec::new(),
+    };
+    assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
+
+    let chunks = split_oversized_view_update(update).unwrap();
+    assert!(chunks.len() > 1);
+    for (idx, chunk) in chunks.iter().enumerate() {
+        assert!(serialized_sync_message_len(chunk) <= MAX_SYNC_MESSAGE_BYTES);
+        let SyncMessage::ViewUpdateChunk {
+            reset_result_set,
+            final_chunk,
+            ..
+        } = chunk
+        else {
+            panic!("expected chunked view update");
+        };
+        assert_eq!(*reset_result_set, idx == 0);
+        assert_eq!(*final_chunk, idx + 1 == chunks.len());
+    }
 }
 
 #[test]

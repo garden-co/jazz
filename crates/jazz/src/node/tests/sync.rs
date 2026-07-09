@@ -478,6 +478,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
         .apply_view_updates_in_batch(vec![ViewUpdateParts {
             subscription,
             settled_through,
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
@@ -557,6 +558,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         .apply_view_updates_in_batch(vec![ViewUpdateParts {
             subscription,
             settled_through: new_seq,
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles: vec![
                 VersionBundle {
@@ -2170,6 +2172,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         .apply_view_update(ViewUpdateParts {
             subscription,
             settled_through,
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -2228,6 +2231,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         .apply_view_update(ViewUpdateParts {
             subscription,
             settled_through,
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -2273,6 +2277,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         .apply_view_update(ViewUpdateParts {
             subscription: core.whole_table_subscription_key("todos").unwrap(),
             settled_through,
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
@@ -2295,6 +2300,7 @@ fn view_updates_reject_unknown_peer_payload_inventory_refs() {
         .apply_view_update(ViewUpdateParts {
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
             settled_through: GlobalSeq(0),
+            defer_settlement: false,
             reset_result_set: false,
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],

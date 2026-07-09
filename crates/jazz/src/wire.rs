@@ -22,7 +22,7 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 1;
+pub const WIRE_PROTOCOL_VERSION: u16 = 2;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -763,8 +763,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                    "min_protocol_version": 1,
-                    "max_protocol_version": 1,
+                    "min_protocol_version": 2,
+                    "max_protocol_version": 2,
                     "features": 5,
                     "role": "client"
                 }
@@ -1028,6 +1028,20 @@ mod tests {
                 subscription,
                 settled_through: GlobalSeq(7),
                 reset_result_set: true,
+                version_bundles: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: vec![tx_id],
+                },
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+            SyncMessage::ViewUpdateChunk {
+                subscription,
+                settled_through: GlobalSeq(7),
+                reset_result_set: true,
+                final_chunk: true,
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
