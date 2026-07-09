@@ -31,6 +31,13 @@ Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the
 full workspace, including examples.
 
+Pending activation with the coldpath maintained-relation delta merge:
+
+- `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --ignored --exact`
+  enforces `INV-INC-1` for relation/include delivery. It is intentionally ignored
+  on current main because the known relation delivery rebuild+diff violation is
+  still live; flip it into the canonical gate when that fix lands.
+
 This rule exists because previous misses stayed hidden too long: `four_tier`
 was born-red for roughly nine commits; `large_blob_values_follow_ordinary_row_permissions`
 was born-red at `e03780d70`; `jazz-server`'s `cli_dry_run` target rotted after a
