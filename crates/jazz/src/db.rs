@@ -47,7 +47,7 @@ use crate::protocol::{
     SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
 };
 use crate::protocol_limits::{
-    MAX_SYNC_MESSAGE_BYTES, validate_content_extents, validate_fetch_row_versions,
+    MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
     validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
     validate_wire_frame_len,
 };
@@ -56,9 +56,10 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use crate::wire::{
-    TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError, WireErrorCode, WireFeatures,
-    WireFrame, WireRetry, WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport,
-    current_wire_features, decode_frame, decode_sync_message, encode_frame, encode_sync_message,
+    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
+    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
+    WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
+    decode_sync_message, encode_frame, encode_sync_message,
 };
 
 /// How urgently a runtime should service pending peer-connection work.
@@ -4362,6 +4363,18 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     encode_sync_message(message).map_or(0, |bytes| bytes.len())
 }
 
+fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
+    let Ok(payload) = encode_sync_message(message) else {
+        return usize::MAX;
+    };
+    let envelope = WireEnvelope::new(
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+        payload,
+    );
+    encode_frame(&WireFrame::Message(envelope)).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     match message {
         SyncMessage::ViewUpdate {
@@ -4629,7 +4642,7 @@ enum ViewUpdateChunkItem {
 }
 
 fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
-    if validate_sync_message_len(serialized_sync_message_len(&message)).is_ok() {
+    if validate_wire_frame_len(serialized_uncompressed_wire_message_len(&message)).is_ok() {
         return Ok(vec![message]);
     }
     let SyncMessage::ViewUpdate {
@@ -4696,7 +4709,7 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
                 reset_chunk,
                 &items[start..start + mid],
             );
-            if serialized_sync_message_len(&candidate) <= MAX_SYNC_MESSAGE_BYTES {
+            if serialized_uncompressed_wire_message_len(&candidate) <= MAX_WIRE_FRAME_BYTES {
                 best = mid;
                 low = mid + 1;
             } else {
@@ -4706,7 +4719,7 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         if best == 0 {
             return Err(Error::new(
                 ErrorCode::Protocol,
-                "single view update chunk item exceeds sync message limit",
+                "single view update chunk item exceeds wire frame limit",
             ));
         }
         chunks.push(view_update_chunk_from_items(
