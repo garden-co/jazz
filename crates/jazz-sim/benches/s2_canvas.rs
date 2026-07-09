@@ -2539,6 +2539,13 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
             result_member_adds,
             result_member_removes,
             ..
+        }
+        | SyncMessage::ViewUpdateChunk {
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            ..
         } => {
             version_bundles
                 .iter()
@@ -2573,6 +2580,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
+            version_bundles, ..
+        }
+        | SyncMessage::ViewUpdateChunk {
             version_bundles, ..
         } => version_bundles
             .iter()

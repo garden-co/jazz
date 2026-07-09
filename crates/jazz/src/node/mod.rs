@@ -3060,13 +3060,18 @@ where
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
-        let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
-        } = message
-        else {
-            return Ok(Vec::new());
+        let (result_member_adds, version_bundles) = match message {
+            SyncMessage::ViewUpdate {
+                result_member_adds,
+                version_bundles,
+                ..
+            }
+            | SyncMessage::ViewUpdateChunk {
+                result_member_adds,
+                version_bundles,
+                ..
+            } => (result_member_adds, version_bundles),
+            _ => return Ok(Vec::new()),
         };
         let incoming = version_bundles
             .iter()
@@ -3844,6 +3849,7 @@ impl MergeableCommit {
 pub(crate) struct ViewUpdateParts {
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalSeq,
+    pub(crate) defer_settlement: bool,
     pub(crate) reset_result_set: bool,
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,

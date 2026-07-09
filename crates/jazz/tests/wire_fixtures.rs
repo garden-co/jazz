@@ -121,6 +121,24 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "view_update_chunk_final_with_row_add",
+            "ViewUpdateChunk",
+            SyncMessage::ViewUpdateChunk {
+                subscription,
+                settled_through: GlobalSeq(7),
+                reset_result_set: true,
+                final_chunk: true,
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory {
+                    complete_tx_payloads: vec![tx_id],
+                },
+                result_member_adds: vec![result_row_entry(tx_id).into()],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ),
+        (
             "commit_unit_mergeable_empty",
             "CommitUnit",
             SyncMessage::CommitUnit {
@@ -270,7 +288,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v1",
+        fixture_set: "jazz-wire-message-frames-v2",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

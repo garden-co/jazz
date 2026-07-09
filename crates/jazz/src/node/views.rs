@@ -641,6 +641,7 @@ where
         let ViewUpdateParts {
             subscription,
             settled_through,
+            defer_settlement,
             reset_result_set,
             version_bundles,
             peer_complete_tx_payload_refs,
@@ -776,9 +777,11 @@ where
             program_facts.remove(&fact);
         }
         program_facts.extend(program_fact_adds);
-        self.query
-            .settled_through_by_binding_view
-            .insert(binding_view_key, settled_through);
+        if !defer_settlement {
+            self.query
+                .settled_through_by_binding_view
+                .insert(binding_view_key, settled_through);
+        }
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
@@ -796,13 +799,16 @@ where
                 );
             }
         }
-        self.persist_known_state_fact(binding_view_key, settled_through)?;
+        if !defer_settlement {
+            self.persist_known_state_fact(binding_view_key, settled_through)?;
+        }
         if self
             .query
             .initial_hydration_binding_views
             .contains(&binding_view_key)
             && version_bundles_is_empty
             && (!reset_result_set || peer_complete_tx_payload_refs.is_empty())
+            && !defer_settlement
         {
             self.query
                 .initial_hydration_binding_views
