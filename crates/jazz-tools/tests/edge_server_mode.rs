@@ -16,7 +16,10 @@ use jazz_tools::{
     SchemaBuilder, TableSchema, Value,
 };
 use serde_json::json;
-use support::{TestingClient, wait_for_edge_query_ready, wait_for_query};
+use support::{
+    TestingClient, has_added, wait_for_edge_query_ready, wait_for_query,
+    wait_for_subscription_update,
+};
 use tempfile::TempDir;
 
 fn todo_schema() -> Schema {
@@ -27,6 +30,47 @@ fn todo_schema() -> Schema {
                 .column("done", ColumnType::Boolean),
         )
         .build()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn edge_tier_public_subscription_opens_and_receives_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000001")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+
+            let query = QueryBuilder::new("todos").build();
+            let mut stream = client
+                .subscribe(query)
+                .await
+                .expect("edge-tier public subscription should open");
+            let mut log = Vec::new();
+
+            let (todo_id, _, batch_id) = client
+                .insert("todos", row_input!("title" => "visible", "done" => false))
+                .expect("insert todo");
+            client
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("todo should settle at edge");
+
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                Duration::from_secs(10),
+                "edge-tier public subscription receives inserted row",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+        })
+        .await;
 }
 
 fn pilot-app_policy_schema() -> Schema {

@@ -959,9 +959,6 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         ensure_supported_subscription_shape(&prepared.shape)?;
         let read_tier = effective_read_tier(&opts);
-        if opts.propagation == Propagation::Full {
-            ensure_supported_propagated_subscription_tier(read_tier)?;
-        }
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -5339,16 +5336,6 @@ fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Err
 fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
     let _ = query;
     Ok(())
-}
-
-fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result<(), Error> {
-    if tier <= DurabilityTier::Local || tier == DurabilityTier::Global {
-        return Ok(());
-    }
-    Err(Error::new(
-        ErrorCode::Query,
-        "propagated live subscriptions support only local/none or global remote coverage tiers",
-    ))
 }
 
 fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {

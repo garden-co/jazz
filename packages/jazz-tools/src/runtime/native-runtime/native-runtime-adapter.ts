@@ -2026,6 +2026,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     relation_ir?: unknown;
     offset?: unknown;
     order_by?: unknown;
+    orderBy?: unknown;
     select?: unknown;
     select_columns?: unknown;
   };
@@ -2036,7 +2037,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   return queryWithPredicates(parsed.table, encoded.predicates, {
     limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
     offset: encoded.offset,
-    orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by)),
+    orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by ?? parsed.orderBy)),
     select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
     arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
   });
@@ -2233,6 +2234,12 @@ function readRootOrderBy(value: unknown): QueryOrder[] {
   if (value == null) return [];
   if (!Array.isArray(value)) throw unsupportedQueryEncodingError("order_by");
   return value.map((entry) => {
+    if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string") {
+      if (entry[1] !== "asc" && entry[1] !== "desc") {
+        throw unsupportedQueryEncodingError("order_by");
+      }
+      return { column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" };
+    }
     if (!entry || typeof entry !== "object") {
       throw unsupportedQueryEncodingError("order_by");
     }
