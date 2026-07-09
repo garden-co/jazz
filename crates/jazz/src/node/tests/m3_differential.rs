@@ -14,6 +14,7 @@
 // | seeded reachable closure, same-table string seed | `string_resources_same_table_seeded_reachable` |
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
+// | projection with includes                     | `docs_projected_with_doc_access`            |
 // | relation traversal facade, forward hop       | `docs_relation_facade_direct_access`        |
 // | recursive membership                         | both reachable shapes include transitive hops |
 // | aggregate                                    | `docs_count`                                |
@@ -513,6 +514,14 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
         "grandchildren_inherit_child",
         Query::from("grandchildren")
             .inherits("child")
+            .validate(schema)
+            .unwrap(),
+    );
+    push(
+        "docs_projected_with_doc_access",
+        Query::from("docs")
+            .select(["title"])
+            .array_subquery(ArraySubquery::new("access", "doc_access", "doc", "id").select(["team"]))
             .validate(schema)
             .unwrap(),
     );
