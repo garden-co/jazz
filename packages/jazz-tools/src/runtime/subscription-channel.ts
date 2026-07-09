@@ -267,5 +267,6 @@ export function decodeEncodedSubscriptionDelta<T extends { id: string }>(
         item: decodeRow(change.row),
       } as RowDelta<T>;
     }),
+    reset: true,
   };
 }

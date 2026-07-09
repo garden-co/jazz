@@ -22,6 +22,7 @@ import {
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
   writeValueType,
+  type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRelationSubscriptionDelta,
   type NativeRelationSubscriptionEdge,
@@ -1341,15 +1342,47 @@ export class NativeRuntimeAdapter implements Runtime {
         ),
       );
     } else {
-      const applied = applySubscriptionDeltaWithWireDelta(
-        subscription.rows,
-        subscription.rowIndexByKey,
-        chunk.delta,
-        this.schema,
-      );
-      subscription.rows = applied.rows;
-      subscription.rowIndexByKey = applied.rowIndexByKey;
-      subscription.callback?.(applied.wireDelta);
+      if (chunk.reset) {
+        subscription.rows = [];
+        subscription.rowIndexByKey = new Map();
+      }
+      if (chunk.relationDelta && subscription.relationMaterialization.arraySubqueries.length > 0) {
+        const previousRows = subscription.rows;
+        applyRelationSubscriptionDelta(
+          subscription,
+          chunk.delta,
+          chunk.relationDelta,
+          this.schema,
+          chunk.reset === true,
+        );
+        subscription.rows = materializeRelationRows(
+          subscription.relationRows,
+          subscription.relationEdges,
+          subscription.relationRootCount,
+          subscription.relationMaterialization,
+        );
+        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
+        const wireDelta = chunk.reset
+          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
+          : nativeDeltaFromRows(
+              subscription.rows,
+              previousRows,
+              this.schema,
+              subscription.outputColumns,
+            );
+        subscription.callback?.(wireDelta);
+      } else {
+        const applied = applySubscriptionDeltaWithWireDelta(
+          subscription.rows,
+          subscription.rowIndexByKey,
+          chunk.delta,
+          this.schema,
+          chunk.reset === true,
+        );
+        subscription.rows = applied.rows;
+        subscription.rowIndexByKey = applied.rowIndexByKey;
+        subscription.callback?.(applied.wireDelta);
+      }
     }
   }
 
@@ -3128,8 +3161,11 @@ function applySubscriptionDeltaWithWireDelta(
   currentIndexByKey: Map<string, number>,
   delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
+  reset = false,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: SubscriptionWireDelta } {
-  const rowsByKey = new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
+  const rowsByKey = reset
+    ? new Map<string, RowState>()
+    : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
   const removedEntries: Array<{ id: string; index: number }> = [];
 
   for (const removed of delta.removed) {
@@ -3150,8 +3186,117 @@ function applySubscriptionDeltaWithWireDelta(
   return {
     rows,
     rowIndexByKey,
-    wireDelta: wireDeltaFromNativeBatches(delta, rowIndexByKey, removedEntries, schema),
+    wireDelta: {
+      ...wireDeltaFromNativeBatches(delta, rowIndexByKey, removedEntries, schema),
+      ...(reset ? { reset: true } : {}),
+    },
   };
+}
+
+function applyRelationSubscriptionDelta(
+  subscription: SubscriptionState,
+  rootDelta: NativeSubscriptionDelta,
+  relationDelta: NativeRelationSubscriptionDelta,
+  schema: WasmSchema,
+  reset: boolean,
+): void {
+  if (reset) {
+    subscription.relationRows = [];
+    subscription.relationEdges = [];
+    subscription.relationRootCount = 0;
+  }
+
+  const rootRemoved = new Set(
+    rootDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
+  );
+  if (rootRemoved.size > 0) {
+    let index = 0;
+    while (index < subscription.relationRootCount) {
+      const row = subscription.relationRows[index];
+      if (row && rootRemoved.has(rowKey(row.table, row.id))) {
+        subscription.relationRows.splice(index, 1);
+        subscription.relationRootCount -= 1;
+      } else {
+        index += 1;
+      }
+    }
+  }
+
+  const relatedRemoved = new Set(
+    relationDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
+  );
+  if (relatedRemoved.size > 0) {
+    subscription.relationRows = subscription.relationRows.filter((row, index) => {
+      if (index < subscription.relationRootCount) return true;
+      return !relatedRemoved.has(rowKey(row.table, row.id));
+    });
+  }
+
+  const rootUpdates = rowsFromBatches(rootDelta.updated, schema);
+  for (const row of rootUpdates) {
+    const position = subscription.relationRows
+      .slice(0, subscription.relationRootCount)
+      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
+    if (position >= 0) {
+      subscription.relationRows[position] = row;
+    }
+  }
+
+  const rootAdds = rowsFromBatches(rootDelta.added, schema);
+  for (const row of rootAdds) {
+    const existing = subscription.relationRows
+      .slice(0, subscription.relationRootCount)
+      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
+    if (existing >= 0) {
+      subscription.relationRows[existing] = row;
+    } else {
+      subscription.relationRows.splice(subscription.relationRootCount, 0, row);
+      subscription.relationRootCount += 1;
+    }
+  }
+
+  const relationRows = rowsFromBatches(relationDelta.added, schema).concat(
+    rowsFromBatches(relationDelta.updated, schema),
+  );
+  for (const row of relationRows) {
+    const key = rowKey(row.table, row.id);
+    const rootPosition = subscription.relationRows
+      .slice(0, subscription.relationRootCount)
+      .findIndex((current) => rowKey(current.table, current.id) === key);
+    if (rootPosition >= 0) {
+      subscription.relationRows[rootPosition] = row;
+      continue;
+    }
+    const relatedPosition = subscription.relationRows
+      .slice(subscription.relationRootCount)
+      .findIndex((current) => rowKey(current.table, current.id) === key);
+    if (relatedPosition >= 0) {
+      subscription.relationRows[subscription.relationRootCount + relatedPosition] = row;
+    } else {
+      subscription.relationRows.push(row);
+    }
+  }
+
+  const removedEdges = new Set(relationDelta.removedEdges.map(relationEdgeKey));
+  subscription.relationEdges = subscription.relationEdges.filter(
+    (edge) => !removedEdges.has(relationEdgeKey(edge)),
+  );
+  for (const edge of relationDelta.addedEdges) {
+    const key = relationEdgeKey(edge);
+    if (!subscription.relationEdges.some((current) => relationEdgeKey(current) === key)) {
+      subscription.relationEdges.push(edge);
+    }
+  }
+
+  const referenced = new Set(
+    subscription.relationEdges.map((edge) =>
+      rowKey(edge.targetTable, formatUuid(edge.targetRowId)),
+    ),
+  );
+  subscription.relationRows = subscription.relationRows.filter((row, index) => {
+    if (index < subscription.relationRootCount) return true;
+    return referenced.has(rowKey(row.table, row.id));
+  });
 }
 
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
@@ -3185,6 +3330,10 @@ function rowKey(table: string, id: string): string {
 
 function relationKey(table: string, id: string, relation: string): string {
   return `${table}\0${id}\0${relation}`;
+}
+
+function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
+  return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
 }
 
 function decodeField(
@@ -3280,6 +3429,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | { type: "snapshot"; snapshot: NativeRelationSubscriptionSnapshot; settled?: boolean }
   | {
       type: "delta";
+      reset?: boolean;
       delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
       relationDelta?: NativeRelationSubscriptionDelta;
       relationSnapshot?: NativeRelationSubscriptionSnapshot;
@@ -3293,6 +3443,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     relation_delta?: unknown;
     relation_snapshot?: unknown;
+    reset?: unknown;
     settled?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
@@ -3308,6 +3459,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   if (record.type === "delta" || record.type === "Delta") {
     return {
       type: "delta",
+      reset: record.reset === true,
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),

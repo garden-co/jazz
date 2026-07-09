@@ -59,7 +59,12 @@ export {
   type FileReadOptions,
   type FileWriteOptions,
 } from "./file-storage.js";
-export { RowChangeKind, type RowDelta, type SubscriptionDelta } from "./subscription-manager.js";
+export {
+  RowChangeKind,
+  applySubscriptionDelta,
+  type RowDelta,
+  type SubscriptionDelta,
+} from "./subscription-manager.js";
 export {
   InProcessSubscriptionChannel,
   createInProcessSubscriptionChannel,

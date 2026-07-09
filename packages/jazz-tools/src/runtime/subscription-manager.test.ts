@@ -3,7 +3,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { SubscriptionManager } from "./subscription-manager.js";
+import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
+import type { SubscriptionDelta } from "./subscription-manager.js";
 import type { ColumnDescriptor, NativeRowDelta, WasmRow, RowDelta } from "../drivers/types.js";
 
 interface TestItem {
@@ -38,6 +39,14 @@ const nativeColumns: ColumnDescriptor[] = [
   { name: "name", column_type: { type: "Text" }, nullable: false },
   { name: "count", column_type: { type: "Integer" }, nullable: false },
 ];
+
+function reduceDeltas(...deltas: SubscriptionDelta<TestItem>[]): TestItem[] {
+  const current: TestItem[] = [];
+  for (const delta of deltas) {
+    applySubscriptionDelta(current, delta);
+  }
+  return current;
+}
 
 function uuidBytes(id: string): Uint8Array {
   return Uint8Array.from(
@@ -83,7 +92,7 @@ describe("SubscriptionManager", () => {
     expect(result.delta).toEqual([
       { kind: 0, id: "1", index: 0, item: { id: "1", name: "item1", count: 10 } },
     ]);
-    expect(result.all.map((item) => item.id)).toEqual(["1"]);
+    expect(reduceDeltas(result).map((item) => item.id)).toEqual(["1"]);
   });
 
   it("tracks additions", () => {
@@ -98,7 +107,7 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.delta).toHaveLength(2);
-    expect(result.all.map((item) => item.id)).toEqual(["1", "2"]);
+    expect(reduceDeltas(result).map((item) => item.id)).toEqual(["1", "2"]);
     expect(manager.size).toBe(2);
   });
 
@@ -117,7 +126,7 @@ describe("SubscriptionManager", () => {
 
     const result = manager.handleDelta(delta, transform, nativeColumns);
 
-    expect(result.all).toEqual([{ id, name: "native", count: -42 }]);
+    expect(reduceDeltas(result)).toEqual([{ id, name: "native", count: -42 }]);
     expect(result.delta).toEqual([
       {
         kind: 0,
@@ -162,6 +171,7 @@ describe("SubscriptionManager", () => {
       nativeColumns,
     );
 
+    expect(result.reset).toBe(true);
     expect(result.all).toEqual([{ id: second, name: "second", count: 2 }]);
     expect(manager.size).toBe(1);
   });
@@ -169,7 +179,7 @@ describe("SubscriptionManager", () => {
   it("tracks content updates", () => {
     const manager = new SubscriptionManager<TestItem>();
 
-    manager.handleDelta(
+    const initial = manager.handleDelta(
       makeDelta([{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }]),
       transform,
     );
@@ -185,13 +195,13 @@ describe("SubscriptionManager", () => {
       index: 0,
       item: { id: "1", name: "item1", count: 15 },
     });
-    expect(result.all[0]!.count).toBe(15);
+    expect(reduceDeltas(initial, result)[0]!.count).toBe(15);
   });
 
   it("handles move-only updates without row payload", () => {
     const manager = new SubscriptionManager<TestItem>();
 
-    manager.handleDelta(
+    const initial = manager.handleDelta(
       makeDelta([
         { kind: 0, id: "a", index: 0, row: makeRow("a", "A", 1) },
         { kind: 0, id: "b", index: 1, row: makeRow("b", "B", 2) },
@@ -203,13 +213,13 @@ describe("SubscriptionManager", () => {
     const result = manager.handleDelta(makeDelta([{ kind: 2, id: "c", index: 0 }]), transform);
 
     expect(result.delta).toEqual([{ kind: 2, id: "c", index: 0 }]);
-    expect(result.all.map((item) => item.id)).toEqual(["c", "a", "b"]);
+    expect(reduceDeltas(initial, result).map((item) => item.id)).toEqual(["c", "a", "b"]);
   });
 
   it("tracks removals and shifts", () => {
     const manager = new SubscriptionManager<TestItem>();
 
-    manager.handleDelta(
+    const initial = manager.handleDelta(
       makeDelta([
         { kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) },
         { kind: 0, id: "2", index: 1, row: makeRow("2", "item2", 20) },
@@ -221,13 +231,13 @@ describe("SubscriptionManager", () => {
     const result = manager.handleDelta(makeDelta([{ kind: 1, id: "2", index: 1 }]), transform);
 
     expect(result.delta).toEqual([{ kind: 1, id: "2", index: 1 }]);
-    expect(result.all.map((item) => item.id)).toEqual(["1", "3"]);
+    expect(reduceDeltas(initial, result).map((item) => item.id)).toEqual(["1", "3"]);
   });
 
   it("handles mixed remove + update + add in one delta", () => {
     const manager = new SubscriptionManager<TestItem>();
 
-    manager.handleDelta(
+    const initial = manager.handleDelta(
       makeDelta([
         { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
         { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
@@ -247,13 +257,13 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.delta.map((change) => change.kind)).toEqual([1, 2, 0]);
-    expect(result.all.map((item) => item.id)).toEqual(["A", "D", "C", "E"]);
+    expect(reduceDeltas(initial, result).map((item) => item.id)).toEqual(["A", "D", "C", "E"]);
   });
 
   it("applies index positions correctly for mixed bulk updates", () => {
     const manager = new SubscriptionManager<TestItem>();
 
-    manager.handleDelta(
+    const initial = manager.handleDelta(
       makeDelta([
         { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
         { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
@@ -278,8 +288,9 @@ describe("SubscriptionManager", () => {
       transform,
     );
 
-    expect(result.all.map((item) => item.id)).toEqual(["C", "D", "A", "E"]);
-    expect(result.all.find((item) => item.id === "D")?.name).toBe("D*");
+    const current = reduceDeltas(initial, result);
+    expect(current.map((item) => item.id)).toEqual(["C", "D", "A", "E"]);
+    expect(current.find((item) => item.id === "D")?.name).toBe("D*");
   });
 
   it("clears state", () => {
@@ -299,6 +310,6 @@ describe("SubscriptionManager", () => {
       transform,
     );
 
-    expect(result.all.map((item) => item.id)).toEqual(["2"]);
+    expect(reduceDeltas(result).map((item) => item.id)).toEqual(["2"]);
   });
 });

@@ -1565,15 +1565,16 @@ fn drain_subscriptions(start: Instant, subscriptions: &mut [OpenSubscription]) {
 
 fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
-        }
         SubscriptionEvent::Delta {
+            reset,
             added,
             updated,
             removed,
             ..
         } => {
+            if reset {
+                rows.clear();
+            }
             for row in removed {
                 rows.remove(&row.row_uuid);
             }

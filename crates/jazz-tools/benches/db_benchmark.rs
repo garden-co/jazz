@@ -372,10 +372,12 @@ fn core_subscribed_write(c: &mut Criterion) {
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
                 match block_on(subscription.next_event()) {
-                    Some(SubscriptionEvent::Opened { current, .. }) => {
-                        assert_eq!(current.rows.len(), row_count);
+                    Some(SubscriptionEvent::Delta {
+                        reset: true, added, ..
+                    }) => {
+                        assert_eq!(added.len(), row_count);
                     }
-                    other => panic!("expected opened subscription event, got {other:?}"),
+                    other => panic!("expected reset subscription event, got {other:?}"),
                 }
                 let mut next = row_count;
 

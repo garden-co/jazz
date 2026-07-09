@@ -39,13 +39,118 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
+fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: SubscriptionEvent) {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            current.rows
+        SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            added_related,
+            added_edges,
+            removed_edges,
+            ..
+        } => {
+            if reset {
+                snapshot.rows.clear();
+                snapshot.edges.clear();
+                snapshot.root_count = 0;
+            }
+
+            for removed in removed {
+                if let Some(position) =
+                    snapshot
+                        .rows
+                        .iter()
+                        .take(snapshot.root_count)
+                        .position(|row| {
+                            row.table() == removed.table && row.row_uuid() == removed.row_uuid
+                        })
+                {
+                    snapshot.rows.remove(position);
+                    snapshot.root_count -= 1;
+                }
+            }
+
+            for row in updated {
+                if let Some(position) = snapshot.rows.iter().position(|current| {
+                    current.table() == row.table() && current.row_uuid() == row.row_uuid()
+                }) {
+                    snapshot.rows[position] = row;
+                }
+            }
+
+            for row in added {
+                if let Some(position) =
+                    snapshot
+                        .rows
+                        .iter()
+                        .take(snapshot.root_count)
+                        .position(|current| {
+                            current.table() == row.table() && current.row_uuid() == row.row_uuid()
+                        })
+                {
+                    snapshot.rows[position] = row;
+                } else {
+                    snapshot.rows.insert(snapshot.root_count, row);
+                    snapshot.root_count += 1;
+                }
+            }
+
+            for row in added_related {
+                if snapshot
+                    .rows
+                    .iter()
+                    .take(snapshot.root_count)
+                    .any(|root| root.table() == row.table() && root.row_uuid() == row.row_uuid())
+                {
+                    continue;
+                }
+                if let Some(position) =
+                    snapshot
+                        .rows
+                        .iter()
+                        .skip(snapshot.root_count)
+                        .position(|current| {
+                            current.table() == row.table() && current.row_uuid() == row.row_uuid()
+                        })
+                {
+                    snapshot.rows[snapshot.root_count + position] = row;
+                } else {
+                    snapshot.rows.push(row);
+                }
+            }
+
+            snapshot
+                .edges
+                .retain(|edge| !removed_edges.iter().any(|removed| removed == edge));
+            for edge in added_edges {
+                if !snapshot.edges.iter().any(|current| current == &edge) {
+                    snapshot.edges.push(edge);
+                }
+            }
+
+            let mut index = snapshot.root_count;
+            while index < snapshot.rows.len() {
+                let row = &snapshot.rows[index];
+                let still_referenced = snapshot.edges.iter().any(|edge| {
+                    edge.target_table == row.table() && edge.target_row == row.row_uuid()
+                });
+                if still_referenced {
+                    index += 1;
+                } else {
+                    snapshot.rows.remove(index);
+                }
+            }
         }
-        other => panic!("expected subscription snapshot event, got {other:?}"),
+        SubscriptionEvent::Closed => {}
     }
+}
+
+fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
+    let mut snapshot = RelationSnapshot::default();
+    apply_subscription_event(&mut snapshot, event);
+    snapshot.rows
 }
 
 fn pending_upstream_subscribe_count<S>(db: &Db<S>) -> usize
@@ -95,21 +200,16 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
 }
 
 fn snapshot_edges(event: &SubscriptionEvent) -> BTreeSet<RelationEdge> {
-    match event {
-        SubscriptionEvent::Opened { current, .. }
-        | SubscriptionEvent::Reset { current, .. }
-        | SubscriptionEvent::Delta { current, .. } => current.edges.iter().cloned().collect(),
-        other => panic!("expected subscription snapshot-bearing event, got {other:?}"),
-    }
+    let event = event.clone();
+    let mut snapshot = RelationSnapshot::default();
+    apply_subscription_event(&mut snapshot, event);
+    snapshot.edges.iter().cloned().collect()
 }
 
 fn snapshot_from_event(event: SubscriptionEvent) -> RelationSnapshot {
-    match event {
-        SubscriptionEvent::Opened { current, .. }
-        | SubscriptionEvent::Reset { current, .. }
-        | SubscriptionEvent::Delta { current, .. } => current,
-        other => panic!("expected subscription snapshot-bearing event, got {other:?}"),
-    }
+    let mut snapshot = RelationSnapshot::default();
+    apply_subscription_event(&mut snapshot, event);
+    snapshot
 }
 
 fn schema_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
@@ -215,9 +315,7 @@ fn ordered_limited_related_text_values(
 
 fn event_settled(event: &SubscriptionEvent) -> bool {
     match event {
-        SubscriptionEvent::Opened { settled, .. }
-        | SubscriptionEvent::Delta { settled, .. }
-        | SubscriptionEvent::Reset { settled, .. } => *settled,
+        SubscriptionEvent::Delta { settled, .. } => *settled,
         SubscriptionEvent::Closed => false,
     }
 }
@@ -2266,10 +2364,10 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let mut snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
     assert_eq!(
         ordered_limited_related_text_values(
-            &opened,
+            &snapshot,
             &schema,
             "todos",
             row(0x31),
@@ -2291,10 +2389,10 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    let after_first_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
         ordered_limited_related_text_values(
-            &after_first_insert,
+            &snapshot,
             &schema,
             "todos",
             row(0x31),
@@ -2317,10 +2415,10 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     .unwrap();
     db.tick().unwrap();
     if let Some(outside_boundary_event) = subscription.try_next_event() {
-        let outside_boundary = snapshot_from_event(outside_boundary_event);
+        apply_subscription_event(&mut snapshot, outside_boundary_event);
         assert_eq!(
             ordered_limited_related_text_values(
-                &outside_boundary,
+                &snapshot,
                 &schema,
                 "todos",
                 row(0x31),
@@ -2343,10 +2441,10 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    let after_boundary_insert = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
         ordered_limited_related_text_values(
-            &after_boundary_insert,
+            &snapshot,
             &schema,
             "todos",
             row(0x31),
@@ -2365,10 +2463,10 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    let after_boundary_update = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    apply_subscription_event(&mut snapshot, block_on(subscription.next_event()).unwrap());
     assert_eq!(
         ordered_limited_related_text_values(
-            &after_boundary_update,
+            &snapshot,
             &schema,
             "todos",
             row(0x31),
@@ -7064,18 +7162,13 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    let mut snapshot = RelationSnapshot::default();
     while let Some(event) = subscription.try_next_event() {
-        match event {
-            SubscriptionEvent::Opened { current, .. }
-            | SubscriptionEvent::Reset { current, .. }
-            | SubscriptionEvent::Delta { current, .. } => {
-                assert!(
-                    current.rows.is_empty(),
-                    "pre-insert coverage events must stay empty"
-                );
-            }
-            SubscriptionEvent::Closed => {}
-        }
+        apply_subscription_event(&mut snapshot, event);
+        assert!(
+            snapshot.rows.is_empty(),
+            "pre-insert coverage events must stay empty"
+        );
     }
 
     let write = client
@@ -7357,22 +7450,16 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     server.tick().unwrap();
     client.tick().unwrap();
     while let Some(event) = subscription.try_next_event() {
-        match event {
-            SubscriptionEvent::Opened { current, .. }
-            | SubscriptionEvent::Reset { current, .. } => {
-                assert!(current.rows.is_empty());
-            }
-            SubscriptionEvent::Delta {
-                added,
-                updated,
-                removed,
-                ..
-            } => {
-                assert!(added.is_empty());
-                assert!(updated.is_empty());
-                assert!(removed.is_empty());
-            }
-            SubscriptionEvent::Closed => {}
+        if let SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } = event
+        {
+            assert!(added.is_empty());
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
         }
     }
 
@@ -7518,8 +7605,6 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     client.tick().unwrap();
     while let Some(event) = subscription.try_next_event() {
         let (added, updated, removed) = match event {
-            SubscriptionEvent::Opened { current, .. }
-            | SubscriptionEvent::Reset { current, .. } => (current.rows, Vec::new(), Vec::new()),
             SubscriptionEvent::Delta {
                 added,
                 updated,
@@ -8171,25 +8256,23 @@ fn served_subscription_rows_for_author(
         server.tick().unwrap();
         client.tick().unwrap();
         while let Some(event) = subscription.try_next_event() {
-            match event {
-                SubscriptionEvent::Opened { current, .. }
-                | SubscriptionEvent::Reset { current, .. } => {
-                    rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    rows.clear();
                 }
-                SubscriptionEvent::Delta {
-                    added,
-                    updated,
-                    removed,
-                    ..
-                } => {
-                    for row in removed {
-                        rows.remove(&row.row_uuid);
-                    }
-                    for row in added.into_iter().chain(updated) {
-                        rows.insert(row.row_uuid());
-                    }
+                for row in removed {
+                    rows.remove(&row.row_uuid);
                 }
-                SubscriptionEvent::Closed => {}
+                for row in added.into_iter().chain(updated) {
+                    rows.insert(row.row_uuid());
+                }
             }
         }
     }
@@ -8253,25 +8336,23 @@ fn served_group_entry_rows_via_relay(
         relay.tick().unwrap();
         client.tick().unwrap();
         while let Some(event) = subscription.try_next_event() {
-            match event {
-                SubscriptionEvent::Opened { current, .. }
-                | SubscriptionEvent::Reset { current, .. } => {
-                    rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            {
+                if reset {
+                    rows.clear();
                 }
-                SubscriptionEvent::Delta {
-                    added,
-                    updated,
-                    removed,
-                    ..
-                } => {
-                    for row in removed {
-                        rows.remove(&row.row_uuid);
-                    }
-                    for row in added.into_iter().chain(updated) {
-                        rows.insert(row.row_uuid());
-                    }
+                for row in removed {
+                    rows.remove(&row.row_uuid);
                 }
-                SubscriptionEvent::Closed => {}
+                for row in added.into_iter().chain(updated) {
+                    rows.insert(row.row_uuid());
+                }
             }
         }
     }
