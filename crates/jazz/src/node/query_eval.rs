@@ -47,7 +47,7 @@ use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES}
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
-    QueryError, ShapeId, ValidatedQuery, binding_id_for_values,
+    QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
 
@@ -3663,10 +3663,8 @@ where
         };
         let shape = match &ast.body {
             ShapeBody::Query(query) => query.validate(&schema.schema)?,
-            ShapeBody::Relation(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "relation query registration requires unified lowering",
-                ));
+            ShapeBody::Relation(relation) => {
+                relation_query_to_query(relation)?.validate(&schema.schema)?
             }
         };
         if shape.shape_id() != shape_id {

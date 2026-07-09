@@ -4826,6 +4826,124 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
 }
 
 #[test]
+fn subscriber_connection_accepts_relation_register_shape_for_serving_subscription() {
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "users",
+            row(0xa1),
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "todos",
+            row(0x11),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("alice todo".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        )
+        .unwrap();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let relation = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+    let normalized = relation_query_to_query(&relation)
+        .unwrap()
+        .validate(&schema)
+        .unwrap();
+    let binding = normalized.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: normalized.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: normalized.shape_id(),
+            ast: ShapeAst::new_relation(relation, schema.version_id()),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: normalized.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::ViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    }) = client_transport.try_recv()
+    else {
+        panic!("expected relation facade subscription view update");
+    };
+    assert_eq!(served, subscription);
+    assert!(
+        result_member_adds.iter().any(|member| {
+            let Some(member) = member.as_real_row() else {
+                return false;
+            };
+            member.table.as_str() == "todos" && member.row_uuid == row(0x11)
+        }),
+        "relation facade subscription should deliver the projected target row"
+    );
+}
+
+#[test]
 fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
