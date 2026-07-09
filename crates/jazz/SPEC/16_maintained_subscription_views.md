@@ -33,6 +33,13 @@ are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
 
+`groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
+maintained-view ingestion, application, publication, snapshot assembly, diffing,
+and subscriber delivery are bounded by the size of the change and affected keys,
+not by accumulated view state. `INV-MV-1` and the maintained-vs-one-shot
+differential oracle prove observable equivalence; they do not justify a
+full-state rebuild or full-state diff on the maintained path.
+
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
@@ -159,6 +166,14 @@ Maintained-lowering gaps:
   relation/path lowering or relation-edge terminal deltas are represented in
   groove. Serving code must not compensate by recursively subscribing to
   coarse child shapes for sync coverage;
+- relation delivery currently has a known `INV-INC-1` violation in the local
+  maintained path: relation/include publication rebuilds and diffs accumulated
+  relation state after small child changes. The fix is in flight on the
+  coldpath delta-native work and the ignored mechanism canary in
+  `crates/jazz/tests/incremental_delivery_canary.rs` is the pending activation
+  receipt. The canary is at the `Db` facade level because the current
+  `jazz-tools::JazzClient` subscription surface rejects relation/include
+  queries as non-simple table queries;
 - application-column projection is a materialization concern layered over the
   maintained membership/version stream; projected subscription payloads must not
   become a second diff engine;
