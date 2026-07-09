@@ -105,6 +105,10 @@ export async function acquireWebLockWithRetry(
   lockName: string,
   options: WebLockRetryOptions = {},
 ): Promise<LeaderLockLease | null> {
+  const lockManager =
+    options.lockManager === undefined ? resolveNavigatorLocks() : options.lockManager;
+  if (!lockManager) return null;
+
   const timeoutMs = normalizePositiveTimeout(options.timeoutMs, DEFAULT_WEB_LOCK_RETRY_TIMEOUT_MS);
   const retryDelayMs = normalizePositiveTimeout(
     options.retryDelayMs,
@@ -113,7 +117,7 @@ export async function acquireWebLockWithRetry(
   const deadline = Date.now() + timeoutMs;
 
   while (true) {
-    const lease = await tryAcquireWebLock(lockName, options);
+    const lease = await tryAcquireWebLock(lockName, { ...options, lockManager });
     if (lease) return lease;
 
     const remainingMs = deadline - Date.now();
