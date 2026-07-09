@@ -102,6 +102,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .load_local_batch_record(batch_id)
                 .ok()
                 .flatten()
+                .is_some()
+            || self
+                .storage
+                .load_local_batch_row_index(batch_id)
+                .ok()
+                .flatten()
                 .is_some();
         if !has_stored_bookkeeping {
             return;
@@ -111,6 +117,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         if let Err(error) = self.storage.delete_local_batch_record(batch_id) {
             tracing::warn!(?batch_id, %error, "failed to retire local batch record");
+        }
+        if let Err(error) = self.storage.delete_local_batch_row_index(batch_id) {
+            tracing::warn!(?batch_id, %error, "failed to retire local batch row index");
         }
         self.mark_storage_write_pending_flush();
     }

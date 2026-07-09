@@ -589,6 +589,13 @@ pub trait Storage {
         }
     }
 
+    fn delete_local_batch_row_index(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        self.raw_table_delete(
+            LOCAL_BATCH_ROW_INDEX_TABLE,
+            &local_batch_record_key(batch_id),
+        )
+    }
+
     fn index_local_batch_history_rows(
         &mut self,
         table: &str,
@@ -1853,6 +1860,25 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn delete_local_batch_record(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
         (**self).delete_local_batch_record(batch_id)
+    }
+
+    fn upsert_local_batch_row_index(
+        &mut self,
+        batch_id: BatchId,
+        new_members: &[LocalBatchMember],
+    ) -> Result<(), StorageError> {
+        (**self).upsert_local_batch_row_index(batch_id, new_members)
+    }
+
+    fn load_local_batch_row_index(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<Vec<LocalBatchMember>>, StorageError> {
+        (**self).load_local_batch_row_index(batch_id)
+    }
+
+    fn delete_local_batch_row_index(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        (**self).delete_local_batch_row_index(batch_id)
     }
 
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {

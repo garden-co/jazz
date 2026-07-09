@@ -301,7 +301,21 @@ fn rc_rolled_back_batch_rejects_later_operations() {
     )
     .unwrap();
 
+    // Internal storage bookkeeping: rolled-back batches should not retain the
+    // batch_id -> rows index after the batch is no longer replayable.
+    assert!(
+        core.storage()
+            .load_local_batch_row_index(batch_id)
+            .unwrap()
+            .is_some()
+    );
+
     core.rollback_batch(batch_id).unwrap();
+
+    assert_eq!(
+        core.storage().load_local_batch_row_index(batch_id).unwrap(),
+        None
+    );
 
     let expected_error =
         format!("Write error: batch {batch_id} has already been completed or was never opened");
@@ -805,6 +819,13 @@ fn rc_client_retires_batch_bookkeeping_when_fate_reaches_settlement_target() {
             .is_some(),
         "submission pends while below the target"
     );
+    assert!(
+        s.a.storage()
+            .load_local_batch_row_index(batch_id)
+            .unwrap()
+            .is_some(),
+        "internal batch row index should exist while the batch can be replayed"
+    );
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
@@ -830,6 +851,13 @@ fn rc_client_retires_batch_bookkeeping_when_fate_reaches_settlement_target() {
             .unwrap()
             .is_none(),
         "global fate retires the local batch record"
+    );
+    assert!(
+        s.a.storage()
+            .load_local_batch_row_index(batch_id)
+            .unwrap()
+            .is_none(),
+        "global fate retires the internal batch row index"
     );
     assert!(
         s.a.storage()
