@@ -27,6 +27,7 @@ export type EncodedSubscriptionRowDelta =
 
 export interface EncodedSubscriptionDelta {
   all: EncodedSubscriptionRow[];
+  reset?: true;
   delta: EncodedSubscriptionRowDelta[];
 }
 
