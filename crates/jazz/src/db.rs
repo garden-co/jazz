@@ -2926,6 +2926,7 @@ where
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
+                pending_view_update_chunks: BTreeMap::new(),
             },
             last_resume_bytes: None,
         }));
@@ -3613,6 +3614,10 @@ enum ConnectionLink {
         uploaded: BTreeSet<TxId>,
         /// Declared known-state ViewUpdates parked until missing row bodies arrive.
         pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
+        /// Oversized ViewUpdates arrive as FIFO chunk sequences. Partial
+        /// sequences stay here across transport ticks so the receiver stages
+        /// each logical ViewUpdate once, at the final chunk boundary.
+        pending_view_update_chunks: BTreeMap<SubscriptionKey, ViewUpdateParts>,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -3716,6 +3721,7 @@ where
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
+                pending_view_update_chunks,
             } => {
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let pending_index = 0;
@@ -3893,8 +3899,11 @@ where
                                     version_bundles,
                                 )?;
                             }
-                            pending_view_updates
-                                .push(view_update_parts_from_message(repair.update));
+                            push_view_update_message_for_receiver(
+                                pending_view_update_chunks,
+                                &mut pending_view_updates,
+                                repair.update,
+                            )?;
                         }
                         message @ (SyncMessage::ViewUpdate { subscription, .. }
                         | SyncMessage::ViewUpdateChunk { subscription, .. }) => {
@@ -3905,7 +3914,11 @@ where
                                 node.missing_known_state_row_version_refs(&message)?
                             };
                             if missing.is_empty() {
-                                pending_view_updates.push(view_update_parts_from_message(message));
+                                push_view_update_message_for_receiver(
+                                    pending_view_update_chunks,
+                                    &mut pending_view_updates,
+                                    message,
+                                )?;
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "upstream applied view update {}",
@@ -4475,6 +4488,79 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         },
         _ => unreachable!("expected view update message"),
     }
+}
+
+fn push_view_update_message_for_receiver(
+    pending_chunks: &mut BTreeMap<SubscriptionKey, ViewUpdateParts>,
+    ready: &mut Vec<ViewUpdateParts>,
+    message: SyncMessage,
+) -> Result<(), Error> {
+    let (subscription, final_chunk) = match &message {
+        SyncMessage::ViewUpdateChunk {
+            subscription,
+            final_chunk,
+            ..
+        } => (*subscription, *final_chunk),
+        SyncMessage::ViewUpdate { .. } => {
+            ready.push(view_update_parts_from_message(message));
+            return Ok(());
+        }
+        _ => unreachable!("expected view update message"),
+    };
+
+    let parts = view_update_parts_from_message(message);
+    if let Some(accumulated) = pending_chunks.get_mut(&subscription) {
+        merge_view_update_chunk_parts(accumulated, parts)?;
+        if final_chunk {
+            let mut complete = pending_chunks.remove(&subscription).ok_or_else(|| {
+                Error::new(ErrorCode::Protocol, "completed chunk sequence disappeared")
+            })?;
+            complete.defer_settlement = false;
+            ready.push(complete);
+        }
+        return Ok(());
+    }
+
+    if final_chunk {
+        ready.push(parts);
+    } else {
+        pending_chunks.insert(subscription, parts);
+    }
+    Ok(())
+}
+
+fn merge_view_update_chunk_parts(
+    accumulated: &mut ViewUpdateParts,
+    mut next: ViewUpdateParts,
+) -> Result<(), Error> {
+    if accumulated.subscription != next.subscription {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "view update chunks changed subscription mid-sequence",
+        ));
+    }
+    accumulated.settled_through = accumulated.settled_through.max(next.settled_through);
+    accumulated.defer_settlement = next.defer_settlement;
+    accumulated.reset_result_set |= next.reset_result_set;
+    accumulated
+        .version_bundles
+        .append(&mut next.version_bundles);
+    accumulated
+        .peer_complete_tx_payload_refs
+        .append(&mut next.peer_complete_tx_payload_refs);
+    accumulated
+        .result_member_adds
+        .append(&mut next.result_member_adds);
+    accumulated
+        .result_member_removes
+        .append(&mut next.result_member_removes);
+    accumulated
+        .program_fact_adds
+        .append(&mut next.program_fact_adds);
+    accumulated
+        .program_fact_removes
+        .append(&mut next.program_fact_removes);
+    Ok(())
 }
 
 fn transport_error(error: TransportError) -> Error {
