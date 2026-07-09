@@ -311,6 +311,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorWaiters: Array<(error: Error) => void> = [];
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
+  private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -387,6 +388,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.queuedServerFrames.length = 0;
+    this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverCarrier?.close();
@@ -813,7 +815,7 @@ export class NativeRuntimeAdapter implements Runtime {
       peerIdentity: this.peerIdentity,
       authJson,
       onFrame: (frame) => {
-        transport.sendWireFrame(frame);
+        this.pendingInboundServerFrames.push(frame);
         this.scheduleServerPump();
       },
       onError: (error) => {
@@ -844,6 +846,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.queuedServerFrames.length = 0;
+    this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
   }
@@ -1367,6 +1370,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private pumpServerTransport(): void {
     const transport = this.serverTransport;
     if (this.closed || !transport) return;
+    this.drainPendingInboundServerFrames(transport);
     for (let round = 0; round < 32; round += 1) {
       transport.tick();
       const frames = normalizeTransportFrames(transport.recvWireFrames());
@@ -1379,6 +1383,14 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     }
     this.serverPumpAgain = true;
+  }
+
+  private drainPendingInboundServerFrames(transport: Transport): void {
+    if (this.pendingInboundServerFrames.length === 0) return;
+    const frames = this.pendingInboundServerFrames.splice(0);
+    for (const frame of frames) {
+      transport.sendWireFrame(frame);
+    }
   }
 
   private sendServerFrames(frames: Uint8Array[]): void {
