@@ -107,6 +107,11 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, undefined);
         return;
       }
+      case "close": {
+        await closeRuntime();
+        postResult(message.id, undefined);
+        return;
+      }
       case "closeForStorageClear": {
         const result = await closeForStorageClear();
         postResult(message.id, result);
@@ -189,16 +194,20 @@ async function closeForStorageClear(): Promise<string> {
     throw new Error("Persistent browser native runtime has no storage namespace");
   }
 
+  await closeRuntime();
+  return namespace;
+}
+
+async function closeRuntime(): Promise<void> {
   await settlePendingWrites();
   await runtime?.close?.();
   runtime = null;
   runtimeNamespace = null;
   pendingWriteTransactionIds.clear();
-  return namespace;
 }
 
 async function settlePendingWrites(): Promise<void> {
-  const runtime = getRuntime();
+  if (!runtime) return;
   for (const transactionId of pendingWriteTransactionIds) {
     await runtime.waitForTransaction(transactionId, "local");
     pendingWriteTransactionIds.delete(transactionId);

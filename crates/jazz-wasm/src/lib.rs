@@ -1619,11 +1619,20 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = close)]
-    pub fn close(&mut self) -> bool {
-        !matches!(
-            std::mem::replace(&mut self.inner, WasmDbInner::Closed),
-            WasmDbInner::Closed
-        )
+    pub fn close(&mut self) -> Result<bool, JsValue> {
+        let inner = std::mem::replace(&mut self.inner, WasmDbInner::Closed);
+        match inner {
+            WasmDbInner::Memory(db) => {
+                db.close().map_err(to_js_error)?;
+                Ok(true)
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => {
+                db.close().map_err(to_js_error)?;
+                Ok(true)
+            }
+            WasmDbInner::Closed => Ok(false),
+        }
     }
 }
 

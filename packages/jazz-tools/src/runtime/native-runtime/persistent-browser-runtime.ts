@@ -46,6 +46,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private authFailureCallback: ((reason: string) => void) | undefined;
   private connectionReady: Promise<unknown> | null = null;
+  private pagehideAbort: AbortController | null = null;
   private nextCallId = 1;
   private nextSubscriptionId = 1;
   private closed = false;
@@ -79,6 +80,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.opened = this.send("open", [runtimeSources, dbName, schema, node, author]).then(
       () => undefined,
     );
+    if (typeof window !== "undefined") {
+      this.pagehideAbort = new AbortController();
+      window.addEventListener(
+        "pagehide",
+        () => {
+          void this.close();
+        },
+        { signal: this.pagehideAbort.signal },
+      );
+    }
   }
 
   insert(
@@ -272,9 +283,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     try {
       await this.opened;
       await Promise.allSettled(this.writes.values());
+      await this.send("close", []);
     } finally {
       this.closed = true;
       this.closing = false;
+      this.pagehideAbort?.abort();
+      this.pagehideAbort = null;
       this.worker.terminate();
       this.resolveAll();
     }
@@ -293,6 +307,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     } finally {
       this.closed = true;
       this.closing = false;
+      this.pagehideAbort?.abort();
+      this.pagehideAbort = null;
       this.worker.terminate();
       this.resolveAll();
     }
