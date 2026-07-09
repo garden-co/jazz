@@ -47,6 +47,11 @@ where
 
     pub(super) fn recover_from_storage(&mut self) -> Result<(), Error> {
         let cleanly_closed = self.take_valid_clean_close_marker()?;
+        let storage_consistent_through = if cleanly_closed {
+            None
+        } else {
+            self.valid_storage_consistency_marker()?
+        };
         for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
             let record = raw.record();
             let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
@@ -208,7 +213,7 @@ where
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
         }
         if !cleanly_closed {
-            self.cleanup_settled_ahead_current_leftovers()?;
+            self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
         }
         Ok(())
     }
