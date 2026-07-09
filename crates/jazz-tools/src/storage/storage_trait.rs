@@ -530,6 +530,121 @@ pub trait Storage {
         Ok(records)
     }
 
+    fn upsert_local_batch_row_index(
+        &mut self,
+        batch_id: BatchId,
+        new_members: &[LocalBatchMember],
+    ) -> Result<(), StorageError> {
+        if new_members.is_empty() {
+            return Ok(());
+        }
+        let mut members = self
+            .load_local_batch_row_index(batch_id)?
+            .unwrap_or_default();
+        for member in new_members {
+            upsert_local_batch_member(&mut members, member.clone());
+        }
+
+        ensure_raw_table_header(
+            self,
+            LOCAL_BATCH_ROW_INDEX_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_LOCAL_BATCH_ROW_INDEX,
+                LOCAL_BATCH_ROW_INDEX_FORMAT_V1,
+            ),
+        )?;
+        let bytes = encode_local_batch_row_index(batch_id, &members)?;
+        self.raw_table_put(
+            LOCAL_BATCH_ROW_INDEX_TABLE,
+            &local_batch_record_key(batch_id),
+            &bytes,
+        )
+    }
+
+    fn load_local_batch_row_index(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<Vec<LocalBatchMember>>, StorageError> {
+        match self.raw_table_get(
+            LOCAL_BATCH_ROW_INDEX_TABLE,
+            &local_batch_record_key(batch_id),
+        )? {
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    LOCAL_BATCH_ROW_INDEX_TABLE,
+                    STORAGE_KIND_LOCAL_BATCH_ROW_INDEX,
+                    LOCAL_BATCH_ROW_INDEX_FORMAT_V1,
+                )?;
+                let (row_batch_id, members) = decode_local_batch_row_index(&bytes)?;
+                if row_batch_id != batch_id {
+                    return Err(StorageError::IoError(format!(
+                        "local batch row index key/row mismatch for {:?}",
+                        batch_id
+                    )));
+                }
+                Ok(Some(members))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn delete_local_batch_row_index(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        self.raw_table_delete(
+            LOCAL_BATCH_ROW_INDEX_TABLE,
+            &local_batch_record_key(batch_id),
+        )
+    }
+
+    fn index_local_batch_history_rows(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+    ) -> Result<(), StorageError> {
+        if history_rows.len() != encoded_history_rows.len() {
+            return Err(StorageError::IoError(format!(
+                "history row index count mismatch: {} decoded vs {} encoded",
+                history_rows.len(),
+                encoded_history_rows.len()
+            )));
+        }
+
+        let mut members_by_batch = BTreeMap::<BatchId, Vec<LocalBatchMember>>::new();
+        for (row, encoded) in history_rows.iter().zip(encoded_history_rows) {
+            if row.row_id != encoded.row_id
+                || row.batch_id() != encoded.batch_id
+                || row.branch.as_str() != encoded.branch.as_str()
+            {
+                return Err(StorageError::IoError(format!(
+                    "history row index mismatch for table {table}: decoded ({}, {}, {:?}) vs encoded ({}, {}, {:?})",
+                    row.row_id,
+                    row.branch,
+                    row.batch_id(),
+                    encoded.row_id,
+                    encoded.branch,
+                    encoded.batch_id
+                )));
+            }
+
+            members_by_batch
+                .entry(row.batch_id())
+                .or_default()
+                .push(LocalBatchMember {
+                    object_id: row.row_id,
+                    table_name: table.to_string(),
+                    branch_name: BranchName::new(row.branch.as_str()),
+                    schema_hash: encoded.row_raw_table_id.schema_hash,
+                    row_digest: row.content_digest(),
+                });
+        }
+
+        for (batch_id, members) in members_by_batch {
+            self.upsert_local_batch_row_index(batch_id, &members)?;
+        }
+        Ok(())
+    }
+
     fn upsert_sealed_batch_submission(
         &mut self,
         submission: &SealedBatchSubmission,
@@ -775,7 +890,8 @@ pub trait Storage {
         rows: &[StoredRowBatch],
     ) -> Result<(), StorageError> {
         let encoded_rows = encode_history_row_bytes_for_storage(self, table, rows)?;
-        self.apply_encoded_row_mutation(table, &encoded_rows, &[], &[])
+        self.apply_encoded_row_mutation(table, &encoded_rows, &[], &[])?;
+        self.index_local_batch_history_rows(table, rows, &encoded_rows)
     }
 
     fn apply_encoded_row_mutation(
@@ -892,14 +1008,14 @@ pub trait Storage {
         encoded_visible_rows: &[OwnedVisibleRowBytes],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
-        let _ = history_rows;
         let _ = visible_entries;
         self.apply_encoded_row_mutation(
             table,
             encoded_history_rows,
             encoded_visible_rows,
             index_mutations,
-        )
+        )?;
+        self.index_local_batch_history_rows(table, history_rows, encoded_history_rows)
     }
 
     fn upsert_visible_region_row_bytes(
@@ -1744,6 +1860,25 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn delete_local_batch_record(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
         (**self).delete_local_batch_record(batch_id)
+    }
+
+    fn upsert_local_batch_row_index(
+        &mut self,
+        batch_id: BatchId,
+        new_members: &[LocalBatchMember],
+    ) -> Result<(), StorageError> {
+        (**self).upsert_local_batch_row_index(batch_id, new_members)
+    }
+
+    fn load_local_batch_row_index(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<Vec<LocalBatchMember>>, StorageError> {
+        (**self).load_local_batch_row_index(batch_id)
+    }
+
+    fn delete_local_batch_row_index(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        (**self).delete_local_batch_row_index(batch_id)
     }
 
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {

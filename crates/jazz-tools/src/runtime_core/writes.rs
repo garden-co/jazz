@@ -980,17 +980,33 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("load rejected batch ack: {err}")))?
         {
             self.acknowledged_rejected_batches.insert(batch_id);
-            if self
+            let has_local_batch_record = self
                 .storage
                 .load_local_batch_record(batch_id)
                 .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-                .is_some()
-            {
+                .is_some();
+            let has_local_batch_row_index = self
+                .storage
+                .load_local_batch_row_index(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("load local batch row index: {err}"))
+                })?
+                .is_some();
+            if has_local_batch_record {
                 self.storage
                     .delete_local_batch_record(batch_id)
                     .map_err(|err| {
                         RuntimeError::WriteError(format!("delete local batch record: {err}"))
                     })?;
+            }
+            if has_local_batch_row_index {
+                self.storage
+                    .delete_local_batch_row_index(batch_id)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("delete local batch row index: {err}"))
+                    })?;
+            }
+            if has_local_batch_record || has_local_batch_row_index {
                 self.mark_storage_write_pending_flush();
             }
             return Ok(false);
@@ -1013,6 +1029,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.storage
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
+        self.storage
+            .delete_local_batch_row_index(batch_id)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("delete local batch row index: {err}"))
+            })?;
         self.acknowledged_rejected_batches.insert(batch_id);
         self.mark_storage_write_pending_flush();
         Ok(true)
@@ -1040,6 +1061,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.storage
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
+        self.storage
+            .delete_local_batch_row_index(batch_id)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("delete local batch row index: {err}"))
+            })?;
         self.durability.forget_batch(batch_id);
         self.finish_batch(batch_id);
         self.mark_storage_write_pending_flush();
@@ -1072,6 +1098,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .delete_local_batch_record(batch_id)
                 .map_err(|err| {
                     RuntimeError::WriteError(format!("delete empty local batch record: {err}"))
+                })?;
+            self.storage
+                .delete_local_batch_row_index(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("delete empty local batch row index: {err}"))
                 })?;
             self.mark_storage_write_pending_flush();
             self.finish_batch(batch_id);

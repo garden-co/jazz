@@ -83,13 +83,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Retire a batch's pending bookkeeping once its fate reaches the
     /// settlement target. The terminal fate row stays behind as the tombstone;
     /// row history is untouched.
-    pub(crate) fn retire_settled_batch(&mut self, batch_id: crate::row_histories::BatchId) {
+    pub(crate) fn retire_settled_batch(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+        confirmed_tier: DurabilityTier,
+    ) {
         // Servers broadcast fates to every interested client and may
         // re-deliver them, so most settled fates arriving here describe
         // batches this node never tracked. Probe before deleting to avoid
         // dirtying storage (and forcing a flush) when there is nothing to
         // retire.
         let had_cached_record = self.local_batch_record_cache.remove(&batch_id).is_some();
+        let should_delete_row_index = confirmed_tier >= DurabilityTier::GlobalServer;
         let has_stored_bookkeeping = had_cached_record
             || self
                 .storage
@@ -103,6 +108,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .ok()
                 .flatten()
                 .is_some();
+        let has_local_batch_row_index = should_delete_row_index
+            && self
+                .storage
+                .load_local_batch_row_index(batch_id)
+                .ok()
+                .flatten()
+                .is_some();
+        let has_stored_bookkeeping = has_stored_bookkeeping || has_local_batch_row_index;
         if !has_stored_bookkeeping {
             return;
         }
@@ -111,6 +124,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         if let Err(error) = self.storage.delete_local_batch_record(batch_id) {
             tracing::warn!(?batch_id, %error, "failed to retire local batch record");
+        }
+        if should_delete_row_index
+            && let Err(error) = self.storage.delete_local_batch_row_index(batch_id)
+        {
+            tracing::warn!(?batch_id, %error, "failed to retire local batch row index");
         }
         self.mark_storage_write_pending_flush();
     }

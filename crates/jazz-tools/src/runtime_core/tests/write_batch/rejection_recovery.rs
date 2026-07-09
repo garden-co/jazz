@@ -914,6 +914,14 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
         ),
         "rejected batch fate should be persisted before acknowledgement"
     );
+    assert!(
+        alice
+            .storage()
+            .load_local_batch_row_index(batch_id)
+            .unwrap()
+            .is_some(),
+        "internal batch row index should exist until the rejected batch is acknowledged"
+    );
 
     assert!(
         alice.acknowledge_rejected_batch(batch_id).unwrap(),
@@ -921,6 +929,13 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     );
     assert_eq!(
         alice.storage().load_local_batch_record(batch_id).unwrap(),
+        None
+    );
+    assert_eq!(
+        alice
+            .storage()
+            .load_local_batch_row_index(batch_id)
+            .unwrap(),
         None
     );
     assert!(
