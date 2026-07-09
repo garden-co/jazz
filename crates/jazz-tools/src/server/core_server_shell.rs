@@ -56,6 +56,7 @@ impl ServerShellHandle {
                     },
                 )
                 .with_row_id_seed(0x5e)
+                .with_runtime_schema_bootstrap()
                 .with_role(role);
                 let config = match edge_cache_budget {
                     Some(budget) => config.with_edge_cache_budget(budget),

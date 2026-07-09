@@ -86,6 +86,10 @@ pub struct InMemoryServerShellConfig {
     pub edge_cache_budget: Option<EdgeCacheBudget>,
     /// Server role used for client-link semantics.
     pub role: NodeRole,
+    /// Whether startup should publish the constructor schema into the runtime
+    /// catalogue if the opened store does not already carry a durable write
+    /// pointer for it.
+    pub bootstrap_runtime_schema: bool,
 }
 
 impl InMemoryServerShellConfig {
@@ -97,6 +101,7 @@ impl InMemoryServerShellConfig {
             row_id_seed: None,
             edge_cache_budget: None,
             role: NodeRole::Core,
+            bootstrap_runtime_schema: false,
         }
     }
 
@@ -115,6 +120,15 @@ impl InMemoryServerShellConfig {
     /// Configure this shell's server role.
     pub fn with_role(mut self, role: NodeRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// Ensure the constructor schema is present in the runtime catalogue at
+    /// startup. Product `JazzServer` uses this for pre-seeded stores opened
+    /// from a data directory; low-level loopback shells leave it disabled so
+    /// their admin-publish tests observe an initially empty runtime lane.
+    pub fn with_runtime_schema_bootstrap(mut self) -> Self {
+        self.bootstrap_runtime_schema = true;
         self
     }
 }
@@ -258,6 +272,14 @@ impl ShellDb {
             Self::Memory(db) => db.set_edge_cache_budget(budget),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.set_edge_cache_budget(budget),
+        }
+    }
+
+    fn current_write_schema(&self) -> CurrentWriteSchema {
+        match self {
+            Self::Memory(db) => db.current_write_schema(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.current_write_schema(),
         }
     }
 
@@ -422,6 +444,8 @@ impl InMemoryServerShell {
     ) -> ShellResult<Self> {
         let edge_cache_budget = config.edge_cache_budget;
         let role = config.role;
+        let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
+        let bootstrap_schema = config.schema.clone();
         let db = match &storage_config {
             StorageConfig::InMemory => {
                 let refs = config.schema.column_families();
@@ -461,7 +485,7 @@ impl InMemoryServerShell {
         };
         db.set_edge_cache_budget(edge_cache_budget);
 
-        Ok(Self {
+        let mut shell = Self {
             db,
             role,
             sessions: Vec::new(),
@@ -470,7 +494,11 @@ impl InMemoryServerShell {
             runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
             drain_state: DrainState::Running,
-        })
+        };
+        if bootstrap_runtime_schema {
+            shell.bootstrap_runtime_schema(bootstrap_schema)?;
+        }
+        Ok(shell)
     }
 
     /// Return the shell's ABI runtime handle for diagnostics in unit tests.
@@ -495,10 +523,30 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
+    fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
+        let schema_id = schema.version_id();
+        let current = self.db.current_write_schema();
+        if current.schema == schema_id && current.revision > 0 {
+            self.runtime_schema_state.current_write_revision = current.revision;
+            self.runtime_schema_state.last_published_schema = Some(schema_id);
+            return Ok(());
+        }
+
+        self.publish_runtime_schema(schema)?;
+        Ok(())
+    }
+
     /// Publish a schema to the local runtime catalogue and make it the current write schema.
     pub fn publish_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
+        let current = self.db.current_write_schema();
+        if current.schema == schema_id && current.revision > 0 {
+            self.runtime_schema_state.current_write_revision = current.revision;
+            self.runtime_schema_state.last_published_schema = Some(schema_id);
+            return Ok(schema_id);
+        }
+
         let publish_acks = catalogue_acks(self.db.publish_schema(schema_version)?)?;
         if !publish_acks
             .iter()

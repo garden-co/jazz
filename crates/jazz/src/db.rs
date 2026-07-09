@@ -1927,6 +1927,11 @@ where
             .map_err(Into::into)
     }
 
+    /// Return the current write-schema pointer known to this database.
+    pub fn current_write_schema(&self) -> CurrentWriteSchema {
+        self.node.node.borrow().current_write_schema()
+    }
+
     /// Open an exclusive transaction over the current local snapshot.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
         let tx_id = self.open_exclusive_handle()?;
