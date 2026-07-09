@@ -19,6 +19,7 @@ use axum::{
 use jazz::db::CommitUnitTrust;
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::AuthorId;
+use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
     WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
@@ -740,21 +741,32 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
 }
 
 fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
+    if bytes.len() > MAX_WIRE_FRAME_BYTES {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)?;
+    if frames
+        .iter()
+        .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    Ok(frames)
 }
 
 async fn send_ws_encoded_frames(
     socket: &mut WebSocket,
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
-    let batch = postcard::to_allocvec(frames).map_err(axum::Error::new)?;
-    #[cfg(feature = "sync-autopsy")]
-    jazz::db::sync_autopsy::record(format!(
-        "server websocket send batch frames={} bytes={}",
-        frames.len(),
-        batch.len()
-    ));
-    socket.send(Message::Binary(batch)).await
+    for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
+        #[cfg(feature = "sync-autopsy")]
+        jazz::db::sync_autopsy::record(format!(
+            "server websocket send batch bytes={}",
+            batch.len()
+        ));
+        socket.send(Message::Binary(batch)).await?;
+    }
+    Ok(())
 }
 
 async fn send_ws_error(socket: &mut WebSocket, error: WireError) {
@@ -767,8 +779,31 @@ async fn send_ws_frames(socket: &mut WebSocket, frames: &[WireFrame]) -> Result<
         .map(encode_frame)
         .collect::<Result<Vec<_>, _>>()
         .map_err(axum::Error::new)?;
-    let batch = postcard::to_allocvec(&encoded).map_err(axum::Error::new)?;
-    socket.send(Message::Binary(batch)).await
+    send_ws_encoded_frames(socket, &encoded).await
+}
+
+fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    for frame in frames {
+        if validate_wire_frame_len(frame.len()).is_err() {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        let mut candidate = current.clone();
+        candidate.push(frame.clone());
+        let encoded = postcard::to_allocvec(&candidate)?;
+        if encoded.len() > MAX_WIRE_FRAME_BYTES && !current.is_empty() {
+            batches.push(postcard::to_allocvec(&current)?);
+            current.clear();
+        } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        current.push(frame.clone());
+    }
+    if !current.is_empty() {
+        batches.push(postcard::to_allocvec(&current)?);
+    }
+    Ok(batches)
 }
 
 async fn close_ws_for_shutdown(socket: &mut WebSocket) {
@@ -1196,6 +1231,28 @@ mod tests {
         ));
         let encoded = vec![encode_frame(&hello).expect("encode client hello")];
         postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
+    }
+
+    #[test]
+    fn websocket_frame_batches_split_near_cap_frames() {
+        let frame = vec![0x42; MAX_WIRE_FRAME_BYTES - 32];
+        let batches =
+            encode_ws_frame_batches(&[frame.clone(), frame]).expect("encode bounded batches");
+
+        assert_eq!(batches.len(), 2);
+        for batch in batches {
+            assert!(batch.len() <= MAX_WIRE_FRAME_BYTES);
+            let decoded = decode_ws_encoded_frame_batch(&batch).expect("decode bounded batch");
+            assert_eq!(decoded.len(), 1);
+        }
+    }
+
+    #[test]
+    fn websocket_frame_batches_reject_oversized_single_frame() {
+        let error = encode_ws_frame_batches(&[vec![0; MAX_WIRE_FRAME_BYTES + 1]])
+            .expect_err("oversized frame should not be batched");
+
+        assert!(matches!(error, postcard::Error::SerializeBufferFull));
     }
 
     async fn open_negotiated_ws(
