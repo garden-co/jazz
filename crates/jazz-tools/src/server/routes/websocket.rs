@@ -598,10 +598,12 @@ async fn handle_ws_connection(
     );
 
     let mut activity_rx = core_server_shell.subscribe_activity();
-    if drain_ws_outbound(&mut socket, &core_server_shell, session)
-        .await
-        .is_err()
-    {
+    if let Err(error) = drain_ws_outbound(&mut socket, &core_server_shell, session).await {
+        send_ws_error(
+            &mut socket,
+            WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+        )
+        .await;
         core_server_shell.close(session);
         let _ = socket.close().await;
         return;
@@ -659,7 +661,16 @@ async fn handle_ws_connection(
                         }
                     };
                     if !outbound.is_empty() {
-                        if send_ws_encoded_frames(&mut socket, &outbound).await.is_err() {
+                        if let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
+                            send_ws_error(
+                                &mut socket,
+                                WireError::new(
+                                    WireErrorCode::Internal,
+                                    WireRetry::Later,
+                                    error.to_string(),
+                                ),
+                            )
+                            .await;
                             break;
                         }
                         core_server_shell.notify_activity();
@@ -677,7 +688,14 @@ async fn handle_ws_connection(
                 if changed.is_err() {
                     break;
                 }
-                if drain_ws_outbound(&mut socket, &core_server_shell, session).await.is_err() {
+                if let Err(error) =
+                    drain_ws_outbound(&mut socket, &core_server_shell, session).await
+                {
+                    send_ws_error(
+                        &mut socket,
+                        WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -692,14 +710,14 @@ async fn drain_ws_outbound(
     socket: &mut WebSocket,
     core_server_shell: &crate::server::core_server_shell::ServerShellHandle,
     session: jazz_server::ServerSession,
-) -> Result<(), ()> {
-    let outbound = core_server_shell.tick_take(session).await.map_err(|_| ())?;
+) -> Result<(), String> {
+    let outbound = core_server_shell.tick_take(session).await?;
     if outbound.is_empty() {
         return Ok(());
     }
     send_ws_encoded_frames(socket, &outbound)
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| error.to_string())?;
     core_server_shell.notify_activity();
     Ok(())
 }
