@@ -124,6 +124,17 @@ struct CoreSubscriptionDelta<'a> {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+struct CoreRelationSubscriptionDelta<'a> {
+    base_cursor: Option<u64>,
+    cursor: u64,
+    added: Vec<CoreRowBatch<'a>>,
+    updated: Vec<CoreRowBatch<'a>>,
+    removed: Vec<CoreRemovedRow>,
+    added_edges: Vec<CoreRelationEdge>,
+    removed_edges: Vec<CoreRelationEdge>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
 struct CoreRemovedRow {
     table: String,
     row_id: CoreRowUuid,
@@ -1885,6 +1896,30 @@ fn encode_core_subscription_delta<'a>(
     })
 }
 
+fn encode_core_relation_subscription_delta<'a>(
+    added: &'a [jazz::node::CurrentRow],
+    updated: &'a [jazz::node::CurrentRow],
+    removed: &[jazz::db::RemovedRow],
+    added_edges: &[jazz::node::RelationEdge],
+    removed_edges: &[jazz::db::RemovedRelationEdge],
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&CoreRelationSubscriptionDelta {
+        base_cursor: None,
+        cursor: 0,
+        added: core_row_batches(added),
+        updated: core_row_batches(updated),
+        removed: removed
+            .iter()
+            .map(|row| CoreRemovedRow {
+                table: row.table.clone(),
+                row_id: row.row_uuid,
+            })
+            .collect(),
+        added_edges: added_edges.iter().map(core_relation_edge).collect(),
+        removed_edges: removed_edges.iter().map(core_relation_edge).collect(),
+    })
+}
+
 fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
     let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -1943,18 +1978,33 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             }))
         }
         SubscriptionEvent::Delta {
+            current,
             added,
             updated,
             removed,
+            added_edges,
+            removed_edges,
             settled,
             tier,
             ..
         } => {
             let delta = encode_core_subscription_delta(added, updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let relation_delta = encode_core_relation_subscription_delta(
+                added,
+                updated,
+                removed,
+                added_edges,
+                removed_edges,
+            )
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let relation_snapshot = encode_core_relation_snapshot(current)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "delta",
                 "delta": delta,
+                "relation_delta": relation_delta,
+                "relation_snapshot": relation_snapshot,
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             }))

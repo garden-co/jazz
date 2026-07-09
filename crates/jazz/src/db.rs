@@ -51,7 +51,14 @@ use crate::protocol_limits::{
     validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
     validate_wire_frame_len,
 };
-use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
+use crate::query::{
+    Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery, relation_query_to_query,
+};
+#[cfg(test)]
+use crate::query::{
+    RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -753,12 +760,15 @@ where
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
     pub async fn all_relation_query_for_identity(
         &self,
-        _query: &RelationQuery,
+        query: &RelationQuery,
         opts: ReadOpts,
-        _author: AuthorId,
+        author: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        Err(relation_query_requires_unified_lowering())
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        self.all_relation_snapshot_for_identity(&prepared, opts, author)
+            .await
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.
@@ -1047,12 +1057,14 @@ where
 
     async fn open_relation_subscription(
         &self,
-        _query: &RelationQuery,
+        query: &RelationQuery,
         opts: ReadOpts,
-        _author: AuthorId,
+        author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        Err(relation_query_requires_unified_lowering())
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        self.open_subscription(&prepared, opts, author).await
     }
 
     fn open_subscription_upstream_coverage(
@@ -5335,7 +5347,7 @@ fn ensure_supported_propagated_subscription_tier(tier: DurabilityTier) -> Result
     }
     Err(Error::new(
         ErrorCode::Query,
-        "propagated live subscriptions require global-tier remote coverage until unified maintained lowering supports other tiers",
+        "propagated live subscriptions support only local/none or global remote coverage tiers",
     ))
 }
 
@@ -5352,17 +5364,10 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
     if opts.tier != DurabilityTier::Global {
         return Err(Error::new(
             ErrorCode::Query,
-            "sync subscription serving requires global tier until unified maintained lowering supports other tiers",
+            "sync subscription serving supports only global-tier registration",
         ));
     }
     Ok(())
-}
-
-fn relation_query_requires_unified_lowering() -> Error {
-    Error::new(
-        ErrorCode::Query,
-        "output-changing relation queries require unified query-engine lowering",
-    )
 }
 
 fn coverage_key(
