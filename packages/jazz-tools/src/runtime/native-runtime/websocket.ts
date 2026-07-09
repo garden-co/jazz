@@ -34,6 +34,13 @@ export type BrowserWebSocket = {
   addEventListener(type: "close", listener: () => void): void;
 };
 
+export const WIRE_PROTOCOL_VERSION = 2;
+export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
+export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
+export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
+export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
+export const CLIENT_WIRE_FEATURES = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+
 export function webSocketUrl(serverUrl: string, appId: string): string {
   return httpUrlToWs(serverUrl, appId);
 }
@@ -52,9 +59,9 @@ export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
 export function encodeWireClientHello(): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
-  writer.u64(1); // min_protocol_version
-  writer.u64(1); // max_protocol_version
-  writer.u64(5); // FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
+  writer.u64(MIN_WIRE_PROTOCOL_VERSION); // min_protocol_version
+  writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
+  writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(0); // WirePeerRole::Client
   return writer.finish();
 }
