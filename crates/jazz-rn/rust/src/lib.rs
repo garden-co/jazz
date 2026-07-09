@@ -264,12 +264,25 @@ pub trait MutationErrorCallback: Send + Sync {
 // RnScheduler
 // ============================================================================
 
+#[derive(Clone, Copy)]
+enum SchedulerJob {
+    Tick,
+    DeliverMutationErrors,
+}
+
+type SharedTickCallback = Arc<Mutex<Option<Arc<dyn BatchedTickCallback>>>>;
+type SharedCoreRef = Arc<Mutex<Option<Weak<Mutex<RnCoreType>>>>>;
+
 #[derive(Clone, Default)]
 struct RnScheduler {
     scheduled: Arc<AtomicBool>,
     mutation_error_delivery_scheduled: Arc<AtomicBool>,
-    core_ref: Arc<Mutex<Option<Weak<Mutex<RnCoreType>>>>>,
-    callback: Arc<Mutex<Option<Box<dyn BatchedTickCallback>>>>,
+    core_ref: SharedCoreRef,
+    callback: SharedTickCallback,
+    // The worker thread is detached: it exits once the sender is dropped and
+    // its queue drains. It must never be joined — see `shutdown` below.
+    worker: Arc<Mutex<Option<std::sync::mpsc::Sender<SchedulerJob>>>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl RnScheduler {
@@ -281,12 +294,133 @@ impl RnScheduler {
 
     fn set_callback(&self, cb: Option<Box<dyn BatchedTickCallback>>) {
         if let Ok(mut slot) = self.callback.lock() {
-            *slot = cb;
+            *slot = cb.map(Arc::from);
         }
     }
 
     fn clear_scheduled(&self) {
         self.scheduled.store(false, Ordering::SeqCst);
+    }
+
+    fn send_job(&self, job: SchedulerJob) {
+        if self.shutdown.load(Ordering::SeqCst) {
+            self.clear_job_scheduled(job);
+            return;
+        }
+
+        let mut slot = match self.worker.lock() {
+            Ok(slot) => slot,
+            Err(_) => {
+                self.clear_job_scheduled(job);
+                return;
+            }
+        };
+
+        if self.shutdown.load(Ordering::SeqCst) {
+            self.clear_job_scheduled(job);
+            return;
+        }
+
+        if slot.is_none() {
+            *slot = Self::spawn_worker(
+                Arc::clone(&self.scheduled),
+                Arc::clone(&self.mutation_error_delivery_scheduled),
+                Arc::clone(&self.core_ref),
+                Arc::clone(&self.callback),
+            );
+        }
+
+        let sent = slot.as_ref().is_some_and(|sender| sender.send(job).is_ok());
+
+        if !sent {
+            // Spawn failed or the worker died; drop the job and reset both
+            // the slot and the debounce flag so the next schedule retries.
+            self.clear_job_scheduled(job);
+            *slot = None;
+        }
+    }
+
+    fn clear_job_scheduled(&self, job: SchedulerJob) {
+        match job {
+            SchedulerJob::Tick => self.scheduled.store(false, Ordering::SeqCst),
+            SchedulerJob::DeliverMutationErrors => self
+                .mutation_error_delivery_scheduled
+                .store(false, Ordering::SeqCst),
+        }
+    }
+
+    fn spawn_worker(
+        scheduled: Arc<AtomicBool>,
+        mutation_error_delivery_scheduled: Arc<AtomicBool>,
+        core_ref: SharedCoreRef,
+        callback: SharedTickCallback,
+    ) -> Option<std::sync::mpsc::Sender<SchedulerJob>> {
+        let (sender, receiver) = std::sync::mpsc::channel::<SchedulerJob>();
+        let spawned = std::thread::Builder::new()
+            .name("jazz-rn-scheduler".into())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    std::thread::sleep(Duration::from_millis(1));
+                    match job {
+                        SchedulerJob::Tick => {
+                            scheduled.store(false, Ordering::SeqCst);
+                            Self::request_batched_tick(&callback);
+                        }
+                        SchedulerJob::DeliverMutationErrors => {
+                            mutation_error_delivery_scheduled.store(false, Ordering::SeqCst);
+                            Self::deliver_mutation_errors(&core_ref);
+                        }
+                    }
+                }
+            });
+
+        match spawned {
+            Ok(_) => Some(sender),
+            Err(error) => {
+                // Do not panic: this runs while `send_job` holds the worker
+                // mutex, and poisoning it would silently disable the
+                // scheduler for good.
+                eprintln!("jazz-rn: failed to spawn scheduler thread: {error}");
+                None
+            }
+        }
+    }
+
+    fn request_batched_tick(callback: &SharedTickCallback) {
+        // Clone the callback out before invoking it: the call blocks until
+        // the JS thread services it, and `set_callback(None)` (run by
+        // `close()` on that same JS thread) must never wait on it.
+        let callback = callback.lock().ok().and_then(|slot| slot.clone());
+        if let Some(cb) = callback {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cb.request_batched_tick();
+            }));
+        }
+    }
+
+    fn deliver_mutation_errors(core_ref: &SharedCoreRef) {
+        let core_ref = core_ref.lock().ok().and_then(|slot| slot.clone());
+
+        if let Some(core) = core_ref.and_then(|core_ref| core_ref.upgrade()) {
+            if let Err(error) = deliver_pending_mutation_errors(&core) {
+                eprintln!("jazz-rn: deliver pending mutation errors: {error:?}");
+            }
+        }
+    }
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.scheduled.store(false, Ordering::SeqCst);
+        self.mutation_error_delivery_scheduled
+            .store(false, Ordering::SeqCst);
+
+        // Dropping the sender lets the worker drain its queue (no-ops once
+        // the callbacks are cleared) and exit on its own. Never join it: JS
+        // callbacks run via a blocking hop to the JS thread, and `close()`
+        // runs on that same thread — joining here can deadlock the app.
+        if let Ok(mut slot) = self.worker.lock() {
+            *slot = None;
+        }
     }
 }
 
@@ -297,7 +431,7 @@ impl Scheduler for RnScheduler {
             return;
         }
 
-        // Defer firing the JS callback through a background thread so we do
+        // Defer firing the JS callback through the scheduler worker so we do
         // not synchronously re-enter `RnRuntime::batched_tick` from inside
         // `core.batched_tick()`. Without this delay,
         // `cb.request_batched_tick()` enqueues a JS microtask that runs
@@ -306,19 +440,7 @@ impl Scheduler for RnScheduler {
         // of schedule calls within a tick into a single follow-up callback.
         // This mirrors `schedule_mutation_error_delivery` below and
         // `NapiScheduler::schedule_batched_tick` in `jazz-napi`.
-        let scheduled = Arc::clone(&self.scheduled);
-        let callback = Arc::clone(&self.callback);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1));
-            scheduled.store(false, Ordering::SeqCst);
-            if let Ok(guard) = callback.lock() {
-                if let Some(cb) = guard.as_ref() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        cb.request_batched_tick();
-                    }));
-                }
-            }
-        });
+        self.send_job(SchedulerJob::Tick);
     }
 
     fn schedule_mutation_error_delivery(&self) {
@@ -329,22 +451,7 @@ impl Scheduler for RnScheduler {
             return;
         }
 
-        let scheduled = Arc::clone(&self.mutation_error_delivery_scheduled);
-        let core_ref = self.core_ref.lock().ok().and_then(|slot| slot.clone());
-        let Some(core_ref) = core_ref else {
-            scheduled.store(false, Ordering::SeqCst);
-            return;
-        };
-
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1));
-            scheduled.store(false, Ordering::SeqCst);
-            if let Some(core) = core_ref.upgrade() {
-                if let Err(error) = deliver_pending_mutation_errors(&core) {
-                    eprintln!("jazz-rn: deliver pending mutation errors: {error:?}");
-                }
-            }
-        });
+        self.send_job(SchedulerJob::DeliverMutationErrors);
     }
 }
 
@@ -367,7 +474,9 @@ fn deliver_pending_mutation_errors(core: &Arc<Mutex<RnCoreType>>) -> Result<(), 
     };
 
     for event in events {
-        callback(&event);
+        // The callback re-enters JS; a panic (e.g. a JS exception) must not
+        // kill the scheduler worker or skip the remaining events.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&event)));
     }
 
     Ok(())
@@ -853,6 +962,9 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
+            core.scheduler_mut().set_callback(None);
+            core.set_mutation_error_callback(None);
+            core.scheduler().shutdown();
             let flush_result = core.flush_storage();
             let flush_wal_result = core.flush_wal();
             let close_result = core.storage().close();
@@ -965,6 +1077,114 @@ struct RnTickNotifier {
 impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread::ThreadId;
+
+    struct BlockingTickCallback {
+        invocations: AtomicUsize,
+        entered_tx: mpsc::Sender<(usize, ThreadId)>,
+        unblock_first_rx: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl BatchedTickCallback for BlockingTickCallback {
+        fn request_batched_tick(&self) {
+            let invocation = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
+            self.entered_tx
+                .send((invocation, std::thread::current().id()))
+                .expect("test should receive tick callback");
+
+            if invocation == 1 {
+                self.unblock_first_rx
+                    .lock()
+                    .expect("test unblock receiver should not be poisoned")
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("test should unblock first tick callback");
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_coalesces_bursts_on_one_worker_for_follow_up_ticks() {
+        // This is intentionally an internal scheduler test: constant worker
+        // count and callback serialization are not observable through the
+        // public RN runtime API.
+        let scheduler = RnScheduler::default();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (unblock_first_tx, unblock_first_rx) = mpsc::channel();
+
+        scheduler.set_callback(Some(Box::new(BlockingTickCallback {
+            invocations: AtomicUsize::new(0),
+            entered_tx,
+            unblock_first_rx: Mutex::new(unblock_first_rx),
+        })));
+
+        scheduler.schedule_batched_tick();
+        let (first_invocation, first_thread_id) = entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first tick callback should run");
+        assert_eq!(first_invocation, 1);
+
+        for _ in 0..5 {
+            scheduler.schedule_batched_tick();
+        }
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "follow-up tick callback ran concurrently with the blocked callback"
+        );
+
+        unblock_first_tx
+            .send(())
+            .expect("first tick callback should still be waiting");
+        let (second_invocation, second_thread_id) = entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("follow-up tick callback should run after the first returns");
+        assert_eq!(second_invocation, 2);
+        assert_eq!(
+            second_thread_id, first_thread_id,
+            "follow-up tick ran on a freshly spawned scheduler thread"
+        );
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "burst schedules produced more than one follow-up tick"
+        );
+    }
+
+    struct NotifyTickCallback {
+        entered_tx: mpsc::Sender<()>,
+    }
+
+    impl BatchedTickCallback for NotifyTickCallback {
+        fn request_batched_tick(&self) {
+            let _ = self.entered_tx.send(());
+        }
+    }
+
+    #[test]
+    fn shutdown_scheduler_drops_new_ticks_and_clears_the_debounce_flag() {
+        // Internal scheduler test: post-shutdown scheduling behavior is not
+        // observable through the public RN runtime API.
+        let scheduler = RnScheduler::default();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        scheduler.set_callback(Some(Box::new(NotifyTickCallback { entered_tx })));
+
+        scheduler.shutdown();
+        scheduler.schedule_batched_tick();
+
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "tick callback ran after shutdown"
+        );
+        assert!(
+            !scheduler.scheduled.load(Ordering::SeqCst),
+            "shutdown left the tick debounce flag wedged"
+        );
     }
 }
 
