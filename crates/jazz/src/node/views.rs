@@ -620,6 +620,9 @@ where
             for global_seq in receiver_batch_global_seqs {
                 self.record_applied_global_seq(global_seq);
             }
+            if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
+                self.persist_storage_consistency_marker_through(tx_time)?;
+            }
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
         preloaded_tx_ids.extend(receiver_batch_tx_ids);

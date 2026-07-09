@@ -1502,6 +1502,9 @@ where
             .map(|(stored, global_seq)| (stored.clone(), *global_seq))
             .collect::<Vec<_>>();
         self.database.commit_batch(batch)?;
+        if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
+            self.persist_storage_consistency_marker_through(tx_time)?;
+        }
         #[cfg(test)]
         {
             self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
@@ -1627,6 +1630,9 @@ where
             None
         };
         self.database.commit_batch(batch)?;
+        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+            self.persist_storage_consistency_marker_through(tx_id.time)?;
+        }
         #[cfg(test)]
         {
             let rows = content_versions
@@ -3997,7 +4003,10 @@ where
         Ok(())
     }
 
-    pub(super) fn cleanup_settled_ahead_current_leftovers(&mut self) -> Result<(), Error> {
+    pub(super) fn cleanup_settled_ahead_current_leftovers(
+        &mut self,
+        already_consistent_through: Option<TxTime>,
+    ) -> Result<(), Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database
@@ -4009,25 +4018,29 @@ where
             if !matches!(fate, Fate::Rejected(_)) && global_seq.is_none() {
                 continue;
             }
+            let tx_time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
+            if already_consistent_through.is_some_and(|through| tx_time <= through) {
+                continue;
+            }
             let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
             let node = self
                 .node_for_alias(node_alias)
                 .ok_or(Error::InvalidStoredValue(
                     "transaction node alias must exist",
                 ))?;
-            tx_ids.push(TxId::new(
-                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
-                node,
-            ));
+            tx_ids.push(TxId::new(tx_time, node));
         }
         if tx_ids.is_empty() {
             return Ok(());
         }
         let mut batch = self.database.open_batch();
-        for tx_id in tx_ids {
-            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx_id)?;
+        for tx_id in &tx_ids {
+            self.cleanup_fated_ahead_current_for_tx(&mut batch, *tx_id)?;
         }
         self.database.commit_batch(batch)?;
+        if let Some(tx_time) = tx_ids.into_iter().map(|tx_id| tx_id.time).max() {
+            self.persist_storage_consistency_marker_through(tx_time)?;
+        }
         Ok(())
     }
 
@@ -4119,6 +4132,7 @@ where
         )?;
         if !cleanup_batch.is_empty() {
             self.database.commit_batch(cleanup_batch)?;
+            self.persist_storage_consistency_marker_through(tx_id.time)?;
         }
         Ok(())
     }

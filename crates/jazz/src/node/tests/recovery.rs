@@ -142,6 +142,101 @@ fn clean_close_reopen_skips_fated_ahead_current_sweep() {
 }
 
 #[test]
+fn unclean_reopen_skips_fated_sweep_through_consistency_marker() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(14), 10)
+                    .cells(title_cells("periodic marker")),
+            )
+            .unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+    }
+
+    reset_query_versions_for_tx_call_count();
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        query_versions_for_tx_call_count(),
+        0,
+        "periodic consistency marker should skip crash-only ahead-current sweep"
+    );
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(14), title_cells("periodic marker"))])
+    );
+}
+
+#[test]
+fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        for offset in 0_u8..20 {
+            let tx_id = node
+                .commit_mergeable(
+                    MergeableCommit::new("todos", row(100 + offset), 10 + u64::from(offset))
+                        .cells(title_cells("before marker")),
+                )
+                .unwrap();
+            node.apply_fate_update(
+                tx_id,
+                Fate::Accepted,
+                Some(GlobalSeq(1 + u64::from(offset))),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
+
+        let crash_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(200), 1000)
+                    .cells(title_cells("after marker crash window")),
+            )
+            .unwrap();
+        mark_accepted_without_ahead_cleanup(&mut node, crash_tx, GlobalSeq(1000));
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+    }
+
+    reset_query_versions_for_tx_call_count();
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        query_versions_for_tx_call_count(),
+        1,
+        "recovery should sweep only fated transactions newer than the marker"
+    );
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .filter(|(row_uuid, _)| *row_uuid == row(200))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(200), title_cells("after marker crash window"))])
+    );
+}
+
+#[test]
 fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
@@ -181,6 +276,31 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         )
         .unwrap();
     assert!(reopened.rejections.child_txs_by_parent.is_empty());
+}
+
+fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_seq: GlobalSeq)
+where
+    S: OrderedKvStorage,
+{
+    let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
+    stored.fate = Fate::Accepted;
+    stored.global_seq = Some(global_seq);
+    stored.durability = DurabilityTier::Global;
+    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let mut batch = node.database.open_batch();
+    batch.update(
+        "jazz_transactions",
+        transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            stored.fate.clone(),
+            stored.global_seq,
+            stored.durability,
+        ),
+    );
+    node.write_global_current_update(&mut batch, &version, global_seq)
+        .unwrap();
+    node.database.commit_batch(batch).unwrap();
 }
 
 #[test]
