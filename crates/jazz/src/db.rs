@@ -3187,6 +3187,23 @@ where
                             .read_view_key(),
                         })
                     });
+                    let settled_tier = remote_read_tier.unwrap_or(read_tier);
+                    let settled_binding_view = BindingViewKey {
+                        shape_id: shape.shape_id(),
+                        binding_id: binding.binding_id(),
+                        read_view: RegisterShapeOptions {
+                            tier: settled_tier,
+                            read_view: read_view.clone(),
+                        }
+                        .read_view_key(),
+                    };
+                    if node
+                        .borrow()
+                        .publication_deferred_for_binding_view(settled_binding_view)
+                    {
+                        retained.push(Rc::downgrade(&state));
+                        continue;
+                    }
                     let maintained_update =
                         if let Some(maintained) = maintained_subscription.as_mut() {
                             node.borrow_mut()
@@ -3223,7 +3240,6 @@ where
                             SubscriptionSnapshotSource::LinkSnapshot,
                         )
                     };
-                    let settled_tier = remote_read_tier.unwrap_or(read_tier);
                     let settled = subscription_is_settled(
                         &node.borrow(),
                         shape,
