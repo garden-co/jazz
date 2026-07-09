@@ -2328,6 +2328,22 @@ where
         Ok(value)
     }
 
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &crate::storage::ColumnFamilyName,
+        prefix: &crate::storage::Key,
+        upper: &crate::storage::Key,
+    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
+        self.metrics.borrow_mut().record_range(cf, prefix);
+        let value = self
+            .storage
+            .last_with_prefix_before_or_at(cf, prefix, upper)?;
+        if let Some((key, _)) = &value {
+            self.metrics.borrow_mut().record_range_row(cf, key);
+        }
+        Ok(value)
+    }
+
     fn write_many(
         &self,
         operations: &[crate::storage::WriteOperation<'_>],
