@@ -671,6 +671,15 @@ where
                 .initial_hydration_binding_views
                 .insert(binding_view_key);
         }
+        if defer_settlement {
+            self.query
+                .deferred_publication_binding_views
+                .insert(binding_view_key);
+        } else {
+            self.query
+                .deferred_publication_binding_views
+                .remove(&binding_view_key);
+        }
         let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
             preloaded.clone()
         } else if reset_result_set

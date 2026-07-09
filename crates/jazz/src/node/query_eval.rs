@@ -3840,6 +3840,15 @@ where
             .contains_key(&binding_view_key)
     }
 
+    pub(crate) fn publication_deferred_for_binding_view(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        self.query
+            .deferred_publication_binding_views
+            .contains(&binding_view_key)
+    }
+
     pub(crate) fn settled_result_transitions_for_subscription(
         &self,
         subscription: SubscriptionKey,

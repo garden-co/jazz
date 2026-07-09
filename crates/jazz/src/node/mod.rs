@@ -314,6 +314,12 @@ struct QueryServing {
     /// snapshot payloads arrive after an empty reset stamp, and every payload
     /// in that phase is eligible for complete-bundle bulk ingest.
     initial_hydration_binding_views: BTreeSet<BindingViewKey>,
+    /// Binding views that are currently receiving a chunked update sequence.
+    ///
+    /// Intermediate chunks apply storage and settled-result state, but they do
+    /// not define an observation boundary for local maintained subscribers.
+    /// Publication runs when the final chunk clears this marker.
+    deferred_publication_binding_views: BTreeSet<BindingViewKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -536,6 +542,7 @@ where
                 settled_through_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
                 initial_hydration_binding_views: BTreeSet::new(),
+                deferred_publication_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_exclusive: BTreeMap::new(),
@@ -663,6 +670,7 @@ where
         self.query.settled_through_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
         self.query.initial_hydration_binding_views.clear();
+        self.query.deferred_publication_binding_views.clear();
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;
