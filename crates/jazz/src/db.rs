@@ -43,8 +43,8 @@ use crate::peer::PeerState;
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
+    Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
 };
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
@@ -4641,6 +4641,11 @@ enum ViewUpdateChunkItem {
     ProgramFactRemove(ProgramFactEntry),
 }
 
+#[derive(Clone)]
+struct ViewUpdateChunkUnit {
+    items: Vec<ViewUpdateChunkItem>,
+}
+
 fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
     if validate_wire_frame_len(serialized_uncompressed_wire_message_len(&message)).is_ok() {
         return Ok(vec![message]);
@@ -4660,54 +4665,30 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         return Ok(vec![message]);
     };
 
-    let mut items = Vec::new();
-    items.extend(
-        version_bundles
-            .into_iter()
-            .map(ViewUpdateChunkItem::VersionBundle),
-    );
-    items.extend(
-        peer_payload_inventory
-            .complete_tx_payloads
-            .into_iter()
-            .map(ViewUpdateChunkItem::CompleteTxPayload),
-    );
-    items.extend(
-        result_member_adds
-            .into_iter()
-            .map(ViewUpdateChunkItem::ResultMemberAdd),
-    );
-    items.extend(
-        result_member_removes
-            .into_iter()
-            .map(ViewUpdateChunkItem::ResultMemberRemove),
-    );
-    items.extend(
-        program_fact_adds
-            .into_iter()
-            .map(ViewUpdateChunkItem::ProgramFactAdd),
-    );
-    items.extend(
-        program_fact_removes
-            .into_iter()
-            .map(ViewUpdateChunkItem::ProgramFactRemove),
+    let units = view_update_chunk_units(
+        version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
     );
 
     let mut chunks = Vec::new();
     let mut start = 0;
-    while start < items.len() {
+    while start < units.len() {
         let reset_chunk = chunks.is_empty() && reset_result_set;
-        let remaining = items.len() - start;
+        let remaining = units.len() - start;
         let mut low = 1;
         let mut high = remaining;
         let mut best = 0;
         while low <= high {
             let mid = low + (high - low) / 2;
-            let candidate = view_update_chunk_from_items(
+            let candidate = view_update_chunk_from_units(
                 subscription,
                 settled_through,
                 reset_chunk,
-                &items[start..start + mid],
+                &units[start..start + mid],
             );
             if serialized_uncompressed_wire_message_len(&candidate) <= MAX_WIRE_FRAME_BYTES {
                 best = mid;
@@ -4719,14 +4700,14 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         if best == 0 {
             return Err(Error::new(
                 ErrorCode::Protocol,
-                "single view update chunk item exceeds wire frame limit",
+                "single view update chunk unit exceeds wire frame limit",
             ));
         }
-        chunks.push(view_update_chunk_from_items(
+        chunks.push(view_update_chunk_from_units(
             subscription,
             settled_through,
             reset_chunk,
-            &items[start..start + best],
+            &units[start..start + best],
         ));
         start += best;
     }
@@ -4734,6 +4715,87 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         *final_chunk = true;
     }
     Ok(chunks)
+}
+
+fn view_update_chunk_units(
+    version_bundles: Vec<VersionBundle>,
+    peer_payload_inventory: PeerPayloadInventory,
+    result_member_adds: Vec<ResultMemberEntry>,
+    result_member_removes: Vec<ResultMemberEntry>,
+    program_fact_adds: Vec<ProgramFactEntry>,
+    program_fact_removes: Vec<ProgramFactEntry>,
+) -> Vec<ViewUpdateChunkUnit> {
+    let mut bundle_by_version_ref = BTreeMap::new();
+    for (bundle_idx, bundle) in version_bundles.iter().enumerate() {
+        for version in &bundle.versions {
+            bundle_by_version_ref.insert(
+                RowVersionRef::new(
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                    bundle.tx.tx_id,
+                ),
+                bundle_idx,
+            );
+        }
+    }
+
+    let mut adds_by_bundle = BTreeMap::<usize, Vec<ResultMemberEntry>>::new();
+    let mut standalone_adds = Vec::new();
+    for add in result_member_adds {
+        let Some((table, row_uuid, tx_id)) = add.as_row() else {
+            standalone_adds.push(add);
+            continue;
+        };
+        let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
+        if let Some(bundle_idx) = bundle_by_version_ref.get(&version_ref).copied() {
+            adds_by_bundle.entry(bundle_idx).or_default().push(add);
+        } else {
+            standalone_adds.push(add);
+        }
+    }
+
+    let mut units = Vec::new();
+    for (idx, bundle) in version_bundles.into_iter().enumerate() {
+        let mut items = vec![ViewUpdateChunkItem::VersionBundle(bundle)];
+        if let Some(adds) = adds_by_bundle.remove(&idx) {
+            items.extend(adds.into_iter().map(ViewUpdateChunkItem::ResultMemberAdd));
+        }
+        units.push(ViewUpdateChunkUnit { items });
+    }
+
+    units.extend(
+        peer_payload_inventory
+            .complete_tx_payloads
+            .into_iter()
+            .map(|item| ViewUpdateChunkUnit {
+                items: vec![ViewUpdateChunkItem::CompleteTxPayload(item)],
+            }),
+    );
+    units.extend(standalone_adds.into_iter().map(|item| ViewUpdateChunkUnit {
+        items: vec![ViewUpdateChunkItem::ResultMemberAdd(item)],
+    }));
+    units.extend(
+        result_member_removes
+            .into_iter()
+            .map(|item| ViewUpdateChunkUnit {
+                items: vec![ViewUpdateChunkItem::ResultMemberRemove(item)],
+            }),
+    );
+    units.extend(
+        program_fact_adds
+            .into_iter()
+            .map(|item| ViewUpdateChunkUnit {
+                items: vec![ViewUpdateChunkItem::ProgramFactAdd(item)],
+            }),
+    );
+    units.extend(
+        program_fact_removes
+            .into_iter()
+            .map(|item| ViewUpdateChunkUnit {
+                items: vec![ViewUpdateChunkItem::ProgramFactRemove(item)],
+            }),
+    );
+    units
 }
 
 fn empty_view_update_chunk(
@@ -4755,15 +4817,17 @@ fn empty_view_update_chunk(
     }
 }
 
-fn view_update_chunk_from_items(
+fn view_update_chunk_from_units(
     subscription: SubscriptionKey,
     settled_through: GlobalSeq,
     reset_result_set: bool,
-    items: &[ViewUpdateChunkItem],
+    units: &[ViewUpdateChunkUnit],
 ) -> SyncMessage {
     let mut chunk = empty_view_update_chunk(subscription, settled_through, reset_result_set);
-    for item in items {
-        chunk = push_view_update_chunk_item(chunk, item.clone());
+    for unit in units {
+        for item in &unit.items {
+            chunk = push_view_update_chunk_item(chunk, item.clone());
+        }
     }
     chunk
 }
