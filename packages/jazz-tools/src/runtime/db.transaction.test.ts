@@ -82,6 +82,36 @@ describe("Db transactions", () => {
     expect(result.value).toBe("mergeable");
   });
 
+  it("reads its own staged writes inside a mergeable callback transaction", async () => {
+    const result = await db.transaction(async (tx) => {
+      const inserted = tx.insert(app.todos, { title: "staged", done: false });
+
+      await expect(allTodos()).resolves.toEqual([]);
+      await expect(
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+      ).resolves.toEqual(inserted);
+
+      tx.update(app.todos, inserted.id, { done: true });
+      await expect(
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+      ).resolves.toEqual({
+        ...inserted,
+        done: true,
+      });
+
+      return inserted.id;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.one(app.todos.where({ id: result.value }), { tier: "local" })).resolves.toEqual(
+      {
+        id: result.value,
+        title: "staged",
+        done: true,
+      },
+    );
+  });
+
   it("types exclusive transaction waits without durability options", () => {
     if (false) {
       const result = db.exclusiveTransaction((tx) => tx.kind);
@@ -235,5 +265,18 @@ describe("Db mergeable transactions", () => {
     expect(() =>
       tx.insert(otherApp.todos, { title: "Wrong client", done: false, note: "nope" }),
     ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+  });
+
+  it("keeps write-policy dry-runs independent from uncommitted transaction rows", async () => {
+    expect(db.canInsert(app.todos, { title: "allowed", done: false })).toBe(true);
+
+    const tx = db.beginTransaction();
+    const staged = tx.insert(app.todos, { title: "staged dry-run", done: false });
+
+    expect(db.canUpdate(app.todos, staged.id, { done: true })).toBe(false);
+    expect(tx.kind).toBe("mergeable");
+
+    tx.rollback();
+    await expect(allTodos()).resolves.toEqual([]);
   });
 });

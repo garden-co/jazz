@@ -226,7 +226,14 @@ type PendingTx = {
   kind: TransactionKind;
   tx?: Tx;
   identity?: Uint8Array;
-  writes: Array<{ table: string; rowId: Uint8Array }>;
+  writes: PendingTxWrite[];
+};
+
+type PendingTxWrite = {
+  table: string;
+  rowId: Uint8Array;
+  row?: RowState;
+  deleted?: boolean;
 };
 
 type CompletedTx = {
@@ -419,8 +426,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
-      tx.writes.push({ table, rowId });
-      return this.resultForRow(table, rowId, txIdFromContext(_writeContext) ?? "", writeIdentity);
+      const row = this.rowStateFromValues(table, rowId, values);
+      tx.writes.push({ table, rowId, row });
+      return {
+        id: row.id,
+        values: row.values,
+        transactionId: txIdFromContext(_writeContext) ?? "",
+      };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
       writeIdentity
@@ -445,8 +457,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
-      tx.writes.push({ table, rowId });
-      return this.resultForRow(table, rowId, txIdFromContext(writeContext) ?? "", writeIdentity);
+      const row = this.rowStateFromValues(table, rowId, values);
+      tx.writes.push({ table, rowId, row });
+      return { id: row.id, values: row.values, transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
       writeIdentity
@@ -471,7 +484,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
-      tx.writes.push({ table, rowId });
+      tx.writes.push({
+        table,
+        rowId,
+        row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
+      });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Update", () =>
@@ -495,7 +512,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeIdentity = writeSession?.identity;
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
-    const existing = this.readRow(table, rowId, writeIdentity);
+    const existing = tx
+      ? (this.pendingRow(tx, table, rowId) ?? this.readRow(table, rowId, writeIdentity))
+      : this.readRow(table, rowId, writeIdentity);
     let cells: Uint8Array;
     try {
       cells = existing
@@ -506,7 +525,13 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (tx) {
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
-      tx.writes.push({ table, rowId });
+      tx.writes.push({
+        table,
+        rowId,
+        row: existing
+          ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
+          : this.rowStateFromValues(table, rowId, values),
+      });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
@@ -527,7 +552,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
-      tx.writes.push({ table, rowId });
+      tx.writes.push({ table, rowId, deleted: true });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
@@ -715,7 +740,11 @@ export class NativeRuntimeAdapter implements Runtime {
       const rows = session
         ? this.db.allForIdentity(query, session.identity, opts)
         : this.db.all(query, opts);
-      return rowsFromBatches(readRowBatches(rows), this.schema);
+      return this.applyTransactionReadOverlay(
+        rowsFromBatches(readRowBatches(rows), this.schema),
+        coreQueryJson,
+        optionsJson,
+      );
     } finally {
       if (attachment !== undefined) this.db.detachQuery?.(attachment);
     }
@@ -965,6 +994,135 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  private rowStateFromValues(
+    table: string,
+    rowId: Uint8Array,
+    values: Record<string, Value>,
+  ): RowState {
+    const visibleColumns = this.table(table).columns.filter(
+      (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
+    );
+    const valuesByColumn = new Map<string, Value>();
+    for (const column of visibleColumns) {
+      valuesByColumn.set(column.name, values[column.name] ?? column.default ?? { type: "Null" });
+    }
+    return withValuesByColumn(
+      {
+        table,
+        id: formatUuid(rowId),
+        values: visibleColumns
+          .filter((column) => !isProvenanceMagicColumn(column.name))
+          .map((column) => valuesByColumn.get(column.name)!),
+      },
+      valuesByColumn,
+    );
+  }
+
+  private mergeRowState(
+    table: string,
+    rowId: Uint8Array,
+    patch: Record<string, Value>,
+    tx: PendingTx,
+    identity?: Uint8Array,
+  ): RowState {
+    const current = this.pendingRow(tx, table, rowId) ?? this.readRow(table, rowId, identity);
+    const merged: Record<string, Value> = {};
+    for (const column of this.table(table).columns) {
+      const existing = current?.valuesByColumn?.get(column.name);
+      if (existing !== undefined) merged[column.name] = existing;
+    }
+    Object.assign(merged, patch);
+    return this.rowStateFromValues(table, rowId, merged);
+  }
+
+  private pendingRow(tx: PendingTx, table: string, rowId: Uint8Array): RowState | undefined {
+    const id = formatUuid(rowId);
+    for (let index = tx.writes.length - 1; index >= 0; index -= 1) {
+      const write = tx.writes[index]!;
+      if (write.table !== table || formatUuid(write.rowId) !== id) continue;
+      return write.deleted ? undefined : write.row;
+    }
+    return undefined;
+  }
+
+  private applyTransactionReadOverlay(
+    committedRows: RowState[],
+    queryJson: string,
+    optionsJson?: string | null,
+  ): RowState[] {
+    const transactionId = txIdFromOptions(optionsJson);
+    if (!transactionId) return committedRows;
+    const tx = this.pendingTxs.get(transactionId);
+    if (!tx) return committedRows;
+
+    let query: {
+      table?: unknown;
+      conditions?: unknown;
+      orderBy?: unknown;
+      limit?: unknown;
+      offset?: unknown;
+    };
+    try {
+      query = JSON.parse(queryJson) as typeof query;
+    } catch {
+      return committedRows;
+    }
+    if (typeof query.table !== "string") return committedRows;
+
+    const rowsById = new Map(committedRows.map((row) => [row.id, row]));
+    for (const write of tx.writes) {
+      if (write.table !== query.table) continue;
+      const id = formatUuid(write.rowId);
+      if (write.deleted) {
+        rowsById.delete(id);
+      } else if (write.row) {
+        rowsById.set(id, write.row);
+      }
+    }
+
+    let rows = [...rowsById.values()].filter((row) => this.rowMatchesQuery(row, query));
+    if (Array.isArray(query.orderBy) && query.orderBy.length > 0) {
+      rows = this.sortRowsForQuery(rows, query.orderBy);
+    }
+    const offset = typeof query.offset === "number" && query.offset > 0 ? query.offset : 0;
+    const limit = typeof query.limit === "number" && query.limit >= 0 ? query.limit : undefined;
+    return limit === undefined ? rows.slice(offset) : rows.slice(offset, offset + limit);
+  }
+
+  private rowMatchesQuery(row: RowState, query: { conditions?: unknown }): boolean {
+    if (!Array.isArray(query.conditions)) return true;
+    return query.conditions.every((condition) => {
+      if (!condition || typeof condition !== "object") return false;
+      const { column, op, value } = condition as {
+        column?: unknown;
+        op?: unknown;
+        value?: unknown;
+      };
+      if (typeof column !== "string" || op !== "eq") return false;
+      const actual = column === "id" ? uuidValue(row.id) : row.valuesByColumn?.get(column);
+      return actual !== undefined && queryValueEqual(actual, value);
+    });
+  }
+
+  private sortRowsForQuery(rows: RowState[], orderBy: unknown[]): RowState[] {
+    const clauses = orderBy.filter(
+      (clause): clause is [string, "asc" | "desc"] =>
+        Array.isArray(clause) &&
+        typeof clause[0] === "string" &&
+        (clause[1] === "asc" || clause[1] === "desc"),
+    );
+    return [...rows].sort((left, right) => {
+      for (const [column, direction] of clauses) {
+        const comparison = compareQueryValues(
+          column === "id" ? uuidValue(left.id) : left.valuesByColumn?.get(column),
+          column === "id" ? uuidValue(right.id) : right.valuesByColumn?.get(column),
+        );
+        if (comparison !== 0) return direction === "desc" ? -comparison : comparison;
+      }
+      return left.id.localeCompare(right.id);
+    });
+  }
+
   private refreshOpenedPlainSubscriptions(): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
@@ -974,8 +1132,8 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.query === null
           ? this.refreshNativeRelationSubscriptionRows(subscription)
           : subscription.relationMaterialization.arraySubqueries.length > 0
-          ? this.refreshRelationSubscriptionRows(subscription)
-          : this.refreshPlainSubscriptionRows(subscription);
+            ? this.refreshRelationSubscriptionRows(subscription)
+            : this.refreshPlainSubscriptionRows(subscription);
       const delta = nativeDeltaFromRows(
         nextRows,
         previousRows,
@@ -3663,6 +3821,10 @@ function rowValuesEqual(left: Value[], right: Value[]): boolean {
   return left.every((value, index) => valueEqual(value, right[index]));
 }
 
+function uuidValue(value: string): Value {
+  return { type: "Uuid", value };
+}
+
 function valueEqual(left: Value, right: Value | undefined): boolean {
   if (!right || left.type !== right.type) return false;
   switch (left.type) {
@@ -3684,9 +3846,69 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
   }
 }
 
+function queryValueEqual(left: Value, right: unknown): boolean {
+  if (right && typeof right === "object" && "type" in right) {
+    return valueEqual(left, right as Value);
+  }
+  switch (left.type) {
+    case "Boolean":
+    case "Text":
+    case "Uuid":
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Timestamp":
+    case "Row":
+      return left.value === right;
+    case "Null":
+      return right === null || right === undefined;
+    case "Bytea":
+      return Array.isArray(right)
+        ? bytesEqual(left.value, Uint8Array.from(right as number[]))
+        : right instanceof Uint8Array && bytesEqual(left.value, right);
+    case "Array":
+      return Array.isArray(right) && left.value.length === right.length;
+  }
+}
+
+function compareQueryValues(left: Value | undefined, right: Value | undefined): number {
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return -1;
+  if (right === undefined) return 1;
+  if (left.type !== right.type) return left.type.localeCompare(right.type);
+  switch (left.type) {
+    case "Boolean":
+      return Number(left.value) - Number((right as typeof left).value);
+    case "Text":
+    case "Uuid":
+    case "Timestamp":
+    case "Row":
+      return String(left.value).localeCompare(String((right as typeof left).value));
+    case "Integer":
+    case "BigInt":
+    case "Double":
+      return Number(left.value) - Number((right as typeof left).value);
+    case "Null":
+      return 0;
+    case "Bytea":
+      return compareBytes(left.value, (right as typeof left).value);
+    case "Array":
+      return left.value.length - (right as typeof left).value.length;
+  }
+}
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false;
   return left.every((byte, index) => byte === right[index]);
+}
+
+function compareBytes(left: Uint8Array, right: Uint8Array): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = left[index]! - right[index]!;
+    if (diff !== 0) return diff;
+  }
+  return left.length - right.length;
 }
 
 export function parseUuid(value: string): Uint8Array {
