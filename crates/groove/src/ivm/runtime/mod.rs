@@ -32,7 +32,7 @@ use crate::ivm::{
 use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
 use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
 use crate::storage::{
-    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
+    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
     is_windowed_history_table,
 };
 use thiserror::Error;
@@ -281,7 +281,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let staged_overlay = RefCell::new(std::mem::take(staged_writes));
+        let staged_overlay = RefCell::new(StagedWriteState::from(std::mem::take(staged_writes)));
         let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
         let tick = self.tick_with_params(table_deltas, Vec::new(), &overlay);
         overlay.drain_into(staged_writes);

@@ -1059,7 +1059,7 @@ fn vec_derived_primary_key_scan_raw(
 }
 
 #[test]
-fn staged_batch_read_index_handles_large_accumulated_batches() {
+fn staged_batch_storage_txn_handles_large_accumulated_batches() {
     let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
@@ -1077,7 +1077,7 @@ fn staged_batch_read_index_handles_large_accumulated_batches() {
         rows[0].record().get("title").unwrap(),
         Value::String("album-9999".to_owned())
     );
-    assert_eq!(batch.read_index.borrow().entries.len(), 10_000);
+    assert_eq!(batch.txn_operations.borrow().len(), 10_000);
     assert_eq!(
         rows.iter()
             .cloned()
@@ -1128,10 +1128,7 @@ fn staged_batch_read_index_handles_large_accumulated_batches() {
             .len(),
         9_999
     );
-    assert_eq!(
-        batch.read_index.borrow().indexed_operations,
-        batch.operations.len()
-    );
+    assert_eq!(batch.txn_indexed_operations.get(), batch.operations.len());
 }
 
 #[test]
@@ -1181,14 +1178,11 @@ fn primary_key_get_raw_observes_staged_overlay() {
         inserted.record().get("title").unwrap(),
         Value::String("inserted-three".to_owned())
     );
-    assert_eq!(
-        batch.read_index.borrow().indexed_operations,
-        batch.operations.len()
-    );
+    assert_eq!(batch.txn_indexed_operations.get(), batch.operations.len());
 }
 
 #[test]
-fn staged_batch_read_index_overlays_storage_for_prefix_scans() {
+fn staged_batch_storage_txn_overlays_storage_for_prefix_scans() {
     let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let mut seed = database.open_batch();
     seed.insert(
@@ -1237,7 +1231,7 @@ fn staged_batch_read_index_overlays_storage_for_prefix_scans() {
 }
 
 #[test]
-fn staged_batch_read_index_advances_only_new_operations() {
+fn staged_batch_storage_txn_advances_only_new_operations() {
     let database = Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap();
     let mut batch = database.open_batch();
     for id in 0..10_000 {
@@ -1249,7 +1243,7 @@ fn staged_batch_read_index_advances_only_new_operations() {
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(9_999)])
         .unwrap();
-    assert_eq!(batch.read_index.borrow().indexed_operations, 10_000);
+    assert_eq!(batch.txn_indexed_operations.get(), 10_000);
 
     for id in 10_000..20_000 {
         batch.insert(
@@ -1260,8 +1254,8 @@ fn staged_batch_read_index_advances_only_new_operations() {
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
         .unwrap();
-    assert_eq!(batch.read_index.borrow().indexed_operations, 20_000);
-    assert_eq!(batch.read_index.borrow().entries.len(), 20_000);
+    assert_eq!(batch.txn_indexed_operations.get(), 20_000);
+    assert_eq!(batch.txn_operations.borrow().len(), 20_000);
 
     batch.update(
         "albums",
@@ -1270,8 +1264,8 @@ fn staged_batch_read_index_advances_only_new_operations() {
     database
         .primary_key_scan_raw_in_batch(&batch, "albums", &[Value::U64(19_999)])
         .unwrap();
-    assert_eq!(batch.read_index.borrow().indexed_operations, 20_001);
-    assert_eq!(batch.read_index.borrow().entries.len(), 20_000);
+    assert_eq!(batch.txn_indexed_operations.get(), 20_001);
+    assert_eq!(batch.txn_operations.borrow().len(), 20_001);
 }
 
 #[test]
