@@ -1,15 +1,16 @@
 import * as React from "react";
 import { Component, Suspense, useState, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { JazzClientProvider } from "./provider.js";
-import { useAll, useAllSuspense } from "./use-all.js";
+import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 
 type Todo = { id: string; title: string };
+type NoQueryResult = { data: undefined; isLoading: false; error: null };
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
   return {
@@ -70,6 +71,36 @@ afterEach(() => {
 });
 
 describe("react-core/useAll", () => {
+  it("returns no result when no query is provided", () => {
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      expectTypeOf(useAll<Todo>()).toEqualTypeOf<NoQueryResult>();
+      expectTypeOf(useAll<Todo>(undefined)).toEqualTypeOf<NoQueryResult>();
+
+      const maybeQuery = makeQuery() as QueryBuilder<Todo> | undefined;
+      expectTypeOf(useAll(maybeQuery)).toEqualTypeOf<UseAllResult<Todo> | NoQueryResult>();
+    }
+  });
+
+  it("returns no result without subscribing when no query is provided", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-00");
+    let result: NoQueryResult | undefined;
+
+    function Probe() {
+      result = useAll<Todo>();
+      return <span>{result.isLoading ? "loading" : "idle"}</span>;
+    }
+
+    const { container } = render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    expect(container.textContent).toBe("idle");
+    expect(result).toEqual({ data: undefined, isLoading: false, error: null });
+    expect(subscribeCalls).toHaveLength(0);
+  });
+
   it("an inline query does not resubscribe across re-renders", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-01");
     let force!: (n: number) => void;

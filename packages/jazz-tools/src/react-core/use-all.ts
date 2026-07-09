@@ -6,10 +6,27 @@ type UseAllOptions = {
   suspense?: boolean;
 };
 
-export type UseAllResult<T extends { id: string }> = {
-  data: T[] | undefined;
-  isLoading: boolean;
-  error: Error | null;
+export type UseAllResult<T extends { id: string }> =
+  | {
+      data: undefined;
+      isLoading: true;
+      error: null;
+    }
+  | {
+      data: T[];
+      isLoading: false;
+      error: null;
+    }
+  | {
+      data: undefined;
+      isLoading: false;
+      error: Error;
+    };
+
+type UseAllNoQueryResult = {
+  data: undefined;
+  isLoading: false;
+  error: null;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -26,7 +43,7 @@ function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
   options?: UseAllOptions,
-): T[] | UseAllResult<T> {
+): T[] | UseAllResult<T> | UseAllNoQueryResult {
   const { suspense = false } = options ?? {};
   const { manager } = useJazzClient();
 
@@ -126,11 +143,24 @@ function useAllBase<T extends { id: string }>(
  * @returns `{ data, isLoading, error }`. `data` is `undefined` until the query
  *   resolves or if the query fails.
  */
+export function useAll<T extends { id: string } = { id: string }>(): UseAllNoQueryResult;
+export function useAll<T extends { id: string } = { id: string }>(
+  query: undefined,
+  options?: QueryOptions,
+): UseAllNoQueryResult;
+export function useAll<T extends { id: string }>(
+  query: QueryBuilder<T>,
+  options?: QueryOptions,
+): UseAllResult<T>;
+export function useAll<T extends { id: string }>(
+  query: QueryBuilder<T> | undefined,
+  options?: QueryOptions,
+): UseAllResult<T> | UseAllNoQueryResult;
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): UseAllResult<T> {
-  return useAllBase(query, options, { suspense: false }) as UseAllResult<T>;
+): UseAllResult<T> | UseAllNoQueryResult {
+  return useAllBase(query, options, { suspense: false }) as UseAllResult<T> | UseAllNoQueryResult;
 }
 
 /**
