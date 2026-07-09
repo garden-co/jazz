@@ -352,8 +352,12 @@ the sync lane, or the content channel.
   `toBlob`/`toStream`: apps `fetch(file.url())` and derive blobs in
   userland. Before acceptance the URL 404s — apps preview from the Blob
   they already hold (they just created it). Offline reading of files is
-  future work via a service-worker integration caching `/files/*`; the spec
-  makes no offline-read promise the primary read path can't keep.
+  future work via a service-worker integration on `/files/*` that serves
+  both directions: locally staged bodies (making `url()` live immediately
+  on the creating device, even offline and pre-acceptance — which
+  constrains the staging store to somewhere a SW can read) and cached
+  downloads. Until then the spec makes no offline-read promise the primary
+  read path can't keep.
 - **The core owns object deletion, triggered by cell death:** when a
   descriptor's cell is overwritten, nulled, or its row deleted — and the
   core observes that settle globally — it appends the file id to a durable
@@ -430,9 +434,10 @@ the sync lane, or the content channel.
 
 ## Out of Scope
 
-- Offline reads of file bodies (a future service-worker integration
-  caching `/files/*`), and any SDK byte-read API (`toBlob`/`toStream` —
-  blob derivation is userland).
+- Offline reads of file bodies (a future service-worker integration on
+  `/files/*`, serving staged bodies pre-acceptance and cached downloads
+  offline), and any SDK byte-read API (`toBlob`/`toStream` — blob
+  derivation is userland).
 - `fromStream` / unknown-length uploads (creation takes a Blob; size must
   be known at descriptor time).
 - Per-identity rate limits and quotas on grant issuance and download

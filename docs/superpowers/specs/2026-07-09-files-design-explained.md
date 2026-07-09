@@ -333,9 +333,14 @@ const blob = await (await fetch(msg.attachment.url())).blob();
   half-promising them. The honest baseline: the browser's HTTP cache holds
   immutable bodies well, so recently-viewed files often work offline — but
   nothing guarantees it. Real offline file reading is a future
-  **service-worker integration** that caches `/files/*` responses — the
-  same mechanism the web uses for every other offline asset, and the only
-  one that also covers plain `<img>` tags.
+  **service-worker integration** intercepting `/files/*` — the same
+  mechanism the web uses for every other offline asset, and the only one
+  that also covers plain `<img>` tags. It serves both directions: cached
+  downloads when offline, and this device's _staged_ bodies before
+  acceptance — making `url()` render immediately on the creating device,
+  offline included, with no fallback code. (Which is why the staging store
+  should live somewhere a SW can read, and why the Blob-in-hand preview
+  never fully dies: no SW controls the page on its first load.)
 
 The device file store still exists, but it is **upload staging only**: it
 holds bodies this device created, from `fromBlob` until the writing
