@@ -260,9 +260,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(row_id, batch_id, batch_mode)?;
         if Self::should_auto_seal_direct_write(batch_mode, write_context) {
+            // commit_batch marks the pending flush and fires the tick itself:
+            // the batch was just tracked, so it reaches the sealing tail
+            // rather than the missing/empty/already-sealed early returns
+            // (which do not tick).
             self.commit_batch(batch_id)?;
         } else {
-            // commit_batch runs these operations internally, avoid firing two ticks
             self.mark_storage_write_pending_flush();
             self.immediate_tick();
         }
