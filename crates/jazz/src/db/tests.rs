@@ -1389,6 +1389,81 @@ fn db_facade_opens_writes_and_reads_todos_end_to_end() {
 }
 
 #[test]
+fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0x31; 16]);
+    let db = open_db(0x31, owner, &schema);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let row_id = row(0x31);
+    db.insert_with_id("todos", row_id, cells("delete me", false, owner))
+        .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![row_id]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.delete("todos", row_id).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row_id]
+    );
+}
+
+#[test]
+fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
+    let schema = owner_id_public_schema();
+    let author = AuthorId::from_bytes([0x32; 16]);
+    let db = open_db(0x32, AuthorId::SYSTEM, &schema);
+    let user_id = "local-first-user";
+    db.set_identity_claims(
+        author,
+        BTreeMap::from([("user_id".to_owned(), Value::String(user_id.to_owned()))]),
+    );
+    let query = Query::from("messages");
+    let prepared = prepared(&db, &query);
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), author)).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let row_id = row(0x32);
+    db.insert_with_id_for_identity(
+        author,
+        "messages",
+        row_id,
+        BTreeMap::from([
+            ("body".to_owned(), Value::String("delete me".to_owned())),
+            ("owner_id".to_owned(), Value::String(user_id.to_owned())),
+        ]),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert_eq!(row_ids(&added), vec![row_id]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.delete_for_identity(author, "messages", row_id).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row_id]
+    );
+}
+
+#[test]
 fn db_close_is_idempotent() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     db.insert("todos", doctest_support::todo_cells("close me", false))

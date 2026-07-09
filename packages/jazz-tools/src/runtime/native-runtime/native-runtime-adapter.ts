@@ -242,6 +242,7 @@ type RuntimeSession = {
 
 type SubscriptionState = {
   sources: SubscriptionSourceState[];
+  queryJson: string;
   query: PreparedQuery | null;
   identity?: Uint8Array;
   rows: RowState[];
@@ -250,12 +251,17 @@ type SubscriptionState = {
   relationRootCount: number;
   relationEdges: NativeRelationSubscriptionEdge[];
   relationMaterialization: RelationMaterializationSpec;
-  outputColumns: ColumnDescriptor[] | null;
+  outputColumns: SubscriptionOutputColumns | null;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
   callback?: Function;
   cancelled: boolean;
+};
+
+type SubscriptionOutputColumns = {
+  rootTable: string;
+  rootColumns: readonly ColumnDescriptor[];
 };
 
 type RelationMaterializationSpec = {
@@ -616,6 +622,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.throwServerTransportErrorForTier(tier);
         write.wait(tier);
         this.pumpSubscriptions();
+        this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
         const rejected = rejectedWaitError(transactionId, error);
@@ -628,6 +635,7 @@ export class NativeRuntimeAdapter implements Runtime {
           this.throwServerTransportErrorForTier(tier);
           write.wait(tier);
           this.pumpSubscriptions();
+          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
           const secondRejected = rejectedWaitError(transactionId, secondError);
@@ -762,6 +770,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
+      queryJson,
       query: usesNativeRelationApi ? null : this.prepareQuery(queryJson),
       identity,
       rows: [],
@@ -959,11 +968,12 @@ export class NativeRuntimeAdapter implements Runtime {
   private refreshOpenedPlainSubscriptions(): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
-      if (!subscription.query) continue;
 
       const previousRows = subscription.rows;
       const nextRows =
-        subscription.relationMaterialization.arraySubqueries.length > 0
+        subscription.query === null
+          ? this.refreshNativeRelationSubscriptionRows(subscription)
+          : subscription.relationMaterialization.arraySubqueries.length > 0
           ? this.refreshRelationSubscriptionRows(subscription)
           : this.refreshPlainSubscriptionRows(subscription);
       const delta = nativeDeltaFromRows(
@@ -984,6 +994,23 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowsBytes = subscription.identity
       ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
       : this.db.all(subscription.query, subscription.opts);
+    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
+  }
+
+  private refreshNativeRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
+    if (
+      !this.db.allRelationQuery ||
+      (subscription.identity && !this.db.allRelationQueryForIdentity)
+    ) {
+      return [];
+    }
+    const rowsBytes = subscription.identity
+      ? this.db.allRelationQueryForIdentity!(
+          subscription.queryJson,
+          subscription.identity,
+          subscription.opts,
+        )
+      : this.db.allRelationQuery(subscription.queryJson, subscription.opts);
     return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
   }
 
@@ -1362,6 +1389,7 @@ export class NativeRuntimeAdapter implements Runtime {
           subscription.relationMaterialization,
         );
         subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
+        subscription.opened = true;
         const wireDelta = chunk.reset
           ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
           : nativeDeltaFromRows(
@@ -1381,6 +1409,7 @@ export class NativeRuntimeAdapter implements Runtime {
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
+        subscription.opened = true;
         subscription.callback?.(applied.wireDelta);
       }
     }
@@ -1894,7 +1923,10 @@ function relationMaterializationSpec(
   };
 }
 
-function subscriptionOutputColumns(queryJson: string, schema: WasmSchema): ColumnDescriptor[] {
+function subscriptionOutputColumns(
+  queryJson: string,
+  schema: WasmSchema,
+): SubscriptionOutputColumns {
   const parsed = JSON.parse(queryJson) as {
     table?: unknown;
     select?: unknown;
@@ -1905,12 +1937,15 @@ function subscriptionOutputColumns(queryJson: string, schema: WasmSchema): Colum
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
   }
-  return outputColumnsForTable(
-    parsed.table,
-    schema,
-    readSelectColumns(parsed.select_columns ?? parsed.select),
-    readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
-  );
+  return {
+    rootTable: parsed.table,
+    rootColumns: outputColumnsForTable(
+      parsed.table,
+      schema,
+      readSelectColumns(parsed.select_columns ?? parsed.select),
+      readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
+    ),
+  };
 }
 
 function outputColumnsForTable(
@@ -3508,7 +3543,7 @@ function nativeDeltaFromRows(
   rows: RowState[],
   previousRows: RowState[] = [],
   schema?: WasmSchema,
-  outputColumns: readonly ColumnDescriptor[] | null = null,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   const previousByKey = new Map(
     previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
@@ -3544,7 +3579,7 @@ function nativeDeltaFromRows(
 function nativeResetDeltaFromRows(
   rows: RowState[],
   schema: WasmSchema,
-  outputColumns: readonly ColumnDescriptor[] | null = null,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   return {
     ...nativeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
@@ -3558,7 +3593,7 @@ function nativeDeltaFromChanges(
   removed: Array<{ id: string; index: number }>,
   rowIndexByKey: Map<string, number>,
   schema?: WasmSchema,
-  outputColumns: readonly ColumnDescriptor[] | null = null,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   return {
     __jazzNativeRowDelta: true,
@@ -3580,11 +3615,14 @@ function encodeNativeRows(
   rowIndexByKey: Map<string, number>,
   schema: WasmSchema | undefined,
   updated = false,
-  outputColumns: readonly ColumnDescriptor[] | null = null,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): Uint8Array {
   const chunks: Uint8Array[] = [];
   for (const row of rows) {
-    const columns = outputColumns ?? schema?.[row.table]?.columns;
+    const columns =
+      outputColumns && row.table === outputColumns.rootTable
+        ? outputColumns.rootColumns
+        : schema?.[row.table]?.columns;
     if (!columns) {
       throw new Error(`missing schema for subscription row table ${row.table}`);
     }
