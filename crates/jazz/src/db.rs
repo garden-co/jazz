@@ -6117,7 +6117,17 @@ fn subscription_reset_event(
     settled: bool,
     current: RelationSnapshot,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, &RelationSnapshot::default(), &current, true)
+    SubscriptionEvent::Delta {
+        reset: true,
+        added: current.rows,
+        updated: Vec::new(),
+        removed: Vec::new(),
+        added_related: Vec::new(),
+        added_edges: current.edges,
+        removed_edges: Vec::new(),
+        settled,
+        tier,
+    }
 }
 
 fn subscription_delta_event_with_reset(
@@ -6189,6 +6199,55 @@ fn apply_maintained_update_to_snapshot(
 ) -> SubscriptionEvent {
     fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
         row.table() == table && row.row_uuid() == row_uuid
+    }
+
+    if snapshot.rows.is_empty()
+        && snapshot.edges.is_empty()
+        && snapshot.root_count == 0
+        && update.removed.is_empty()
+        && update.removed_edges.is_empty()
+    {
+        let mut added = Vec::with_capacity(update.added.len());
+        let mut added_related = Vec::new();
+        let mut seen_rows = BTreeSet::new();
+        for row in &update.added {
+            seen_rows.insert((row.table().to_owned(), row.row_uuid()));
+            added.push(row.clone());
+        }
+
+        let mut seen_edges = BTreeSet::new();
+        for (edge, row) in &update.added_edges {
+            if seen_edges.insert(edge.clone()) {
+                snapshot.edges.push(edge.clone());
+            }
+            let Some(row) = row else {
+                continue;
+            };
+            if seen_rows.insert((row.table().to_owned(), row.row_uuid())) {
+                added_related.push(row.clone());
+            }
+        }
+
+        snapshot.root_count = added.len();
+        snapshot.rows.reserve(added.len() + added_related.len());
+        snapshot.rows.extend(added.iter().cloned());
+        snapshot.rows.extend(added_related.iter().cloned());
+
+        return SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated: Vec::new(),
+            removed: Vec::new(),
+            added_related,
+            added_edges: update
+                .added_edges
+                .iter()
+                .map(|(edge, _)| edge.clone())
+                .collect(),
+            removed_edges: Vec::new(),
+            settled,
+            tier,
+        };
     }
 
     let mut added = Vec::new();
