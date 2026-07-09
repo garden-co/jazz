@@ -575,6 +575,8 @@ impl PeerState {
         let ResultTransitions {
             adds: result_member_adds,
             removes: mut result_member_removes,
+            result_payload_adds: _,
+            result_payload_removes: _,
             program_fact_adds,
             program_fact_removes,
             allow_storage_witness_fallback,
@@ -876,6 +878,8 @@ impl PeerState {
         Ok(ResultTransitions {
             adds: result_member_adds,
             removes: result_member_removes,
+            result_payload_adds: Vec::new(),
+            result_payload_removes: Vec::new(),
             program_fact_adds,
             program_fact_removes,
             allow_storage_witness_fallback,
@@ -1139,6 +1143,8 @@ impl PeerState {
         let ResultTransitions {
             adds: source_adds,
             removes: source_removes,
+            result_payload_adds: _,
+            result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,

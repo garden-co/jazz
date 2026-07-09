@@ -266,7 +266,9 @@ fn assert_unsupported_subscription_include_deleted(error: Error) {
 fn assert_unsupported_propagated_subscription_tier(error: Error) {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(
-        error.message.contains("global-tier remote coverage"),
+        error
+            .message
+            .contains("support only local/none or global remote coverage tiers"),
         "unexpected error message: {}",
         error.message
     );
@@ -938,6 +940,7 @@ fn relation_schema() -> JazzSchema {
                 ColumnSchema::new("owner_id", ColumnType::Uuid),
             ],
         )
+        .with_reference("owner_id", "users")
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
         TableSchema::new(
@@ -947,6 +950,7 @@ fn relation_schema() -> JazzSchema {
                 ColumnSchema::new("todo_id", ColumnType::Uuid),
             ],
         )
+        .with_reference("todo_id", "todos")
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
     ])
@@ -1533,6 +1537,382 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
 }
 
 #[test]
+fn relation_query_one_shot_hop_uses_unified_query_path() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("bob todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xb1).0)),
+        ]),
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::Value::String(
+                            "alice".to_owned(),
+                        )),
+                    },
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
+}
+
+#[test]
+fn relation_query_subscription_hop_uses_unified_query_path() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), vec![row(0x11)]);
+}
+
+#[test]
+fn relation_snapshot_reverse_array_skips_deleted_children() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    db.delete("todos", row(0x11)).unwrap();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+}
+
+#[test]
+fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() {
+    let schema = JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
+            ],
+        )
+        .with_reference("ownerId", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x11),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    let joined_before_delete = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined_before_delete), vec![row(0xa1), row(0xa1)]);
+    db.delete("todos", row(0x11)).unwrap();
+
+    let joined = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined), vec![row(0xa1)]);
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+}
+
+#[test]
+fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
+    let schema = JazzSchema::new([
+        TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+                ColumnSchema::new("tags", ColumnType::Array(Box::new(ColumnType::String))),
+                ColumnSchema::new("projectId", ColumnType::Uuid),
+                ColumnSchema::new("ownerId", ColumnType::nullable(ColumnType::Uuid)),
+                ColumnSchema::new(
+                    "assigneesIds",
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                ),
+            ],
+        )
+        .with_reference("projectId", "projects")
+        .with_reference("ownerId", "users")
+        .with_reference("assigneesIds", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+    ]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    db.insert_with_id(
+        "projects",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "todos",
+        row(0x22),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("Write tests".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "tags".to_owned(),
+                Value::Array(vec![Value::String("dev".to_owned())]),
+            ),
+            ("projectId".to_owned(), Value::Uuid(row(0xa1).0)),
+            ("ownerId".to_owned(), Value::Nullable(None)),
+            ("assigneesIds".to_owned(), Value::Array(Vec::new())),
+        ]),
+    )
+    .unwrap();
+
+    let query = Query::from("projects")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaProject", "todos", "projectId", "id")
+                .select([
+                    "title",
+                    "done",
+                    "tags",
+                    "projectId",
+                    "ownerId",
+                    "assigneesIds",
+                    "$createdAt",
+                    "$updatedAt",
+                ])
+                .limit(1),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].target_row, row(0x22));
+    let child = snapshot
+        .rows
+        .iter()
+        .find(|candidate| candidate.row_uuid() == row(0x22))
+        .expect("child row is materialized");
+    let (descriptor, _) = child.encoded_record();
+    assert!(descriptor.field_index("$createdAt").is_some());
+    assert!(descriptor.field_index("$updatedAt").is_some());
+}
+
+#[test]
 fn include_deleted_fails_closed_on_live_subscription_apis() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let query = db.table("todos");
@@ -2034,6 +2414,107 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
             "comments",
             "body"
         )
+    );
+}
+
+#[test]
+fn array_subquery_subscription_projects_late_root_and_existing_forward_target() {
+    let schema = relation_schema();
+    let db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
+    db.insert_with_id(
+        "users",
+        row(0xa1),
+        BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+    )
+    .unwrap();
+    let query = Query::from("todos")
+        .select(["title"])
+        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(opened.rows.is_empty());
+
+    db.insert_with_id(
+        "todos",
+        row(0x52),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("late root".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(snapshot.root_count, 1);
+    let root = snapshot
+        .rows
+        .iter()
+        .find(|candidate| candidate.table() == "todos" && candidate.row_uuid() == row(0x52))
+        .expect("late root should be present");
+    assert_eq!(
+        root.cell(schema_table(&schema, "todos"), "title"),
+        Some(Value::String("late root".to_owned()))
+    );
+    assert_eq!(root.cell(schema_table(&schema, "todos"), "owner_id"), None);
+    assert_eq!(
+        sorted_related_text_values(
+            &snapshot,
+            &schema,
+            "todos",
+            row(0x52),
+            "owner",
+            "users",
+            "name"
+        ),
+        vec!["owner".to_owned()]
+    );
+}
+
+#[test]
+fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forward_target() {
+    let schema = issue_schema();
+    let db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
+    db.insert_with_id(
+        "projects",
+        row(0xa2),
+        BTreeMap::from([("name".to_owned(), Value::String("project".to_owned()))]),
+    )
+    .unwrap();
+    let query = Query::from("issues").select(["title"]).array_subquery(
+        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
+    );
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(opened.rows.is_empty());
+
+    db.insert_with_id(
+        "issues",
+        row(0x53),
+        issue_cells(
+            "late issue",
+            "open",
+            AuthorId::from_bytes([0xa8; 16]),
+            row(0xa2),
+            1,
+            &[],
+            None,
+        ),
+    )
+    .unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(
+        sorted_related_text_values(
+            &snapshot,
+            &schema,
+            "issues",
+            row(0x53),
+            "project",
+            "projects",
+            "name"
+        ),
+        vec!["project".to_owned()]
     );
 }
 
@@ -4932,6 +5413,124 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
     assert!(
         client_transport.try_recv().is_none(),
         "registering a supported array-subquery shape should not emit a rejection"
+    );
+}
+
+#[test]
+fn subscriber_connection_accepts_relation_register_shape_for_serving_subscription() {
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "users",
+            row(0xa1),
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "todos",
+            row(0x11),
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("alice todo".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        )
+        .unwrap();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let relation = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+    let normalized = relation_query_to_query(&relation)
+        .unwrap()
+        .validate(&schema)
+        .unwrap();
+    let binding = normalized.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: normalized.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: normalized.shape_id(),
+            ast: ShapeAst::new_relation(relation, schema.version_id()),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: normalized.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::ViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    }) = client_transport.try_recv()
+    else {
+        panic!("expected relation facade subscription view update");
+    };
+    assert_eq!(served, subscription);
+    assert!(
+        result_member_adds.iter().any(|member| {
+            let Some(member) = member.as_real_row() else {
+                return false;
+            };
+            member.table.as_str() == "todos" && member.row_uuid == row(0x11)
+        }),
+        "relation facade subscription should deliver the projected target row"
     );
 }
 

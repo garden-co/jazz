@@ -87,6 +87,8 @@ struct ReplacementKey {
 pub(crate) struct ResultTransitions {
     pub(crate) adds: Vec<ResultMemberEntry>,
     pub(crate) removes: Vec<ResultMemberEntry>,
+    pub(crate) result_payload_adds: Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
+    pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) allow_storage_witness_fallback: bool,
@@ -96,7 +98,10 @@ pub(crate) struct ResultTransitions {
 
 #[derive(Clone, Debug)]
 pub(crate) enum DecodedMaintainedEvent {
-    ResultCurrent(ResultMemberEntry),
+    ResultCurrent {
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+    },
     AggregateResult {
         member: ResultMemberEntry,
         payload: ResultMemberPayloadEntry,
@@ -136,7 +141,7 @@ enum EventIdentity {
 
 #[derive(Clone, Debug)]
 enum NetEvent {
-    Result(ResultMemberEntry),
+    Result(ResultMemberEntry, ResultMemberPayloadEntry),
     AggregateResult(
         ResultMemberEntry,
         ResultMemberPayloadEntry,
@@ -205,6 +210,12 @@ impl MaintainedSubscriptionView {
             transitions
                 .program_fact_removes
                 .extend(delta_transitions.program_fact_removes);
+            transitions
+                .result_payload_adds
+                .extend(delta_transitions.result_payload_adds);
+            transitions
+                .result_payload_removes
+                .extend(delta_transitions.result_payload_removes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
         }
@@ -219,7 +230,9 @@ impl MaintainedSubscriptionView {
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
         for (event, weight) in rows {
             let net_event = match event {
-                DecodedMaintainedEvent::ResultCurrent(entry) => NetEvent::Result(entry),
+                DecodedMaintainedEvent::ResultCurrent { member, payload } => {
+                    NetEvent::Result(member, payload)
+                }
                 DecodedMaintainedEvent::AggregateResult {
                     member,
                     payload,
@@ -257,8 +270,8 @@ impl MaintainedSubscriptionView {
                 continue;
             }
             match event {
-                NetEvent::Result(entry) => {
-                    self.apply_result_delta(entry, weight, &mut transitions);
+                NetEvent::Result(entry, payload) => {
+                    self.apply_result_delta(entry, payload, weight, &mut transitions);
                 }
                 NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
                     self.apply_aggregate_result_delta(
@@ -336,6 +349,7 @@ impl MaintainedSubscriptionView {
     fn apply_result_delta(
         &mut self,
         entry: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
         weight: i64,
         transitions: &mut ResultTransitions,
     ) {
@@ -343,9 +357,13 @@ impl MaintainedSubscriptionView {
         let new = old + weight;
         if old <= 0 && new > 0 {
             transitions.adds.push(entry.clone());
+            transitions
+                .result_payload_adds
+                .push((entry.clone(), payload.clone()));
         }
         if old > 0 && new <= 0 {
             transitions.removes.push(entry.clone());
+            transitions.result_payload_removes.push(entry.clone());
         }
         if new == 0 {
             self.result_weights.remove(&entry);
@@ -564,15 +582,19 @@ fn decode_typed_terminal_record(
                 .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalSeq)))
                 .transpose()?
                 .flatten();
-            Ok(DecodedMaintainedEvent::ResultCurrent(
-                RealRowMemberEntry::current_content((
-                    table.name.clone().into(),
-                    row_uuid,
-                    TxId::new(tx_time, tx_node),
-                ))
-                .with_settle_position(settle_position)
-                .into(),
+            let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+                table.name.clone().into(),
+                row_uuid,
+                TxId::new(tx_time, tx_node),
             ))
+            .with_settle_position(settle_position)
+            .into();
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: encode_record_descriptor(&record.descriptor())?,
+                record: record.raw().to_vec(),
+            };
+            Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
         }
         MaintainedTerminalKind::AggregateResult(schema) => {
             let table = match record.get_idx(field_idx(record, &schema.synthetic.table_field)?)? {
@@ -1036,7 +1058,7 @@ impl ReplacementKey {
 impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
-            Self::Result(entry) => EventIdentity::Result(entry.clone()),
+            Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
             Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
             Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
             Self::Replacement(key, identity, _) => {
@@ -1302,6 +1324,17 @@ mod tests {
         ("todos".to_owned().into(), row_uuid, tx(1, time))
     }
 
+    fn result_current(member: ResultMemberEntry) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ResultCurrent {
+            payload: ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: Vec::new(),
+                record: Vec::new(),
+            },
+            member,
+        }
+    }
+
     #[test]
     fn result_single_enter_then_leave_emits_add_then_remove() {
         let aliases = aliases();
@@ -1310,19 +1343,13 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         let first = maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), 1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
             .unwrap();
         assert_eq!(first.adds, vec![member.clone()]);
         assert!(first.removes.is_empty());
 
         let second = maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), -1)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
             .unwrap();
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
@@ -1339,9 +1366,9 @@ mod tests {
         let transitions = maintained
             .apply_decoded_deltas(
                 [
-                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), 1),
-                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), 1),
-                    (DecodedMaintainedEvent::ResultCurrent(member.clone()), -1),
+                    (result_current(member.clone()), 1),
+                    (result_current(member.clone()), 1),
+                    (result_current(member.clone()), -1),
                 ],
                 &aliases,
             )
@@ -1360,19 +1387,13 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
 
         let active = maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), 2)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(result_current(member.clone()), 2)], &aliases)
             .unwrap();
         assert_eq!(active.adds, vec![member.clone()]);
         assert!(active.removes.is_empty());
 
         let inactive = maintained
-            .apply_decoded_deltas(
-                [(DecodedMaintainedEvent::ResultCurrent(member.clone()), -2)],
-                &aliases,
-            )
+            .apply_decoded_deltas([(result_current(member.clone()), -2)], &aliases)
             .unwrap();
         assert!(inactive.adds.is_empty());
         assert_eq!(inactive.removes, vec![member]);

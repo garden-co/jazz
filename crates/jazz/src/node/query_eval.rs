@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{RecordDescriptor, ValueType};
+use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
@@ -40,14 +40,14 @@ use super::query_engine::{
 };
 use crate::protocol::{
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewKey,
-    ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, RowVersionRef, ShapeAst, ShapeBody,
-    Subscribe, SubscriptionKey, SyncMessage,
+    ReadViewSourceSpec, ReadViewSpec, ResultMemberEntry, ResultMemberPayloadEntry, RowVersionRef,
+    ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyncMessage,
 };
 use crate::protocol_limits::{MAX_KNOWN_STATE_EXACT_REFS, MAX_SYNC_MESSAGE_BYTES};
 use crate::query::{
     Aggregate, AggregateFunction, AggregateQuery, ArraySubquery, ArraySubqueryRequirement, Binding,
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
-    QueryError, ShapeId, ValidatedQuery, binding_id_for_values,
+    QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
 
@@ -61,7 +61,9 @@ pub(crate) struct LocalMaintainedViewSubscription {
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
     result_table: String,
+    result_select: Option<Vec<String>>,
     result_set: BTreeSet<ResultMemberEntry>,
+    result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
 }
 
@@ -2518,7 +2520,22 @@ fn normalize_array_subquery(
         child_current = slice_node;
     }
 
-    let nested_parent_input = child_current.clone();
+    for (nested_index, nested) in subquery.nested_arrays.iter().enumerate() {
+        let mut nested_path = path.to_vec();
+        nested_path.push(nested_index);
+        let nested_parent_input = child_current.clone();
+        let nested_node = normalize_array_subquery(
+            nodes,
+            nested_parent_input,
+            &child_source,
+            nested,
+            &nested_path,
+        )?;
+        if !matches!(nested.requirement, ArraySubqueryRequirement::Optional) {
+            child_current = nested_node;
+        }
+    }
+
     let path_node = RowSetNodeId(format!("array_subquery:{path_id}:path"));
     nodes.insert(
         path_node.clone(),
@@ -2544,17 +2561,6 @@ fn normalize_array_subquery(
             requirement: array_requirement(subquery.requirement),
         },
     );
-    for (nested_index, nested) in subquery.nested_arrays.iter().enumerate() {
-        let mut nested_path = path.to_vec();
-        nested_path.push(nested_index);
-        normalize_array_subquery(
-            nodes,
-            nested_parent_input.clone(),
-            &child_source,
-            nested,
-            &nested_path,
-        )?;
-    }
     Ok(path_node)
 }
 
@@ -3663,10 +3669,8 @@ where
         };
         let shape = match &ast.body {
             ShapeBody::Query(query) => query.validate(&schema.schema)?,
-            ShapeBody::Relation(_) => {
-                return Err(Error::InvalidStoredValue(
-                    "relation query registration requires unified lowering",
-                ));
+            ShapeBody::Relation(relation) => {
+                relation_query_to_query(relation)?.validate(&schema.schema)?
             }
         };
         if shape.shape_id() != shape_id {
@@ -3893,6 +3897,8 @@ where
             super::maintained_subscription_view::ResultTransitions {
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
+                result_payload_adds: Vec::new(),
+                result_payload_removes: Vec::new(),
                 program_fact_adds: current_facts.difference(&previous_facts).cloned().collect(),
                 program_fact_removes: previous_facts.difference(&current_facts).cloned().collect(),
                 allow_storage_witness_fallback: true,
@@ -5641,7 +5647,9 @@ where
             terminal_schemas,
             tables,
             result_table: shape.query().table.clone(),
+            result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
+            result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
         };
         let initial = self.apply_local_maintained_view_transitions(&mut local, transitions)?;
@@ -5743,6 +5751,14 @@ where
                 changed = true;
             }
         }
+        for member in transitions.result_payload_removes {
+            local.result_payloads.remove(&member);
+        }
+        for (member, payload) in transitions.result_payload_adds {
+            if member.table_name() == Some(local.result_table.as_str()) {
+                local.result_payloads.insert(member, payload);
+            }
+        }
         for fact in transitions.program_fact_removes {
             if local.program_facts.remove(&fact) {
                 changed = true;
@@ -5833,6 +5849,15 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
+        if local.result_select.is_some()
+            && let Some(payload) = local.result_payloads.get(member)
+        {
+            let mut row = self.current_row_from_result_payload(&table, payload)?;
+            if let Some(columns) = &local.result_select {
+                row = row.project(&table, columns)?;
+            }
+            return Ok(Some(row));
+        }
         let mut tx_versions = local.maintained.versions_by_tx(entry.2);
         let version = if let Some(version) =
             local_maintained_view_content_witness(&tx_versions, entry.0.as_str(), entry.1)
@@ -5852,8 +5877,55 @@ where
                 .ok_or(Error::MissingTransaction(entry.2))?
                 .clone()
         };
-        self.current_row_from_materialized_version(&table, &version)
-            .map(Some)
+        let mut row = self.current_row_from_materialized_version(&table, &version)?;
+        if let Some(columns) = &local.result_select {
+            row = row.project(&table, columns)?;
+        }
+        Ok(Some(row))
+    }
+
+    fn current_row_from_result_payload(
+        &mut self,
+        table: &TableSchema,
+        payload: &ResultMemberPayloadEntry,
+    ) -> Result<CurrentRow, Error> {
+        let fields: Vec<(Option<String>, ValueType)> = postcard::from_bytes(&payload.descriptor)
+            .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
+        let payload_descriptor = RecordDescriptor::new(
+            fields
+                .into_iter()
+                .map(|(name, value_type)| {
+                    name.map(|name| (name, value_type))
+                        .ok_or(Error::InvalidStoredValue(
+                            "result payload descriptor field must be named",
+                        ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
+        let row_uuid_idx = payload_descriptor
+            .field_index("row_uuid")
+            .or_else(|| payload_descriptor.field_index("id"))
+            .ok_or(Error::InvalidStoredValue(
+                "result payload is missing row identity",
+            ))?;
+        let row_uuid = payload_record.get_uuid(row_uuid_idx)?;
+        let mut descriptor_fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+        let mut values = vec![Value::Uuid(row_uuid)];
+        for (index, field) in payload_descriptor.fields().iter().enumerate() {
+            let Some(name) = &field.name else {
+                continue;
+            };
+            if name == "row_uuid" || name == "id" {
+                continue;
+            }
+            descriptor_fields.push((name.clone(), field.value_type.clone()));
+            values.push(payload_record.get_idx(index)?);
+        }
+        let descriptor = RecordDescriptor::new(descriptor_fields);
+        let raw = descriptor.create(&values)?;
+        let row = CurrentRow::new(table.name.clone(), OwnedRecord::new(raw, descriptor));
+        self.materialize_current_row(table, row)
     }
 
     pub(crate) fn prepare_query_binding_for_link(
@@ -6051,6 +6123,14 @@ where
         let Some(edges) = snapshots.get("maintained.relation_edges") else {
             return Ok(snapshot);
         };
+        #[derive(Clone)]
+        struct RelationEdgeCandidate {
+            edge: RelationEdge,
+            target_tx_time: TxTime,
+            target_tx_node: NodeAlias,
+        }
+
+        let limits = Self::relation_snapshot_no_order_limits(&shape.query().array_subqueries);
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
@@ -6059,6 +6139,7 @@ where
         let target_row_idx = required_field_idx(descriptor, "target_row")?;
         let target_tx_time_idx = required_field_idx(descriptor, "target_tx_time")?;
         let target_tx_node_idx = required_field_idx(descriptor, "target_tx_node_id")?;
+        let mut candidates = Vec::new();
         for (record, weight) in edges.iter() {
             if weight <= 0 {
                 continue;
@@ -6070,27 +6151,65 @@ where
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
             let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
-            snapshot.edges.push(RelationEdge {
-                source_table,
-                source_row,
-                relation,
-                target_table: target_table_name.clone(),
-                target_row,
+            candidates.push(RelationEdgeCandidate {
+                edge: RelationEdge {
+                    source_table,
+                    source_row,
+                    relation,
+                    target_table: target_table_name,
+                    target_row,
+                },
+                target_tx_time,
+                target_tx_node,
             });
-            if row_keys.insert((target_table_name.clone(), target_row)) {
+        }
+        candidates.sort_by(|left, right| {
+            (
+                &left.edge.source_table,
+                left.edge.source_row,
+                &left.edge.relation,
+                left.edge.target_row,
+            )
+                .cmp(&(
+                    &right.edge.source_table,
+                    right.edge.source_row,
+                    &right.edge.relation,
+                    right.edge.target_row,
+                ))
+        });
+        let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
+        for candidate in candidates {
+            let group = (
+                candidate.edge.source_table.clone(),
+                candidate.edge.source_row,
+                candidate.edge.relation.clone(),
+            );
+            let count = counts.entry(group).or_default();
+            if limits
+                .get(&candidate.edge.relation)
+                .is_some_and(|limit| *count >= *limit)
+            {
+                continue;
+            }
+            *count += 1;
+            if row_keys.insert((
+                candidate.edge.target_table.clone(),
+                candidate.edge.target_row,
+            )) {
                 let target_table = self
-                    .table_in_schema(&target_table_name, shape.schema_version())?
+                    .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
                     .clone();
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
                     &target_table,
-                    &target_table_name,
-                    target_row,
-                    target_tx_time,
-                    target_tx_node,
+                    &candidate.edge.target_table,
+                    candidate.edge.target_row,
+                    candidate.target_tx_time,
+                    candidate.target_tx_node,
                 )?;
                 snapshot.rows.push(row);
             }
+            snapshot.edges.push(candidate.edge);
         }
         Ok(snapshot)
     }
@@ -6133,6 +6252,21 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "relation edge target branch row is missing",
             ))
+    }
+
+    fn relation_snapshot_no_order_limits(subqueries: &[ArraySubquery]) -> BTreeMap<String, usize> {
+        let mut limits = BTreeMap::new();
+        for subquery in subqueries {
+            if subquery.order_by.is_empty()
+                && let Some(limit) = subquery.limit
+            {
+                limits.insert(subquery.column_name.clone(), limit);
+            }
+            limits.extend(Self::relation_snapshot_no_order_limits(
+                &subquery.nested_arrays,
+            ));
+        }
+        limits
     }
 
     fn materialize_relation_snapshot_root_rows(
@@ -6545,6 +6679,12 @@ where
         transitions.adds.extend(snapshot_transitions.adds);
         transitions.removes.extend(snapshot_transitions.removes);
         transitions
+            .result_payload_adds
+            .extend(snapshot_transitions.result_payload_adds);
+        transitions
+            .result_payload_removes
+            .extend(snapshot_transitions.result_payload_removes);
+        transitions
             .program_fact_adds
             .extend(snapshot_transitions.program_fact_adds);
         transitions
@@ -6561,6 +6701,12 @@ where
                     )?;
                     transitions.adds.extend(delta_transitions.adds);
                     transitions.removes.extend(delta_transitions.removes);
+                    transitions
+                        .result_payload_adds
+                        .extend(delta_transitions.result_payload_adds);
+                    transitions
+                        .result_payload_removes
+                        .extend(delta_transitions.result_payload_removes);
                     transitions
                         .program_fact_adds
                         .extend(delta_transitions.program_fact_adds);
