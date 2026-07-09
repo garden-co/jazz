@@ -273,11 +273,29 @@ pub fn runtime_transport_compression_features() -> WireFeatures {
 }
 
 fn default_transport_compression_features() -> WireFeatures {
-    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"))]
+    #[cfg(any(
+        all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"),
+        all(
+            target_arch = "wasm32",
+            any(
+                feature = "transport-compression-zstd",
+                feature = "transport-compression-ruzstd"
+            )
+        )
+    ))]
     {
         FEATURE_PAYLOAD_ZSTD
     }
-    #[cfg(any(target_arch = "wasm32", not(feature = "transport-compression-zstd")))]
+    #[cfg(not(any(
+        all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"),
+        all(
+            target_arch = "wasm32",
+            any(
+                feature = "transport-compression-zstd",
+                feature = "transport-compression-ruzstd"
+            )
+        )
+    )))]
     {
         FEATURE_NONE
     }
@@ -433,7 +451,7 @@ enum WireStreamEncoderInner {
 impl WireStreamEncoder {
     /// Create encoder state for one outbound connection direction.
     pub fn new(features: WireFeatures) -> Result<Self, String> {
-        let codec = WireCompression::from_features(features);
+        let codec = outbound_wire_compression_from_features(features);
         let inner = match codec {
             WireCompression::None => WireStreamEncoderInner::None,
             WireCompression::Lz4 => new_lz4_stream_encoder()?,
@@ -472,6 +490,17 @@ impl WireStreamEncoder {
             }
         }
     }
+}
+
+fn outbound_wire_compression_from_features(features: WireFeatures) -> WireCompression {
+    match WireCompression::from_features(features) {
+        WireCompression::Zstd if !cfg_can_encode_zstd() => WireCompression::None,
+        codec => codec,
+    }
+}
+
+fn cfg_can_encode_zstd() -> bool {
+    cfg!(feature = "transport-compression-zstd")
 }
 
 #[cfg(any(
@@ -561,6 +590,9 @@ impl WireStreamDecoder {
         let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
         if active.count_ones() > 1 {
             return Err("wire frame declares more than one payload compression codec".to_owned());
+        }
+        if active == FEATURE_NONE {
+            return Ok(payload.to_vec());
         }
         if WireCompression::from_features(active) != self.codec {
             return Err("wire frame compression codec changed within one connection".to_owned());
@@ -869,6 +901,18 @@ mod tests {
                 .decode_message(&encoded_second, FEATURE_NONE)
                 .unwrap(),
             second
+        );
+    }
+
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn compressed_stream_decoder_accepts_raw_envelopes() {
+        let mut decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
+        let message = b"client hello without outbound zstd encoder".to_vec();
+
+        assert_eq!(
+            decoder.decode_message(&message, FEATURE_NONE).unwrap(),
+            message
         );
     }
 
