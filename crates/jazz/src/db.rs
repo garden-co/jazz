@@ -6195,17 +6195,22 @@ fn apply_maintained_update_to_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
+    fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
+        row.table() == table && row.row_uuid() == row_uuid
+    }
+
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
 
     for row in &update.added {
-        let key = subscription_row_key(row);
+        let table = row.table();
+        let row_uuid = row.row_uuid();
         if let Some(position) = snapshot
             .rows
             .iter()
             .take(snapshot.root_count)
-            .position(|current| subscription_row_key(current) == key)
+            .position(|current| row_matches(current, table, row_uuid))
         {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
@@ -6220,9 +6225,11 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
-        if update.removed.iter().any(|(table, row_uuid)| {
-            subscription_row_key(&snapshot.rows[index]) == (table.clone(), *row_uuid)
-        }) {
+        if update
+            .removed
+            .iter()
+            .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
+        {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
             removed.push(RemovedRow {
@@ -6245,12 +6252,13 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let key = subscription_row_key(row);
+        let table = row.table();
+        let row_uuid = row.row_uuid();
         if snapshot
             .rows
             .iter()
             .take(snapshot.root_count)
-            .any(|root| subscription_row_key(root) == key)
+            .any(|root| row_matches(root, table, row_uuid))
         {
             continue;
         }
@@ -6258,7 +6266,7 @@ fn apply_maintained_update_to_snapshot(
             .rows
             .iter()
             .skip(snapshot.root_count)
-            .position(|current| subscription_row_key(current) == key)
+            .position(|current| row_matches(current, table, row_uuid))
         {
             let position = snapshot.root_count + position;
             snapshot.rows[position] = row.clone();
@@ -6272,16 +6280,21 @@ fn apply_maintained_update_to_snapshot(
             edge.target_table == removed_edge.target_table
                 && edge.target_row == removed_edge.target_row
         });
-        let removed_key = (removed_edge.target_table.clone(), removed_edge.target_row);
-        let is_root = snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .any(|row| subscription_row_key(row) == removed_key);
+        let is_root = snapshot.rows.iter().take(snapshot.root_count).any(|row| {
+            row_matches(
+                row,
+                removed_edge.target_table.as_str(),
+                removed_edge.target_row,
+            )
+        });
         if !still_referenced && !is_root {
-            snapshot
-                .rows
-                .retain(|row| subscription_row_key(row) != removed_key);
+            snapshot.rows.retain(|row| {
+                !row_matches(
+                    row,
+                    removed_edge.target_table.as_str(),
+                    removed_edge.target_row,
+                )
+            });
         }
     }
 
