@@ -21,6 +21,7 @@ use crate::query::{
     col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
+use crate::time::TxTime;
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireStreamDecoder,
     current_wire_features,
@@ -4122,6 +4123,190 @@ fn view_update_chunking_budgets_full_wire_frame_boundary() {
             MAX_WIRE_FRAME_BYTES
         );
     }
+}
+
+#[test]
+fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
+    // Internal protocol test: the public API only exposes eventual subscription
+    // rows, while this pins the chunk composition invariant that prevents
+    // per-chunk missing-ref repair from seeing false misses.
+    let schema = schema();
+    let table = &schema.tables[0];
+    let subscription = SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x25; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x36; 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let tx_node = NodeUuid::from_bytes([0x51; 16]);
+    let mut version_bundles = Vec::new();
+    let mut result_member_adds = Vec::new();
+    for idx in 0..900u16 {
+        let tx_id = TxId::new(TxTime::from(idx as u64 + 1), tx_node);
+        let row_uuid = RowUuid::from_bytes([
+            (idx >> 8) as u8,
+            idx as u8,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+            0xaa,
+        ]);
+        let tx = crate::tx::Transaction {
+            tx_id,
+            kind: crate::tx::TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorId::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            source_branch: None,
+            merge_strategy: None,
+        };
+        let version = crate::protocol::VersionRecord::from_cells(
+            table,
+            schema.version_id(),
+            row_uuid,
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String(format!("row-{idx}-{}", "x".repeat(4096))),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+            ]),
+            None,
+        )
+        .unwrap();
+        version_bundles.push(VersionBundle {
+            tx,
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(idx as u64 + 1)),
+            durability: DurabilityTier::Global,
+        });
+        result_member_adds.push(ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            row_uuid,
+            tx_id,
+        )));
+    }
+
+    let update = SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(900),
+        reset_result_set: true,
+        version_bundles,
+        peer_payload_inventory: Default::default(),
+        result_member_adds,
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
+
+    let chunks = split_oversized_view_update(update).unwrap();
+    assert!(chunks.len() > 1);
+    let mut total_adds = 0;
+    for chunk in chunks {
+        assert!(serialized_uncompressed_wire_message_len(&chunk) <= MAX_WIRE_FRAME_BYTES);
+        let SyncMessage::ViewUpdateChunk {
+            version_bundles,
+            result_member_adds,
+            ..
+        } = chunk
+        else {
+            panic!("expected chunked view update");
+        };
+        let incoming = version_bundles
+            .iter()
+            .flat_map(|bundle| {
+                bundle.versions.iter().map(|version| {
+                    RowVersionRef::new(
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        bundle.tx.tx_id,
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        for (table, row_uuid, tx_id) in result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+        {
+            total_adds += 1;
+            assert!(
+                incoming.contains(&RowVersionRef::new(table.to_string(), row_uuid, tx_id)),
+                "result add must be accompanied by its referenced version in the same chunk"
+            );
+        }
+    }
+    assert_eq!(total_adds, 900);
+}
+
+#[test]
+fn oversized_snapshot_subscription_delivers_full_settled_count() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0x71; 16]);
+    let client_author = AuthorId::from_bytes([0x72; 16]);
+    let server = open_core(0x73, AuthorId::SYSTEM, &schema);
+    let client = open_db(0x74, client_author, &schema);
+    let expected = 900;
+
+    for idx in 0..expected {
+        seed(
+            &server,
+            "todos",
+            cells(&format!("row-{idx}-{}", "x".repeat(4096)), false, owner),
+        );
+    }
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let opened = block_on(subscription.next_event()).unwrap();
+    assert!(!event_settled(&opened));
+    assert!(opened_rows(opened).is_empty());
+
+    for _ in 0..200 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+
+        while let Some(event) = subscription.try_next_event() {
+            let settled = event_settled(&event);
+            let snapshot = snapshot_from_event(event);
+            if settled {
+                assert_eq!(snapshot.rows.len(), expected);
+                return;
+            }
+        }
+    }
+
+    let rows = prepared_read(&client, &query);
+    panic!(
+        "oversized snapshot subscription did not settle; currently visible rows={}",
+        rows.len()
+    );
 }
 
 fn view_update_with_facts(
