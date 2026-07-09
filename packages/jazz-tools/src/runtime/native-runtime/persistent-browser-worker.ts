@@ -48,6 +48,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       case "upsert":
       case "delete": {
         const result = dispatchWrite(message);
+        await getRuntime().waitForTransaction(result.transactionId, "local");
         postResult(message.id, result);
         return;
       }
