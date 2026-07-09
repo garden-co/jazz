@@ -191,7 +191,7 @@ function UseAllProbe<T extends { id: string }>({
       ? result.data.map(pick).join("|")
       : result.isLoading
         ? "pending"
-        : "idle";
+        : "no result";
   return <div data-testid="rows">{text}</div>;
 }
 
@@ -693,7 +693,7 @@ describe("useAll browser integration", () => {
     );
   });
 
-  it("returns idle state when query is missing and a result when the query is provided later", async () => {
+  it("returns no result when query is missing and a result when the query is provided later", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("missing-query"),
@@ -729,9 +729,9 @@ describe("useAll browser integration", () => {
     );
 
     await waitForCondition(
-      () => getText("rows") === "idle",
+      () => getText("rows") === "no result",
       5000,
-      "expected idle text when query is missing",
+      "expected no result text when query is missing",
     );
 
     const setQueryButton = container?.querySelector('[data-testid="set-query"]');

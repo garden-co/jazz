@@ -134,14 +134,16 @@ function useAllBase<T extends { id: string }>(
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  *
- * Loading and error states are returned alongside the rows, matching the other
- * framework bindings. Use {@link useAllSuspense} when you want loading and
- * errors to flow through Suspense and an error boundary instead.
- *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns `{ data, isLoading, error }`. `data` is `undefined` until the query
- *   resolves or if the query fails.
+ * @returns `{ data, isLoading, error }`
+ * - `data` is `undefined` until the query resolves or if the query fails.
+ * - `isLoading` is `true` before the first result is available.
+ * - `error` is `null` unless there was a problem setting up the subscription
+ *   and no results could be loaded.
+ *
+ * Use {@link useAllSuspense} when you want loading and errors to flow through
+ * Suspense and an error boundary instead.
  */
 export function useAll<T extends { id: string } = { id: string }>(): UseAllNoQueryResult;
 export function useAll<T extends { id: string } = { id: string }>(

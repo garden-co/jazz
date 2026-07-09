@@ -148,7 +148,7 @@ Each framework has a reactive binding that re-renders when query results change.
 
 ### The loading state
 
-`useAll`'s `data` field (or Vue's `data` ref) and `QuerySubscription.current` are `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
+`useAll`'s `data` field (or Vue's `data` ref and Svelte's `QuerySubscription.current`) are `undefined` until the first server response arrives. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the requested data.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">

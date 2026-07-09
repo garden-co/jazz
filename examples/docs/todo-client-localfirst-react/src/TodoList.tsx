@@ -24,7 +24,8 @@ export function TodoList() {
 
   // #region reading-loading-state-react
   const allTodos = useAll(app.todos);
-  // allTodos.isLoading is true while connecting; allTodos.data is [] when loaded but empty
+  // `allTodos.data` is `undefined` while loading the first result (and `allTodos.isLoading` is `true`).
+  // `allTodos.data` is `[]` when loaded but empty
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react

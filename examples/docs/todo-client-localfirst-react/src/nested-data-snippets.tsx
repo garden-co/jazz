@@ -45,11 +45,14 @@ s.definePermissions(app, ({ policy, allowedTo, session }) => {
 
 // #region nested-query
 export function ProjectTasks({ projectId }: { projectId: string }) {
-  const { data: tasks = [], isLoading } = useAll(
-    app.tasks.where({ projectId }).orderBy("$createdAt", "desc"),
-  );
+  const {
+    data: tasks,
+    isLoading,
+    error,
+  } = useAll(app.tasks.where({ projectId }).orderBy("$createdAt", "desc"));
 
   if (isLoading) return <p>Loading…</p>;
+  if (error) return <p>Something went wrong!</p>;
 
   return (
     <ul>

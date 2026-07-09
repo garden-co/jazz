@@ -66,7 +66,6 @@ export function useSync(playerId: string): SyncResult {
 
   // ---------------------------------------------------------------------------
   // Subscriptions — useAll streams live results from the server.
-  // isLoading = not yet settled (subscription hasn't received its first result).
   // ---------------------------------------------------------------------------
 
   // Other players (exclude self)

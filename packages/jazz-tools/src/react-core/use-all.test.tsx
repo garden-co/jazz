@@ -214,7 +214,11 @@ describe("react-core/useAll", () => {
       const result = useAll(makeQuery());
       return (
         <span>
-          {result.error?.message ?? (result.isLoading ? "loading" : String(result.data?.length))}
+          {result.error
+            ? result.error.message
+            : result.isLoading
+              ? "loading"
+              : String(result.data.length)}
         </span>
       );
     }

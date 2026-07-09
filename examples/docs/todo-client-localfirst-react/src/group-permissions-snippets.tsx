@@ -122,9 +122,10 @@ export function addMember(
 
 // #region group-query-docs
 export function WorkspaceDocuments({ workspaceId }: { workspaceId: string }) {
-  const { data: docs = [], isLoading } = useAll(app.documents.where({ workspaceId }));
+  const { data: docs, isLoading, error } = useAll(app.documents.where({ workspaceId }));
 
   if (isLoading) return <p>Loading…</p>;
+  if (error) return <p>Something went wrong!</p>;
 
   return (
     <ul>

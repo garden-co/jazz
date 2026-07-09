@@ -533,7 +533,9 @@ function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: Q
     <div data-testid="rows">
       {rows
         ? rows.map((row) => row.title).join("|")
-        : (result.error?.message ?? (result.isLoading ? "loading" : "undefined"))}
+        : result.isLoading
+          ? "loading"
+          : result.error.message}
     </div>
   );
 }
