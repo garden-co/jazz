@@ -887,18 +887,18 @@ export function TableDataGrid() {
       );
 
       await Promise.all([
-        ...rowUpdates.map(({ rowId, updates }) =>
-          db.update(tableProxy, rowId, updates).wait({
+        ...rowUpdates.map(async ({ rowId, updates }) =>
+          (await db.update(tableProxy, rowId, updates)).wait({
             tier: mutationDurabilityTier,
           }),
         ),
-        ...[...queuedDeletes].map((rowId) =>
-          db.delete(tableProxy, rowId).wait({
+        ...[...queuedDeletes].map(async (rowId) =>
+          (await db.delete(tableProxy, rowId)).wait({
             tier: mutationDurabilityTier,
           }),
         ),
-        ...insertValues.map((values) =>
-          db.insert(tableProxy, values).wait({
+        ...insertValues.map(async (values) =>
+          (await db.insert(tableProxy, values)).wait({
             tier: mutationDurabilityTier,
           }),
         ),

@@ -9,8 +9,8 @@
 //! seam. New readers should start here to see how commits become table deltas
 //! and how subscriptions are exposed above the engine.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::str;
 
 use web_time::{Duration, Instant};
@@ -27,8 +27,9 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema,
 };
 use crate::storage::{
-    Key, KeyValue, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore,
-    StorageLayout, WindowConsolidation, WriteOperation, is_windowed_history_table,
+    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
+    StagedWriteState, StorageLayout, WindowConsolidation, WriteOperation,
+    is_windowed_history_table,
 };
 use thiserror::Error;
 
@@ -875,8 +876,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_read_index(batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
+        self.ensure_batch_storage_txn(batch)?;
+        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_scan_raw_with_storage(&storage, table, prefix)
     }
@@ -903,10 +904,48 @@ where
         table: &str,
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_read_index(batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
+        self.ensure_batch_storage_txn(batch)?;
+        let table_schema = self.table(table)?;
+        let primary_key = table_schema
+            .primary_key
+            .as_ref()
+            .ok_or_else(|| Error::MissingPrimaryKey(table.to_owned()))?;
+        if key.len() != primary_key.columns.len() {
+            return Err(Error::PrimaryKeyArity {
+                table: table.to_owned(),
+                expected: primary_key.columns.len(),
+                actual: key.len(),
+            });
+        }
+        let descriptor = self
+            .ivm_runtime
+            .table_descriptor(table)
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let mut encoded_key = Vec::new();
+        for (value, column) in key.iter().zip(&primary_key.columns) {
+            ensure_primary_key_value_type(table_schema, column, value)?;
+            encode_primary_key_part(&mut encoded_key, value);
+        }
+        let staged_contains_key = batch
+            .txn_operations
+            .borrow_mut()
+            .contains_key(table, &encoded_key);
+        if !staged_contains_key {
+            let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+            let key_descriptor = primary_key_descriptor(primary_key);
+            let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
+            return Ok(store
+                .get_raw(&encoded_key)?
+                .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)));
+        }
+
+        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.primary_key_get_raw_with_storage(&storage, table, key)
+        let key_descriptor = primary_key_descriptor(primary_key);
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
+        Ok(store
+            .get_raw(&encoded_key)?
+            .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)))
     }
 
     fn primary_key_get_raw_with_storage<'a, T>(
@@ -1097,8 +1136,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_read_index(batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
+        self.ensure_batch_storage_txn(batch)?;
+        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.primary_key_last_raw_with_storage(&storage, table, prefix)
     }
@@ -1297,8 +1336,8 @@ where
         index_name: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_read_index(batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.storage, &batch.read_index);
+        self.ensure_batch_storage_txn(batch)?;
+        let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.index_scan_raw_with_storage(&storage, table, index_name, prefix)
     }
@@ -1591,7 +1630,10 @@ where
         let storage_write_count = storage_writes.total.count;
         let storage_write_bytes = storage_writes.total.bytes;
         let storage_start = Instant::now();
-        if let Err(error) = self.storage.write_many(&operations) {
+        let txn = self.storage.begin_txn();
+        drop(operations);
+        txn.stage_owned_operations(staged_operations);
+        if let Err(error) = txn.commit() {
             // The runtime has already advanced in memory by this point. The v0
             // policy is to make the Database instance fatal on final commit
             // failure rather than serve possibly torn in-memory state.
@@ -1631,15 +1673,34 @@ where
         Ok(pending_writes)
     }
 
-    fn ensure_batch_read_index(&self, batch: &DatabaseBatch) -> Result<(), Error> {
-        let mut read_index = batch.read_index.borrow_mut();
-        while read_index.indexed_operations < batch.operations.len() {
-            let operation = &batch.operations[read_index.indexed_operations];
+    fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
+        let mut txn_operations = batch.txn_operations.borrow_mut();
+        while batch.txn_indexed_operations.get() < batch.operations.len() {
+            let operation = &batch.operations[batch.txn_indexed_operations.get()];
             let pending = self.pending_write_from_operation(operation)?;
-            read_index.apply_pending(pending);
-            read_index.indexed_operations += 1;
+            txn_operations.stage(self.owned_storage_operation_for_pending(&pending)?);
+            batch
+                .txn_indexed_operations
+                .set(batch.txn_indexed_operations.get() + 1);
         }
         Ok(())
+    }
+
+    fn owned_storage_operation_for_pending(
+        &self,
+        pending: &PendingTableWrite,
+    ) -> Result<OwnedWriteOperation, Error> {
+        Ok(match pending {
+            PendingTableWrite::Set { key, record, .. } => OwnedWriteOperation::Set {
+                cf: pending.table().to_owned(),
+                key: key.clone(),
+                value: record.clone(),
+            },
+            PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
+                cf: pending.table().to_owned(),
+                key: key.clone(),
+            },
+        })
     }
 
     fn pending_write_from_operation(
@@ -2313,204 +2374,6 @@ impl<'a> EncodedKeyValue<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum StagedReadOutcome {
-    Upsert(Vec<u8>),
-    Tombstone,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct BatchReadIndex {
-    indexed_operations: usize,
-    entries: BTreeMap<(String, Vec<u8>), StagedReadOutcome>,
-}
-
-impl BatchReadIndex {
-    fn apply_pending(&mut self, write: PendingTableWrite) {
-        match write {
-            PendingTableWrite::Set {
-                table, key, record, ..
-            } => {
-                self.entries
-                    .insert((table, key), StagedReadOutcome::Upsert(record));
-            }
-            PendingTableWrite::Delete { table, key } => {
-                self.entries
-                    .insert((table, key), StagedReadOutcome::Tombstone);
-            }
-        }
-    }
-}
-
-struct IndexedBatchOverlay<'a, S> {
-    base: &'a S,
-    index: &'a RefCell<BatchReadIndex>,
-}
-
-impl<'a, S> IndexedBatchOverlay<'a, S> {
-    fn new(base: &'a S, index: &'a RefCell<BatchReadIndex>) -> Self {
-        Self { base, index }
-    }
-
-    fn overlay_prefix_values(
-        values: &mut Vec<KeyValue>,
-        cf: &str,
-        prefix: &[u8],
-        index: &RefCell<BatchReadIndex>,
-    ) {
-        let mut merged = values.drain(..).collect::<BTreeMap<_, _>>();
-        let index = index.borrow();
-        let start = (cf.to_owned(), prefix.to_vec());
-        for ((entry_cf, key), outcome) in index.entries.range(start..) {
-            if entry_cf != cf || !key.starts_with(prefix) {
-                break;
-            }
-            match outcome {
-                StagedReadOutcome::Upsert(record) => {
-                    merged.insert(key.clone(), record.clone());
-                }
-                StagedReadOutcome::Tombstone => {
-                    merged.remove(key);
-                }
-            }
-        }
-        *values = merged.into_iter().collect();
-    }
-
-    fn overlay_range_values(
-        values: &mut Vec<KeyValue>,
-        cf: &str,
-        start_key: &[u8],
-        end_key: &[u8],
-        index: &RefCell<BatchReadIndex>,
-    ) {
-        let mut merged = values.drain(..).collect::<BTreeMap<_, _>>();
-        let index = index.borrow();
-        let start = (cf.to_owned(), start_key.to_vec());
-        for ((entry_cf, key), outcome) in index.entries.range(start..) {
-            if entry_cf != cf || key.as_slice() >= end_key {
-                break;
-            }
-            match outcome {
-                StagedReadOutcome::Upsert(record) => {
-                    merged.insert(key.clone(), record.clone());
-                }
-                StagedReadOutcome::Tombstone => {
-                    merged.remove(key);
-                }
-            }
-        }
-        *values = merged.into_iter().collect();
-    }
-}
-
-impl<S> OrderedKvStorage for IndexedBatchOverlay<'_, S>
-where
-    S: OrderedKvStorage,
-{
-    fn get(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &Key,
-    ) -> Result<Option<Vec<u8>>, crate::storage::Error> {
-        match self
-            .index
-            .borrow()
-            .entries
-            .get(&(cf.to_owned(), key.to_vec()))
-        {
-            Some(StagedReadOutcome::Upsert(record)) => Ok(Some(record.clone())),
-            Some(StagedReadOutcome::Tombstone) => Ok(None),
-            None => self.base.get(cf, key),
-        }
-    }
-
-    fn set(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &Key,
-        value: &[u8],
-    ) -> Result<(), crate::storage::Error> {
-        self.base.set(cf, key, value)
-    }
-
-    fn delete(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &Key,
-    ) -> Result<(), crate::storage::Error> {
-        self.base.delete(cf, key)
-    }
-
-    fn scan_range(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        let mut values = self.base.range(cf, start, end)?;
-        Self::overlay_range_values(&mut values, cf, start, end, self.index);
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        let mut values = self.base.prefix(cf, prefix)?;
-        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        let mut values = self.base.prefix(cf, prefix)?;
-        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
-        for (key, value) in values.into_iter().rev() {
-            visit(&key, &value)?;
-        }
-        Ok(())
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, crate::storage::Error> {
-        let mut values = self.base.prefix(cf, prefix)?;
-        Self::overlay_prefix_values(&mut values, cf, prefix, self.index);
-        Ok(values.into_iter().last())
-    }
-
-    fn approximate_class_bytes(
-        &self,
-        cf: &crate::storage::ColumnFamilyName,
-    ) -> Result<Option<u64>, crate::storage::Error> {
-        self.base.approximate_class_bytes(cf)
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), crate::storage::Error> {
-        self.base.write_many(operations)
-    }
-
-    fn column_family_names(&self) -> Option<Vec<String>> {
-        self.base.column_family_names()
-    }
-}
-
 fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usize {
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
@@ -2890,8 +2753,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<Record<'_>>, Error> {
-        self.database.ensure_batch_read_index(&self.batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
+        self.database.ensure_batch_storage_txn(&self.batch)?;
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_with_storage(&storage, table, prefix)
@@ -2902,8 +2765,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_read_index(&self.batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
+        self.database.ensure_batch_storage_txn(&self.batch)?;
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_raw_with_storage(&storage, table, prefix)
@@ -2914,8 +2777,8 @@ where
         table: &str,
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_read_index(&self.batch)?;
-        let overlay = IndexedBatchOverlay::new(&self.database.storage, &self.batch.read_index);
+        self.database.ensure_batch_storage_txn(&self.batch)?;
+        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_last_raw_with_storage(&storage, table, prefix)
@@ -2930,7 +2793,8 @@ where
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
     operations: Vec<BatchOperation>,
-    read_index: RefCell<BatchReadIndex>,
+    txn_operations: RefCell<StagedWriteState>,
+    txn_indexed_operations: Cell<usize>,
 }
 
 impl PartialEq for DatabaseBatch {
