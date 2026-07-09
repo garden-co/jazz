@@ -1889,6 +1889,20 @@ where
         }
     }
 
+    /// Run `callback` in a mergeable transaction and commit all staged writes as one transaction.
+    ///
+    /// If `callback` returns an error, the transaction is dropped without committing. Reads and
+    /// writes through the [`MergeableTx`] observe earlier writes staged in the same callback.
+    pub fn transaction<T>(
+        &self,
+        callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
+    ) -> Result<(T, TxId), Error> {
+        let mut tx = self.mergeable_tx();
+        let value = callback(&mut tx)?;
+        let tx_id = tx.commit()?;
+        Ok((value, tx_id))
+    }
+
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> MergeableTx<'_, S> {
         MergeableTx {
@@ -1897,6 +1911,20 @@ where
             permission_subject: Some(author),
             writes: Vec::new(),
         }
+    }
+
+    /// Run `callback` in a mergeable transaction authored and permission-checked as `author`.
+    ///
+    /// If `callback` returns an error, the transaction is dropped without committing.
+    pub fn transaction_for_identity<T>(
+        &self,
+        author: AuthorId,
+        callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
+    ) -> Result<(T, TxId), Error> {
+        let mut tx = self.mergeable_tx_for_identity(author);
+        let value = callback(&mut tx)?;
+        let tx_id = tx.commit()?;
+        Ok((value, tx_id))
     }
 
     /// Publish an immutable schema-version payload through the catalogue lane.

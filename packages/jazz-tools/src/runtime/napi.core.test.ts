@@ -382,6 +382,69 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
+  it("delivers a multi-write mergeable transaction as one subscription delta", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-transaction-delta:node"),
+      deterministicBytes("jazz-napi-native-runtime-transaction-delta:author"),
+      22,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const manager = new SubscriptionManager<WasmRow>();
+    const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      updates.push(
+        manager.handleDelta(
+          delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
+          (row) => row,
+          TEST_SCHEMA.todos.columns,
+        ),
+      );
+    });
+
+    expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
+
+    const tx = runtime.beginTransaction("mergeable");
+    const writeContext = JSON.stringify({ batch_id: tx });
+    const first = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "transaction first" },
+        done: { type: "Boolean", value: false },
+      },
+      writeContext,
+      "33333333-3333-4333-8333-333333333333",
+    );
+    const second = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "transaction second" },
+        done: { type: "Boolean", value: true },
+      },
+      writeContext,
+      "44444444-4444-4444-8444-444444444444",
+    );
+
+    expect(first.transactionId).toBe(tx);
+    expect(second.transactionId).toBe(tx);
+    expect(updates).toHaveLength(1);
+
+    runtime.commitTransaction(tx);
+    await runtime.waitForTransaction(tx, "local");
+
+    expect(updates).toHaveLength(2);
+    expect(updates[1]?.reset).not.toBe(true);
+    expect(updates[1]?.delta).toHaveLength(2);
+    expect(updates[1]?.delta.map((change) => change.id).sort()).toEqual([first.id, second.id]);
+
+    runtime.unsubscribe(handle);
+  });
+
   it("applies session ownership policy to local native NAPI inserts and reads", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
