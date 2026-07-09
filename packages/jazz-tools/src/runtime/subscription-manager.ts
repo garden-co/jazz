@@ -27,28 +27,61 @@ export type RowDelta<T> =
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
   | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
 
+export type SubscriptionDelta<T> =
+  | {
+      /** Ordered list of changes for this delta. */
+      delta: RowDelta<T>[];
+      reset?: false;
+    }
+  | {
+      /** Complete replacement result after applying this reset delta. */
+      all: T[];
+      /** Ordered list of changes for this delta. */
+      delta: RowDelta<T>[];
+      /** True when this delta replaces all previously observed state. */
+      reset: true;
+    };
+
 /**
- * Delta result from a subscription callback.
- *
- * Contains the full current state (`all`) plus an ordered row-change stream.
+ * Canonical reducer for subscription streams. Consumers own the materialized
+ * result set; the stream only guarantees that reducing deltas in order yields
+ * the current view. Fresh subscriptions start with a reset delta.
  */
-export interface SubscriptionDelta<T> {
-  /**
-   * Current full result set after applying this delta. Freshly allocated on
-   * every delta: the array and its rows are new object references each time,
-   * so consumers that diff by identity will see every row as changed. Reactive
-   * frameworks should reconcile with `applyDelta`/`reconcileArray` from
-   * `reconcile-array.js` to preserve identity for rows that did not change.
-   */
-  all: T[];
-  /** Ordered list of changes for this delta */
-  delta: RowDelta<T>[];
-  /**
-   * True when the producer is sending a complete replacement snapshot. Empty
-   * reset snapshots are semantically different from empty incremental deltas:
-   * consumers must replace their current state with `all`.
-   */
-  reset?: boolean;
+export function applySubscriptionDelta<T extends { id: string }>(
+  current: T[],
+  delta: SubscriptionDelta<T>,
+): T[] {
+  if (delta.reset) {
+    current.length = 0;
+  }
+
+  for (const change of delta.delta) {
+    switch (change.kind) {
+      case RowChangeKind.Added:
+        removeById(current, change.id);
+        current.splice(Math.max(0, Math.min(change.index, current.length)), 0, change.item);
+        break;
+      case RowChangeKind.Removed:
+        removeById(current, change.id);
+        break;
+      case RowChangeKind.Updated: {
+        const existing = current.find((item) => item.id === change.id);
+        removeById(current, change.id);
+        const next = change.item ?? existing;
+        if (next) {
+          current.splice(Math.max(0, Math.min(change.index, current.length)), 0, next);
+        }
+        break;
+      }
+    }
+  }
+
+  return current;
+}
+
+function removeById<T extends { id: string }>(current: T[], id: string): void {
+  const index = current.findIndex((item) => item.id === id);
+  if (index !== -1) current.splice(index, 1);
 }
 
 /**
@@ -169,13 +202,13 @@ export class SubscriptionManager<T extends { id: string }> {
       }
     }
 
+    const all = this.orderedIds
+      .map((id) => this.currentResults.get(id))
+      .filter((item): item is T => item !== undefined);
     return {
-      all: this.orderedIds
-        .map((id) => this.currentResults.get(id))
-        .filter((item): item is T => item !== undefined),
       delta,
-      ...(reset ? { reset: true } : {}),
-    };
+      ...(reset ? { reset: true as const, all } : {}),
+    } as SubscriptionDelta<T>;
   }
 
   /**

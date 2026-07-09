@@ -143,24 +143,17 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {
     match event {
-        SubscriptionEvent::Opened {
-            current: snapshot, ..
-        }
-        | SubscriptionEvent::Reset {
-            current: snapshot, ..
-        } => {
-            assert!(
-                snapshot.rows.iter().any(|row| row.row_uuid() == parent),
-                "{label}: parent row missing from relation snapshot"
-            );
-        }
         SubscriptionEvent::Delta {
-            current,
+            added,
+            added_related,
             added_edges,
+            reset,
             ..
         } => {
             assert!(
-                current.rows.iter().any(|row| row.row_uuid() == parent) || !added_edges.is_empty(),
+                added.iter().any(|row| row.row_uuid() == parent)
+                    || added_related.iter().any(|row| row.row_uuid() == parent)
+                    || (!reset && !added_edges.is_empty()),
                 "{label}: relation delta did not include parent state or edge additions"
             );
         }

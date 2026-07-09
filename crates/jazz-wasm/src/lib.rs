@@ -153,12 +153,36 @@ struct WasmRelationSnapshot<'a> {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct WasmSubscriptionDelta<'a> {
+    added: Vec<WasmRowBatch<'a>>,
+    updated: Vec<WasmRowBatch<'a>>,
+    removed: Vec<WasmRemovedRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WasmRelationSubscriptionDelta<'a> {
+    base_cursor: Option<u64>,
+    cursor: u64,
+    added: Vec<WasmRowBatch<'a>>,
+    updated: Vec<WasmRowBatch<'a>>,
+    removed: Vec<WasmRemovedRow>,
+    added_edges: Vec<WasmRelationEdge>,
+    removed_edges: Vec<WasmRelationEdge>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct WasmRelationEdge {
     source_table: String,
     source_row_id: RowUuid,
     relation: String,
     target_table: String,
     target_row_id: RowUuid,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WasmRemovedRow {
+    table: String,
+    row_id: RowUuid,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2249,6 +2273,52 @@ fn encode_relation_snapshot(
     })
 }
 
+fn encode_subscription_delta<'a>(
+    added: &'a [jazz::node::CurrentRow],
+    updated: &'a [jazz::node::CurrentRow],
+    removed: &[jazz::db::RemovedRow],
+) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&WasmSubscriptionDelta {
+        added: row_batches(added),
+        updated: row_batches(updated),
+        removed: removed
+            .iter()
+            .map(|row| WasmRemovedRow {
+                table: row.table.clone(),
+                row_id: row.row_uuid,
+            })
+            .collect(),
+    })
+}
+
+fn encode_relation_subscription_delta<'a>(
+    added: &'a [jazz::node::CurrentRow],
+    updated: &'a [jazz::node::CurrentRow],
+    removed: &[jazz::db::RemovedRow],
+    added_related: &'a [jazz::node::CurrentRow],
+    added_edges: &[jazz::node::RelationEdge],
+    removed_edges: &[jazz::db::RemovedRelationEdge],
+) -> Result<Vec<u8>, postcard::Error> {
+    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
+    relation_added.extend_from_slice(added);
+    relation_added.extend_from_slice(added_related);
+    postcard::to_allocvec(&WasmRelationSubscriptionDelta {
+        base_cursor: None,
+        cursor: 0,
+        added: row_batches(&relation_added),
+        updated: row_batches(updated),
+        removed: removed
+            .iter()
+            .map(|row| WasmRemovedRow {
+                table: row.table.clone(),
+                row_id: row.row_uuid,
+            })
+            .collect(),
+        added_edges: added_edges.iter().map(wasm_relation_edge).collect(),
+        removed_edges: removed_edges.iter().map(wasm_relation_edge).collect(),
+    })
+}
+
 fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
     let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
     for row in rows {
@@ -2288,39 +2358,40 @@ fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
 fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
     match event {
-        SubscriptionEvent::Opened {
-            current,
-            settled,
-            tier,
-        }
-        | SubscriptionEvent::Reset {
-            current,
-            settled,
-            tier,
-        } => {
-            let rows = encode_relation_snapshot(&current).map_err(to_js_error)?;
-            set_prop(&object, "type", JsValue::from_str("snapshot"))?;
-            set_prop(
-                &object,
-                "rows",
-                js_sys::Uint8Array::from(rows.as_slice()).into(),
-            )?;
-            set_prop(&object, "settled", JsValue::from_bool(settled))?;
-            set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
-        }
         SubscriptionEvent::Delta {
-            current,
+            reset,
+            added,
+            updated,
+            removed,
+            added_related,
+            added_edges,
+            removed_edges,
             settled,
             tier,
-            ..
         } => {
-            let rows = encode_relation_snapshot(&current).map_err(to_js_error)?;
-            set_prop(&object, "type", JsValue::from_str("snapshot"))?;
+            let delta =
+                encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
+            let relation_delta = encode_relation_subscription_delta(
+                &added,
+                &updated,
+                &removed,
+                &added_related,
+                &added_edges,
+                &removed_edges,
+            )
+            .map_err(to_js_error)?;
+            set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
-                "rows",
-                js_sys::Uint8Array::from(rows.as_slice()).into(),
+                "delta",
+                js_sys::Uint8Array::from(delta.as_slice()).into(),
             )?;
+            set_prop(
+                &object,
+                "relation_delta",
+                js_sys::Uint8Array::from(relation_delta.as_slice()).into(),
+            )?;
+            set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
         }

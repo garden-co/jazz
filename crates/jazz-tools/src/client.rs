@@ -1219,65 +1219,42 @@ impl ClientDbInner {
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let mut stream = stream;
-            let mut previous_rows: Vec<ObjectId> = Vec::new();
-            loop {
-                match stream.next_event().await {
-                    Some(CoreSubscriptionEvent::Opened { current, .. }) => {
-                        inner.borrow_mut().remember_rows(&table, &current.rows);
-                        let Ok(delta) =
-                            JazzClient::core_subscription_snapshot_delta(&db, &current.rows)
-                        else {
-                            break;
-                        };
-                        previous_rows = current
-                            .rows
-                            .iter()
-                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
-                            .collect();
-                        let _ = tx.send(delta);
-                    }
-                    Some(CoreSubscriptionEvent::Reset { current, .. }) => {
-                        inner.borrow_mut().remember_rows(&table, &current.rows);
-                        let Ok(delta) = JazzClient::core_subscription_reset_delta(
-                            &db,
-                            &previous_rows,
-                            &current.rows,
-                        ) else {
-                            break;
-                        };
-                        previous_rows = current
-                            .rows
-                            .iter()
-                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
-                            .collect();
-                        let _ = tx.send(delta);
-                    }
-                    Some(CoreSubscriptionEvent::Delta {
-                        current,
-                        added,
-                        updated,
-                        removed,
-                        ..
-                    }) => {
-                        inner.borrow_mut().remember_rows(&table, &current.rows);
-                        let Ok(delta) = JazzClient::core_subscription_change_delta(
-                            &db,
-                            &current.rows,
-                            &added,
-                            &updated,
-                            &removed,
-                        ) else {
-                            break;
-                        };
-                        previous_rows = current
-                            .rows
-                            .iter()
-                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
-                            .collect();
-                        let _ = tx.send(delta);
-                    }
-                    Some(CoreSubscriptionEvent::Closed) | None => break,
-                }
+            let mut current_rows: Vec<jazz::node::CurrentRow> = Vec::new();
+            while let Some(CoreSubscriptionEvent::Delta {
+                reset,
+                added,
+                updated,
+                removed,
+                ..
+            }) = stream.next_event().await
+            {
+                let previous_rows: Vec<ObjectId> = current_rows
+                    .iter()
+                    .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                    .collect();
+                JazzClient::apply_core_subscription_rows(
+                    &mut current_rows,
+                    reset,
+                    &added,
+                    &updated,
+                    &removed,
+                );
+                inner.borrow_mut().remember_rows(&table, &current_rows);
+                let delta = if reset {
+                    JazzClient::core_subscription_reset_delta(&db, &previous_rows, &current_rows)
+                } else {
+                    JazzClient::core_subscription_change_delta(
+                        &db,
+                        &current_rows,
+                        &added,
+                        &updated,
+                        &removed,
+                    )
+                };
+                let Ok(delta) = delta else {
+                    break;
+                };
+                let _ = tx.send(delta);
             }
         });
         Ok(())
@@ -1865,6 +1842,41 @@ impl JazzClient {
         let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
         delta.removed = removed;
         Ok(delta)
+    }
+
+    fn apply_core_subscription_rows(
+        current_rows: &mut Vec<jazz::node::CurrentRow>,
+        reset: bool,
+        added_rows: &[jazz::node::CurrentRow],
+        updated_rows: &[jazz::node::CurrentRow],
+        removed_rows: &[jazz::db::RemovedRow],
+    ) {
+        if reset {
+            current_rows.clear();
+        }
+        current_rows.retain(|row| {
+            !removed_rows
+                .iter()
+                .any(|removed| row.row_uuid() == removed.row_uuid)
+        });
+        for row in updated_rows {
+            if let Some(position) = current_rows
+                .iter()
+                .position(|current| current.row_uuid() == row.row_uuid())
+            {
+                current_rows[position] = row.clone();
+            }
+        }
+        for row in added_rows {
+            if let Some(position) = current_rows
+                .iter()
+                .position(|current| current.row_uuid() == row.row_uuid())
+            {
+                current_rows[position] = row.clone();
+            } else {
+                current_rows.push(row.clone());
+            }
+        }
     }
 
     fn core_subscription_change_delta(

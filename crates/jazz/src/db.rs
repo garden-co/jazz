@@ -791,7 +791,11 @@ where
     ///     },
     /// ))?;
     /// let opened = block_on(subscription.next_event()).unwrap();
-    /// assert!(opened.current_rows().unwrap().is_empty());
+    /// let SubscriptionEvent::Delta { reset, added, .. } = opened else {
+    ///     panic!("expected reset delta");
+    /// };
+    /// assert!(reset);
+    /// assert!(added.is_empty());
     ///
     /// db.insert("todos", todo_cells("notify subscribers", false))?;
     /// let changed = block_on(subscription.next_event()).unwrap();
@@ -1040,11 +1044,7 @@ where
         state
             .borrow()
             .sender
-            .unbounded_send(SubscriptionEvent::Opened {
-                current: snapshot,
-                settled,
-                tier: read_tier,
-            })
+            .unbounded_send(subscription_reset_event(read_tier, settled, snapshot))
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
         self.node
             .subscriptions
@@ -5994,28 +5994,28 @@ pub struct RemovedRow {
 /// Materialized relation edge removed from a subscription result.
 pub type RemovedRelationEdge = RelationEdge;
 
-/// Materialized event emitted by a database subscription stream.
+/// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
-    /// Initial materialized result for the subscription.
-    Opened {
-        /// Complete materialized rows visible at subscription open.
-        current: RelationSnapshot,
-        /// Whether the result is complete at the requested read tier.
-        settled: bool,
-        /// Read tier used to materialize the rows.
-        tier: DurabilityTier,
-    },
-    /// Incremental materialized result change.
+    /// Incremental or reset result change.
     Delta {
-        /// Complete materialized rows after applying this change.
-        current: RelationSnapshot,
+        /// Whether this delta replaces all previously observed rows and edges.
+        ///
+        /// Fresh subscriptions start with a reset delta from the empty result.
+        reset: bool,
         /// Rows newly visible to the subscription.
         added: Vec<CurrentRow>,
         /// Rows still visible with changed projected cells.
         updated: Vec<CurrentRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
+        /// Related rows newly referenced by relation edges.
+        ///
+        /// Relation subscriptions reduce `added`, `updated`, `removed`,
+        /// `added_related`, `added_edges`, and `removed_edges` into their local
+        /// view. The producer does not attach a full current snapshot to
+        /// incremental deltas.
+        added_related: Vec<CurrentRow>,
         /// Relation edges newly visible to the subscription.
         added_edges: Vec<RelationEdge>,
         /// Relation edges no longer visible to the subscription.
@@ -6025,36 +6025,8 @@ pub enum SubscriptionEvent {
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
     },
-    /// Full replacement result, reserved for future stream resumption and
-    /// internal invalidation cases where a precise delta is unavailable.
-    Reset {
-        /// Complete replacement materialized rows.
-        current: RelationSnapshot,
-        /// Whether the result is complete at the requested read tier.
-        settled: bool,
-        /// Read tier used to materialize the rows.
-        tier: DurabilityTier,
-    },
     /// The subscription stream was closed by the producer.
     Closed,
-}
-
-impl SubscriptionEvent {
-    /// Return full materialized rows for snapshot-like events.
-    pub fn current_rows(&self) -> Option<&[CurrentRow]> {
-        match self {
-            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(&current.rows),
-            Self::Delta { .. } | Self::Closed => None,
-        }
-    }
-
-    /// Return the complete materialized relation snapshot for snapshot-like events.
-    pub fn current_snapshot(&self) -> Option<&RelationSnapshot> {
-        match self {
-            Self::Opened { current, .. } | Self::Reset { current, .. } => Some(current),
-            Self::Delta { .. } | Self::Closed => None,
-        }
-    }
 }
 
 /// Stream of materialized subscription events.
@@ -6137,6 +6109,24 @@ fn subscription_delta_event(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
 ) -> SubscriptionEvent {
+    subscription_delta_event_with_reset(tier, settled, previous, current, false)
+}
+
+fn subscription_reset_event(
+    tier: DurabilityTier,
+    settled: bool,
+    current: RelationSnapshot,
+) -> SubscriptionEvent {
+    subscription_delta_event_with_reset(tier, settled, &RelationSnapshot::default(), &current, true)
+}
+
+fn subscription_delta_event_with_reset(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+    reset: bool,
+) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
         previous_by_id.insert(subscription_row_key(row), row);
@@ -6179,10 +6169,11 @@ fn subscription_delta_event(
     }
 
     SubscriptionEvent::Delta {
-        current: current.clone(),
+        reset,
         added,
         updated,
         removed,
+        added_related: Vec::new(),
         added_edges,
         removed_edges,
         settled,
@@ -6203,6 +6194,7 @@ fn apply_maintained_update_to_snapshot(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
+    let mut added_related = Vec::new();
 
     for row in &update.added {
         let table = row.table();
@@ -6274,6 +6266,7 @@ fn apply_maintained_update_to_snapshot(
         } else {
             snapshot.rows.push(row.clone());
         }
+        added_related.push(row.clone());
     }
 
     for removed_edge in &update.removed_edges {
@@ -6299,35 +6292,12 @@ fn apply_maintained_update_to_snapshot(
         }
     }
 
-    let mut current_rows = Vec::new();
-    current_rows.extend(added.iter().cloned());
-    current_rows.extend(updated.iter().cloned());
-    let root_count = current_rows.len();
-    for (_, row) in &update.added_edges {
-        if let Some(row) = row {
-            let key = subscription_row_key(row);
-            if !current_rows
-                .iter()
-                .any(|current| subscription_row_key(current) == key)
-            {
-                current_rows.push(row.clone());
-            }
-        }
-    }
-
     SubscriptionEvent::Delta {
-        current: RelationSnapshot {
-            root_count,
-            rows: current_rows,
-            edges: update
-                .added_edges
-                .iter()
-                .map(|(edge, _)| edge.clone())
-                .collect(),
-        },
+        reset: false,
         added,
         updated,
         removed,
+        added_related,
         added_edges: update
             .added_edges
             .iter()
