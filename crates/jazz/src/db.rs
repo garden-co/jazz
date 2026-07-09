@@ -1020,6 +1020,7 @@ where
             opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
+        let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
@@ -1031,7 +1032,7 @@ where
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
-            snapshot: snapshot.clone(),
+            snapshot: state_snapshot,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
@@ -3279,7 +3280,7 @@ where
         if snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
             let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
-            state.snapshot = snapshot;
+            state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -6336,6 +6337,21 @@ fn apply_maintained_update_to_snapshot(
         settled,
         tier,
     }
+}
+
+fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {
+    let mut snapshot = snapshot.clone();
+    reserve_relation_snapshot_delta_slack(&mut snapshot);
+    snapshot
+}
+
+fn reserve_relation_snapshot_delta_slack(snapshot: &mut RelationSnapshot) {
+    fn slack(len: usize) -> usize {
+        (len / 8).max(64)
+    }
+
+    snapshot.rows.reserve(slack(snapshot.rows.len()));
+    snapshot.edges.reserve(slack(snapshot.edges.len()));
 }
 
 fn subscription_is_settled<S>(
