@@ -49,9 +49,9 @@ to decide before implementation tickets can be cut.
   uploads) — sharpens once B settles.
 - React Native staging specifics, if B resolves browser+native first.
 - Whether staged bodies need encryption at rest on any platform.
-- Interceptor runtime details (SW registration/update lifecycle; RN
-  loopback port/secret lifecycle across app restarts) — the persistence
-  side is ticket B; the runtime side sharpens once B settles.
+- Interceptor runtime details beyond the spike's feasibility questions
+  (SW registration/update lifecycle; RN loopback port/secret lifecycle
+  across app restarts) — sharpens once the interceptor spike and B settle.
 
 ## Out of scope
 
@@ -59,9 +59,9 @@ to decide before implementation tickets can be cut.
   (`packages/jazz-tools/src/runtime/file-storage.ts`, files/file_parts chunk
   rows) — migrate/deprecate/leave is a separate product effort, not
   new-plane persistence.
-- Interceptor _behavior_ beyond persistence (SW fetch-handler logic, RN
-  loopback HTTP semantics) — in v1 scope per the PRD (2026-07-09 update:
-  offline reads ship via web SW + RN loopback server), but this map owns
-  only where their stores persist (ticket B); the interceptors themselves
-  are implementation cut from the destination spec.
+- Interceptor _implementation_ (production SW fetch-handler, production RN
+  loopback server) — in v1 scope per the PRD (2026-07-09 update: offline
+  reads ship via web SW + RN loopback server), but built from the
+  destination spec, not on this map. On-map: the throwaway feasibility
+  spike (ticket H) and where the stores persist (ticket B).
 - Per-identity rate limits / quotas (PRD: planned future work).

@@ -3,7 +3,7 @@
 Type: `wayfinder:grilling`
 Status: open
 Assignee: (unclaimed)
-Blocked by: (none)
+Blocked by: [H — interceptor spike](H-interceptor-spike.md)
 
 ## Question
 
