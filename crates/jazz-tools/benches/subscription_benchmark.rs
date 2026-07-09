@@ -139,8 +139,13 @@ fn narrow_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
 
 fn read_opened_len(event: Option<SubscriptionEvent>) -> usize {
     match event {
-        Some(SubscriptionEvent::Opened { current, .. }) => current.rows.len(),
-        other => panic!("expected opened subscription event, got {other:?}"),
+        Some(SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            ..
+        }) => added.len() + updated.len(),
+        other => panic!("expected reset subscription event, got {other:?}"),
     }
 }
 

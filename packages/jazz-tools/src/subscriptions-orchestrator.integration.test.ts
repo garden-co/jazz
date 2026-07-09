@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "./drivers/types.js";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "./runtime/db.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "./subscriptions-orchestrator.js";
 
 type Todo = {
@@ -75,18 +76,24 @@ async function withRealManager<T>(
   }
 }
 
+function reduceTodoDelta(current: Todo[], delta: SubscriptionDelta<Todo>): Todo[] {
+  return [...applySubscriptionDelta(current, delta)];
+}
+
 describe("SubscriptionsOrchestrator integration coverage", () => {
   it("SO-I01 first mutation causes first fulfilled cache snapshot", async () => {
     await withRealManager("i01", async ({ manager, db }) => {
       const key = manager.makeQueryKey(allTodosQuery);
       const entry = manager.getCacheEntry<Todo>(key);
       const observedSnapshots: Todo[][] = [];
+      const current: Todo[] = [];
       const unsubscribe = entry.subscribe({
         onfulfilled(data) {
+          current.splice(0, current.length, ...data);
           observedSnapshots.push(data);
         },
         onDelta(delta) {
-          observedSnapshots.push(delta.all);
+          observedSnapshots.push(reduceTodoDelta(current, delta));
         },
       });
       const { value: inserted } = await db.insert(todosTable, { title: "first", done: false });
@@ -113,6 +120,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       const entry = manager.getCacheEntry<Todo>(key);
       const snapshots: string[][] = [];
       const mismatches: Array<{ deltaOrder: string[]; stateOrder: string[] }> = [];
+      const current: Todo[] = [];
 
       const recordSnapshot = (rows: Todo[]) => {
         const deltaOrder = rows.map((row) => row.title);
@@ -128,10 +136,11 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
 
       const unsubscribe = entry.subscribe({
         onfulfilled(data) {
+          current.splice(0, current.length, ...data);
           recordSnapshot(data);
         },
         onDelta(delta) {
-          recordSnapshot(delta.all);
+          recordSnapshot(reduceTodoDelta(current, delta));
         },
       });
 
@@ -169,21 +178,25 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       const entry = manager.getCacheEntry<Todo>(key);
       const listenerA: string[][] = [];
       const listenerB: string[][] = [];
+      const currentA: Todo[] = [];
+      const currentB: Todo[] = [];
 
       const offA = entry.subscribe({
         onfulfilled(data) {
+          currentA.splice(0, currentA.length, ...data);
           listenerA.push(data.map((row) => row.id));
         },
         onDelta(delta) {
-          listenerA.push(delta.all.map((row) => row.id));
+          listenerA.push(reduceTodoDelta(currentA, delta).map((row) => row.id));
         },
       });
       const offB = entry.subscribe({
         onfulfilled(data) {
+          currentB.splice(0, currentB.length, ...data);
           listenerB.push(data.map((row) => row.id));
         },
         onDelta(delta) {
-          listenerB.push(delta.all.map((row) => row.id));
+          listenerB.push(reduceTodoDelta(currentB, delta).map((row) => row.id));
         },
       });
 
@@ -210,21 +223,25 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       const entry = manager.getCacheEntry<Todo>(key);
       const listenerA: string[][] = [];
       const listenerB: string[][] = [];
+      const currentA: Todo[] = [];
+      const currentB: Todo[] = [];
 
       const offA = entry.subscribe({
         onfulfilled(data) {
+          currentA.splice(0, currentA.length, ...data);
           listenerA.push(data.map((row) => row.title));
         },
         onDelta(delta) {
-          listenerA.push(delta.all.map((row) => row.title));
+          listenerA.push(reduceTodoDelta(currentA, delta).map((row) => row.title));
         },
       });
       const offB = entry.subscribe({
         onfulfilled(data) {
+          currentB.splice(0, currentB.length, ...data);
           listenerB.push(data.map((row) => row.title));
         },
         onDelta(delta) {
-          listenerB.push(delta.all.map((row) => row.title));
+          listenerB.push(reduceTodoDelta(currentB, delta).map((row) => row.title));
         },
       });
 
@@ -253,13 +270,15 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       const key = manager.makeQueryKey(allTodosQuery);
       const entry = manager.getCacheEntry<Todo>(key);
       const events: number[] = [];
+      const current: Todo[] = [];
 
       entry.subscribe({
         onfulfilled(data) {
+          current.splice(0, current.length, ...data);
           events.push(data.length);
         },
         onDelta(delta) {
-          events.push(delta.all.length);
+          events.push(reduceTodoDelta(current, delta).length);
         },
       });
 

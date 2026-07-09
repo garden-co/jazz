@@ -72,8 +72,11 @@ function subscribeToEntry<T extends { id: string }>(
     onDelta: (delta: SubscriptionDelta<T>) => {
       if (data.value) {
         applyDelta(data.value, delta);
-      } else {
+      } else if (delta.reset) {
         data.value = delta.all;
+      } else {
+        data.value = [];
+        applyDelta(data.value, delta);
       }
       loading.value = false;
     },

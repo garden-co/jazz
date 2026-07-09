@@ -1,4 +1,5 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
+import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
@@ -946,7 +947,8 @@ describe("TS Query API", () => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+      const current: SubscribedTodo[] = [];
+      const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
           reject(new Error("Timed out waiting for subscribeAll projection update"));
@@ -955,11 +957,12 @@ describe("TS Query API", () => {
         unsubscribe = db.subscribeAll(
           app.todos.select("title").include({ project: true }),
           (delta) => {
-            if (delta.all.length !== 1) {
+            const all = applySubscriptionDelta(current, delta as any);
+            if (all.length !== 1) {
               return;
             }
 
-            resolve(delta as { all: SubscribedTodo[] });
+            resolve([...all]);
           },
         );
       });
@@ -975,13 +978,13 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const delta = await deltaPromise;
+      const all = await deltaPromise;
       if (timeout) {
         clearTimeout(timeout);
       }
       unsubscribe();
 
-      expect(delta.all).toEqual([
+      expect(all).toEqual([
         {
           id: todoId,
           title: "Watch subscription",
@@ -991,9 +994,9 @@ describe("TS Query API", () => {
           },
         },
       ]);
-      assert(delta.all[0]);
-      expect("done" in delta.all[0]).toBe(false);
-      expect("tags" in delta.all[0]).toBe(false);
+      assert(all[0]);
+      expect("done" in all[0]).toBe(false);
+      expect("tags" in all[0]).toBe(false);
     });
 
     it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
@@ -1007,18 +1010,20 @@ describe("TS Query API", () => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+      const current: SubscribedTodo[] = [];
+      const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
           reject(new Error("Timed out waiting for subscribeAll nullable update"));
         }, 10_000);
 
         unsubscribe = db.subscribeAll(app.todos.select("title", "ownerId"), (delta) => {
-          if (delta.all.length !== 1) {
+          const all = applySubscriptionDelta(current, delta as any);
+          if (all.length !== 1) {
             return;
           }
 
-          resolve(delta as { all: SubscribedTodo[] });
+          resolve([...all]);
         });
       });
 
@@ -1033,22 +1038,22 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const delta = await deltaPromise;
+      const all = await deltaPromise;
       if (timeout) {
         clearTimeout(timeout);
       }
       unsubscribe();
 
-      expect(delta.all).toEqual([
+      expect(all).toEqual([
         {
           id: todoId,
           title: "Watch nullable subscription",
           ownerId: null,
         },
       ]);
-      assert(delta.all[0]);
-      expect("done" in delta.all[0]).toBe(false);
-      expect("tags" in delta.all[0]).toBe(false);
+      assert(all[0]);
+      expect("done" in all[0]).toBe(false);
+      expect("tags" in all[0]).toBe(false);
     });
   });
 });

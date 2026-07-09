@@ -2386,22 +2386,21 @@ fn apply_db_subscription_event(
     event: SubscriptionEvent,
 ) {
     match event {
-        SubscriptionEvent::Opened { current: rows, .. }
-        | SubscriptionEvent::Reset { current: rows, .. } => {
-            current.clear();
-            current.extend(rows.rows.into_iter().map(|row| (row.row_uuid(), row)));
-        }
         SubscriptionEvent::Delta {
+            reset,
             added,
             updated,
             removed,
             ..
         } => {
-            for row in added.into_iter().chain(updated) {
-                current.insert(row.row_uuid(), row);
+            if reset {
+                current.clear();
             }
             for row in removed {
                 current.remove(&row.row_uuid);
+            }
+            for row in added.into_iter().chain(updated) {
+                current.insert(row.row_uuid(), row);
             }
         }
         SubscriptionEvent::Closed => {}

@@ -1900,13 +1900,17 @@ fn encode_core_relation_subscription_delta<'a>(
     added: &'a [jazz::node::CurrentRow],
     updated: &'a [jazz::node::CurrentRow],
     removed: &[jazz::db::RemovedRow],
+    added_related: &'a [jazz::node::CurrentRow],
     added_edges: &[jazz::node::RelationEdge],
     removed_edges: &[jazz::db::RemovedRelationEdge],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
+    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
+    relation_added.extend_from_slice(added);
+    relation_added.extend_from_slice(added_related);
     postcard::to_allocvec(&CoreRelationSubscriptionDelta {
         base_cursor: None,
         cursor: 0,
-        added: core_row_batches(added),
+        added: core_row_batches(&relation_added),
         updated: core_row_batches(updated),
         removed: removed
             .iter()
@@ -1958,30 +1962,12 @@ fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
 
 fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
     match event {
-        SubscriptionEvent::Opened {
-            current,
-            settled,
-            tier,
-        }
-        | SubscriptionEvent::Reset {
-            current,
-            settled,
-            tier,
-        } => {
-            let rows = encode_core_relation_snapshot(current)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            Ok(serde_json::json!({
-                "type": "snapshot",
-                "rows": rows,
-                "settled": settled,
-                "tier": format!("{tier:?}"),
-            }))
-        }
         SubscriptionEvent::Delta {
-            current,
+            reset,
             added,
             updated,
             removed,
+            added_related,
             added_edges,
             removed_edges,
             settled,
@@ -1994,17 +1980,16 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 added,
                 updated,
                 removed,
+                added_related,
                 added_edges,
                 removed_edges,
             )
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let relation_snapshot = encode_core_relation_snapshot(current)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             Ok(serde_json::json!({
                 "type": "delta",
+                "reset": reset,
                 "delta": delta,
                 "relation_delta": relation_delta,
-                "relation_snapshot": relation_snapshot,
                 "settled": settled,
                 "tier": format!("{tier:?}"),
             }))

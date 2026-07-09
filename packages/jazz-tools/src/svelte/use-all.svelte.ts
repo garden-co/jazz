@@ -86,8 +86,11 @@ export class QuerySubscription<T extends { id: string }> {
           onDelta: (delta: SubscriptionDelta<T>) => {
             if (this.current) {
               applyDelta(this.current, delta);
-            } else {
+            } else if (delta.reset) {
               this.current = delta.all;
+            } else {
+              this.current = [];
+              applyDelta(this.current, delta);
             }
           },
           onError: (error: unknown) => {

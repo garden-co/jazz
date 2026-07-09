@@ -940,7 +940,6 @@ fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, us
 fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
     match event {
         Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
-        Some(SubscriptionEvent::Reset { current, .. }) => current.rows.len(),
         None => 0,
         other => panic!("unexpected permission snapshot subscription event {other:?}"),
     }
@@ -948,8 +947,13 @@ fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
 
 fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
     match event {
-        Some(SubscriptionEvent::Opened { current, .. }) => current.rows.len(),
-        other => panic!("expected opened {name} subscription event, got {other:?}"),
+        Some(SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            ..
+        }) => added.len() + updated.len(),
+        other => panic!("expected reset {name} subscription event, got {other:?}"),
     }
 }
 
@@ -1187,10 +1191,15 @@ fn r9_subscribed_write(c: &mut Criterion) {
                 let mut subscription =
                     block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe board");
                 match block_on(subscription.next_event()) {
-                    Some(SubscriptionEvent::Opened { current, .. }) => {
-                        assert!(!current.rows.is_empty());
+                    Some(SubscriptionEvent::Delta {
+                        reset: true,
+                        added,
+                        updated,
+                        ..
+                    }) => {
+                        assert!(!added.is_empty() || !updated.is_empty());
                     }
-                    other => panic!("expected opened subscription event, got {other:?}"),
+                    other => panic!("expected reset subscription event, got {other:?}"),
                 }
 
                 let mut task_index = 0usize;
@@ -1459,10 +1468,17 @@ fn r12_recursive_permissions(c: &mut Criterion) {
                 block_on(db.subscribe_for_identity(&query, read_opts.clone(), READER_AUTHOR))
                     .expect("subscribe recursive docs for reader");
             match block_on(subscription.next_event()) {
-                Some(SubscriptionEvent::Opened { current, .. }) => {
-                    assert_recursive_docs_visible(&current.rows);
+                Some(SubscriptionEvent::Delta {
+                    reset: true,
+                    added,
+                    updated,
+                    ..
+                }) => {
+                    let mut rows = added;
+                    rows.extend(updated);
+                    assert_recursive_docs_visible(&rows);
                 }
-                other => panic!("expected recursive docs opened event, got {other:?}"),
+                other => panic!("expected recursive docs reset event, got {other:?}"),
             }
 
             black_box(rows.len())

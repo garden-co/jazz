@@ -1591,8 +1591,15 @@ fn subscription_snapshot_row_set(
     subscription: &mut SubscriptionStream,
 ) -> BTreeSet<(String, RowUuid)> {
     match block_on(subscription.next_event()).expect("subscription emits initial event") {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            row_set(current.rows)
+        SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            ..
+        } => {
+            let mut rows = added;
+            rows.extend(updated);
+            row_set(rows)
         }
         event => panic!("expected subscription snapshot, got {event:?}"),
     }
@@ -1614,15 +1621,16 @@ fn apply_subscription_events(
 
 fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: SubscriptionEvent) {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *rows = row_set(current.rows);
-        }
         SubscriptionEvent::Delta {
+            reset,
             added,
             updated,
             removed,
             ..
         } => {
+            if reset {
+                rows.clear();
+            }
             for row in removed {
                 rows.remove(&(row.table, row.row_uuid));
             }

@@ -1180,8 +1180,15 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
 
 fn subscription_opened_rows(event: SubscriptionEvent) -> Vec<jazz::node::CurrentRow> {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            current.rows
+        SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            ..
+        } => {
+            let mut rows = added;
+            rows.extend(updated);
+            rows
         }
         other => panic!("expected subscription snapshot, got {other:?}"),
     }
@@ -1198,15 +1205,16 @@ fn drain_subscription_events(
 
 fn apply_subscription_event(rows: &mut Vec<jazz::node::CurrentRow>, event: SubscriptionEvent) {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *rows = current.rows;
-        }
         SubscriptionEvent::Delta {
+            reset,
             added,
             updated,
             removed,
             ..
         } => {
+            if reset {
+                rows.clear();
+            }
             let removed = removed
                 .into_iter()
                 .map(|row| row.row_uuid)

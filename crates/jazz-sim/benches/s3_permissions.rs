@@ -1875,15 +1875,16 @@ fn drain_db_subscription(client: &mut DbClient) {
 
 fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
     match event {
-        SubscriptionEvent::Opened { current, .. } | SubscriptionEvent::Reset { current, .. } => {
-            *visible_rows = current.rows.into_iter().map(|row| row.row_uuid()).collect();
-        }
         SubscriptionEvent::Delta {
+            reset,
             added,
             updated,
             removed,
             ..
         } => {
+            if reset {
+                visible_rows.clear();
+            }
             for row in removed {
                 visible_rows.remove(&row.row_uuid);
             }

@@ -15,6 +15,7 @@ export type {
   BrowserAuthSecretStoreOptions,
 } from "../runtime/auth-secret-store.js";
 export {
+  applySubscriptionDelta,
   RowChangeKind,
   type RowDelta,
   type SubscriptionDelta,
@@ -37,7 +38,7 @@ export function subscribeAll<T extends { id: string }>(
   const key = store.makeQueryKey(query, options);
   const entry = store.getCacheEntry<T>(key);
   return entry.subscribe({
-    onfulfilled: (data) => callback({ all: data, delta: [] }),
+    onfulfilled: (data) => callback({ all: data, delta: [], reset: true }),
     onDelta: callback,
     onError: (error) => {
       setTimeout(() => {
