@@ -110,6 +110,42 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .collect()
     }
 
+    fn scan_local_batch_rows(&self, batch_id: BatchId) -> Vec<LocalBatchRow> {
+        let Ok(row_locators) = self.storage.scan_row_locators() else {
+            return Vec::new();
+        };
+
+        let mut rows = Vec::new();
+        for (object_id, row_locator) in row_locators {
+            let Ok(history_rows) = self
+                .storage
+                .scan_history_row_batches(row_locator.table.as_str(), object_id)
+            else {
+                continue;
+            };
+            for row in history_rows
+                .into_iter()
+                .filter(|row| row.batch_id == batch_id)
+            {
+                let branch_name = BranchName::new(row.branch.as_str());
+                let Ok(schema_hash) =
+                    self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
+                else {
+                    continue;
+                };
+                let member = LocalBatchMember {
+                    object_id,
+                    table_name: row_locator.table.to_string(),
+                    branch_name,
+                    schema_hash,
+                    row_digest: row.content_digest(),
+                };
+                rows.push((member, row_locator.clone(), row));
+            }
+        }
+        rows
+    }
+
     fn sort_local_batch_rows(rows: &mut [LocalBatchRow]) {
         rows.sort_by(
             |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
@@ -169,6 +205,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if !rows.is_empty() {
                 break;
             }
+        }
+        if rows.is_empty() {
+            // Last-resort fallback if the batchId->rows index is not found.
+            // This is extremely inefficient, as we're scanning across all tables' rows.
+            rows = self.scan_local_batch_rows(batch_id);
         }
 
         Self::sort_local_batch_rows(&mut rows);
@@ -275,7 +316,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             // its record for the mutation-error replay path and `Missing`
             // pends retransmission, and neither carries a confirmed tier.
             if acked_tier >= self.settlement_target() {
-                self.retire_settled_batch(batch_id);
+                self.retire_settled_batch(batch_id, acked_tier);
             }
         }
     }
