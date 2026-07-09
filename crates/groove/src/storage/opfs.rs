@@ -8,7 +8,6 @@ use std::rc::Rc;
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
-#[cfg(not(target_arch = "wasm32"))]
 pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
 use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
@@ -37,7 +36,6 @@ fn browser_fidelity_options() -> BTreeOptions {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn browser_fidelity_options_with_sync_policy(sync_policy: BtreeSyncPolicy) -> BTreeOptions {
     BTreeOptions {
         sync_policy,
@@ -124,7 +122,11 @@ impl NativeBtreeStorage {
 impl OpfsStorage {
     pub async fn open(namespace: &str, column_families: &[&str]) -> Result<Self, Error> {
         let file = OpfsFile::open(namespace).await?;
-        Self::from_file(file, column_families)
+        let tree = OpfsBTree::open(
+            file,
+            browser_fidelity_options_with_sync_policy(BtreeSyncPolicy::OnClose),
+        )?;
+        Self::from_tree(tree, column_families)
     }
 
     pub async fn destroy(namespace: &str) -> Result<(), Error> {
