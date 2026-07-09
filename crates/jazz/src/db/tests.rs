@@ -4051,6 +4051,7 @@ fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
     assert!(chunks.len() > 1);
     for (idx, chunk) in chunks.iter().enumerate() {
         assert!(serialized_sync_message_len(chunk) <= MAX_SYNC_MESSAGE_BYTES);
+        assert!(serialized_uncompressed_wire_message_len(chunk) <= MAX_WIRE_FRAME_BYTES);
         let SyncMessage::ViewUpdateChunk {
             reset_result_set,
             final_chunk,
@@ -4062,6 +4063,100 @@ fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
         assert_eq!(*reset_result_set, idx == 0);
         assert_eq!(*final_chunk, idx + 1 == chunks.len());
     }
+}
+
+#[test]
+fn view_update_chunking_budgets_full_wire_frame_boundary() {
+    let subscription = SubscriptionKey {
+        shape_id: ShapeId(uuid::Uuid::from_bytes([0x24; 16])),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x35; 16])),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    let mut low = 0usize;
+    let mut high = 800usize;
+    let mut prefix_count = 0usize;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let candidate = view_update_with_facts(subscription, source_coverage_facts(mid, 4096));
+        if serialized_sync_message_len(&candidate) < MAX_SYNC_MESSAGE_BYTES - 20_000 {
+            prefix_count = mid;
+            low = mid + 1;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+    let prefix = source_coverage_facts(prefix_count, 4096);
+
+    let mut low = 0usize;
+    let mut high = 50_000usize;
+    let mut tail_len = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let mut candidate_facts = prefix.clone();
+        candidate_facts.push(source_coverage_fact(candidate_facts.len(), mid));
+        let candidate = view_update_with_facts(subscription, candidate_facts);
+        if serialized_sync_message_len(&candidate) <= MAX_SYNC_MESSAGE_BYTES {
+            tail_len = Some(mid);
+            low = mid + 1;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+    let mut facts = prefix;
+    facts.push(source_coverage_fact(
+        facts.len(),
+        tail_len.expect("test fixture should find a semantic-fit tail"),
+    ));
+    let update = view_update_with_facts(subscription, facts);
+    assert!(serialized_sync_message_len(&update) <= MAX_SYNC_MESSAGE_BYTES);
+    assert!(serialized_uncompressed_wire_message_len(&update) > MAX_WIRE_FRAME_BYTES);
+
+    let chunks = split_oversized_view_update(update).unwrap();
+    assert!(chunks.len() > 1);
+    for chunk in &chunks {
+        assert!(
+            serialized_uncompressed_wire_message_len(chunk) <= MAX_WIRE_FRAME_BYTES,
+            "chunk framed length {} exceeds cap {}",
+            serialized_uncompressed_wire_message_len(chunk),
+            MAX_WIRE_FRAME_BYTES
+        );
+    }
+}
+
+fn view_update_with_facts(
+    subscription: SubscriptionKey,
+    facts: Vec<crate::protocol::ProgramFactEntry>,
+) -> SyncMessage {
+    SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(42),
+        reset_result_set: true,
+        version_bundles: Vec::new(),
+        peer_payload_inventory: Default::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        program_fact_adds: facts,
+        program_fact_removes: Vec::new(),
+    }
+}
+
+fn source_coverage_fact(idx: usize, coverage_len: usize) -> crate::protocol::ProgramFactEntry {
+    crate::protocol::ProgramFactEntry::SourceCoverage(crate::protocol::SourceCoverageEntry {
+        source: format!("boundary-source-{idx}"),
+        table: "todos".to_owned().into(),
+        row: None,
+        coverage: vec![idx as u8; coverage_len],
+    })
+}
+
+fn source_coverage_facts(
+    count: usize,
+    coverage_len: usize,
+) -> Vec<crate::protocol::ProgramFactEntry> {
+    (0..count)
+        .map(|idx| source_coverage_fact(idx, coverage_len))
+        .collect()
 }
 
 #[test]
