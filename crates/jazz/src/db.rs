@@ -51,7 +51,11 @@ use crate::protocol_limits::{
     validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
     validate_wire_frame_len,
 };
-use crate::query::{Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery};
+use crate::query::{
+    Binding, Operand, OrderDirection, Predicate, Query, QueryError, RelationCmpOp,
+    RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate, RelationProjectExpr,
+    RelationQuery, RelationRowIdRef, RelationValueRef, ShapeId, ValidatedQuery,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
@@ -752,12 +756,15 @@ where
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
     pub async fn all_relation_query_for_identity(
         &self,
-        _query: &RelationQuery,
+        query: &RelationQuery,
         opts: ReadOpts,
-        _author: AuthorId,
+        author: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
-        Err(relation_query_requires_unified_lowering())
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        self.all_relation_snapshot_for_identity(&prepared, opts, author)
+            .await
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.
@@ -1046,12 +1053,14 @@ where
 
     async fn open_relation_subscription(
         &self,
-        _query: &RelationQuery,
+        query: &RelationQuery,
         opts: ReadOpts,
-        _author: AuthorId,
+        author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        Err(relation_query_requires_unified_lowering())
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        self.open_subscription(&prepared, opts, author).await
     }
 
     fn open_subscription_upstream_coverage(
@@ -5281,11 +5290,368 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
     Ok(())
 }
 
-fn relation_query_requires_unified_lowering() -> Error {
-    Error::new(
-        ErrorCode::Query,
-        "output-changing relation queries require unified query-engine lowering",
-    )
+#[derive(Default)]
+struct RelationFacadePlan {
+    tables_by_scope: BTreeMap<String, String>,
+    filters_by_scope: BTreeMap<String, Vec<Predicate>>,
+    joins: Vec<RelationFacadeJoin>,
+    output_scope: Option<String>,
+    order_by: Vec<(String, OrderDirection)>,
+    limit: Option<usize>,
+    offset: usize,
+}
+
+struct RelationFacadeJoin {
+    left_scope: String,
+    left_column: String,
+    right_scope: String,
+    right_column: String,
+}
+
+fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Error> {
+    let mut plan = RelationFacadePlan::default();
+    collect_relation_facade(&query.rel, &mut plan)?;
+    let output_scope = plan.output_scope.ok_or_else(|| {
+        relation_unification_error("relation query must end in a project over one output table")
+    })?;
+    let output_table = plan
+        .tables_by_scope
+        .get(&output_scope)
+        .cloned()
+        .ok_or_else(|| relation_unification_error("relation query output scope is unknown"))?;
+    let mut query = Query::from(output_table);
+
+    for filter in plan
+        .filters_by_scope
+        .remove(&output_scope)
+        .unwrap_or_default()
+    {
+        query = query.filter(filter);
+    }
+
+    let mut joins = Vec::new();
+    for join in plan.joins {
+        let (join_scope, join_column, root_column) = if join.left_scope == output_scope {
+            (join.right_scope, join.right_column, join.left_column)
+        } else if join.right_scope == output_scope {
+            (join.left_scope, join.left_column, join.right_column)
+        } else {
+            return Err(relation_unification_error(
+                "relation query joins must connect directly to the output scope in this slice",
+            ));
+        };
+        let join_table = plan
+            .tables_by_scope
+            .get(&join_scope)
+            .cloned()
+            .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
+        let filters = plan
+            .filters_by_scope
+            .remove(&join_scope)
+            .unwrap_or_default();
+        joins.push((join_table, join_column, root_column, filters));
+    }
+
+    if !plan.filters_by_scope.is_empty() {
+        return Err(relation_unification_error(
+            "relation query filters on non-adjacent scopes are not unified yet",
+        ));
+    }
+    if joins.len() > 1 {
+        return Err(relation_unification_error(
+            "multi-hop relation query lowering is not unified yet",
+        ));
+    }
+
+    for (join_table, join_column, root_column, filters) in joins {
+        query = query.join_via_column(join_table, join_column, root_column, filters);
+    }
+    for (column, direction) in plan.order_by {
+        query = query.order_by(column, direction);
+    }
+    if let Some(limit) = plan.limit {
+        query = query.limit(limit);
+    }
+    if plan.offset != 0 {
+        query = query.offset(plan.offset);
+    }
+    Ok(query)
+}
+
+fn relation_unification_error(message: impl Into<String>) -> Error {
+    Error::new(ErrorCode::Query, message)
+}
+
+fn collect_relation_facade(
+    expr: &RelationExpr,
+    plan: &mut RelationFacadePlan,
+) -> Result<(), Error> {
+    match expr {
+        RelationExpr::TableScan { table, alias } => {
+            let scope = alias.clone().unwrap_or_else(|| table.clone());
+            match plan.tables_by_scope.insert(scope, table.clone()) {
+                Some(existing) if existing != *table => Err(relation_unification_error(
+                    "relation query reuses an alias for different tables",
+                )),
+                _ => Ok(()),
+            }
+        }
+        RelationExpr::Filter { input, predicate } => {
+            collect_relation_facade(input, plan)?;
+            if let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? {
+                plan.filters_by_scope
+                    .entry(scope)
+                    .or_default()
+                    .push(predicate);
+            }
+            Ok(())
+        }
+        RelationExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => {
+            if *join_kind != RelationJoinKind::Inner {
+                return Err(relation_unification_error(
+                    "left relation joins are not unified yet",
+                ));
+            }
+            collect_relation_facade(left, plan)?;
+            collect_relation_facade(right, plan)?;
+            for condition in on {
+                let left_scope = relation_scope(&condition.left)?;
+                let right_scope = relation_scope(&condition.right)?;
+                plan.joins.push(RelationFacadeJoin {
+                    left_scope,
+                    left_column: condition.left.column.clone(),
+                    right_scope,
+                    right_column: condition.right.column.clone(),
+                });
+            }
+            Ok(())
+        }
+        RelationExpr::Project { input, columns } => {
+            collect_relation_facade(input, plan)?;
+            let mut output_scope = None::<String>;
+            for column in columns {
+                let scope = match &column.expr {
+                    RelationProjectExpr::Column(column) => relation_scope(column)?,
+                    RelationProjectExpr::RowId(RelationRowIdRef::Current) => continue,
+                    RelationProjectExpr::RowId(_) => {
+                        return Err(relation_unification_error(
+                            "outer/frontier row-id relation projections are not unified yet",
+                        ));
+                    }
+                };
+                match &output_scope {
+                    Some(existing) if existing != &scope => {
+                        return Err(relation_unification_error(
+                            "relation query project must select one output scope",
+                        ));
+                    }
+                    Some(_) => {}
+                    None => output_scope = Some(scope),
+                }
+            }
+            plan.output_scope = output_scope;
+            Ok(())
+        }
+        RelationExpr::OrderBy { input, terms } => {
+            collect_relation_facade(input, plan)?;
+            let output_scope = plan.output_scope.clone().ok_or_else(|| {
+                relation_unification_error("relation order_by requires projected output scope")
+            })?;
+            for term in terms {
+                let scope = relation_scope(&term.column)?;
+                if scope != output_scope {
+                    return Err(relation_unification_error(
+                        "relation order_by on non-output scope is not unified yet",
+                    ));
+                }
+                plan.order_by
+                    .push((term.column.column.clone(), term.direction));
+            }
+            Ok(())
+        }
+        RelationExpr::Offset { input, offset } => {
+            collect_relation_facade(input, plan)?;
+            plan.offset = *offset;
+            Ok(())
+        }
+        RelationExpr::Limit { input, limit } => {
+            collect_relation_facade(input, plan)?;
+            plan.limit = Some(*limit);
+            Ok(())
+        }
+        RelationExpr::Union { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. } => Err(relation_unification_error(
+            "union/gather/distinct relation query lowering is not unified yet",
+        )),
+    }
+}
+
+fn relation_scope(column: &RelationColumnRef) -> Result<String, Error> {
+    column.scope.clone().ok_or_else(|| {
+        relation_unification_error("relation column refs must be scoped for unified lowering")
+    })
+}
+
+fn relation_predicate_to_query_predicate(
+    predicate: &RelationPredicate,
+) -> Result<Option<(String, Predicate)>, Error> {
+    match predicate {
+        RelationPredicate::Cmp { left, op, right } => {
+            let scope = relation_scope(left)?;
+            let predicate = match op {
+                RelationCmpOp::Eq => Predicate::Eq(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+                RelationCmpOp::Ne => Predicate::Ne(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+                RelationCmpOp::Lt => Predicate::Lt(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+                RelationCmpOp::Le => Predicate::Lte(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+                RelationCmpOp::Gt => Predicate::Gt(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+                RelationCmpOp::Ge => Predicate::Gte(
+                    Operand::Column(left.column.clone()),
+                    relation_value_to_operand(right)?,
+                ),
+            };
+            Ok(Some((scope, predicate)))
+        }
+        RelationPredicate::IsNull { column } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::IsNull(Operand::Column(column.column.clone())),
+        ))),
+        RelationPredicate::IsNotNull { column } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
+                column.column.clone(),
+            )))),
+        ))),
+        RelationPredicate::In { left, values } => Ok(Some((
+            relation_scope(left)?,
+            Predicate::In(
+                Operand::Column(left.column.clone()),
+                values
+                    .iter()
+                    .map(relation_value_to_operand)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        ))),
+        RelationPredicate::Contains { left, right } => Ok(Some((
+            relation_scope(left)?,
+            Predicate::Contains(
+                Operand::Column(left.column.clone()),
+                relation_value_to_operand(right)?,
+            ),
+        ))),
+        RelationPredicate::And(predicates) => relation_predicate_list(predicates, Predicate::All),
+        RelationPredicate::Or(predicates) => relation_predicate_list(predicates, Predicate::Any),
+        RelationPredicate::Not(predicate) => {
+            let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
+                return Ok(None);
+            };
+            Ok(Some((scope, Predicate::Not(Box::new(predicate)))))
+        }
+        RelationPredicate::True => Ok(None),
+        RelationPredicate::False => Ok(Some((String::new(), Predicate::Any(Vec::new())))),
+    }
+}
+
+fn relation_predicate_list(
+    predicates: &[RelationPredicate],
+    wrap: impl FnOnce(Vec<Predicate>) -> Predicate,
+) -> Result<Option<(String, Predicate)>, Error> {
+    let mut scope = None::<String>;
+    let mut items = Vec::new();
+    for predicate in predicates {
+        let Some((predicate_scope, predicate)) = relation_predicate_to_query_predicate(predicate)?
+        else {
+            continue;
+        };
+        if predicate_scope.is_empty() {
+            items.push(predicate);
+            continue;
+        }
+        match &scope {
+            Some(existing) if existing != &predicate_scope => {
+                return Err(relation_unification_error(
+                    "relation predicate composition across scopes is not unified yet",
+                ));
+            }
+            Some(_) => {}
+            None => scope = Some(predicate_scope),
+        }
+        items.push(predicate);
+    }
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    Ok(Some((scope, wrap(items))))
+}
+
+fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, Error> {
+    match value {
+        RelationValueRef::Literal(value) => {
+            Ok(Operand::Literal(json_value_to_record_value(value)?))
+        }
+        RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
+        RelationValueRef::SessionRef(path) => {
+            if path.len() != 1 {
+                return Err(relation_unification_error(
+                    "nested session refs are not unified yet",
+                ));
+            }
+            Ok(Operand::Claim(path[0].clone()))
+        }
+        RelationValueRef::OuterColumn(_)
+        | RelationValueRef::FrontierColumn(_)
+        | RelationValueRef::RowId(_) => Err(relation_unification_error(
+            "outer/frontier/row-id relation predicate operands are not unified yet",
+        )),
+    }
+}
+
+fn json_value_to_record_value(value: &serde_json::Value) -> Result<Value, Error> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Nullable(None)),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                Ok(Value::U64(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::F64(value))
+            } else {
+                Err(relation_unification_error(
+                    "negative integer relation literals are not supported by this slice",
+                ))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
+        serde_json::Value::Array(values) => Ok(Value::Array(
+            values
+                .iter()
+                .map(json_value_to_record_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        serde_json::Value::Object(_) => Err(relation_unification_error(
+            "object relation literals are not supported by query predicates",
+        )),
+    }
 }
 
 fn coverage_key(
