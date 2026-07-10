@@ -8,6 +8,7 @@
 
 use super::*;
 use std::sync::mpsc::TryRecvError;
+use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, IvmRuntimeError, LiteralValue, PlanExpr, PredicateExpr,
@@ -109,6 +110,15 @@ fn indexed_tracks_schema() -> DatabaseSchema {
         ["album_id", "disc"],
     ))
     .with_index(IndexSchema::new("tracks_by_title_unique", ["title"]).unique())])
+}
+
+fn track_values(id: u64, album_id: u64, disc: Option<u64>, title: &str) -> Vec<Value> {
+    vec![
+        Value::U64(id),
+        Value::U64(album_id),
+        Value::Nullable(disc.map(|disc| Box::new(Value::U64(disc)))),
+        Value::String(title.to_owned()),
+    ]
 }
 
 fn history_schema() -> DatabaseSchema {
@@ -3877,6 +3887,76 @@ fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
             (vec![Value::U64(1), Value::U64(1)], 1),
             (vec![Value::U64(3), Value::U64(2)], 1),
         ]
+    );
+}
+
+#[test]
+#[ignore = "receipt-only timing for batch-general schema index maintenance"]
+fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
+    const ROWS: u64 = 20_000;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    for id in 0..ROWS {
+        batch.insert(
+            "tracks",
+            track_values(id, id % 30, Some(id % 5), &format!("bulk-track-{id:05}")),
+        );
+    }
+
+    let bulk_start = Instant::now();
+    database.commit_batch(batch).unwrap();
+    let bulk_elapsed = bulk_start.elapsed();
+
+    let album_rows = database
+        .index_get(
+            "tracks",
+            "tracks_by_album_disc",
+            &[
+                Value::U64(7),
+                Value::Nullable(Some(Box::new(Value::U64(2)))),
+            ],
+        )
+        .unwrap();
+    assert_eq!(album_rows.len(), 667);
+    assert_eq!(
+        database
+            .index_get(
+                "tracks",
+                "tracks_by_title_unique",
+                &[Value::String("bulk-track-12345".to_owned())],
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mut single = database.open_batch();
+    single.insert(
+        "tracks",
+        track_values(ROWS + 1, 7, Some(2), "single-after-bulk"),
+    );
+    let single_start = Instant::now();
+    database.commit_batch(single).unwrap();
+    let single_elapsed = single_start.elapsed();
+
+    println!(
+        "indexed_batch_commit_timing_receipt rows={ROWS} bulk_ms={:.3} single_after_bulk_ms={:.3} matching_album_rows_after={}",
+        bulk_elapsed.as_secs_f64() * 1000.0,
+        single_elapsed.as_secs_f64() * 1000.0,
+        database
+            .index_get(
+                "tracks",
+                "tracks_by_album_disc",
+                &[
+                    Value::U64(7),
+                    Value::Nullable(Some(Box::new(Value::U64(2)))),
+                ],
+            )
+            .unwrap()
+            .len()
     );
 }
 
@@ -10286,15 +10366,6 @@ fn record_values(records: Vec<Record<'_>>) -> Vec<Vec<Value>> {
         .into_iter()
         .map(|record| record.to_values().unwrap())
         .collect()
-}
-
-fn track_values(id: u64, album: u64, disc: Option<u64>, title: &str) -> Vec<Value> {
-    vec![
-        Value::U64(id),
-        Value::U64(album),
-        Value::Nullable(disc.map(|value| Box::new(Value::U64(value)))),
-        Value::String(title.to_owned()),
-    ]
 }
 
 fn mutate_pair_table(
