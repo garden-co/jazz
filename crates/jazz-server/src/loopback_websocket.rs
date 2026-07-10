@@ -113,6 +113,9 @@ impl LoopbackWebSocketServerConfig {
         if let Some(row_id_seed) = self.row_id_seed {
             config = config.with_row_id_seed(row_id_seed);
         }
+        if !self.schema.tables.is_empty() {
+            config = config.with_runtime_schema_bootstrap();
+        }
         config
     }
 }
