@@ -657,6 +657,7 @@ struct CorrelatedPathPlan {
     correlation: PredicateExpr,
     requirement: CorrelationRequirement,
     output_steps: Vec<LinearStep>,
+    siblings: Vec<CorrelatedPathPlan>,
     nested: Vec<CorrelatedPathPlan>,
 }
 
@@ -916,6 +917,14 @@ fn analyze_root_node(
                 correlation: correlation.clone(),
                 requirement: *requirement,
                 output_steps: Vec::new(),
+                siblings: collect_sibling_correlated_paths(
+                    parent.root.source().ok_or_else(|| {
+                        UnsupportedReason::Operator("path parent must be a source".to_owned())
+                    })?,
+                    &path.child,
+                    &request.input.shape.nodes,
+                    &mut visited,
+                )?,
                 nested: collect_nested_correlated_paths(
                     &path.child,
                     &request.input.shape.nodes,
@@ -983,6 +992,14 @@ fn analyze_root_node(
                     &request.input.shape.nodes,
                     &mut path_visited,
                 )?;
+                plan.siblings = collect_sibling_correlated_paths(
+                    plan.parent.root.source().ok_or_else(|| {
+                        UnsupportedReason::Operator("path parent must be a source".to_owned())
+                    })?,
+                    &plan.path.child,
+                    &request.input.shape.nodes,
+                    &mut path_visited,
+                )?;
                 validate_result_source(
                     request,
                     plan.parent.root.source().ok_or_else(|| {
@@ -1044,6 +1061,7 @@ fn analyze_correlated_path_root(
                 correlation: correlation.clone(),
                 requirement: *requirement,
                 output_steps: Vec::new(),
+                siblings: Vec::new(),
                 nested: collect_nested_correlated_paths(
                     &path.child,
                     &request.input.shape.nodes,
@@ -1119,6 +1137,49 @@ fn collect_nested_correlated_paths(
             correlation: correlation.clone(),
             requirement: *requirement,
             output_steps: Vec::new(),
+            siblings: Vec::new(),
+            nested: collect_nested_correlated_paths(&path.child, nodes, visited)?,
+        });
+    }
+    Ok(paths)
+}
+
+fn collect_sibling_correlated_paths(
+    owner: &SourceId,
+    excluded_child: &SourceId,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    visited: &mut BTreeSet<RowSetNodeId>,
+) -> Result<Vec<CorrelatedPathPlan>, UnsupportedReason> {
+    let mut paths = Vec::new();
+    for (node_id, node) in nodes {
+        let RowSetExpr::CorrelatedPathProjection {
+            input,
+            child_input,
+            path,
+            correlation,
+            requirement,
+        } = node
+        else {
+            continue;
+        };
+        if &path.owner != owner || &path.child == excluded_child {
+            continue;
+        }
+        visited.insert(node_id.clone());
+        let mut parent_visited = BTreeSet::new();
+        let parent = analyze_linear_subplan(input, nodes, &mut parent_visited)?;
+        visited.extend(parent_visited);
+        let mut child_visited = BTreeSet::new();
+        let child = analyze_correlated_child_subplan(child_input, path, nodes, &mut child_visited)?;
+        visited.extend(child_visited);
+        paths.push(CorrelatedPathPlan {
+            parent,
+            child,
+            path: path.clone(),
+            correlation: correlation.clone(),
+            requirement: *requirement,
+            output_steps: Vec::new(),
+            siblings: Vec::new(),
             nested: collect_nested_correlated_paths(&path.child, nodes, visited)?,
         });
     }
@@ -1240,6 +1301,9 @@ fn collect_correlated_path_fragments<'a>(
             steps: &path.output_steps,
         });
         collect_step_relation_fragments(&path.output_steps, fragments);
+    }
+    for sibling in &path.siblings {
+        collect_correlated_path_fragments(sibling, fragments);
     }
     for nested in &path.nested {
         collect_correlated_path_fragments(nested, fragments);
@@ -5492,6 +5556,30 @@ fn correlated_relation_edge_graphs(
             .clone()
             .project_fields(correlated_relation_edge_fields(source, target, path)?),
     ];
+    for sibling in &path.siblings {
+        let sibling_graph =
+            lower_correlated_path_relation_graph(sibling, source, resolved_sources, request)
+                .map_err(|gap| {
+                    Box::new(CapabilityReport {
+                        gaps: vec![gap],
+                        explain: ExplainPlan {
+                            capabilities: vec![
+                        "sibling correlated path relation facts lower from the shared root graph"
+                            .to_owned(),
+                    ],
+                            ..ExplainPlan::default()
+                        },
+                    })
+                })?
+                .graph;
+        graphs.extend(correlated_relation_edge_graphs(
+            sibling,
+            sibling_graph,
+            source,
+            resolved_sources,
+            request,
+        )?);
+    }
     for nested in &path.nested {
         let nested_parent = graph
             .clone()
