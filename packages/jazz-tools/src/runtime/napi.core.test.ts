@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
@@ -234,6 +234,24 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     server = null;
     globalThis.WebSocket = previousWebSocket;
   });
+
+  it("decodes the BoreDM real schema fixture through NAPI", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const schema = new Uint8Array(
+      readFileSync(new URL("../testing/fixtures/boredm-real/schema.native.bin", import.meta.url)),
+    );
+    const db = NapiDb.openMemory(
+      schema,
+      openConfig(
+        deterministicBytes("jazz-napi-native-runtime:boredm-real-node"),
+        deterministicBytes("jazz-napi-native-runtime:boredm-real-author"),
+        1,
+        true,
+      ),
+    );
+
+    db.close?.();
+  }, 20_000);
 
   it("emits core tick scheduler wakes through the NAPI bridge", async () => {
     const { NapiDb } = await loadNapiModule();

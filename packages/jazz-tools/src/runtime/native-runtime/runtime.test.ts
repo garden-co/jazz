@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./native-codec.js";
 import {
@@ -3673,6 +3674,17 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
   });
 
+  it("encodes the BoreDM real schema fixture byte-stably", () => {
+    const fixtureDir = new URL("../../testing/fixtures/boredm-real/", import.meta.url);
+    const source = JSON.parse(readFileSync(new URL("schema-source.json", fixtureDir), "utf8")) as {
+      mergedSchema: WasmSchema;
+    };
+    const expectedBytes = new Uint8Array(readFileSync(new URL("schema.native.bin", fixtureDir)));
+    const encoded = encodeSchema(source.mergedSchema);
+
+    expect(encoded).toEqual(expectedBytes);
+  });
+
   it("rejects ExistsRel Gather policies without a concrete MaxDepth bound", () => {
     expect(() =>
       encodeSchema({
@@ -4668,7 +4680,9 @@ function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
 }
 
 function readPolicyInheritsForTest(reader: PostcardReader): TestPolicyInherits {
-  return { parentColumn: reader.string() };
+  const parentColumn = reader.string();
+  reader.u64();
+  return { parentColumn };
 }
 
 function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
@@ -4742,6 +4756,20 @@ function readPolicyPredicateForTest(reader: PostcardReader): TestPolicyPredicate
     const column = reader.string();
     return { tag, column, operand: readPolicyOperandForTest(reader) };
   }
+  if (tag === 5) {
+    readPolicyOperandForTest(reader);
+    reader.readVec(readPolicyOperandForTest);
+    return { tag };
+  }
+  if (tag === 10) {
+    readPolicyOperandForTest(reader);
+    readPolicyOperandForTest(reader);
+    return { tag };
+  }
+  if (tag === 11) {
+    readPolicyOperandForTest(reader);
+    return { tag };
+  }
   throw new Error(`unsupported policy predicate tag ${tag}`);
 }
 
@@ -4751,11 +4779,25 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
   if (tag === 2) return { tag, claim: reader.string() };
   if (tag === 3) {
     const literalTag = reader.u64();
+    if (literalTag === 2 || literalTag === 3) {
+      return { tag, literalTag, value: reader.u64() };
+    }
+    if (literalTag === 4) {
+      return { tag, literalTag, value: reader.bytes() };
+    }
     if (literalTag === 5) {
       return { tag, literalTag, value: reader.bool() };
     }
-    expect(literalTag).toBe(6);
-    return { tag, literalTag, value: reader.string() };
+    if (literalTag === 6) {
+      return { tag, literalTag, value: reader.string() };
+    }
+    if (literalTag === 8) {
+      return { tag, literalTag, value: reader.bytes() };
+    }
+    if (literalTag === 12) {
+      return { tag, literalTag, value: reader.option(readPolicyOperandForTest) };
+    }
+    throw new Error(`unsupported policy literal tag ${literalTag}`);
   }
   throw new Error(`unsupported policy operand tag ${tag}`);
 }
@@ -4809,12 +4851,13 @@ type TestPolicyReachable = {
 type TestPolicyPredicate =
   | { tag: number; children: TestPolicyPredicate[] }
   | { tag: number; child: TestPolicyPredicate }
-  | { tag: number; column: string; operand: TestPolicyOperand };
+  | { tag: number; column: string; operand: TestPolicyOperand }
+  | { tag: number };
 
 type TestPolicyOperand =
   | { tag: number; column: string }
   | { tag: number; claim: string }
-  | { tag: number; literalTag: number; value: string | boolean };
+  | { tag: number; literalTag: number; value: unknown };
 
 function unsupportedJoinRelationIr(): unknown {
   return {
