@@ -1124,11 +1124,13 @@ fn sync_current_rows_to(
     let update = peer.current_rows_update(core, "todos").unwrap();
     reader.apply_sync_message(update).unwrap();
 }
-fn register_shape_binding(
-    node: &mut NodeState<RocksDbStorage>,
+fn register_shape_binding<S>(
+    node: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
-) {
+) where
+    S: OrderedKvStorage + ReopenableStorage,
+{
     node.apply_sync_message(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(shape),

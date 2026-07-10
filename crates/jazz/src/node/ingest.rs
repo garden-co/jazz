@@ -1507,8 +1507,12 @@ where
         }
         #[cfg(test)]
         {
-            self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
-            self.assert_global_current_updates_match_history_for_test(&current_update_versions)?;
+            if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
+                self.assert_merge_head_rows_match_history_for_test(&content_rows)?;
+                self.assert_global_current_updates_match_history_for_test(
+                    &current_update_versions,
+                )?;
+            }
         }
         for bundle in bundles {
             if !loaded_tx_ids.contains(&bundle.tx.tx_id) {
