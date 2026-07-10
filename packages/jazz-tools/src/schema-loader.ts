@@ -180,7 +180,12 @@ function isTypedAppLike(value: Record<string, unknown>): value is { wasmSchema: 
   return typeof schema === "object" && schema !== null && !Array.isArray(schema);
 }
 
-function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null {
+type LoadedSchemaInput = {
+  schema: Schema;
+  wasmSchema?: WasmSchema;
+};
+
+function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaInput | null {
   const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
     (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null,
@@ -188,11 +193,16 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null 
 
   for (const candidate of candidates) {
     if (isTypedAppLike(candidate)) {
-      return wasmSchemaToAst(candidate.wasmSchema);
+      return {
+        schema: wasmSchemaToAst(candidate.wasmSchema),
+        wasmSchema: candidate.wasmSchema,
+      };
     }
+  }
 
+  for (const candidate of candidates) {
     try {
-      return schemaDefinitionToAst(candidate as any);
+      return { schema: schemaDefinitionToAst(candidate as any) };
     } catch {
       // Try the next supported export shape.
     }
@@ -200,13 +210,13 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null 
 
   const collected = getCollectedSchema();
   if (collected.tables.length > 0) {
-    return collected;
+    return { schema: collected };
   }
 
   return null;
 }
 
-async function loadSchemaAst(filePath: string): Promise<Schema> {
+async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
   const loaded = await loadTsModule(filePath);
   const directSchema = schemaFromLoadedModule(loaded);
   if (directSchema) {
@@ -350,9 +360,10 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     );
   }
 
-  let schema = await loadSchemaAst(resolved.schemaFile);
+  const loadedSchema = await loadSchemaInput(resolved.schemaFile);
+  let schema = loadedSchema.schema;
   const tablesWithInlinePolicies = findInlinePolicyTables(schema);
-  if (tablesWithInlinePolicies.length > 0) {
+  if (tablesWithInlinePolicies.length > 0 && !loadedSchema.wasmSchema) {
     throw new Error(
       `Inline table permissions in ${basename(resolved.schemaFile)} are no longer supported. ` +
         "Move policies to permissions.ts. " +
@@ -388,6 +399,6 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     permissionsFile: resolvedPermissionsFile,
     permissions,
     schema,
-    wasmSchema: schemaToWasm(schema),
+    wasmSchema: loadedSchema.wasmSchema ?? schemaToWasm(schema),
   };
 }

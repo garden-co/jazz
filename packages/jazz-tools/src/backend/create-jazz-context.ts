@@ -65,6 +65,10 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
 
 type FlushableRuntime = Runtime & { flush?: () => void };
 
+function schemaHasNativePolicies(schema: WasmSchema): boolean {
+  return Object.values(schema).some((table) => table.policies !== undefined);
+}
+
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
@@ -86,8 +90,10 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     schema,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
+    const hasSeparatePermissionsBundle =
+      this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
     const schemaJson = serializeRuntimeSchema(schema, {
-      loadedPolicyBundle: this.config.permissions !== undefined,
+      loadedPolicyBundle: hasSeparatePermissionsBundle,
     });
 
     if (this.client) {
@@ -249,7 +255,7 @@ export class JazzContext {
       );
     }
     const schema = resolveSchemaSource(selected);
-    return this.config.permissions
+    return this.config.permissions && !schemaHasNativePolicies(schema)
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;
   }
