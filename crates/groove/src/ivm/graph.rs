@@ -185,6 +185,12 @@ pub enum GraphBuilder {
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
     },
+    SemiJoin {
+        left: Box<GraphBuilder>,
+        right: Box<GraphBuilder>,
+        left_on: Vec<FieldRef>,
+        right_on: Vec<FieldRef>,
+    },
     AntiJoin {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
@@ -340,6 +346,20 @@ impl GraphBuilder {
         right_on: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_on: left_on.into_iter().map(FieldRef::name).collect(),
+            right_on: right_on.into_iter().map(FieldRef::name).collect(),
+        }
+    }
+
+    pub fn semi_join(
+        left: GraphBuilder,
+        right: GraphBuilder,
+        left_on: impl IntoIterator<Item = impl Into<String>>,
+        right_on: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::SemiJoin {
             left: Box::new(left),
             right: Box::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),

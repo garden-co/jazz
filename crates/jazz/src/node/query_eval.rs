@@ -6945,6 +6945,12 @@ where
             },
             Err(err) => return Err(err),
         };
+        if authorized.route_fields.is_empty() {
+            return Ok(PolicyAuthorizationGraph {
+                graph: GraphBuilder::semi_join(base, authorized.graph, ["row_uuid"], ["row_uuid"]),
+                route_fields: authorized.route_fields,
+            });
+        }
         let mut fields = output_fields
             .iter()
             .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
