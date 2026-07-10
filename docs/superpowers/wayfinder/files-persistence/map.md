@@ -33,6 +33,10 @@ to decide before implementation tickets can be cut.
   trait methods.
 - Standing preference: keep artifacts in-repo (no public GitHub issues).
 
+Destination progress: the resolved half is published as the ready-for-agent
+[Slice 1 spec — file column & stateless file plane](../../specs/2026-07-10-files-persistence-spec.md);
+the open tickets below cover the rest.
+
 ## Decisions so far
 
 <!-- one line per closed ticket: gist + link -->
