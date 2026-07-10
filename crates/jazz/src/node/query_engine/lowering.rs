@@ -67,14 +67,19 @@ pub(crate) fn lower_query_program(
             authorization: source_authorization_for_source(&request, &source)?,
             requirements,
         };
-        let resolved_source = source_resolver
-            .resolve_source(&source_request)
-            .map_err(|err| {
-                Box::new(CapabilityReport {
+        let resolved_source = match source_resolver.resolve_source(&source_request) {
+            Ok(resolved_source) => resolved_source,
+            Err(err) => {
+                let mut failure_explain = explain.clone();
+                failure_explain
+                    .read
+                    .push(format!("failed source request: {:#?}", err.request));
+                return Err(Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Source(err.gap)],
-                    explain: explain_with_request(&request, explain.clone()),
-                })
-            })?;
+                    explain: explain_with_request(&request, failure_explain),
+                }));
+            }
+        };
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,

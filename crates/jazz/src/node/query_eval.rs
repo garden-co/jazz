@@ -8,6 +8,7 @@
 use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
@@ -17,7 +18,7 @@ use groove::schema::ColumnType;
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
-    AppProjectionTree, AppRowOutputRequest, AppRowSchema, ClaimPath, ClosurePath,
+    AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
     ClosurePathSegment, ClosureRootGate, ComparisonOp as NormalizedComparisonOp,
     ContentVersionSource, CorrelationRequirement, DataSource, DeletionRegisterSource,
     FieldProjection, FrontierId, JoinContribution, JoinMode as NormalizedJoinMode, LensSelection,
@@ -1397,6 +1398,67 @@ fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceRes
         request: Box::new(request.clone()),
         gap,
     }
+}
+
+fn capability_trace_enabled() -> bool {
+    std::env::var_os("JAZZ_CAPABILITY_TRACE").is_some()
+        || std::env::var_os("JAZZ_CAPABILITY_TRACE_FILE").is_some()
+}
+
+fn trace_capability_compile(
+    node_uuid: NodeUuid,
+    node_alias: Option<NodeAlias>,
+    request: &QueryProgramRequest,
+    result: Result<&QueryProgram, &CapabilityReport>,
+) {
+    let Some(path) = std::env::var_os("JAZZ_CAPABILITY_TRACE_FILE") else {
+        if std::env::var_os("JAZZ_CAPABILITY_TRACE").is_some() {
+            eprintln!(
+                "JAZZ_CAPABILITY_TRACE set without JAZZ_CAPABILITY_TRACE_FILE; capability trace skipped"
+            );
+        }
+        return;
+    };
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!(
+                "failed to open JAZZ_CAPABILITY_TRACE_FILE {:?}: {err}",
+                path
+            );
+            return;
+        }
+    };
+    let event = match result {
+        Ok(_) => "compile_success",
+        Err(_) => "compile_failure",
+    };
+    let _ = writeln!(
+        file,
+        "\n=== JAZZ_CAPABILITY_TRACE {event} pid={} node_uuid={:?} node_alias={:?} ===",
+        std::process::id(),
+        node_uuid,
+        node_alias
+    );
+    let _ = writeln!(file, "request:\n{request:#?}");
+    match result {
+        Ok(program) => {
+            let _ = writeln!(file, "explain:\n{:#?}", program.explain);
+            let _ = writeln!(file, "output:\n{:#?}", program.lowered.output);
+        }
+        Err(report) => {
+            let _ = writeln!(file, "report:\n{report:#?}");
+        }
+    }
+    let _ = writeln!(
+        file,
+        "backtrace:\n{}",
+        std::backtrace::Backtrace::force_capture()
+    );
 }
 
 fn resolved_current_source_graph<S>(
@@ -4519,6 +4581,7 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
+        let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
@@ -4526,8 +4589,18 @@ where
             inline_sources,
             access_paths,
         };
-        lower_query_program(request, &mut resolver)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))
+        let node_uuid = resolver.node.node_uuid;
+        let node_alias = resolver.node.self_node_alias;
+        let result = lower_query_program(request, &mut resolver);
+        if let Some(request) = trace_request {
+            trace_capability_compile(
+                node_uuid,
+                node_alias,
+                &request,
+                result.as_ref().map_err(|report| report.as_ref()),
+            );
+        }
+        result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
     fn policy_authorization_row_id_graph(
