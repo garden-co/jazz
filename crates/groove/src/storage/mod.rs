@@ -1083,8 +1083,10 @@ where
                 upper = previous;
                 continue;
             };
-            if key <= window.max_key {
-                return self.lookup_window_record(&raw_key, window.codec, key);
+            if key <= window.max_key
+                && let Some(value) = self.lookup_window_record(&raw_key, window.codec, key)?
+            {
+                return Ok(Some(value));
             }
             let Some(previous) = lexicographic_predecessor(&raw_key) else {
                 return Ok(None);
@@ -3434,6 +3436,61 @@ mod tests {
                 expected_target.2.as_bytes()
             ))
         );
+    }
+
+    #[test]
+    fn windowed_record_store_get_skips_sparse_overlapping_window_miss() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let store = window_store(&storage, &descriptor);
+
+        for (row, time, title) in [
+            (1, 10, "base-1"),
+            (2, 10, "base-2"),
+            (3, 10, "base-3"),
+            (4, 10, "base-4"),
+            (5, 10, "base-5"),
+        ] {
+            storage
+                .set(
+                    "jazz_docs_history",
+                    &window_key(row, time, 7),
+                    &window_value(descriptor, title, title.as_bytes()),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.consolidate_windows(10).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 5
+            }
+        );
+
+        for (row, time, title) in [(2, 99, "sparse-2"), (5, 99, "sparse-5")] {
+            storage
+                .set(
+                    "jazz_docs_history",
+                    &window_key(row, time, 7),
+                    &window_value(descriptor, title, title.as_bytes()),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.consolidate_windows(10).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 2
+            }
+        );
+
+        let target_key = window_key(3, 10, 7);
+        let target_value = window_value(descriptor, "base-3", b"base-3");
+        assert_eq!(
+            store.prefix(&target_key).unwrap(),
+            vec![(target_key.clone(), target_value.clone())]
+        );
+        assert_eq!(store.get_raw(&target_key).unwrap(), Some(target_value));
     }
 
     #[test]
