@@ -4606,13 +4606,26 @@ impl NodeState {
         input: &RecordDeltas,
         storage: &impl OrderedKvStorage,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        apply_persist_delta(
+        let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some() && !input.deltas.is_empty();
+        let start = trace.then(std::time::Instant::now);
+        let result = apply_persist_delta(
             storage,
             &persist.storage,
             &persist.key_fields,
             persist.unique,
             input,
-        )?;
+        );
+        if trace {
+            eprintln!(
+                "GROOVE_TRACE_PERSIST storage={} input={} unique={} key_fields={:?} elapsed_ms={:.3}",
+                String::from_utf8_lossy(&persist.storage.key_prefix).replace('\0', "."),
+                input.deltas.len(),
+                persist.unique,
+                persist.key_fields,
+                start.expect("trace start").elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        result?;
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: input.deltas.clone(),
@@ -5051,7 +5064,37 @@ where
             }
             OpType::IndexBy(index_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_index_by(index_by, output_desc, &input)
+                let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some();
+                let start = trace.then(std::time::Instant::now);
+                let input_len = input.deltas.len();
+                let result = NodeState::update_index_by(index_by, output_desc, &input);
+                if trace && input_len > 0 {
+                    let output_len = result
+                        .as_ref()
+                        .map(|records| records.deltas.len())
+                        .unwrap_or(0);
+                    let index_name = index_by
+                        .explicit_index
+                        .as_ref()
+                        .map(|index| index.name.as_str())
+                        .unwrap_or("<derived>");
+                    let key_fields = index_by
+                        .key_expressions
+                        .iter()
+                        .map(|expr| format!("{expr:?}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    eprintln!(
+                        "GROOVE_TRACE_INDEX_BY node={node:?} index={index_name} input={input_len} output={output_len} unique={} append_value_to_key={} store_value={} scan={} key_fields=[{}] elapsed_ms={:.3}",
+                        index_by.unique,
+                        index_by.append_value_to_key,
+                        index_by.store_value,
+                        index_by.scan.is_some(),
+                        key_fields,
+                        start.expect("trace start").elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                result
             }
             OpType::Union => {
                 let inputs = graph_node

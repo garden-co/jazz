@@ -1318,6 +1318,353 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     );
 }
 
+fn boredm_real_schema_fixture() -> JazzSchema {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/jazz-tools/src/testing/fixtures/boredm-real/schema.native.bin");
+    let bytes = std::fs::read(path).unwrap();
+    postcard::from_bytes(&bytes).unwrap()
+}
+
+fn boredm_uuid(kind: u8, idx: u32) -> uuid::Uuid {
+    let mut bytes = [kind; 16];
+    bytes[12..].copy_from_slice(&idx.to_be_bytes());
+    uuid::Uuid::from_bytes(bytes)
+}
+
+fn boredm_row(kind: u8, idx: u32) -> RowUuid {
+    RowUuid(boredm_uuid(kind, idx))
+}
+
+fn boredm_author(kind: u8, idx: u32) -> AuthorId {
+    AuthorId(boredm_uuid(kind, idx))
+}
+
+fn nullable(value: Option<Value>) -> Value {
+    Value::Nullable(value.map(Box::new))
+}
+
+fn boredm_team_cells(
+    corporation_id: uuid::Uuid,
+    created_by: uuid::Uuid,
+    name: impl Into<String>,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("corporation_id".to_owned(), Value::Uuid(corporation_id)),
+        ("created_by".to_owned(), Value::Uuid(created_by)),
+        ("updated_by".to_owned(), Value::Uuid(created_by)),
+        ("archived".to_owned(), Value::Bool(false)),
+        ("name".to_owned(), Value::String(name.into())),
+        ("date_created".to_owned(), Value::U64(1)),
+        ("date_updated".to_owned(), Value::U64(1)),
+        ("description".to_owned(), nullable(None)),
+    ])
+}
+
+fn boredm_dropdown_cells(
+    corporation_id: uuid::Uuid,
+    created_by: uuid::Uuid,
+    name: impl Into<String>,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("corporation_id".to_owned(), Value::Uuid(corporation_id)),
+        ("created_by".to_owned(), Value::Uuid(created_by)),
+        ("updated_by".to_owned(), Value::Uuid(created_by)),
+        ("archived".to_owned(), Value::Bool(false)),
+        ("name".to_owned(), Value::String(name.into())),
+        ("date_created".to_owned(), Value::U64(1)),
+        ("date_updated".to_owned(), Value::U64(1)),
+        (
+            "soil_default_line_type".to_owned(),
+            nullable(Some(Value::String("solid".to_owned()))),
+        ),
+        (
+            "rock_default_line_type".to_owned(),
+            nullable(Some(Value::String("solid".to_owned()))),
+        ),
+        ("tables_configs".to_owned(), Value::String("{}".to_owned())),
+    ])
+}
+
+fn boredm_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("dropdowns_id".to_owned(), Value::Uuid(dropdown.0)),
+        ("table".to_owned(), Value::String("data_entry".to_owned())),
+        ("field".to_owned(), Value::String(format!("field_{idx}"))),
+        (
+            "options".to_owned(),
+            Value::Array(vec![
+                Value::String(format!("option_{idx}_a")),
+                Value::String(format!("option_{idx}_b")),
+                Value::String(format!("option_{idx}_c")),
+            ]),
+        ),
+        ("allow_custom".to_owned(), nullable(Some(Value::Bool(false)))),
+        ("show_column".to_owned(), Value::Bool(true)),
+        ("order".to_owned(), nullable(Some(Value::U32(idx as u32)))),
+        ("required".to_owned(), Value::Bool(idx.is_multiple_of(3))),
+        ("min".to_owned(), nullable(None)),
+        ("max".to_owned(), nullable(None)),
+        ("precision".to_owned(), nullable(Some(Value::U32(0)))),
+    ])
+}
+
+fn boredm_version(
+    schema: &JazzSchema,
+    table: &str,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    cells: &BTreeMap<String, Value>,
+) -> VersionRecord {
+    VersionRecord::from_cells(
+        schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .unwrap(),
+        schema.version_id(),
+        row_uuid,
+        Vec::new(),
+        AuthorId::SYSTEM,
+        tx_id.time,
+        AuthorId::SYSTEM,
+        tx_id.time,
+        cells,
+        None,
+    )
+    .unwrap()
+}
+
+fn seed_boredm_known_global(
+    core: &mut NodeState<RocksDbStorage>,
+    schema: &JazzSchema,
+    rows: Vec<(&str, RowUuid, BTreeMap<String, Value>)>,
+) {
+    for (idx, (table, row_uuid, cells)) in rows.iter().enumerate() {
+        let global_seq = GlobalSeq((idx + 1) as u64);
+        let tx_id = TxId::new(TxTime((idx + 1) as u64), node(0x21));
+        let version = boredm_version(schema, table, *row_uuid, tx_id, cells);
+        core.ingest_known_transaction(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorId::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                source_branch: None,
+                merge_strategy: None,
+            },
+            vec![version],
+            Fate::Accepted,
+            Some(global_seq),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    }
+}
+
+fn open_boredm_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)).unwrap()
+}
+
+fn open_boredm_native_btree_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<NativeBtreeStorage>) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        NativeBtreeStorage::open_with_sync_policy(temp_dir.path().join("btree.db"), &refs, BtreeSyncPolicy::OnClose)
+            .unwrap();
+    (temp_dir, NodeState::new(node_uuid, schema, storage).unwrap())
+}
+
+fn apply_boredm_reset_receipt<S>(
+    storage_label: &str,
+    reader: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    update: SyncMessage,
+    entry_count: usize,
+) -> std::time::Duration
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    register_shape_binding(reader, shape, binding);
+    let apply_start = std::time::Instant::now();
+    unsafe {
+        std::env::set_var("GROOVE_TRACE_INDEX_BY", "1");
+        std::env::set_var("JAZZ_SKIP_BULK_INGEST_ASSERTS", "1");
+    }
+    reader.apply_sync_message(update).unwrap();
+    unsafe {
+        std::env::remove_var("GROOVE_TRACE_INDEX_BY");
+        std::env::remove_var("JAZZ_SKIP_BULK_INGEST_ASSERTS");
+    }
+    let apply_elapsed = apply_start.elapsed();
+    let rows = reader
+        .query_rows(shape, binding, DurabilityTier::Global)
+        .unwrap();
+    assert_eq!(rows.len(), entry_count, "{storage_label}");
+    println!(
+        "boredm_real_dropdown_entry_reset_ingest_apply storage={storage_label} apply_ms={:.3}",
+        apply_elapsed.as_secs_f64() * 1000.0
+    );
+    apply_elapsed
+}
+
+#[ignore]
+#[test]
+fn boredm_real_dropdown_entry_reset_ingest_timing_receipt() {
+    let schema = boredm_real_schema_fixture();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
+
+    let member = boredm_author(0x31, 1);
+    let corp = boredm_row(0x32, 1);
+    let member_team = RowUuid(member.0);
+    let access_team = boredm_row(0x33, 1);
+    let dropdown_count = 30usize;
+    let entry_count = 19_894usize;
+    let mut seed_rows = Vec::new();
+    let seed_start = std::time::Instant::now();
+    let member_claims = BTreeMap::from([
+        ("sub".to_owned(), Value::Uuid(member.0)),
+        ("user_id".to_owned(), Value::Uuid(member.0)),
+        ("isAdmin".to_owned(), Value::Bool(false)),
+    ]);
+    core.set_session_claims(member, member_claims.clone());
+
+    seed_rows.push((
+        "team",
+        member_team,
+        boredm_team_cells(member_team.0, member_team.0, "member"),
+    ));
+    seed_rows.push((
+        "team",
+        access_team,
+        boredm_team_cells(member_team.0, member_team.0, "access"),
+    ));
+    seed_rows.push((
+        "corporation",
+        corp,
+        BTreeMap::from([
+            ("team_id".to_owned(), Value::Uuid(member_team.0)),
+            ("login_time".to_owned(), Value::U32(0)),
+        ]),
+    ));
+    seed_rows.push((
+        "team_entry",
+        boredm_row(0x34, 1),
+        BTreeMap::from([
+            ("team_id".to_owned(), Value::Uuid(member_team.0)),
+            ("target_id".to_owned(), Value::Uuid(access_team.0)),
+            ("added_by".to_owned(), nullable(Some(Value::Uuid(member_team.0)))),
+            ("administrator".to_owned(), Value::Bool(false)),
+            ("date_added".to_owned(), Value::U64(1)),
+        ]),
+    ));
+    seed_rows.push((
+        "team_entry",
+        boredm_row(0x34, 2),
+        BTreeMap::from([
+            ("team_id".to_owned(), Value::Uuid(access_team.0)),
+            ("target_id".to_owned(), Value::Uuid(access_team.0)),
+            ("added_by".to_owned(), nullable(Some(Value::Uuid(member_team.0)))),
+            ("administrator".to_owned(), Value::Bool(false)),
+            ("date_added".to_owned(), Value::U64(1)),
+        ]),
+    ));
+    for parent_idx in 0..dropdown_count {
+        let dropdown = boredm_row(0x40, parent_idx as u32);
+        seed_rows.push((
+            "dropdowns",
+            dropdown,
+            boredm_dropdown_cells(member_team.0, member_team.0, format!("dropdown_{parent_idx}")),
+        ));
+        seed_rows.push((
+            "dropdowns_access_edges",
+            boredm_row(0x41, parent_idx as u32),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(dropdown.0)),
+                ("team_id".to_owned(), Value::Uuid(access_team.0)),
+                ("grant_role".to_owned(), Value::String("EDITOR".to_owned())),
+                ("administrator".to_owned(), Value::Bool(false)),
+            ]),
+        ));
+    }
+    for idx in 0..entry_count {
+        let parent = boredm_row(0x40, (idx % dropdown_count) as u32);
+        seed_rows.push((
+            "dropdown_entry",
+            boredm_row(0x50, idx as u32),
+            boredm_dropdown_entry_cells(parent, idx),
+        ));
+    }
+    seed_boredm_known_global(&mut core, &schema, seed_rows);
+    let seed_elapsed = seed_start.elapsed();
+
+    let shape = Query::from("dropdown_entry").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::new();
+    let serve_start = std::time::Instant::now();
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let serve_elapsed = serve_start.elapsed();
+    let SyncMessage::ViewUpdate {
+        result_member_adds,
+        version_bundles,
+        ..
+    } = &update
+    else {
+        panic!("expected view update");
+    };
+    let result_member_count = result_member_adds.len();
+    let version_bundle_count = version_bundles.len();
+    assert!(result_member_count >= entry_count);
+
+    let mut memory_reader = open_boredm_memory_node(node(0x23), schema.clone());
+    let memory_elapsed = apply_boredm_reset_receipt(
+        "memory",
+        &mut memory_reader,
+        &shape,
+        &binding,
+        update.clone(),
+        entry_count,
+    );
+    let (_rocks_dir, mut rocks_reader) = open_node_with_schema(node(0x24), schema.clone());
+    let rocks_elapsed = apply_boredm_reset_receipt(
+        "rocksdb",
+        &mut rocks_reader,
+        &shape,
+        &binding,
+        update.clone(),
+        entry_count,
+    );
+    let (_btree_dir, mut btree_reader) = open_boredm_native_btree_node(node(0x25), schema.clone());
+    let btree_elapsed = apply_boredm_reset_receipt(
+        "native_btree_on_close",
+        &mut btree_reader,
+        &shape,
+        &binding,
+        update,
+        entry_count,
+    );
+    println!(
+        "boredm_real_dropdown_entry_reset_ingest_timing child_rows={entry_count} result_members={result_member_count} version_bundles={version_bundle_count} parents={dropdown_count} seed_ms={:.3} serve_ms={:.3} memory_apply_ms={:.3} rocksdb_apply_ms={:.3} native_btree_on_close_apply_ms={:.3}",
+        seed_elapsed.as_secs_f64() * 1000.0,
+        serve_elapsed.as_secs_f64() * 1000.0,
+        memory_elapsed.as_secs_f64() * 1000.0,
+        rocks_elapsed.as_secs_f64() * 1000.0,
+        btree_elapsed.as_secs_f64() * 1000.0
+    );
+}
+
 #[test]
 fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     // Internal protocol coverage: public APIs only expose this as a background
