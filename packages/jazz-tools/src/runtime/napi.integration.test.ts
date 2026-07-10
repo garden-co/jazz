@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,6 +10,7 @@ import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -85,6 +86,13 @@ type PolicyTodoInit = {
   projectId?: string;
   owner_id: string;
 };
+
+type BoredmLocation = {
+  id: string;
+  display_address?: string;
+};
+
+type BoredmLocationInit = Omit<BoredmLocation, "id">;
 
 const TEST_SCHEMA: WasmSchema = {
   todos: {
@@ -236,6 +244,7 @@ const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", impo
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts", import.meta.url),
 );
+const BOREDM_REAL_FIXTURE_DIR = new URL("../testing/fixtures/boredm-real/", import.meta.url);
 
 beforeAll(async () => {
   await loadNapiModule();
@@ -287,6 +296,13 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
       clearTimeout(timeoutId);
     }
   }
+}
+
+async function loadBoredmRealWasmSchema(): Promise<WasmSchema> {
+  const source = JSON.parse(
+    await readFile(new URL("schema-source.json", BOREDM_REAL_FIXTURE_DIR), "utf8"),
+  ) as { mergedSchema: WasmSchema };
+  return source.mergedSchema;
 }
 
 async function settleAsyncSyncWork(): Promise<void> {
@@ -600,6 +616,74 @@ describe("NAPI integration", () => {
       await server.stop();
     }
   }, 60_000);
+
+  it("resolves global waits for backend writes with the BoreDM real schema fixture", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-boredm-global-wait-secret";
+    const adminSecret = "napi-boredm-global-wait-admin-secret";
+    const boredmSchemaForServer = await loadBoredmRealWasmSchema();
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+      schema: encodeNativeSchema(boredmSchemaForServer),
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const boredmSchema = boredmSchemaForServer;
+      const locationTable = makeWhereTable<BoredmLocation, BoredmLocationInit>(
+        "location",
+        boredmSchema,
+      );
+
+      runtimeData = await createTempRuntimeData("jazz-napi-boredm-global-wait-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: boredmSchema },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdLocation = await withTimeout(
+        backendDb
+          .insert(
+            locationTable,
+            {
+              display_address: "BoreDM real schema global wait",
+            },
+            { id: randomUUID() },
+          )
+          .wait({ tier: "global" }),
+        90_000,
+        "BoreDM real schema backend global insert wait timed out",
+      );
+
+      expect(createdLocation).toMatchObject({
+        display_address: "BoreDM real schema global wait",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 120_000);
 
   it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();

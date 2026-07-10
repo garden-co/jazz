@@ -52,13 +52,18 @@ impl std::error::Error for SchemaConversionError {}
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
-    let mut converted = tables
+    let converted = tables
         .into_iter()
         .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
-    coerce_typed_literals(&mut converted);
-    validate_converted_schema(&converted)?;
-    Ok(JazzSchema::new(converted))
+    let mut validation_schema = converted.clone();
+    coerce_typed_literals(&mut validation_schema);
+    validate_converted_schema(&validation_schema)?;
+    Ok(JazzSchema {
+        tables: converted,
+        branch_read_policy: None,
+        branch_write_policy: None,
+    })
 }
 
 fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
@@ -215,9 +220,6 @@ fn coerce_predicate_typed_literals(
             values.retain_mut(|value| {
                 !coerce_operand_pair_typed_literal(table, left, value, column_types)
             });
-            if values.is_empty() {
-                *predicate = Predicate::Any(Vec::new());
-            }
         }
         Predicate::Contains(left, right) => {
             if coerce_operand_pair_typed_literal(table, left, right, column_types)
@@ -433,18 +435,7 @@ fn convert_column_type(
         ColumnType::Double => Ok(GrooveColumnType::F64),
         ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
-        ColumnType::Enum { variants } => Ok(GrooveColumnType::Enum(
-            EnumSchema::new(
-                format!("{}_{}", table.as_str(), column),
-                variants.iter().cloned(),
-            )
-            .map_err(|error| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column),
-                    format!("invalid enum: {error}"),
-                )
-            })?,
-        )),
+        ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
@@ -513,8 +504,10 @@ fn convert_policy_with_mode(
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
-                return Ok(Query::from(table.as_str())
-                    .filter(convert_policy_predicate(table, path, expr)?));
+                return query_with_predicate_filters(
+                    table.as_str(),
+                    predicate_filters_for_expr(table, path, expr)?,
+                );
             }
             let mut query = Query::from(table.as_str());
             for (index, expr) in exprs.iter().enumerate() {
@@ -550,7 +543,7 @@ fn convert_policy_with_mode(
         PolicyExpr::Inherits {
             operation,
             via_column,
-            max_depth: _,
+            max_depth,
         } => append_inherited_policy(
             schema,
             table_schema,
@@ -559,6 +552,7 @@ fn convert_policy_with_mode(
             Query::from(table.as_str()),
             *operation,
             via_column,
+            *max_depth,
             native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
@@ -589,7 +583,10 @@ fn convert_policy_with_mode(
         PolicyExpr::ExistsRel { rel } => {
             append_exists_rel_policy_clause(table, path, Query::from(table.as_str()), rel)
         }
-        _ => Ok(Query::from(table.as_str()).filter(convert_policy_predicate(table, path, expr)?)),
+        _ => query_with_predicate_filters(
+            table.as_str(),
+            predicate_filters_for_expr(table, path, expr)?,
+        ),
     }
 }
 
@@ -628,7 +625,7 @@ fn append_policy_clause(
         PolicyExpr::Inherits {
             operation,
             via_column,
-            max_depth: _,
+            max_depth,
         } => append_inherited_policy(
             schema,
             table_schema,
@@ -637,6 +634,7 @@ fn append_policy_clause(
             query,
             *operation,
             via_column,
+            *max_depth,
             native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
@@ -658,7 +656,46 @@ fn append_policy_clause(
             condition,
         } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
         PolicyExpr::ExistsRel { rel } => append_exists_rel_policy_clause(table, path, query, rel),
-        _ => Ok(query.filter(convert_policy_predicate(table, path, expr)?)),
+        _ => Ok(append_predicate_filters(
+            query,
+            predicate_filters_for_expr(table, path, expr)?,
+        )),
+    }
+}
+
+fn query_with_predicate_filters(
+    table: &str,
+    filters: Vec<Predicate>,
+) -> Result<Query, SchemaConversionError> {
+    Ok(append_predicate_filters(Query::from(table), filters))
+}
+
+fn append_predicate_filters(mut query: Query, filters: Vec<Predicate>) -> Query {
+    for filter in filters {
+        query = query.filter(filter);
+    }
+    query
+}
+
+fn predicate_filters_for_expr(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+) -> Result<Vec<Predicate>, SchemaConversionError> {
+    match expr {
+        PolicyExpr::True => Ok(Vec::new()),
+        PolicyExpr::And(exprs) => {
+            let mut filters = Vec::new();
+            for (index, expr) in exprs.iter().enumerate() {
+                filters.extend(predicate_filters_for_expr(
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    expr,
+                )?);
+            }
+            Ok(filters)
+        }
+        _ => Ok(vec![convert_policy_predicate(table, path, expr)?]),
     }
 }
 
@@ -1487,13 +1524,11 @@ fn rel_predicate_to_policy(
             }])
         }
         RelPredicateExpr::In { left, values } => {
-            let predicates = values
+            let values = values
                 .iter()
                 .map(
                     |value| match rel_value_to_policy_operand(table, path, value)? {
-                        LoweredRelValue::Operand(operand) => {
-                            Ok(Predicate::Eq(Operand::Column(left.column.clone()), operand))
-                        }
+                        LoweredRelValue::Operand(operand) => Ok(operand),
                         _ => Err(err(
                             format!("$.{}.{}", table.as_str(), path),
                             "core schema ExistsRel In does not support row-id operands",
@@ -1502,7 +1537,7 @@ fn rel_predicate_to_policy(
                 )
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Any(predicates),
+                predicate: Predicate::In(Operand::Column(left.column.clone()), values),
                 column: Some(left.column.clone()),
                 value: None,
             }])
@@ -1565,6 +1600,7 @@ fn append_inherited_policy(
     query: Query,
     operation: Operation,
     via_column: &str,
+    max_depth: Option<usize>,
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
@@ -1598,17 +1634,16 @@ fn append_inherited_policy(
     })?;
     if operation == Operation::Select
         && native_select_inherits
-        && inherited_select_requires_native_atom(
+        && policy_select_expansion_requires_native_inherits(
             schema,
             parent_schema,
             parent_table,
-            path,
             parent_policy,
         )
     {
-        return Ok(query.inherits(via_column));
+        return Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)));
     }
-    if operation != Operation::Select && policy_requires_branch(parent_policy) {
+    if operation != Operation::Select || (native_select_inherits && max_depth.is_some()) {
         return Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)));
     }
     let parent_filter = convert_policy_predicate(
@@ -1627,8 +1662,17 @@ fn append_inherited_policy(
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
-                native_select_inherits,
+                false,
             )?;
+            if native_select_inherits
+                && PolicyBranch::alternatives_from_query(parent_query.clone())
+                    .iter()
+                    .any(|branch| !branch.reachable.is_empty())
+            {
+                return Ok(
+                    query.inherits_operation(via_column, convert_inherits_operation(operation))
+                );
+            }
             append_inherited_policy_branches(
                 table,
                 path,
@@ -1642,27 +1686,74 @@ fn append_inherited_policy(
     }
 }
 
-fn inherited_select_requires_native_atom(
+fn policy_select_expansion_requires_native_inherits(
     schema: &Schema,
-    parent_schema: &TableSchema,
-    parent_table: &TableName,
-    path: &str,
-    parent_policy: &PolicyExpr,
+    table_schema: &TableSchema,
+    table: &TableName,
+    expr: &PolicyExpr,
 ) -> bool {
-    let Ok(parent_query) = convert_policy_with_mode(
-        schema,
-        parent_schema,
-        parent_table,
-        &format!("{path}.Inherits[{parent_table}]"),
-        parent_policy,
-        false,
-    ) else {
-        return true;
-    };
+    fn inner(
+        schema: &Schema,
+        table_schema: &TableSchema,
+        table: &TableName,
+        expr: &PolicyExpr,
+        visited: &mut Vec<TableName>,
+    ) -> bool {
+        match expr {
+            PolicyExpr::ExistsRel { .. } => true,
+            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs
+                .iter()
+                .any(|expr| inner(schema, table_schema, table, expr, visited)),
+            PolicyExpr::Not(expr) => inner(schema, table_schema, table, expr, visited),
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column,
+                ..
+            } => table_schema
+                .columns
+                .columns
+                .iter()
+                .find(|column| column.name.as_str() == via_column)
+                .and_then(|column| column.references.as_ref())
+                .and_then(|parent_table| {
+                    if visited.contains(parent_table) {
+                        return None;
+                    }
+                    let parent_schema = schema.get(parent_table)?;
+                    let parent_policy = parent_schema.policies.select.using.as_ref()?;
+                    visited.push(parent_table.clone());
+                    let requires_native =
+                        inner(schema, parent_schema, parent_table, parent_policy, visited);
+                    visited.pop();
+                    Some(requires_native)
+                })
+                .unwrap_or(false),
+            PolicyExpr::InheritsReferencing {
+                operation: Operation::Select,
+                source_table,
+                ..
+            } => {
+                let source_table = TableName::new(source_table);
+                if visited.contains(&source_table) {
+                    return false;
+                }
+                schema
+                    .get(&source_table)
+                    .and_then(|source_schema| {
+                        let source_policy = source_schema.policies.select.using.as_ref()?;
+                        visited.push(source_table.clone());
+                        let requires_native =
+                            inner(schema, source_schema, &source_table, source_policy, visited);
+                        visited.pop();
+                        Some(requires_native)
+                    })
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
 
-    PolicyBranch::alternatives_from_query(parent_query)
-        .into_iter()
-        .any(|branch| !branch.reachable.is_empty() || !branch.inherits.is_empty())
+    inner(schema, table_schema, table, expr, &mut vec![table.clone()])
 }
 
 fn append_inherited_policy_branches(
@@ -1862,14 +1953,7 @@ fn convert_policy_predicate(
                 convert_policy_operand(table, &format!("{path}.InList[{index}]"), value)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(|values| {
-                Predicate::Any(
-                    values
-                        .into_iter()
-                        .map(|value| Predicate::Eq(Operand::Column(column.clone()), value))
-                        .collect(),
-                )
-            }),
+            .map(|values| Predicate::In(Operand::Column(column.clone()), values)),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} yet"),
@@ -1947,11 +2031,56 @@ mod tests {
     };
     use crate::public_api::types::TableSchemaBuilder;
     use crate::public_schema::{
-        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, SchemaBuilder,
-        TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
+        SchemaBuilder, TablePolicies, TableSchema,
     };
     use jazz::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+    use jazz::schema::JazzSchema;
+    use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn boredm_real_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/jazz-tools/src/testing/fixtures/boredm-real")
+    }
+
+    fn boredm_real_fixture_schema() -> Schema {
+        let source = std::fs::read_to_string(boredm_real_fixture_dir().join("schema-source.json"))
+            .expect("read BoreDM real schema fixture source");
+        let source: serde_json::Value =
+            serde_json::from_str(&source).expect("parse BoreDM real schema fixture source");
+        serde_json::from_value(source["mergedSchema"].clone())
+            .expect("decode BoreDM real public schema fixture")
+    }
+
+    fn boredm_real_fixture_native_schema() -> JazzSchema {
+        let bytes = std::fs::read(boredm_real_fixture_dir().join("schema.native.bin"))
+            .expect("read BoreDM real native schema fixture");
+        postcard::from_bytes(&bytes).expect("decode BoreDM real native schema fixture")
+    }
+
+    #[test]
+    fn converts_boredm_real_public_schema_to_native_fixture_byte_stably() {
+        let converted =
+            convert_public_schema(&boredm_real_fixture_schema()).expect("convert BoreDM schema");
+        let expected = boredm_real_fixture_native_schema();
+
+        for (index, (left, right)) in converted
+            .tables
+            .iter()
+            .zip(expected.tables.iter())
+            .enumerate()
+        {
+            assert_eq!(left, right, "first table mismatch at index {index}");
+        }
+        assert_eq!(converted.tables.len(), expected.tables.len());
+        assert_eq!(
+            converted.version_id(),
+            expected.version_id(),
+            "server public-schema conversion must publish the same schema version that TS/NAPI clients use"
+        );
+        assert_eq!(converted, expected);
+    }
 
     #[test]
     fn converts_supported_columns_references_and_indexes() {
@@ -2233,7 +2362,7 @@ mod tests {
         assert_eq!(todos.read_policy.as_ref().unwrap().table, "todos");
         assert_eq!(
             todos.read_policy.as_ref().unwrap().filters,
-            vec![Predicate::All(vec![
+            vec![
                 Predicate::Eq(
                     Operand::Column("owner_id".to_owned()),
                     Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
@@ -2252,7 +2381,7 @@ mod tests {
                         Operand::Claim("team_id".to_owned()),
                     ),
                 ]),
-            ])]
+            ]
         );
         assert_eq!(
             todos.write_policies.insert_check.as_ref().unwrap().table,
@@ -2533,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_unbounded_inherited_select_to_row_id_join() {
+    fn expands_unbounded_inherited_select_when_parent_policy_is_branchable() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("folders")
@@ -2568,6 +2697,7 @@ mod tests {
         let policy = documents.read_policy.as_ref().unwrap();
         assert!(policy.filters.is_empty());
         assert_eq!(policy.joins.len(), 1);
+        assert!(policy.inherits.is_empty());
         let join = &policy.joins[0];
         assert_eq!(join.table, "folders");
         assert_eq!(join.on_column, "id");
@@ -2583,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_depth_limited_inherited_select_to_row_id_join() {
+    fn preserves_depth_limited_inherited_select_as_native_atom() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("teams")
@@ -2623,35 +2753,14 @@ mod tests {
             .unwrap();
         let policy = access_edges.read_policy.as_ref().unwrap();
         assert!(policy.filters.is_empty());
-        assert_eq!(policy.joins.len(), 1);
-        let join = &policy.joins[0];
-        assert_eq!(join.table, "teams");
-        assert_eq!(join.on_column, "id");
-        assert_eq!(join.target, JoinTarget::RowId);
-        assert_eq!(join.source_column.as_deref(), Some("target_team"));
-        assert_eq!(
-            join.filters,
-            vec![Predicate::All(vec![
-                Predicate::Contains(
-                    Operand::Claim("team_ids".to_owned()),
-                    Operand::Column("id".to_owned()),
-                ),
-                Predicate::Any(vec![
-                    Predicate::Eq(
-                        Operand::Column("kind".to_owned()),
-                        Operand::Literal(GrooveValue::String("individual".to_owned())),
-                    ),
-                    Predicate::Eq(
-                        Operand::Column("kind".to_owned()),
-                        Operand::Literal(GrooveValue::String("manual".to_owned())),
-                    ),
-                ])
-            ])]
-        );
+        assert!(policy.joins.is_empty());
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "target_team");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
     }
 
     #[test]
-    fn converts_empty_in_list_to_false_predicate() {
+    fn preserves_empty_in_list_as_in_predicate() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("teams")
@@ -2670,11 +2779,17 @@ mod tests {
             .find(|table| table.name == "teams")
             .unwrap();
         let policy = teams.read_policy.as_ref().unwrap();
-        assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::In(
+                Operand::Column("kind".to_owned()),
+                Vec::new()
+            )]
+        );
     }
 
     #[test]
-    fn converts_enum_policy_literals_to_core_discriminants() {
+    fn converts_enum_policy_literals_as_text_for_native_schema_parity() {
         let legacy_role_id = ObjectId::from_uuid(
             uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap(),
         );
@@ -2710,13 +2825,13 @@ mod tests {
         let policy = access_edges.read_policy.as_ref().unwrap();
         assert_eq!(
             policy.filters,
-            vec![Predicate::Any(vec![
-                Predicate::Eq(
-                    Operand::Column("grant_role".to_owned()),
-                    Operand::Literal(GrooveValue::Enum(2)),
-                ),
-                Predicate::Any(Vec::new()),
-            ])]
+            vec![Predicate::In(
+                Operand::Column("grant_role".to_owned()),
+                vec![
+                    Operand::Literal(GrooveValue::String("VIEWER".to_owned())),
+                    Operand::Literal(GrooveValue::Uuid(*legacy_role_id.uuid())),
+                ],
+            )]
         );
     }
 
@@ -3036,15 +3151,9 @@ mod tests {
             .unwrap();
         let policy = reactions.read_policy.as_ref().unwrap();
         assert_eq!(policy.policy_branches.len(), 1);
-        let join = &policy.policy_branches[0].joins[0];
-        assert_eq!(join.table, "chatMembers");
-        assert_eq!(join.on_column, "chatId");
-        assert_eq!(join.target, JoinTarget::Column);
-        assert_eq!(join.source_column.as_deref(), Some("chatId"));
-        let lookup = join.source_lookup.as_ref().unwrap();
-        assert_eq!(lookup.table, "messages");
-        assert_eq!(lookup.row_id_source_column, "messageId");
-        assert_eq!(lookup.value_column, "chatId");
+        assert!(policy.joins.is_empty());
+        assert!(policy.inherits.is_empty());
+        assert_eq!(policy.policy_branches[0].joins.len(), 1);
     }
 
     #[test]
@@ -3097,15 +3206,9 @@ mod tests {
             .unwrap();
         let policy = strokes.read_policy.as_ref().unwrap();
         assert_eq!(policy.policy_branches.len(), 1);
-        let join = &policy.policy_branches[0].joins[0];
-        assert_eq!(join.table, "chatMembers");
-        assert_eq!(join.on_column, "chatId");
-        assert_eq!(join.target, JoinTarget::Column);
-        assert_eq!(join.source_column.as_deref(), Some("chatId"));
-        let lookup = join.source_lookup.as_ref().unwrap();
-        assert_eq!(lookup.table, "canvases");
-        assert_eq!(lookup.row_id_source_column, "canvasId");
-        assert_eq!(lookup.value_column, "chatId");
+        assert!(policy.joins.is_empty());
+        assert!(policy.inherits.is_empty());
+        assert_eq!(policy.policy_branches[0].joins.len(), 1);
     }
 
     #[test]
