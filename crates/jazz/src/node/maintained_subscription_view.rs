@@ -4,9 +4,9 @@ use groove::ivm::{MultisinkDeltas, RecordDeltas};
 use groove::records::{BorrowedRecord, RecordDescriptor, Value};
 
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
-    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
-    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
+    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
+    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
+    tx_ids_from_value, validate_cell_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
@@ -778,19 +778,6 @@ fn decode_typed_version_witness(
             "maintained witness table_name must exist",
         ))?;
     let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
-    let mut cells = BTreeMap::new();
-    for column in &table.columns {
-        let field =
-            schema
-                .user_fields
-                .get(&column.name)
-                .ok_or(super::Error::InvalidStoredValue(
-                    "maintained witness schema missing user field",
-                ))?;
-        if let Some(value) = nullable_value(record.get_idx(field_idx(record, field)?)?)? {
-            cells.insert(column.name.clone(), value);
-        }
-    }
     let tx_time = TxTime(record_u64(record, &schema.identity.tx_time_field)?);
     let layer = if deletion.is_some() {
         VersionLayer::Deletion
@@ -811,7 +798,7 @@ fn decode_typed_version_witness(
         created_at: TxTime(record_u64(record, &schema.created_at_field)?),
         updated_by: AuthorId(record.get_uuid(field_idx(record, &schema.updated_by_field)?)?),
         updated_at: TxTime(record_u64(record, &schema.updated_at_field)?),
-        cells,
+        cells: BTreeMap::new(),
         deletion,
     };
     let descriptor = *descriptor_cache
@@ -826,12 +813,52 @@ fn decode_typed_version_witness(
     let values = if layer == VersionLayer::Deletion {
         register_values_from_parts(&parts)?
     } else {
-        history_values_from_parts(table, &parts)?
+        history_values_from_witness_record(record, schema, table, &parts)?
     };
     Ok(VersionRow {
         table: groove::Intern::new(parts.table),
         record: owned_record_from_storage_values_with_descriptor(descriptor, values)?,
     })
+}
+
+fn history_values_from_witness_record(
+    record: BorrowedRecord<'_>,
+    schema: &VersionWitnessSchema,
+    table: &TableSchema,
+    version: &VersionRowParts,
+) -> Result<Vec<Value>, super::Error> {
+    let mut values = vec![
+        Value::Uuid(version.row_uuid.0),
+        Value::U64(version.tx_time.0),
+        Value::U64(version.tx_node_alias.0),
+        Value::U64(version.schema_version_alias.0),
+        Value::Array(
+            version
+                .parents
+                .iter()
+                .map(|parent| super::codec::tx_id_value(*parent))
+                .collect(),
+        ),
+        Value::Uuid(version.created_by.0),
+        Value::U64(version.created_at.0),
+        Value::Uuid(version.updated_by.0),
+        Value::U64(version.updated_at.0),
+    ];
+    for column in &table.columns {
+        let field =
+            schema
+                .user_fields
+                .get(&column.name)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "maintained witness schema missing user field",
+                ))?;
+        let value = nullable_value(record.get_idx(field_idx(record, field)?)?)?;
+        if let Some(value) = &value {
+            validate_cell_value(column, value)?;
+        }
+        values.push(Value::Nullable(value.map(Box::new)));
+    }
+    Ok(values)
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
