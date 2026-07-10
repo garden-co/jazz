@@ -7,10 +7,11 @@ Scope: the resolved half of the files-persistence wayfinder map
 (`docs/superpowers/wayfinder/files-persistence/map.md`) — the
 [Descriptor persistence](../wayfinder/files-persistence/tickets/A-descriptor-persistence.md)
 and [Grant ledger](../wayfinder/files-persistence/tickets/E-claim-ledger.md)
-resolutions. Updated for the 2026-07-10 invisible-core pivot: core has no
-client-side byte machinery at all (no staging store, no resume records, no
-durable outbox hold — see the PRD's amendment 9); the one remaining open
-map ticket is the pending-delete intent record, NOT in this slice.
+resolutions. Updated for the 2026-07-10 invisible-core pivot and the MVP
+delete cut: core keeps zero durable client-side file-plane state (no
+staging store, no resume records, no durable outbox hold, no delete
+intent — see the PRD's amendment 9). The wayfinder map is complete; this
+spec plus the amended PRD are its destination deliverable.
 Feature-level authority: the files PRD
 (`2026-07-09-files-spec.md`).
 
@@ -186,21 +187,19 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
   conditional single PUT and conditional multipart completion, server-side
   copy, presigned part URLs for an existing `UploadId`, HEAD, DELETE —
   implemented by the real backend and the in-process fake alike.
-- **Delete execution (decided after this spec's first cut):** the server
-  side is synchronous and stateless — one idempotent DELETE in-request;
-  durability is client-owned via a locally persisted pending-delete
-  intent retried across restarts (permanent denials drop it; calls
-  dedupe; the promise resolves on origin confirmation). The server half
-  is in this slice; the intent record's persistence belongs to the
-  pending-delete-intent ticket (the former resume-records ticket, slimmed
-  by the invisible-core pivot).
-- **Explicitly deferred to the one open map ticket** (do not improvise):
-  the pending-delete intent record's shape and home. Everything else the
-  map once deferred here was resolved by the 2026-07-10 invisible-core
-  pivot: there are no staged bodies, no resume records, and the outbox
-  hold is in-memory only (PRD amendment 9). This slice may stub the
-  client upload driver to the point where protocol and column behavior
-  are fully testable.
+- **Delete execution (decided after this spec's first cut, amended by the
+  MVP delete cut):** the server side is synchronous and stateless — one
+  idempotent DELETE in-request. Client side, `delete()` returns a Promise
+  resolving on origin confirmation and rejecting on failure; there is no
+  durable intent record and no SDK retry machinery — the caller re-calls
+  if it needs the guarantee, which idempotence makes always safe. Both
+  halves are in this slice.
+- **Nothing is deferred to open map tickets** — the map is complete.
+  Everything it once deferred here was resolved by the 2026-07-10
+  invisible-core pivot and the MVP delete cut: no staged bodies, no
+  resume records, an in-memory-only outbox hold, and no delete intent
+  (PRD amendment 9). This slice may stub the client upload driver to the
+  point where protocol and column behavior are fully testable.
 
 ## Testing Decisions
 
@@ -233,8 +232,8 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
 
 ## Out of Scope
 
-- The pending-delete intent record's shape and home (the one open map
-  ticket).
+- A durable pending-delete intent record (cut from the MVP; the deferred
+  design is preserved in the map's pending-delete-intent ticket).
 - The opt-in offline package (2026-07-10 invisible-core pivot): durable
   staging, upload resume, the web SW, the RN loopback server, the
   read-through cache, and the core hook surface — see the PRD's

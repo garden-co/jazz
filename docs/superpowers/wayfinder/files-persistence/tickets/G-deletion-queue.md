@@ -47,3 +47,12 @@ stateless.**
    durability expectations).
 
 Assets: PRD + explainer updated in the same commit.
+
+## Addendum (2026-07-10, from the pending-delete-intent resolution)
+
+Points 2, 3 and 5 are amended by
+[Pending-delete intent record](C-resume-records.md): the durable intent
+is **out of the MVP**. `delete()` returns a Promise resolving on origin
+confirmation and rejecting on failure; retries across restarts are the
+caller's (idempotence makes re-calling always safe). Point 1 — the
+stateless, synchronous, idempotent server half — stands unchanged.

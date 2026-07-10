@@ -5,14 +5,16 @@ Tracker: local-markdown (this directory; tickets are files under `tickets/`)
 
 ## Destination
 
-A ready-for-agent spec pinning where and how every piece of file-plane state
-persists — client side (descriptor column values plus, after the 2026-07-10
-invisible-core pivot, a single pending-delete intent record: core keeps no
-staged bodies, no resume records, no durable outbox hold) and server side
-(stateless by prior decisions) — consistent with the files PRD
-(`docs/superpowers/specs/2026-07-09-files-spec.md`), which the pivot amends:
-offline upload/download move to a future opt-in package. Done when nothing is
-left to decide before implementation tickets can be cut.
+**REACHED (2026-07-10).** A ready-for-agent spec pinning where and how every
+piece of file-plane state persists — resolved as: client side, descriptor
+column values only (after the invisible-core pivot and the MVP delete cut,
+core keeps zero durable file-plane records — no staged bodies, no resume
+records, no durable outbox hold, no delete intent); server side, stateless by
+prior decisions. Published as the
+[Slice 1 spec](../../specs/2026-07-10-files-persistence-spec.md) plus the
+amended files PRD (`docs/superpowers/specs/2026-07-09-files-spec.md`,
+amendment 9). Nothing is left to decide before implementation tickets can be
+cut.
 
 ## Notes
 
@@ -35,9 +37,9 @@ left to decide before implementation tickets can be cut.
   trait methods.
 - Standing preference: keep artifacts in-repo (no public GitHub issues).
 
-Destination progress: the resolved half is published as the ready-for-agent
-[Slice 1 spec — file column & stateless file plane](../../specs/2026-07-10-files-persistence-spec.md);
-the open tickets below cover the rest.
+Destination progress: **complete** — all tickets closed, no fog. The spec
+pair (slice-1 + amended PRD) is the deliverable; implementation tickets can
+be cut from it.
 
 ## Decisions so far
 
@@ -60,11 +62,9 @@ the open tickets below cover the rest.
   (stated). Edges fully stateless — the client holds the `UploadId`. This
   subsumed [Edge grant records](tickets/F-edge-grant-records.md).
 - [Explicit-delete execution](tickets/G-deletion-queue.md) — synchronous
-  idempotent DELETE in-request, server persists nothing; the SDK persists
-  a **pending-delete intent** locally and retries across restarts until
-  origin confirms (permanent denials drop it; calls dedupe; promise
-  resolves on confirmation). Intent record's shape/home belongs to
-  [C — upload-resume records](tickets/C-resume-records.md).
+  idempotent DELETE in-request, server persists nothing. (Amended by C's
+  resolution: the client-persisted intent half was cut from the MVP; the
+  stateless server half stands.)
 - [Interceptor spike](tickets/H-interceptor-spike.md) — both interceptors
   proven by executed prototypes: SW serves `<img>` loads from OPFS/Cache
   with correct 206 Range synthesis (video-safe), first-load fallthrough
@@ -86,13 +86,21 @@ the open tickets below cover the rest.
   by design: the hold is an in-memory courtesy; after restart,
   formerly-held transactions sync normally (bodyless descriptor until an
   opt-in package reinstates durable holds). Closed by B's pivot.
+- [Pending-delete intent record](tickets/C-resume-records.md) — **no
+  record; out of the MVP.** `delete()` returns a Promise (resolves on
+  origin confirmation, rejects on failure); retries across restarts are
+  the caller's — safe because the DELETE is idempotent. Client-side
+  durable file-plane state in core is zero. The deferred record design
+  (file-id key, created-at value, `__pending_file_delete` raw table with
+  standard header versioning) is preserved in the ticket for whoever
+  reinstates it.
 
 ## Not yet specified
 
-(Empty — the 2026-07-10 invisible-core pivot moved all former entries out
-of scope with the offline package, except namespace versioning, which
-folded down into [Pending-delete intent record](tickets/C-resume-records.md).
-Remaining route: resolve C, then publish the destination spec.)
+(Empty — the map is complete. The 2026-07-10 invisible-core pivot moved
+all former entries out of scope with the offline package; the last one
+(namespace versioning) died with the pending-delete intent record's MVP
+cut.)
 
 ## Out of scope
 

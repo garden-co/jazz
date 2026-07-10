@@ -54,8 +54,11 @@ amendments in this spec:
    in-session; the outbox hold is an in-memory courtesy that deliberately
    does not survive restart; an upload interrupted by a restart is lost —
    the committed descriptor syncs bodyless and its URL 404s, the ordinary
-   documented state; `url()` returns the public URL on every platform. The
-   only durable client-side file-plane record is the pending-delete intent.
+   documented state; `url()` returns the public URL on every platform. Core
+   keeps **zero durable client-side file-plane records** — the pending-delete
+   intent was also cut from the MVP: `jazz.files.delete()` returns a Promise
+   (resolves on origin confirmation, rejects on failure), and retrying across
+   restarts is the caller's, safe because the DELETE is idempotent.
    Offline upload durability (staged bodies, resume records, durable holds)
    and offline reads (web service worker, RN loopback server, read-through
    cache) move to a **future opt-in package** — any offline footprint is
@@ -366,11 +369,12 @@ never deletes objects.
 46. As an operator, I want explicit deletes to be one idempotent DELETE
     against the bucket that any server can execute and safely retry, so
     that a requested delete reliably converges with nothing to coordinate.
-47. As an end user, I want my delete to survive flaky connectivity — the
-    SDK persists a pending-delete intent locally and retries across
-    restarts until the origin confirms (permanent denials drop it; calls
-    dedupe; the promise resolves on confirmation) — so that
-    fire-and-forget deletion is safe without any server-side record.
+47. As an app developer, I want `jazz.files.delete(fileId)` to return a
+    Promise that resolves on origin confirmation and rejects on failure —
+    with no durable intent record and no SDK retry machinery (cut from the
+    MVP by the invisible-core amendment) — so that I own the retry policy,
+    and re-calling is always safe because the DELETE is idempotent (an
+    already-absent key answers success).
 48. As an end user, I want a file created with a TTL class to disappear on
     schedule — the bucket's lifecycle rule deletes the body; descriptors
     remain and 404 — so that ephemeral content cleans itself up with no
@@ -567,9 +571,9 @@ never deletes objects.
   re-claimable only by its original owner.
 - **There is no device file store in core (2026-07-10 invisible-core
   pivot).** Core stages nothing, caches nothing, and keeps no durable
-  upload state: the Blob in memory is the only client-side copy of a body,
-  and the only durable client-side file-plane record is the pending-delete
-  intent. An upload interrupted by a restart is lost; the committed
+  file-plane state of any kind: the Blob in memory is the only client-side
+  copy of a body, and descriptor cells (ordinary rows) are the only
+  durable trace. An upload interrupted by a restart is lost; the committed
   descriptor syncs bodyless and its URL 404s — the ordinary documented
   state. Durable staging, upload resume, and the read-through cache belong
   to a future **opt-in offline package**, whose design inventory (store
@@ -596,7 +600,11 @@ never deletes objects.
   app-backend logic ending in a backend delete call. Execution is one
   idempotent DELETE against the bucket at whichever server handles the
   request — deleting an already-deleted id succeeds; a requested delete
-  converges. No tombstone, no metadata, no queue: takeover of a deleted
+  converges. Client side, `delete()` returns a Promise resolving on origin
+  confirmation and rejecting on failure; there is no durable intent record
+  and no SDK retry machinery (MVP cut) — the caller re-calls if it needs
+  the guarantee, which idempotence makes always safe. No tombstone, no
+  metadata, no queue: takeover of a deleted
   id is already impossible because the id's namespace belongs to its
   owner. Cell death — overwrite, null, row delete — never deletes objects,
   so there is no settle-observation machinery, copies never strand a body
@@ -619,7 +627,9 @@ never deletes objects.
   is no `fromStream`), `file.url()` (the stable public URL on every
   platform; computed synchronously and locally; no `canonical` option —
   it is retired until an opt-in package rewrites URLs),
-  `jazz.files.delete(fileId)`, and an observable upload state on the
+  `jazz.files.delete(fileId)` (returns a Promise — resolves on origin
+  confirmation, rejects on failure; retries are the caller's), and an
+  observable upload state on the
   handle: `local → uploading(progress) → released → accepted | rejected`
   (accepted/rejected are the ordinary transaction fates — nothing
   file-specific). Nothing else: reads, previews, and blob derivation are
