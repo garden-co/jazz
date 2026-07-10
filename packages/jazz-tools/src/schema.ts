@@ -6,6 +6,7 @@ export type ScalarSqlType =
   | "TEXT"
   | "BOOLEAN"
   | "INTEGER"
+  | "BIGINT"
   | "REAL"
   | "TIMESTAMP"
   | "UUID"
@@ -60,15 +61,17 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
     ? boolean
     : T extends "INTEGER"
       ? number
-      : T extends "REAL"
+      : T extends "BIGINT"
         ? number
-        : T extends "TIMESTAMP"
-          ? Date
-          : T extends "UUID"
-            ? string
-            : T extends "BYTEA"
-              ? Uint8Array
-              : never;
+        : T extends "REAL"
+          ? number
+          : T extends "TIMESTAMP"
+            ? Date
+            : T extends "UUID"
+              ? string
+              : T extends "BYTEA"
+                ? Uint8Array
+                : never;
 
 export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
