@@ -1,62 +1,71 @@
 export const selfServePricing = {
-  ioPerMillionOps: 0.15,
+  compute: 0.039,
   storagePerGbMonth: 0.45,
   egressPerGb: 0.09,
 } as const;
 
+export const selfServeFreeTier = {
+  computeCuHours: (24 * 30) / 2,
+  storageGbMonth: 1,
+  egressGb: 5,
+} as const;
+
 export const pricingMeters = [
   {
-    name: "I/O",
-    price: "$0.15",
-    unit: "per 1M I/O operations",
-    note: "Reads and writes against our SSDs.",
+    name: "Compute",
+    price: "$0.039",
+    unit: "per hour of 2GB RAM instance",
+    note: "Auto-scaling available soon",
+    included: "1GB RAM instance always included",
   },
   {
     name: "Storage",
     price: "$0.45",
-    unit: "per GB-month",
-    note: "Includes replication and caches.",
+    unit: "per GB/month",
+    note: "Includes backups and caches.",
+    included: "1GB/month included",
   },
   {
     name: "Egress",
     price: "$0.09",
     unit: "per GB out",
     note: "Passed through at cost.",
+    included: "5GB/month included",
   },
 ] as const;
 
 export const frequencyOptions = [
   {
-    value: "multiple-daily",
-    label: "Multiple times daily",
-    activeDaysPerMonth: 22,
-    activeMinutesPerActiveDay: 90,
-    blobFetchRatio: 0.4,
-    peakConcurrencyFraction: 0.12,
-  },
-  {
-    value: "daily",
-    label: "Daily",
-    activeDaysPerMonth: 20,
-    activeMinutesPerActiveDay: 30,
-    blobFetchRatio: 0.22,
-    peakConcurrencyFraction: 0.06,
+    value: "monthly",
+    label: "Monthly",
+    activeDaysPerMonth: 1,
+    visitsPerUserPerMonth: 1,
+    structuredStorageMultiplier: 0.75,
+    blobFetchRatio: 0.04,
   },
   {
     value: "weekly",
     label: "Weekly",
     activeDaysPerMonth: 4,
-    activeMinutesPerActiveDay: 45,
+    visitsPerUserPerMonth: 4,
+    structuredStorageMultiplier: 1,
     blobFetchRatio: 0.1,
-    peakConcurrencyFraction: 0.025,
   },
   {
-    value: "monthly",
-    label: "Monthly",
-    activeDaysPerMonth: 1,
-    activeMinutesPerActiveDay: 60,
-    blobFetchRatio: 0.04,
-    peakConcurrencyFraction: 0.01,
+    value: "daily",
+    label: "Daily",
+    activeDaysPerMonth: 20,
+    visitsPerUserPerMonth: 20,
+    structuredStorageMultiplier: 1,
+    blobFetchRatio: 0.22,
+  },
+  {
+    value: "multiple-daily",
+    label: "Multiple times daily",
+    activeDaysPerMonth: 22,
+    visitsPerUserPerMonth: 44,
+    structuredStorageMultiplier: 1,
+    blobFetchRatio: 0.4,
   },
 ] as const;
 
@@ -64,38 +73,29 @@ export const realtimeOptions = [
   {
     value: "mostly-form-like",
     label: "Mostly form-like apps",
-    cadenceLabel: "~1 interaction every 30s while active",
-    interactionRateHz: 1 / 30,
-    ioOpsPerInteraction: 70,
-    ioAmplification: 1.1,
-    structuredEgressKbPerInteraction: 3,
+    sessionLabel: "~3 minute sessions over the active window",
+    averageSessionMinutes: 3,
+    structuredEgressMbPerVisit: 0.5,
     egressFanoutMultiplier: 1,
     structuredStoragePerUserMb: 8,
-    peakBurstMultiplier: 1.3,
   },
   {
     value: "collaborative",
     label: "Collaborative / shared state",
-    cadenceLabel: "~1 interaction every second while active",
-    interactionRateHz: 1,
-    ioOpsPerInteraction: 85,
-    ioAmplification: 1.8,
-    structuredEgressKbPerInteraction: 4,
+    sessionLabel: "~20 minute sessions over the active window",
+    averageSessionMinutes: 20,
+    structuredEgressMbPerVisit: 2,
     egressFanoutMultiplier: 2.5,
     structuredStoragePerUserMb: 16,
-    peakBurstMultiplier: 1.6,
   },
   {
     value: "live",
     label: "Live streams / fan-out",
-    cadenceLabel: "~30 interactions every second while active",
-    interactionRateHz: 30,
-    ioOpsPerInteraction: 18,
-    ioAmplification: 2.4,
-    structuredEgressKbPerInteraction: 2,
+    sessionLabel: "~45 minute sessions in a concentrated event window",
+    averageSessionMinutes: 45,
+    structuredEgressMbPerVisit: 4,
     egressFanoutMultiplier: 10,
     structuredStoragePerUserMb: 28,
-    peakBurstMultiplier: 2.5,
   },
 ] as const;
 
@@ -103,8 +103,10 @@ export type FrequencyOption = (typeof frequencyOptions)[number]["value"];
 export type RealtimeOption = (typeof realtimeOptions)[number]["value"];
 
 const MB_PER_GB = 1024;
-const OPS_PER_MILLION = 1_000_000;
-const KB_PER_GB = 1024 * 1024;
+const HOURS_PER_DAY = 24;
+const HOURS_PER_MONTH = 24 * 30;
+const IDLE_SHUTDOWN_GRACE_MINUTES = 15;
+const SIMULTANEOUS_USERS_PER_INSTANCE = 200;
 
 function clampNonNegative(value: number) {
   if (!Number.isFinite(value)) return 0;
@@ -123,63 +125,87 @@ export function estimatePricing({
   blobStoragePerUserMb: number;
 }) {
   const selectedFrequency =
-    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[1];
+    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[2];
   const selectedRealtime =
     realtimeOptions.find((option) => option.value === realtime) ?? realtimeOptions[1];
 
   const monthlyActiveUsers = clampNonNegative(mau);
   const blobStorageMb = clampNonNegative(blobStoragePerUserMb);
 
-  const monthlyActiveSecondsPerUser =
-    selectedFrequency.activeDaysPerMonth * selectedFrequency.activeMinutesPerActiveDay * 60;
-  const monthlyActiveSeconds = monthlyActiveUsers * monthlyActiveSecondsPerUser;
-  const monthlyInteractions = monthlyActiveSeconds * selectedRealtime.interactionRateHz;
-
-  const monthlyIoOperations =
-    monthlyInteractions * selectedRealtime.ioOpsPerInteraction * selectedRealtime.ioAmplification;
+  const monthlyVisits = monthlyActiveUsers * selectedFrequency.visitsPerUserPerMonth;
+  const dailyVisits =
+    selectedFrequency.activeDaysPerMonth > 0
+      ? monthlyVisits / selectedFrequency.activeDaysPerMonth
+      : 0;
+  const sessionFootprintHours =
+    (selectedRealtime.averageSessionMinutes + IDLE_SHUTDOWN_GRACE_MINUTES) / 60;
+  const dailyComputeUptimeHours =
+    HOURS_PER_DAY * (1 - Math.exp(-(dailyVisits * sessionFootprintHours) / HOURS_PER_DAY));
+  const estimatedSingleInstanceUptimeHours = Math.min(
+    selectedFrequency.activeDaysPerMonth * dailyComputeUptimeHours,
+    HOURS_PER_MONTH,
+  );
+  const estimatedSimultaneousUsers =
+    estimatedSingleInstanceUptimeHours > 0
+      ? (monthlyVisits * sessionFootprintHours) / estimatedSingleInstanceUptimeHours
+      : 0;
+  const computeInstanceMultiplier = Math.max(
+    1,
+    Math.ceil(estimatedSimultaneousUsers / SIMULTANEOUS_USERS_PER_INSTANCE),
+  );
+  const estimatedComputeUptimeHours =
+    estimatedSingleInstanceUptimeHours * computeInstanceMultiplier;
 
   const structuredStorageGb =
-    (monthlyActiveUsers * selectedRealtime.structuredStoragePerUserMb) / MB_PER_GB;
+    (monthlyActiveUsers *
+      selectedRealtime.structuredStoragePerUserMb *
+      selectedFrequency.structuredStorageMultiplier) /
+    MB_PER_GB;
   const blobStorageGb = (monthlyActiveUsers * blobStorageMb) / MB_PER_GB;
   const storageGbMonth = structuredStorageGb + blobStorageGb;
 
   const structuredEgressGb =
-    (monthlyInteractions *
-      selectedRealtime.structuredEgressKbPerInteraction *
+    (monthlyVisits *
+      selectedRealtime.structuredEgressMbPerVisit *
       selectedRealtime.egressFanoutMultiplier) /
-    KB_PER_GB;
+    MB_PER_GB;
   const blobEgressGb = blobStorageGb * selectedFrequency.blobFetchRatio;
   const egressGb = structuredEgressGb + blobEgressGb;
 
-  const ioCost = (monthlyIoOperations / OPS_PER_MILLION) * selfServePricing.ioPerMillionOps;
-  const storageCost = storageGbMonth * selfServePricing.storagePerGbMonth;
-  const egressCost = egressGb * selfServePricing.egressPerGb;
-  const totalMonthlyCost = ioCost + storageCost + egressCost;
+  const billableComputeUptimeHours = Math.max(
+    estimatedComputeUptimeHours - selfServeFreeTier.computeCuHours,
+    0,
+  );
+  const billableStorageGbMonth = Math.max(storageGbMonth - selfServeFreeTier.storageGbMonth, 0);
+  const billableEgressGb = Math.max(egressGb - selfServeFreeTier.egressGb, 0);
+  const isWithinFreeTier =
+    billableComputeUptimeHours === 0 && billableStorageGbMonth === 0 && billableEgressGb === 0;
 
-  const activeWindowSeconds = monthlyActiveSeconds;
-  const averageActiveIops = activeWindowSeconds > 0 ? monthlyIoOperations / activeWindowSeconds : 0;
-  const peakConcurrentUsers = monthlyActiveUsers * selectedFrequency.peakConcurrencyFraction;
-  const peakIops =
-    peakConcurrentUsers *
-    selectedRealtime.interactionRateHz *
-    selectedRealtime.ioOpsPerInteraction *
-    selectedRealtime.ioAmplification *
-    selectedRealtime.peakBurstMultiplier;
+  const computeCost = billableComputeUptimeHours * selfServePricing.compute;
+  const storageCost = billableStorageGbMonth * selfServePricing.storagePerGbMonth;
+  const egressCost = billableEgressGb * selfServePricing.egressPerGb;
+  const totalMonthlyCost = computeCost + storageCost + egressCost;
 
   return {
-    monthlyActiveSecondsPerUser,
-    monthlyInteractions,
-    monthlyIoOperations,
+    monthlyVisits,
+    dailyVisits,
+    sessionFootprintHours,
+    dailyComputeUptimeHours,
+    estimatedSingleInstanceUptimeHours,
+    estimatedSimultaneousUsers,
+    computeInstanceMultiplier,
+    estimatedComputeUptimeHours,
     structuredStorageGb,
     blobStorageGb,
     storageGbMonth,
     structuredEgressGb,
     blobEgressGb,
     egressGb,
-    averageActiveIops,
-    peakConcurrentUsers,
-    peakIops,
-    ioCost,
+    billableComputeUptimeHours,
+    billableStorageGbMonth,
+    billableEgressGb,
+    isWithinFreeTier,
+    computeCost,
     storageCost,
     egressCost,
     totalMonthlyCost,
