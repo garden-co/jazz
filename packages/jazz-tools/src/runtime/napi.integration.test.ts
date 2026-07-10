@@ -104,6 +104,11 @@ type BoredmTeamAccessEdge = {
   administrator: boolean;
 };
 
+type BoredmTeam = {
+  id: string;
+  [key: string]: unknown;
+};
+
 type BoredmTemplate = {
   id: string;
   corporation_id: string;
@@ -1308,39 +1313,44 @@ describe("NAPI integration", () => {
           headers: { authorization: `Bearer ${jwtToken}` },
         }),
       );
+      let unsubscribeTeam: (() => void) | undefined;
+      const teams = makeTableQueryWithIncludes<BoredmTeam>("team", boredmSchema);
       const teamAccessEdges = makeTableQueryWithIncludes<BoredmTeamAccessEdge>(
         "team_access_edges",
         boredmSchema,
         { resource: true, team: true },
       );
-      const primedEdgeRows = await new Promise<unknown[]>((resolve, reject) => {
-        let unsubscribe: (() => void) | undefined;
-        const reduced: BoredmTeamAccessEdge[] = [];
-        unsubscribe = memberDb.subscribeAll(
-          teamAccessEdges,
-          (delta: SubscriptionDelta<BoredmTeamAccessEdge>) => {
+      const teamRows = await new Promise<unknown[]>((resolve, reject) => {
+        const reduced: BoredmTeam[] = [];
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        unsubscribeTeam = memberDb.subscribeAll(
+          teams,
+          (delta: SubscriptionDelta<BoredmTeam>) => {
             applySubscriptionDelta(reduced, delta);
-            if (reduced.some((row) => row.resource_id === corporationId)) {
-              unsubscribe?.();
+            if (reduced.some((row) => row.id === corporationId)) {
+              if (timeout) clearTimeout(timeout);
               resolve([...reduced]);
             }
           },
           { tier: "global" },
         );
-        setTimeout(() => {
+        timeout = setTimeout(() => {
           const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
           const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
-          unsubscribe?.();
+          unsubscribeTeam?.();
+          unsubscribeTeam = undefined;
           reject(
             new Error(
               capabilityError ??
-                `timed out waiting for primed team_access_edges after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
+                `timed out waiting for sibling team holder after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
             ),
           );
         }, 5_000);
       });
 
-      expect(primedEdgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
+      expect(teamRows).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: corporationId })]),
+      );
       await settleAsyncSyncWork();
 
       const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
@@ -1364,13 +1374,14 @@ describe("NAPI integration", () => {
           reject(
             new Error(
               capabilityError ??
-                `timed out waiting for team_access_edges after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
+                `timed out waiting for team_access_edges after sibling settle; rows=${reduced.length}; errors=${errors.join("\n")}`,
             ),
           );
         }, 5_000);
       });
 
       expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
+      unsubscribeTeam?.();
       const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
       expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
     } finally {

@@ -481,13 +481,14 @@ where
                     .node
                     .settled_binding_view_source_rows(&request.source.table, *binding_view)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let schema_version_alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
                     &table,
                     rows,
-                    self.node
-                        .catalogue
-                        .current_schema_version_alias
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?,
+                    schema_version_alias,
                     "settled-binding-view",
                     &request.requirements,
                 )
@@ -693,13 +694,14 @@ where
                 .node
                 .branch_current_rows(&request.source.table, &branch)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let (base, descriptor, metadata) = inline_branch_current_graph(
                 &table,
                 rows,
-                self.node
-                    .catalogue
-                    .current_schema_version_alias
-                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?,
+                schema_version_alias,
                 branch_id,
                 &request.requirements,
             )
@@ -11302,12 +11304,15 @@ mod tests {
         let (_server_dir, mut server) = open_node();
         let (_reader_dir, mut reader) = open_node();
         let alice = author(1);
-        let shape = Query::from("issues")
-            .filter(eq(col("assignee"), param("user")))
+        let shape = Query::from("users")
+            .filter(eq(col("name"), param("name")))
             .validate(&schema())
             .unwrap();
         let binding = shape
-            .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+            .bind(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("alice".to_owned()),
+            )]))
             .unwrap();
 
         register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
@@ -11315,7 +11320,7 @@ mod tests {
         register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
         subscribe_query_binding(&mut reader, &shape, &binding);
 
-        commit_global_issue(&mut server, 0, "open", alice, 1);
+        commit_global_user(&mut server, alice, "alice", 1);
         let mut peer = PeerState::new();
         let initial = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
         reader.apply_sync_message(initial).unwrap();
@@ -11361,8 +11366,10 @@ mod tests {
 
     #[test]
     fn settled_binding_view_root_with_reference_include_sources_lowers() {
-        // Internal regression: public subscriber timing does not reliably force
-        // the settled-binding root, so build the exact mixed read set directly.
+        // A settled binding view contains root result membership only. Shapes
+        // with implicit reference closures need auxiliary source coverage too,
+        // so the mixed settled-root/current-auxiliary read set must still be
+        // able to lower coverage facts.
         let (_server_dir, mut server) = open_node();
         let (_reader_dir, mut reader) = open_node();
         let alice = author(1);
@@ -11397,17 +11404,23 @@ mod tests {
             .settled_binding_view_key_for_query(&shape, &binding)
             .unwrap()
             .expect("receiver should have a settled binding view after rehydrate");
+        reader.catalogue.current_schema_version_alias = None;
         let request = reader
             .current_query_program_request(
                 &shape,
                 &binding,
                 DurabilityTier::Global,
-                AuthorId::SYSTEM,
+                alice,
                 CurrentQueryProgramOutput::MaintainedView,
                 &ReadViewSpec::default(),
                 Some(settled_binding_view),
             )
             .unwrap();
+        let mut request = request;
+        request
+            .output
+            .facts
+            .insert(ProgramFactKey::SourceCoverage(CoverageScope::Program));
 
         let sources = format!("{:?}", request.reads);
         assert!(sources.contains("SettledBindingView"), "{sources}");
