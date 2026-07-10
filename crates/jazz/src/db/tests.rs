@@ -2008,6 +2008,38 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
+
+    client_transport
+        .send(SyncMessage::Unsubscribe { subscription })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let message = client_transport
+        .try_recv()
+        .expect("expected reopened include subscription view update");
+    let SyncMessage::ViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    } = message
+    else {
+        panic!("expected reopened include subscription view update, got {message:?}");
+    };
+    assert_eq!(served, subscription);
+    let tables = result_member_adds
+        .iter()
+        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 }
 
 #[test]

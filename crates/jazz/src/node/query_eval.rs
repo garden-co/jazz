@@ -11360,6 +11360,64 @@ mod tests {
     }
 
     #[test]
+    fn settled_binding_view_root_with_reference_include_sources_lowers() {
+        // Internal regression: public subscriber timing does not reliably force
+        // the settled-binding root, so build the exact mixed read set directly.
+        let (_server_dir, mut server) = open_node();
+        let (_reader_dir, mut reader) = open_node();
+        let alice = author(1);
+        let shape = Query::from("issues")
+            .filter(eq(col("assignee"), param("user")))
+            .include("assignee")
+            .validate(&schema())
+            .unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+            .unwrap();
+
+        register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(&mut server, &shape, &binding);
+        register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(&mut reader, &shape, &binding);
+
+        commit_global_cells(
+            &mut server,
+            "users",
+            RowUuid(alice.0),
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+            1,
+            1,
+        );
+        commit_global_issue(&mut server, 0, "open", alice, 2);
+        let mut peer = PeerState::new();
+        let initial = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
+        reader.apply_sync_message(initial).unwrap();
+
+        let settled_binding_view = reader
+            .settled_binding_view_key_for_query(&shape, &binding)
+            .unwrap()
+            .expect("receiver should have a settled binding view after rehydrate");
+        let request = reader
+            .current_query_program_request(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+                Some(settled_binding_view),
+            )
+            .unwrap();
+
+        let sources = format!("{:?}", request.reads);
+        assert!(sources.contains("SettledBindingView"), "{sources}");
+        assert!(sources.contains("VisibleCurrent"), "{sources}");
+        reader
+            .compile_query_program_request(request)
+            .expect("settled binding-view root with current include sources should lower");
+    }
+
+    #[test]
     fn query_subscription_ships_provenance_closure_for_local_evaluation() {
         let (_server_dir, mut server) = open_node();
         let (_reader_dir, mut reader) = open_node();
