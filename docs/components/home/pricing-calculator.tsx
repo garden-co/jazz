@@ -24,10 +24,10 @@ const mauTicks = [
 ] as const;
 
 const frequencyTicks = [
-  { value: 0, label: "Multi-daily" },
-  { value: 1, label: "Daily" },
-  { value: 2, label: "Weekly" },
-  { value: 3, label: "Monthly" },
+  { value: 0, label: "Monthly" },
+  { value: 1, label: "Weekly" },
+  { value: 2, label: "Daily" },
+  { value: 3, label: "Multi-daily" },
 ] as const;
 
 const realtimeTicks = [
@@ -127,7 +127,7 @@ function TickSlider({
 
 export function PricingCalculator() {
   const [mauLogValue, setMauLogValue] = useState(3);
-  const [frequencyIndex, setFrequencyIndex] = useState(1);
+  const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(0);
   const [blobStoragePerUserMb, setBlobStoragePerUserMb] = useState(32);
 
@@ -135,7 +135,7 @@ export function PricingCalculator() {
   const frequency = frequencyOptions[frequencyIndex]?.value ?? "daily";
   const realtime = realtimeOptions[realtimeIndex]?.value ?? "mostly-form-like";
   const selectedFrequency =
-    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[1];
+    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[2];
   const selectedRealtime =
     realtimeOptions.find((option) => option.value === realtime) ?? realtimeOptions[0];
 

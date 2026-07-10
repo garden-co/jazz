@@ -36,20 +36,12 @@ export const pricingMeters = [
 
 export const frequencyOptions = [
   {
-    value: "multiple-daily",
-    label: "Multiple times daily",
-    activeDaysPerMonth: 22,
-    visitsPerUserPerMonth: 44,
-    structuredStorageMultiplier: 1,
-    blobFetchRatio: 0.4,
-  },
-  {
-    value: "daily",
-    label: "Daily",
-    activeDaysPerMonth: 20,
-    visitsPerUserPerMonth: 20,
-    structuredStorageMultiplier: 1,
-    blobFetchRatio: 0.22,
+    value: "monthly",
+    label: "Monthly",
+    activeDaysPerMonth: 1,
+    visitsPerUserPerMonth: 1,
+    structuredStorageMultiplier: 0.75,
+    blobFetchRatio: 0.04,
   },
   {
     value: "weekly",
@@ -60,12 +52,20 @@ export const frequencyOptions = [
     blobFetchRatio: 0.1,
   },
   {
-    value: "monthly",
-    label: "Monthly",
-    activeDaysPerMonth: 1,
-    visitsPerUserPerMonth: 1,
-    structuredStorageMultiplier: 0.75,
-    blobFetchRatio: 0.04,
+    value: "daily",
+    label: "Daily",
+    activeDaysPerMonth: 20,
+    visitsPerUserPerMonth: 20,
+    structuredStorageMultiplier: 1,
+    blobFetchRatio: 0.22,
+  },
+  {
+    value: "multiple-daily",
+    label: "Multiple times daily",
+    activeDaysPerMonth: 22,
+    visitsPerUserPerMonth: 44,
+    structuredStorageMultiplier: 1,
+    blobFetchRatio: 0.4,
   },
 ] as const;
 
@@ -125,7 +125,7 @@ export function estimatePricing({
   blobStoragePerUserMb: number;
 }) {
   const selectedFrequency =
-    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[1];
+    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[2];
   const selectedRealtime =
     realtimeOptions.find((option) => option.value === realtime) ?? realtimeOptions[1];
 
