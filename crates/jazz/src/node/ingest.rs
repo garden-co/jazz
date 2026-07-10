@@ -1557,9 +1557,8 @@ where
         let tx_versions = self.query_versions_for_tx(tx_id)?;
         let content_versions = tx_versions
             .iter()
-            .cloned()
-            .into_iter()
             .filter(|version| version.layer() == VersionLayer::Content)
+            .cloned()
             .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
             global_current_updates =

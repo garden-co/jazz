@@ -1695,7 +1695,6 @@ fn policy_select_expansion_requires_native_inherits(
     fn inner(
         schema: &Schema,
         table_schema: &TableSchema,
-        table: &TableName,
         expr: &PolicyExpr,
         visited: &mut Vec<TableName>,
     ) -> bool {
@@ -1703,8 +1702,8 @@ fn policy_select_expansion_requires_native_inherits(
             PolicyExpr::ExistsRel { .. } => true,
             PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs
                 .iter()
-                .any(|expr| inner(schema, table_schema, table, expr, visited)),
-            PolicyExpr::Not(expr) => inner(schema, table_schema, table, expr, visited),
+                .any(|expr| inner(schema, table_schema, expr, visited)),
+            PolicyExpr::Not(expr) => inner(schema, table_schema, expr, visited),
             PolicyExpr::Inherits {
                 operation: Operation::Select,
                 via_column,
@@ -1721,9 +1720,8 @@ fn policy_select_expansion_requires_native_inherits(
                     }
                     let parent_schema = schema.get(parent_table)?;
                     let parent_policy = parent_schema.policies.select.using.as_ref()?;
-                    visited.push(parent_table.clone());
-                    let requires_native =
-                        inner(schema, parent_schema, parent_table, parent_policy, visited);
+                    visited.push(*parent_table);
+                    let requires_native = inner(schema, parent_schema, parent_policy, visited);
                     visited.pop();
                     Some(requires_native)
                 })
@@ -1741,9 +1739,8 @@ fn policy_select_expansion_requires_native_inherits(
                     .get(&source_table)
                     .and_then(|source_schema| {
                         let source_policy = source_schema.policies.select.using.as_ref()?;
-                        visited.push(source_table.clone());
-                        let requires_native =
-                            inner(schema, source_schema, &source_table, source_policy, visited);
+                        visited.push(source_table);
+                        let requires_native = inner(schema, source_schema, source_policy, visited);
                         visited.pop();
                         Some(requires_native)
                     })
@@ -1753,7 +1750,7 @@ fn policy_select_expansion_requires_native_inherits(
         }
     }
 
-    inner(schema, table_schema, table, expr, &mut vec![table.clone()])
+    inner(schema, table_schema, expr, &mut vec![*table])
 }
 
 fn append_inherited_policy_branches(
