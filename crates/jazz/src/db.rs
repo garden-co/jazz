@@ -2423,6 +2423,19 @@ where
         self.local_row_for_identity(table, row, self.identity.author)
     }
 
+    /// Read one locally-current row by primary key without evaluating a table
+    /// query. This backend-scoped helper is used by import/upsert bridges that
+    /// already operate with database authority and need an O(row) existence
+    /// check before staging a write.
+    pub fn local_current_row(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        self.table_schema(table)?;
+        Ok(self.node.node.borrow_mut().local_current_row(table, row)?)
+    }
+
     fn ensure_row_absent(
         &self,
         table: &str,
@@ -5843,7 +5856,7 @@ where
             }
         }
         let mut cells = BTreeMap::new();
-        if let Some(existing) = self.db.local_row(table, row)? {
+        if let Some(existing) = self.db.local_current_row(table, row)? {
             for column in &table_schema.columns {
                 if let Some(value) = existing.cell(table_schema, &column.name) {
                     cells.insert(column.name.clone(), value);
