@@ -71,6 +71,8 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return "BOOLEAN";
     case "Integer":
       return "INTEGER";
+    case "BigInt":
+      return "BIGINT";
     case "Double":
       return "REAL";
     case "Timestamp":
@@ -85,8 +87,6 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return { kind: "ENUM", variants: [...columnType.variants] };
     case "Array":
       return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
-    case "BigInt":
-      throw new Error("Root schema loading does not yet support BIGINT columns.");
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued columns.");
   }

@@ -958,6 +958,8 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
         return { type: "Boolean" };
       case "INTEGER":
         return { type: "Integer" };
+      case "BIGINT":
+        return { type: "BigInt" };
       case "REAL":
         return { type: "Double" };
       case "TIMESTAMP":

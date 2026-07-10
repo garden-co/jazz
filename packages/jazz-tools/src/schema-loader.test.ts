@@ -6,6 +6,7 @@ import { loadCompiledSchema } from "./schema-loader.js";
 const WITH_DEFAULTS_DIR = fileURLToPath(
   new URL("./testing/fixtures/with-defaults", import.meta.url),
 );
+const WITH_BIGINT_DIR = fileURLToPath(new URL("./testing/fixtures/with-bigint", import.meta.url));
 
 describe("loadCompiledSchema", () => {
   it("keeps typed-app schema and wasm schema losslessly aligned", async () => {
@@ -42,5 +43,16 @@ describe("loadCompiledSchema", () => {
         }),
       }),
     );
+  });
+
+  it("loads typed-app BIGINT columns from wasm schema exports", async () => {
+    const loaded = await loadCompiledSchema(WITH_BIGINT_DIR);
+
+    expect(schemaToWasm(loaded.schema)).toEqual(loaded.wasmSchema);
+
+    const counters = loaded.schema.tables.find((table) => table.name === "counters");
+    const largeCount = counters?.columns.find((column) => column.name === "largeCount");
+    expect(largeCount?.sqlType).toBe("BIGINT");
+    expect(largeCount?.default).toBe(9007199254740991);
   });
 });
