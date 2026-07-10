@@ -2,7 +2,7 @@
 
 Type: `wayfinder:grilling`
 Status: open
-Assignee: (unclaimed)
+Assignee: guido (claimed 2026-07-10)
 Blocked by: [E — grant ledger](E-claim-ledger.md)
 
 ## Question
