@@ -238,6 +238,7 @@ function makeTableQueryWithIncludes<T>(
         includes,
         select,
         orderBy: [],
+        hops: [],
       });
     },
   };
@@ -351,6 +352,13 @@ async function loadPilotAppRealWasmSchema(): Promise<WasmSchema> {
     await readFile(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR), "utf8"),
   ) as { mergedSchema: WasmSchema };
   return source.mergedSchema;
+}
+
+async function loadPilotAppRealAppSchema(): Promise<WasmSchema> {
+  const source = JSON.parse(
+    await readFile(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR), "utf8"),
+  ) as { wasmSchema: WasmSchema };
+  return source.wasmSchema;
 }
 
 async function createPilotAppRealSchemaDir(options?: {
@@ -845,7 +853,7 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-pilot-app-holder-subscription-secret";
     const adminSecret = "napi-pilot-app-holder-subscription-admin-secret";
-    const pilot-appSchema = await loadPilotAppRealWasmSchema();
+    const pilot-appSchema = await loadPilotAppRealAppSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
@@ -1084,6 +1092,252 @@ describe("NAPI integration", () => {
       await jwtIssuer.stop();
     }
   }, 60_000);
+
+  it("reopens a deployed the pilot customer schema data directory through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-pilot-app-reopen-secret";
+    const adminSecret = "napi-pilot-app-reopen-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-pilot-app-reopen-server-");
+    let schemaDir: string | null = null;
+    let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
+
+    try {
+      schemaDir = await createPilotAppRealSchemaDir();
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+      });
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+      });
+      expect(server.url).toContain("http://");
+    } finally {
+      if (server) {
+        await server.stop();
+      }
+      if (schemaDir) {
+        await rm(schemaDir, { recursive: true, force: true });
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("serves the pilot customer holder queries after importing data and reopening the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-pilot-app-chain-secret";
+    const adminSecret = "napi-pilot-app-chain-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-pilot-app-chain-server-");
+    const pilot-appSchema = await loadPilotAppRealWasmSchema();
+    const memberId = "00000000-0000-4000-8000-000000000001";
+    const corporationId = randomUUID();
+    const schemaDir = await createPilotAppRealSchemaDir();
+    const jwtIssuer = await startTestJwtIssuer();
+    let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
+    let context: {
+      asBackend(): Db;
+      forRequest(request: Request): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+        jwksUrl: jwtIssuer.jwksUrl,
+      });
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: pilot-appSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "team",
+        pilot-appSchema,
+      );
+      const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "team_entry",
+        pilot-appSchema,
+      );
+      const teamAccessEdgesTable = makeWhereTable<
+        PilotAppTeamAccessEdge,
+        Omit<PilotAppTeamAccessEdge, "id">
+      >("team_access_edges", pilot-appSchema);
+      const now = new Date("2026-07-10T00:00:00.000Z");
+
+      await backendDb
+        .transaction((tx) => {
+          tx.insert(
+            teamTable,
+            {
+              corporation_id: corporationId,
+              created_by: memberId,
+              updated_by: memberId,
+              archived: false,
+              name: "Example Corp",
+              date_created: now,
+              date_updated: now,
+              description: "fixture corporation",
+            },
+            { id: corporationId },
+          );
+          tx.insert(
+            teamTable,
+            {
+              corporation_id: corporationId,
+              created_by: memberId,
+              updated_by: memberId,
+              archived: false,
+              name: "Jon",
+              date_created: now,
+              date_updated: now,
+              description: "fixture member",
+            },
+            { id: memberId },
+          );
+          tx.insert(
+            teamEntryTable,
+            {
+              team_id: memberId,
+              target_id: corporationId,
+              added_by: memberId,
+              administrator: false,
+              date_added: now,
+            },
+            { id: randomUUID() },
+          );
+          tx.insert(
+            teamAccessEdgesTable,
+            {
+              resource_id: corporationId,
+              team_id: corporationId,
+              grant_role: "VIEWER",
+              administrator: false,
+            },
+            { id: randomUUID() },
+          );
+        })
+        .wait({ tier: "global" });
+
+      await context.shutdown();
+      context = null;
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+        jwksUrl: jwtIssuer.jwksUrl,
+      });
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: pilot-appSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const jwtToken = jwtIssuer.jwtForUser(
+        memberId,
+        { email: "redacted@example.com" },
+        { issuer: "example.com" },
+      );
+      const memberDb = await context.forRequest(
+        new Request(server.url, {
+          headers: { authorization: `Bearer ${jwtToken}` },
+        }),
+      );
+      const teamAccessEdges = makeTableQueryWithIncludes<PilotAppTeamAccessEdge>(
+        "team_access_edges",
+        pilot-appSchema,
+      );
+      const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        const reduced: PilotAppTeamAccessEdge[] = [];
+        unsubscribe = memberDb.subscribeAll(
+          teamAccessEdges,
+          (delta: SubscriptionDelta<PilotAppTeamAccessEdge>) => {
+            applySubscriptionDelta(reduced, delta);
+            if (reduced.some((row) => row.resource_id === corporationId)) {
+              unsubscribe?.();
+              resolve([...reduced]);
+            }
+          },
+          { tier: "global" },
+        );
+        setTimeout(() => {
+          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
+          unsubscribe?.();
+          reject(
+            new Error(
+              capabilityError ??
+                `timed out waiting for team_access_edges after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
+            ),
+          );
+        }, 5_000);
+      });
+
+      expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
+      const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+      expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
+    } finally {
+      consoleError.mockRestore();
+      if (context) {
+        await context.shutdown();
+      }
+      if (server) {
+        await server.stop();
+      }
+      await jwtIssuer.stop();
+      await rm(schemaDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 90_000);
 
   it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();
