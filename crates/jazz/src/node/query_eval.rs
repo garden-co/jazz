@@ -462,10 +462,6 @@ where
                 projection,
                 binding_view,
             } => {
-                let table = self
-                    .node
-                    .table_in_schema(&request.source.table, self.read_view.read_schema)
-                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 if request.visibility != RowVisibility::Visible {
                     return Err(source_resolution_error(request, SourceGap::Coverage));
                 }
@@ -478,35 +474,50 @@ where
                         SourceGap::SchemaProjection,
                     ));
                 }
-                let rows = self
+                match self
                     .node
                     .settled_binding_view_source_rows(&request.source.table, *binding_view)
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let schema_version_alias = self
-                    .node
-                    .ensure_schema_version_alias(self.read_view.read_schema)
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
-                    &table,
-                    rows,
-                    schema_version_alias,
-                    "settled-binding-view",
-                    &request.requirements,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                return Ok(ResolvedSource {
-                    table_schema: table,
-                    graph,
-                    row_shape: SourceRowShape {
-                        source: request.source.clone(),
-                        descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
-                        metadata,
-                    },
-                    routing_fields: BTreeSet::new(),
-                    content_version: None,
-                    deletion_register: None,
-                });
+                {
+                    Ok(rows) => {
+                        let table = self
+                            .node
+                            .table_in_schema(&request.source.table, self.read_view.read_schema)
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::SchemaProjection)
+                            })?;
+                        let schema_version_alias = self
+                            .node
+                            .ensure_schema_version_alias(self.read_view.read_schema)
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        let (graph, descriptor, metadata) =
+                            inline_current_graph_with_source_metadata(
+                                &table,
+                                rows,
+                                schema_version_alias,
+                                "settled-binding-view",
+                                &request.requirements,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                        return Ok(ResolvedSource {
+                            table_schema: table,
+                            graph,
+                            row_shape: SourceRowShape {
+                                source: request.source.clone(),
+                                descriptor,
+                                row_uuid_field: "row_uuid".to_owned(),
+                                metadata,
+                            },
+                            routing_fields: BTreeSet::new(),
+                            content_version: None,
+                            deletion_register: None,
+                        });
+                    }
+                    Err(Error::MissingTransaction(_)) => {}
+                    Err(_) => {
+                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    }
+                }
+                (projection, Some(DurabilityTier::Global), None, None, None)
             }
             SourceExpr::WithOverlays { input, overlays } => {
                 let (projection, tier) = match input.as_ref() {
