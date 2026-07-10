@@ -23,3 +23,10 @@ fresh file id after expiry — the old record must die).
 
 Blocked by B because the record references the staged body and shares its
 crash-consistency contract.
+
+Addendum (2026-07-10, from
+[Explicit-delete execution](G-deletion-queue.md)): this ticket also owns
+the **pending-delete intent** record — a second, smaller client-side
+durable record (file id + retry state) persisted until the origin confirms
+deletion; same store, same durability expectations, likely the same
+namespace decision.

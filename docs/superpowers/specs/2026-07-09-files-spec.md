@@ -352,51 +352,56 @@ never deletes objects.
 46. As an operator, I want explicit deletes to be one idempotent DELETE
     against the bucket that any server can execute and safely retry, so
     that a requested delete reliably converges with nothing to coordinate.
-47. As an end user, I want a file created with a TTL class to disappear on
+47. As an end user, I want my delete to survive flaky connectivity — the
+    SDK persists a pending-delete intent locally and retries across
+    restarts until the origin confirms (permanent denials drop it; calls
+    dedupe; the promise resolves on confirmation) — so that
+    fire-and-forget deletion is safe without any server-side record.
+48. As an end user, I want a file created with a TTL class to disappear on
     schedule — the bucket's lifecycle rule deletes the body; descriptors
     remain and 404 — so that ephemeral content cleans itself up with no
     server machinery and no app cron.
-48. As an operator, I want the TTL class set declared per deployment
+49. As an operator, I want the TTL class set declared per deployment
     (recommended defaults 1d/7d/30d) with exactly one lifecycle rule per
     class, so that expiry behavior is auditable in the bucket configuration
     itself.
-49. As an app developer, I want cell death (overwrite, null, row delete) to
+50. As an app developer, I want cell death (overwrite, null, row delete) to
     never touch objects, so that copies and history stay coherent by
     default and storage reclamation is always the explicit API or the TTL
     class; bodies persist until one of those acts.
-50. As an app developer, I want historical reads and branches to surface a
+51. As an app developer, I want historical reads and branches to surface a
     descriptor at a past cut even after its body is deleted or expired, so
     that bodyless history is a defined semantic rather than a crash (the
     URL 404s; there is no SDK body read to error).
-51. As an end user, I want a deleted file's URL to stop serving bytes once
+52. As an end user, I want a deleted file's URL to stop serving bytes once
     the object is deleted (with CDN-cached copies aging out on their own),
     so that deletion means withdrawal, with the CDN caveat stated honestly.
-52. As an app developer, I want two devices concurrently swapping the same
+53. As an app developer, I want two devices concurrently swapping the same
     cell offline to resolve like any conflicting column write — one value
     wins, nothing file-specific happens, no body is deleted — so that
     concurrency needs no file-specific rules.
 
 ### Operations & deployment
 
-53. As an operator, I want the backend contract to be exactly the
+54. As an operator, I want the backend contract to be exactly the
     S3-compatible API (conditional presigned single/multipart PUT, multipart
     create/complete/abort with conditional completion, server-side copy,
     public GET, HEAD, DELETE, and prefix-scoped lifecycle rules for
     `pending/` and each TTL class), so that S3, R2, minio, and Tigris all
     work unchanged.
-54. As an operator, I want the bucket policy to be public GetObject with
+55. As an operator, I want the bucket policy to be public GetObject with
     listing denied, so that unguessable random parts actually protect
     bodies and the bucket can sit directly behind a CDN.
-55. As an operator, I want servers to hold no file-plane state of any kind
+56. As an operator, I want servers to hold no file-plane state of any kind
     — no grant records, no ledger, no tombstones, no queues; authorization
     is a string comparison, and the grant response hands the `UploadId` to
     the client — so that edges restart, scale, and load-balance with
     nothing to replicate or reconcile.
-56. As an operator, I want servers to hold the object-store credentials
+57. As an operator, I want servers to hold the object-store credentials
     (presign, complete, copy, delete) with clients never seeing them, so
     that the only client-facing capabilities are the time-limited presigned
     URLs of their own grants.
-57. As a developer running tests or local dev, I want the file plane to run
+58. As a developer running tests or local dev, I want the file plane to run
     against minio or an in-process fake (including conditional writes,
     conditional multipart completion, server-side copy, and
     manually-triggerable lifecycle expiry), so that no cloud account is

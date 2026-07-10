@@ -182,12 +182,19 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
   conditional single PUT and conditional multipart completion, server-side
   copy, presigned part URLs for an existing `UploadId`, HEAD, DELETE —
   implemented by the real backend and the in-process fake alike.
+- **Delete execution (decided after this spec's first cut):** the server
+  side is synchronous and stateless — one idempotent DELETE in-request;
+  durability is client-owned via a locally persisted pending-delete
+  intent retried across restarts (permanent denials drop it; calls
+  dedupe; the promise resolves on origin confirmation). The server half
+  is in this slice; the intent record's persistence belongs to the
+  resume-records ticket.
 - **Explicitly deferred to open map tickets** (do not improvise):
   where staged bodies live per platform, the resume record's shape and
-  home, how the outbox hold is represented across restarts, and whether
-  delete runs synchronously in-request or via a durable retry record.
-  This slice may stub the client upload driver to the point where
-  protocol and column behavior are fully testable.
+  home (including the pending-delete intent record), and how the outbox
+  hold is represented across restarts. This slice may stub the client
+  upload driver to the point where protocol and column behavior are
+  fully testable.
 
 ## Testing Decisions
 

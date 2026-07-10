@@ -57,6 +57,12 @@ the open tickets below cover the rest.
   class in the id string); URLs publicly carry the uploader's identity id
   (stated). Edges fully stateless — the client holds the `UploadId`. This
   subsumed [Edge grant records](tickets/F-edge-grant-records.md).
+- [Explicit-delete execution](tickets/G-deletion-queue.md) — synchronous
+  idempotent DELETE in-request, server persists nothing; the SDK persists
+  a **pending-delete intent** locally and retries across restarts until
+  origin confirms (permanent denials drop it; calls dedupe; promise
+  resolves on confirmation). Intent record's shape/home belongs to
+  [C — upload-resume records](tickets/C-resume-records.md).
 
 ## Not yet specified
 

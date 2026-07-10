@@ -377,7 +377,10 @@ await jazz.files.delete(msg.attachment.id);
 - **How it runs:** the request travels over the sync connection like grant
   and release, and any server executes it as **one idempotent DELETE**
   against the bucket. Retries converge; deleting an already-deleted id
-  succeeds. The URL then 404s; CDN-cached copies age out on their own
+  succeeds — and the retrying is the _client's_ job: the SDK persists a
+  pending-delete intent locally and keeps retrying across restarts until
+  the origin confirms, so `delete()` is safely fire-and-forget while the
+  server still remembers nothing. The URL then 404s; CDN-cached copies age out on their own
   (immutable caching makes purge best-effort at most, and the design says
   so rather than pretending otherwise). And a dead URL stays dead to
   everyone but its owner: the id lives in the owner's namespace, so nobody
