@@ -309,9 +309,9 @@ fn descriptor_named_fields(descriptor: &RecordDescriptor) -> Option<BTreeSet<Str
 
 fn explain_with_request(request: &QueryProgramRequest, mut explain: ExplainPlan) -> ExplainPlan {
     explain.input = format!("{:?}", request.input);
-    explain.read = vec![format!("{:?}", request.reads)];
-    explain.policy = vec![format!("{:?}", request.policy)];
-    explain.output = vec![format!("{:?}", request.output)];
+    explain.read.insert(0, format!("{:?}", request.reads));
+    explain.policy.insert(0, format!("{:?}", request.policy));
+    explain.output.insert(0, format!("{:?}", request.output));
     explain
 }
 
