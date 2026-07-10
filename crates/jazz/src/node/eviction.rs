@@ -215,11 +215,13 @@ where
 
         let mut batch = self.database.open_batch();
         let mut batch_deletes = 0_usize;
+        let mut evicted_tx_ids = BTreeSet::new();
         for candidate in evictable {
             if low_water_bytes.is_some_and(|low_water| remaining_bytes <= low_water) {
                 break;
             }
             report.row_versions_evictable += 1;
+            evicted_tx_ids.insert(candidate.tx_id);
             let schema_version = self
                 .schema_version_for_alias(candidate.version.schema_version_alias())
                 .ok_or(Error::InvalidStoredValue("version schema alias must exist"))?;
@@ -241,6 +243,9 @@ where
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
             self.database.commit_batch(batch)?;
+        }
+        for tx_id in evicted_tx_ids {
+            self.invalidate_tx_version_tables_cache(tx_id);
         }
         if report.row_versions_evictable > 0 {
             // INV-SYNC-27: once local row-version bodies are removed, no

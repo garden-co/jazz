@@ -1554,13 +1554,16 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let content_versions = self
-            .query_versions_for_tx(tx_id)?
+        let tx_versions = self.query_versions_for_tx(tx_id)?;
+        let content_versions = tx_versions
+            .iter()
+            .cloned()
             .into_iter()
             .filter(|version| version.layer() == VersionLayer::Content)
             .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_seq.is_some() {
-            global_current_updates = self.global_current_updates(tx_id)?;
+            global_current_updates =
+                self.global_current_updates_for_versions(tx_id, &tx_versions)?;
         }
         if let Some(child_alias) = self.node_aliases.get(&tx_id.node).copied() {
             for raw in self.database.primary_key_scan_raw(
@@ -1615,7 +1618,7 @@ where
             })
             .unwrap_or_default();
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
-            self.cleanup_fated_ahead_current_for_tx(&mut batch, tx_id)?;
+            self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
         }
         for global_seq in advanced_global_seqs
             .iter()
@@ -1655,7 +1658,7 @@ where
         if accepted_final {
             self.rejections.child_txs_by_parent.remove(&tx_id);
             self.prune_child_edges(tx_id);
-            self.checkpoint_large_values_for_tx(tx_id)?;
+            self.checkpoint_large_values_for_versions(&tx_versions)?;
         } else if let Some(root) = rejected_root {
             self.prune_child_edges(tx_id);
             let cascades = self.local_cascade_descendants(tx_id, root)?;
@@ -3997,7 +4000,16 @@ where
         batch: &mut DatabaseBatch,
         tx_id: TxId,
     ) -> Result<(), Error> {
-        for version in self.query_versions_for_tx(tx_id)? {
+        let versions = self.query_versions_for_tx(tx_id)?;
+        self.cleanup_fated_ahead_current_for_versions(batch, &versions)
+    }
+
+    fn cleanup_fated_ahead_current_for_versions(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        versions: &[VersionRow],
+    ) -> Result<(), Error> {
+        for version in versions {
             self.write_ahead_current_delete(batch, &version)?;
         }
         Ok(())
@@ -4178,6 +4190,7 @@ where
         let mut pending_global_updates =
             BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
         let mut content_versions = Vec::new();
+        let mut stored_versions = Vec::new();
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
@@ -4250,6 +4263,7 @@ where
             if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
                 content_versions.push(stored.clone());
             }
+            stored_versions.push(stored.clone());
             if update_current_indexes && matches!(fate, Fate::Accepted) {
                 if global_seq.is_some() {
                     let previous_global_current = self.query_global_layer_winner_in_batch(
@@ -4288,21 +4302,29 @@ where
                 target_schema,
                 self.catalogue.current_schema_version_id,
             );
-            let existing = self.database.primary_key_get_raw_in_batch(
-                batch,
-                history_table.as_ref(),
-                &[
-                    Value::Uuid(stored.row_uuid().0),
-                    Value::U64(stored.tx_time().0),
-                    Value::U64(stored.tx_node_alias().0),
-                ],
-            )?;
-            if let Some(existing) = existing {
-                if existing.record().raw() != stored.record.raw() {
-                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            if tx_already_known {
+                let existing = self.database.primary_key_get_raw_in_batch(
+                    batch,
+                    history_table.as_ref(),
+                    &[
+                        Value::Uuid(stored.row_uuid().0),
+                        Value::U64(stored.tx_time().0),
+                        Value::U64(stored.tx_node_alias().0),
+                    ],
+                )?;
+                if let Some(existing) = existing {
+                    if existing.record().raw() != stored.record.raw() {
+                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                    }
+                } else {
+                    batch.insert_raw(
+                        history_table.as_ref(),
+                        history_primary_key(&stored),
+                        stored.record.raw().to_vec(),
+                    );
                 }
             } else {
-                batch.insert_raw(
+                batch.insert_raw_fresh(
                     history_table.as_ref(),
                     history_primary_key(&stored),
                     stored.record.raw().to_vec(),
@@ -4339,6 +4361,7 @@ where
         } else if matches!(fate, Fate::Pending) {
             self.record_child_edges(tx.tx_id, parent_edges);
         }
+        self.cache_tx_versions(tx.tx_id, stored_versions);
         Ok(())
     }
 
@@ -4350,7 +4373,7 @@ where
         global_seq: Option<GlobalSeq>,
         staged_global_seqs: &mut Vec<GlobalSeq>,
     ) -> Result<(), Error> {
-        self.invalidate_tx_version_tables_cache(tx_id);
+        self.invalidate_tx_version_table_names_cache(tx_id);
         if matches!(fate, Fate::Accepted)
             && let Some(global_seq) = global_seq
         {

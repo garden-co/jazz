@@ -287,6 +287,8 @@ struct QueryServing {
         BTreeMap<(crate::query::ShapeId, DurabilityTier, String), PreparedQueryPlanHandle>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
+    /// Recently staged history rows for a stored transaction.
+    tx_versions_cache: BTreeMap<TxId, Vec<VersionRow>>,
     /// Approximate insertion order for bounding `tx_version_tables_cache`.
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
@@ -535,6 +537,7 @@ where
                 current_row_graphs,
                 query_shape_cache: BTreeMap::new(),
                 tx_version_tables_cache: BTreeMap::new(),
+                tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
                 version_storage_sources_cache: BTreeMap::new(),
@@ -666,6 +669,7 @@ where
         self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         self.query.query_shape_cache.clear();
         self.query.tx_version_tables_cache.clear();
+        self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
@@ -1034,7 +1038,7 @@ where
             stored_versions.push(stored);
         }
         self.database.commit_batch(batch)?;
-        self.invalidate_tx_version_tables_cache(tx_id);
+        self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx
                 .local_permission_subjects
@@ -1193,7 +1197,7 @@ where
             }
         }
         self.database.commit_batch(batch)?;
-        self.invalidate_tx_version_tables_cache(tx_id);
+        self.cache_tx_versions(tx_id, vec![stored.clone()]);
         self.record_child_edges(tx_id, stored.parents());
         Ok(tx_id)
     }
@@ -1629,12 +1633,32 @@ where
         self.query.tx_version_tables_cache.get(&tx_id).cloned()
     }
 
+    pub(super) fn cached_tx_versions(&self, tx_id: TxId) -> Option<Vec<VersionRow>> {
+        self.query.tx_versions_cache.get(&tx_id).cloned()
+    }
+
     pub(super) fn cache_tx_version_tables(&mut self, tx_id: TxId, tables: BTreeSet<String>) {
+        self.touch_tx_version_cache_entry(tx_id);
+        self.query.tx_version_tables_cache.insert(tx_id, tables);
+        self.bound_tx_version_cache();
+    }
+
+    pub(super) fn cache_tx_versions(&mut self, tx_id: TxId, versions: Vec<VersionRow>) {
+        self.touch_tx_version_cache_entry(tx_id);
+        self.query.tx_versions_cache.insert(tx_id, versions);
+        self.bound_tx_version_cache();
+    }
+
+    fn touch_tx_version_cache_entry(&mut self, tx_id: TxId) {
         if self.query.tx_version_tables_cache_order_set.insert(tx_id) {
             self.query.tx_version_tables_cache_order.push_back(tx_id);
         }
-        self.query.tx_version_tables_cache.insert(tx_id, tables);
-        while self.query.tx_version_tables_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES {
+    }
+
+    fn bound_tx_version_cache(&mut self) {
+        while self.query.tx_version_tables_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES
+            || self.query.tx_versions_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES
+        {
             let Some(oldest) = self.query.tx_version_tables_cache_order.pop_front() else {
                 break;
             };
@@ -1642,12 +1666,18 @@ where
                 continue;
             }
             self.query.tx_version_tables_cache.remove(&oldest);
+            self.query.tx_versions_cache.remove(&oldest);
         }
     }
 
     pub(super) fn invalidate_tx_version_tables_cache(&mut self, tx_id: TxId) {
         self.query.tx_version_tables_cache.remove(&tx_id);
+        self.query.tx_versions_cache.remove(&tx_id);
         self.query.tx_version_tables_cache_order_set.remove(&tx_id);
+    }
+
+    pub(super) fn invalidate_tx_version_table_names_cache(&mut self, tx_id: TxId) {
+        self.query.tx_version_tables_cache.remove(&tx_id);
     }
 
     fn large_value_checkpoint(
@@ -1675,6 +1705,13 @@ where
 
     pub(super) fn checkpoint_large_values_for_tx(&mut self, tx_id: TxId) -> Result<(), Error> {
         let versions = self.query_versions_for_tx(tx_id)?;
+        self.checkpoint_large_values_for_versions(&versions)
+    }
+
+    pub(super) fn checkpoint_large_values_for_versions(
+        &mut self,
+        versions: &[VersionRow],
+    ) -> Result<(), Error> {
         for version in versions {
             if version.layer() != VersionLayer::Content {
                 continue;
@@ -2650,8 +2687,6 @@ where
         )?;
         if report.windows > 0 {
             self.query.tx_version_tables_cache.clear();
-            self.query.tx_version_tables_cache_order.clear();
-            self.query.tx_version_tables_cache_order_set.clear();
         }
         Ok(report)
     }
