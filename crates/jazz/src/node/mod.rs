@@ -1932,6 +1932,125 @@ where
         self.current_row_from_materialized_version(table, &version)
     }
 
+    pub(crate) fn local_current_row(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table_schema =
+            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
+        let content = self.local_current_content_row_candidate(&table_schema, row_uuid)?;
+        let deletion = self.local_current_deletion_candidate(&table_schema, row_uuid)?;
+        if let (Some((_, content_tx)), Some((deletion, deletion_tx))) = (&content, &deletion)
+            && deletion_tx > content_tx
+            && *deletion == DeletionEvent::Deleted
+        {
+            return Ok(None);
+        }
+        content
+            .map(|(row, _)| self.materialize_current_row(&table_schema, row))
+            .transpose()
+    }
+
+    fn local_current_content_row_candidate(
+        &mut self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid))>, Error> {
+        let mut candidates = Vec::new();
+        let global_tables = table.global_current_storage_tables();
+        if let Some(raw) = self
+            .database
+            .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
+        {
+            let record = raw.record();
+            let tx = self.current_record_sort_key(record)?;
+            candidates.push((decode_current_row(table, record)?, tx));
+        }
+        let ahead_tables = table.ahead_current_storage_tables();
+        if let Some((tx_time, tx_node_alias)) = self
+            .ahead_current_latest
+            .get(&(table.name.clone(), VersionLayer::Content, row_uuid))
+            .copied()
+        {
+            if let Some(raw) = self.database.primary_key_get_raw(
+                &ahead_tables[0].name,
+                &[
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_time.0),
+                    Value::U64(tx_node_alias.0),
+                ],
+            )? {
+                let record = raw.record();
+                let tx = self.current_record_sort_key(record)?;
+                candidates.push((decode_current_row(table, record)?, tx));
+            }
+        }
+        Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
+    }
+
+    fn local_current_deletion_candidate(
+        &mut self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
+        let mut candidates = Vec::new();
+        let global_tables = table.global_current_storage_tables();
+        if let Some(raw) = self
+            .database
+            .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
+        {
+            let record = raw.record();
+            candidates.push((
+                deletion_event_from_value(
+                    record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+                )?,
+                self.current_record_sort_key(record)?,
+            ));
+        }
+        let ahead_tables = table.ahead_current_storage_tables();
+        if let Some((tx_time, tx_node_alias)) = self
+            .ahead_current_latest
+            .get(&(table.name.clone(), VersionLayer::Deletion, row_uuid))
+            .copied()
+        {
+            if let Some(raw) = self.database.primary_key_get_raw(
+                &ahead_tables[1].name,
+                &[
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_time.0),
+                    Value::U64(tx_node_alias.0),
+                ],
+            )? {
+                let record = raw.record();
+                candidates.push((
+                    deletion_event_from_value(
+                        record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+                    )?,
+                    self.current_record_sort_key(record)?,
+                ));
+            }
+        }
+        Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
+    }
+
+    fn current_record_sort_key(
+        &self,
+        record: BorrowedRecord<'_>,
+    ) -> Result<(TxTime, NodeUuid), Error> {
+        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+        let tx_node_alias =
+            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let tx_node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+            .ok_or(Error::InvalidStoredValue(
+                "current row references unknown node alias",
+            ))?;
+        Ok((tx_time, tx_node))
+    }
+
     fn current_row_from_materialized_version(
         &mut self,
         table: &TableSchema,

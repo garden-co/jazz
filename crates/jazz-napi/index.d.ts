@@ -23,6 +23,7 @@ export declare class NapiDb {
   allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
   queryAttachmentIsCovered(attachment: QueryAttachment): boolean
