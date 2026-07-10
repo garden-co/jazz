@@ -37,3 +37,9 @@ majors/minors). Decide and amend the spec pair:
   ticket A's matrix; state whether the release copy is guarded or the
   "immutability at the bucket" claim is reworded to name SDK fresh-randoms
   as the mechanism.
+- **Staging MPU cleanup (new from ticket A):** the matrix found
+  `AbortIncompleteMultipartUpload` lifecycle is NOT portable (S3/R2 only;
+  MinIO has a server-global 24h purge instead, Tigris documents nothing) —
+  decide whether the spec drops the lifecycle assumption for abandoned
+  multipart uploads and mandates a portable fallback (e.g. a
+  `ListMultipartUploads`+`Abort` sweeper) or states per-backend behavior.

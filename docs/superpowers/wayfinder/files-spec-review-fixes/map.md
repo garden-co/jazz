@@ -33,7 +33,12 @@ decision-bearing minors, doc-hygiene).
 
 <!-- one line per closed ticket: gist + link -->
 
-(none yet)
+- [Backend conditional-write support matrix](tickets/A-backend-support-matrix.md)
+  — conditional `CompleteMultipartUpload` is not portable (S3/MinIO yes,
+  R2 ambiguous, Tigris undocumented) but conditional single-part PUT is;
+  nosniff must be a deployment-layer requirement (only Tigris emits it
+  natively); MPU-abort lifecycle also non-portable (S3/R2 only). Full
+  matrix with citations: [backend-support-matrix](notes/backend-support-matrix.md).
 
 ## Not yet specified
 
