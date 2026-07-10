@@ -551,40 +551,52 @@ impl InMemoryServerShell {
     pub fn publish_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
+        let expected_schema = schema_version.schema.clone();
         let current = self.db.current_write_schema();
         if current.schema == schema_id
             && current.revision > 0
-            && self.db.catalogue_schema(schema_id).as_ref() == Some(&schema_version.schema)
+            && self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema)
         {
             self.runtime_schema_state.current_write_revision = current.revision;
             self.runtime_schema_state.last_published_schema = Some(schema_id);
             return Ok(schema_id);
         }
 
-        let publish_acks = catalogue_acks(self.db.publish_schema(schema_version)?)?;
-        if !publish_acks
+        let publish_acks = catalogue_acks_from_messages(self.db.publish_schema(schema_version)?);
+        let catalogue_matches =
+            self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema);
+        let publish_applied = publish_acks
             .iter()
-            .any(|ack| ack.applied && ack.schema == Some(schema_id))
-        {
+            .any(|ack| ack.applied && ack.schema == Some(schema_id));
+        if !publish_applied && !catalogue_matches {
+            return Err(ShellError::MissingEvent("CatalogueAck"));
+        }
+        if !catalogue_matches {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
 
-        let revision = self
-            .runtime_schema_state
-            .current_write_revision
-            .saturating_add(1);
+        let current = self.db.current_write_schema();
+        if current.schema == schema_id && current.revision > 0 {
+            self.runtime_schema_state.current_write_revision = current.revision;
+            self.runtime_schema_state.last_published_schema = Some(schema_id);
+            return Ok(schema_id);
+        }
+
+        let revision = current.revision.saturating_add(1);
         let set_current_acks =
-            catalogue_acks(self.db.set_current_write_schema(CurrentWriteSchema {
+            catalogue_acks_from_messages(self.db.set_current_write_schema(CurrentWriteSchema {
                 revision,
                 schema: schema_id,
-            })?)?;
-        if !set_current_acks.iter().any(|ack| {
+            })?);
+        let set_current_applied = set_current_acks.iter().any(|ack| {
             ack.applied && ack.revision == Some(revision) && ack.schema == Some(schema_id)
-        }) {
+        });
+        let current = self.db.current_write_schema();
+        if !(set_current_applied || current.schema == schema_id && current.revision > 0) {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
 
-        self.runtime_schema_state.current_write_revision = revision;
+        self.runtime_schema_state.current_write_revision = current.revision;
         self.runtime_schema_state.last_published_schema = Some(schema_id);
         Ok(schema_id)
     }
@@ -989,14 +1001,14 @@ impl From<postcard::Error> for ShellError {
     }
 }
 
-fn catalogue_acks(messages: Vec<SyncMessage>) -> ShellResult<Vec<CatalogueAck>> {
-    Ok(messages
+fn catalogue_acks_from_messages(messages: Vec<SyncMessage>) -> Vec<CatalogueAck> {
+    messages
         .into_iter()
         .filter_map(|message| match message {
             SyncMessage::CatalogueAck(ack) => Some(ack),
             _ => None,
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(feature = "rocksdb")]
