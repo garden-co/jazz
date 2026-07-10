@@ -9,8 +9,9 @@ import { type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "./subscription-manager.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -93,6 +94,14 @@ type BoredmLocation = {
 };
 
 type BoredmLocationInit = Omit<BoredmLocation, "id">;
+
+type BoredmTeamAccessEdge = {
+  id: string;
+  resource_id: string;
+  team_id: string;
+  grant_role: "EDITOR" | "MANAGER" | "VIEWER";
+  administrator: boolean;
+};
 
 const TEST_SCHEMA: WasmSchema = {
   todos: {
@@ -194,6 +203,28 @@ function makeWhereQuery<T>(
         includes: {},
         orderBy: [],
         offset: 0,
+      });
+    },
+  };
+}
+
+function makeTableQueryWithIncludes<T>(
+  table: string,
+  schema: WasmSchema,
+  includes: Record<string, unknown> = {},
+  select: string[] = [],
+): QueryBuilder<T> {
+  return {
+    _table: table,
+    _schema: schema,
+    _rowType: undefined as unknown as T,
+    _build() {
+      return JSON.stringify({
+        table,
+        conditions: [],
+        includes,
+        select,
+        orderBy: [],
       });
     },
   };
@@ -446,6 +477,7 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -789,6 +821,156 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(runtimeData);
       await rm(schemaDir, { recursive: true, force: true });
       await server.stop();
+    }
+  }, 60_000);
+
+  it("subscribes to the BoreDM team access-edge holder through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-boredm-holder-subscription-secret";
+    const adminSecret = "napi-boredm-holder-subscription-admin-secret";
+    const schemaDir = await createTempDir("jazz-napi-boredm-holder-schema-");
+    const publicApiImport = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
+    await writeFile(
+      join(schemaDir, "schema.ts"),
+      `
+        import { schema as s } from ${JSON.stringify(publicApiImport)};
+
+        const schema = {
+          team: s.table({
+            corporation_id: s.ref("team"),
+            name: s.string(),
+          }),
+          team_access_edges: s.table({
+            resource_id: s.ref("team"),
+            team_id: s.ref("team"),
+            grant_role: s.string(),
+            administrator: s.boolean(),
+          }).indexOnly(["resource_id", "team_id"]),
+        };
+
+        type AppSchema = s.Schema<typeof schema>;
+        export const app: s.App<AppSchema> = s.defineApp(schema);
+      `,
+    );
+    await writeFile(
+      join(schemaDir, "permissions.ts"),
+      `
+        import { schema as s } from ${JSON.stringify(publicApiImport)};
+        import { app } from "./schema.js";
+
+        export default s.definePermissions(app, ({ policy }) => {
+          policy.team.allowRead.where({});
+          policy.team.allowInsert.where({});
+          policy.team.allowUpdate.where({});
+          policy.team.allowDelete.where({});
+
+          policy.team_access_edges.allowRead.where({});
+          policy.team_access_edges.allowInsert.where({});
+          policy.team_access_edges.allowUpdate.where({});
+          policy.team_access_edges.allowDelete.where({});
+        });
+      `,
+    );
+    const boredmSchema = (await loadCompiledSchema(schemaDir)).wasmSchema;
+    const jwtIssuer = await startTestJwtIssuer();
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+      inMemory: true,
+      jwksUrl: jwtIssuer.jwksUrl,
+    });
+    let context: {
+      asBackend(): Db;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forRequest(request: Request): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: boredmSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const jwtToken = jwtIssuer.jwtForUser(
+        "00000000-0000-4000-8000-000000000001",
+        { email: "redacted@example.com" },
+        { issuer: "boredm.com" },
+      );
+      const memberDb = await context.forRequest(
+        new Request(server.url, {
+          headers: { authorization: `Bearer ${jwtToken}` },
+        }),
+      );
+      const teamAccessEdges = makeTableQueryWithIncludes<BoredmTeamAccessEdge>(
+        "team_access_edges",
+        boredmSchema,
+        { resource: {}, team: {} },
+      );
+      const firstRows = await new Promise<unknown[]>((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        const reduced: BoredmTeamAccessEdge[] = [];
+        unsubscribe = memberDb.subscribeAll(
+          teamAccessEdges,
+          (delta: SubscriptionDelta<BoredmTeamAccessEdge>) => {
+            applySubscriptionDelta(reduced, delta);
+            if (delta.reset || reduced.length > 0) {
+              unsubscribe?.();
+              resolve([...reduced]);
+              return;
+            }
+          },
+          { tier: "global" },
+        );
+        setTimeout(() => {
+          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
+          if (capabilityError) {
+            unsubscribe?.();
+            reject(new Error(capabilityError));
+            return;
+          }
+          unsubscribe?.();
+          reject(
+            new Error(
+              `timed out waiting for team_access_edges subscription; rows=${reduced.length}; errors=${errors.join("\n")}`,
+            ),
+          );
+        }, 5_000);
+      });
+
+      expect(firstRows).toEqual([]);
+      const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+      expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
+    } finally {
+      consoleError.mockRestore();
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await rm(schemaDir, { recursive: true, force: true });
+      await server.stop();
+      await jwtIssuer.stop();
     }
   }, 60_000);
 
