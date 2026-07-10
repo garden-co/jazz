@@ -2,7 +2,7 @@
 
 Type: `wayfinder:prototype`
 Status: open
-Assignee: (unclaimed)
+Assignee: guido (claimed 2026-07-10)
 Blocked by: (none)
 
 ## Question
