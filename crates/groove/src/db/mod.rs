@@ -1729,6 +1729,15 @@ where
                     record: record.clone(),
                 })
             }
+            BatchOperation::InsertRawFresh { table, key, record } => {
+                self.table(table)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::InsertFresh,
+                    table: table.clone(),
+                    key: key.clone().into_bytes(),
+                    record: record.clone(),
+                })
+            }
             BatchOperation::Update { table, values } => {
                 let table_schema = self.table(table)?;
                 let descriptor = self.table_descriptor(table)?;
@@ -2569,6 +2578,7 @@ enum PendingTableWrite {
 #[derive(Clone, Copy)]
 enum WriteMode {
     Insert,
+    InsertFresh,
     Update,
 }
 
@@ -2639,6 +2649,14 @@ where
         let overlay_key = (write.table().to_owned(), write.key().to_vec());
         let current = if let Some(record) = overlay.get(&overlay_key) {
             record.clone()
+        } else if matches!(
+            write,
+            PendingTableWrite::Set {
+                mode: WriteMode::InsertFresh,
+                ..
+            }
+        ) {
+            None
         } else {
             store.get_raw(write.key())?
         };
@@ -2839,6 +2857,24 @@ impl DatabaseBatch {
         });
     }
 
+    /// Stage a raw insert whose caller has already proven that the key is absent.
+    ///
+    /// This avoids a storage lookup during delta computation. It is only sound for
+    /// internal append-only tables whose enclosing transaction identity proves
+    /// freshness; ordinary insert callers must use [`Self::insert_raw`].
+    pub fn insert_raw_fresh(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: Vec<u8>,
+    ) {
+        self.push_operation(BatchOperation::InsertRawFresh {
+            table: table.into(),
+            key,
+            record,
+        });
+    }
+
     pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
         self.push_operation(BatchOperation::Update {
             table: table.into(),
@@ -2877,6 +2913,11 @@ pub enum BatchOperation {
         values: Vec<Value>,
     },
     InsertRaw {
+        table: String,
+        key: PrimaryKeyValue,
+        record: Vec<u8>,
+    },
+    InsertRawFresh {
         table: String,
         key: PrimaryKeyValue,
         record: Vec<u8>,

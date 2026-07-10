@@ -126,12 +126,16 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
-    pub(super) fn global_current_updates(&mut self, tx_id: TxId) -> Result<Vec<VersionRow>, Error> {
+    pub(super) fn global_current_updates_for_versions(
+        &mut self,
+        tx_id: TxId,
+        versions: &[VersionRow],
+    ) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
             .transaction_made_at(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
-        for version in self.query_versions_for_tx(tx_id)? {
+        for version in versions {
             let previous_current = self.query_global_layer_winner(
                 &version.table,
                 version.row_uuid(),
@@ -159,7 +163,7 @@ where
                         version.row_uuid(),
                         version.layer(),
                     ),
-                    version,
+                    version.clone(),
                 );
             }
         }

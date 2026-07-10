@@ -182,6 +182,15 @@ where
         let Some(tx) = self.query_transaction(tx_id)? else {
             return Ok(Vec::new());
         };
+        if let Some(mut versions) = self.cached_tx_versions(tx_id) {
+            versions.sort_by(|left, right| {
+                left.table()
+                    .cmp(right.table())
+                    .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+                    .then_with(|| left.layer().cmp(&right.layer()))
+            });
+            return Ok(versions);
+        }
         let cached_tables = self.cached_tx_version_tables(tx_id);
         let tables = cached_tables
             .clone()

@@ -26,7 +26,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use crate::records::{OwnedRecord, Record, RecordDescriptor, Value as RecordValue, ValueType};
-use crate::window_codec::{WindowRecord, WindowSchema, decode_window, encode_window};
+use crate::window_codec::{
+    WindowRecord, WindowSchema, decode_window, encode_window, lookup_window,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,6 +67,8 @@ struct DecodedWindowCache {
 }
 
 static DECODED_WINDOW_CACHE: OnceLock<Mutex<DecodedWindowCache>> = OnceLock::new();
+static WINDOW_PROBE_TRACKER: OnceLock<Mutex<Option<(DecodedWindowCacheKey, usize)>>> =
+    OnceLock::new();
 
 impl DecodedWindowCache {
     // Window records are immutable in v1: consolidation writes each window once,
@@ -74,6 +78,20 @@ impl DecodedWindowCache {
     // with the same logical CF and window key from colliding.
     fn get(&mut self, key: &DecodedWindowCacheKey) -> Option<Vec<KeyValue>> {
         let value = self.values.get(key)?.clone();
+        self.touch(key);
+        Some(value)
+    }
+
+    fn get_record(
+        &mut self,
+        key: &DecodedWindowCacheKey,
+        record_key: &[u8],
+    ) -> Option<Option<Vec<u8>>> {
+        let records = self.values.get(key)?;
+        let value = records
+            .binary_search_by(|(key, _)| key.as_slice().cmp(record_key))
+            .ok()
+            .map(|idx| records[idx].1.clone());
         self.touch(key);
         Some(value)
     }
@@ -1177,10 +1195,35 @@ where
         window: &[u8],
         key: &Key,
     ) -> Result<Option<Vec<u8>>, Error> {
-        Ok(self
-            .decode_window_records_cached(window_key, window)?
-            .into_iter()
-            .find_map(|(record_key, value)| (record_key == key).then_some(value)))
+        let schema = self.window_schema()?;
+        let key_record = self.key_record_from_bytes(key)?;
+        let cache_key = DecodedWindowCacheKey {
+            column_family: self.column_family.to_owned(),
+            window_key: window_key.to_vec(),
+            value_fingerprint: fingerprint_bytes(window),
+            value_len: window.len(),
+        };
+        let cache = DECODED_WINDOW_CACHE.get_or_init(|| Mutex::new(DecodedWindowCache::default()));
+        if let Some(value) = cache
+            .lock()
+            .expect("decoded window cache poisoned")
+            .get_record(&cache_key, key)
+        {
+            return Ok(value);
+        }
+        if should_decode_full_window_for_probe(&cache_key) {
+            let records = self.decode_window_records(window)?;
+            let value = records
+                .binary_search_by(|(record_key, _)| record_key.as_slice().cmp(key))
+                .ok()
+                .map(|idx| records[idx].1.clone());
+            cache
+                .lock()
+                .expect("decoded window cache poisoned")
+                .insert(cache_key, records);
+            return Ok(value);
+        }
+        Ok(lookup_window(&schema, window, &key_record)?.map(|record| record.value.into_raw()))
     }
 
     fn decode_window_records(&self, window: &[u8]) -> Result<Vec<KeyValue>, Error> {
@@ -1248,6 +1291,21 @@ where
             .ok_or_else(|| Error::InvalidWindowRecord("missing key descriptor".to_owned()))?;
         let values = decode_key_record(key, &descriptor)?;
         Ok(OwnedRecord::new(descriptor.create(&values)?, descriptor))
+    }
+}
+
+fn should_decode_full_window_for_probe(key: &DecodedWindowCacheKey) -> bool {
+    let tracker = WINDOW_PROBE_TRACKER.get_or_init(|| Mutex::new(None));
+    let mut tracker = tracker.lock().expect("window probe tracker poisoned");
+    match tracker.as_mut() {
+        Some((last, count)) if last == key => {
+            *count += 1;
+            *count >= 2
+        }
+        _ => {
+            *tracker = Some((key.clone(), 1));
+            false
+        }
     }
 }
 

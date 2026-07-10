@@ -186,10 +186,49 @@ pub fn lookup_window(
     if key.descriptor() != &schema.key {
         return Err(WindowCodecError::DescriptorMismatch);
     }
-    let needle = key.to_values()?;
-    for record in decode_window(schema, bytes)? {
-        if record.key.to_values()? == needle {
-            return Ok(Some(record));
+    let encoded = decode_encoded_window(bytes)?;
+    let Some(row_idx) = lookup_window_key_index_encoded(schema, &encoded, key)? else {
+        return Ok(None);
+    };
+    Ok(Some(decode_record_at(schema, &encoded, row_idx)?))
+}
+
+pub fn lookup_window_key_index(
+    schema: &WindowSchema,
+    bytes: &[u8],
+    key: &OwnedRecord,
+) -> Result<Option<usize>, WindowCodecError> {
+    if key.descriptor() != &schema.key {
+        return Err(WindowCodecError::DescriptorMismatch);
+    }
+    let encoded = decode_encoded_window(bytes)?;
+    lookup_window_key_index_encoded(schema, &encoded, key)
+}
+
+fn lookup_window_key_index_encoded(
+    schema: &WindowSchema,
+    encoded: &EncodedWindow,
+    key: &OwnedRecord,
+) -> Result<Option<usize>, WindowCodecError> {
+    let specs = column_specs(schema);
+    if encoded.columns.len() != specs.len()
+        || usize::from(encoded.key_column_count) != schema.key.fields().len()
+        || usize::from(encoded.value_column_count) != schema.value.fields().len()
+    {
+        return Err(WindowCodecError::Invalid(
+            "encoded column counts do not match schema",
+        ));
+    }
+
+    let mut low = 0usize;
+    let mut high = usize::from(encoded.record_count);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let candidate = decode_key_at(schema, &specs, encoded, mid)?;
+        match candidate.as_slice().cmp(key.raw()) {
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Equal => return Ok(Some(mid)),
+            std::cmp::Ordering::Greater => high = mid,
         }
     }
     Ok(None)
@@ -262,6 +301,96 @@ fn decode_records(
         });
     }
     Ok(records)
+}
+
+fn decode_key_at(
+    schema: &WindowSchema,
+    specs: &[ColumnSpec],
+    encoded: &EncodedWindow,
+    row_idx: usize,
+) -> Result<Vec<u8>, WindowCodecError> {
+    let key_count = usize::from(encoded.key_column_count);
+    let mut memo = BTreeMap::new();
+    let mut key_values = Vec::with_capacity(key_count);
+    for column_idx in 0..key_count {
+        key_values.push(decode_column_value_at(
+            column_idx, row_idx, specs, encoded, &mut memo,
+        )?);
+    }
+    Ok(schema.key.create(&key_values)?)
+}
+
+fn decode_record_at(
+    schema: &WindowSchema,
+    encoded: &EncodedWindow,
+    row_idx: usize,
+) -> Result<WindowRecord, WindowCodecError> {
+    let record_count = usize::from(encoded.record_count);
+    if row_idx >= record_count {
+        return Err(WindowCodecError::Invalid("window row index out of bounds"));
+    }
+    let specs = column_specs(schema);
+    if encoded.columns.len() != specs.len()
+        || usize::from(encoded.key_column_count) != schema.key.fields().len()
+        || usize::from(encoded.value_column_count) != schema.value.fields().len()
+    {
+        return Err(WindowCodecError::Invalid(
+            "encoded column counts do not match schema",
+        ));
+    }
+
+    let mut memo = BTreeMap::new();
+    let mut key_values = Vec::with_capacity(schema.key.fields().len());
+    let mut value_values = Vec::with_capacity(schema.value.fields().len());
+    for column_idx in 0..specs.len() {
+        let value = decode_column_value_at(column_idx, row_idx, &specs, encoded, &mut memo)?;
+        match specs[column_idx].role {
+            ColumnRole::Key => key_values.push(value),
+            ColumnRole::Value => value_values.push(value),
+        }
+    }
+    Ok(WindowRecord {
+        key: OwnedRecord::new(schema.key.create(&key_values)?, schema.key),
+        value: OwnedRecord::new(schema.value.create(&value_values)?, schema.value),
+    })
+}
+
+fn decode_column_value_at(
+    column_idx: usize,
+    row_idx: usize,
+    specs: &[ColumnSpec],
+    encoded: &EncodedWindow,
+    memo: &mut BTreeMap<(usize, usize), Value>,
+) -> Result<Value, WindowCodecError> {
+    if let Some(value) = memo.get(&(column_idx, row_idx)) {
+        return Ok(value.clone());
+    }
+    let record_count = usize::from(encoded.record_count);
+    let spec = &specs[column_idx];
+    let column = &encoded.columns[column_idx];
+    let value = match column.kind {
+        ColumnEncodingKind::Constant => decode_constant_at(&column.data, &spec.value_type)?,
+        ColumnEncodingKind::DeltaVarint => {
+            decode_delta_varint_at(&column.data, &spec.value_type, row_idx, record_count)?
+        }
+        ColumnEncodingKind::Dictionary => {
+            decode_dictionary_at(&column.data, &spec.value_type, row_idx, record_count)?
+        }
+        ColumnEncodingKind::PreviousRowField => decode_previous_row_field_at(
+            column_idx,
+            row_idx,
+            &column.data,
+            specs,
+            encoded,
+            memo,
+            &spec.value_type,
+        )?,
+        ColumnEncodingKind::Verbatim => {
+            decode_verbatim_at(&column.data, &spec.value_type, row_idx, record_count)?
+        }
+    };
+    memo.insert((column_idx, row_idx), value.clone());
+    Ok(value)
 }
 
 fn validate_record_descriptors(
@@ -530,6 +659,13 @@ fn decode_constant(
     Ok(vec![value; record_count])
 }
 
+fn decode_constant_at(data: &[u8], value_type: &ValueType) -> Result<Value, WindowCodecError> {
+    let mut cursor = Cursor::new(data);
+    let value = cursor.read_cell(value_type)?;
+    cursor.finish()?;
+    Ok(value)
+}
+
 fn decode_delta_varint(
     data: &[u8],
     value_type: &ValueType,
@@ -549,6 +685,24 @@ fn decode_delta_varint(
     }
     cursor.finish()?;
     Ok(values)
+}
+
+fn decode_delta_varint_at(
+    data: &[u8],
+    value_type: &ValueType,
+    row_idx: usize,
+    record_count: usize,
+) -> Result<Value, WindowCodecError> {
+    if row_idx >= record_count {
+        return Err(WindowCodecError::Invalid("delta row index out of bounds"));
+    }
+    let mut cursor = Cursor::new(data);
+    let mut current = cursor.read_varint()?;
+    for _ in 0..row_idx {
+        let delta = unzigzag(cursor.read_varint()?);
+        current = apply_delta(current, delta)?;
+    }
+    integer_to_value(current, value_type)
 }
 
 fn decode_dictionary(
@@ -577,6 +731,42 @@ fn decode_dictionary(
     }
     cursor.finish()?;
     Ok(values)
+}
+
+fn decode_dictionary_at(
+    data: &[u8],
+    value_type: &ValueType,
+    row_idx: usize,
+    record_count: usize,
+) -> Result<Value, WindowCodecError> {
+    if row_idx >= record_count {
+        return Err(WindowCodecError::Invalid(
+            "dictionary row index out of bounds",
+        ));
+    }
+    let mut cursor = Cursor::new(data);
+    let unique_count = usize::try_from(cursor.read_varint()?)
+        .map_err(|_| WindowCodecError::Invalid("dictionary too large"))?;
+    let mut unique = Vec::with_capacity(unique_count);
+    for _ in 0..unique_count {
+        let cell = cursor.read_bytes()?;
+        unique.push(value_from_cell(&cell, value_type)?);
+    }
+    let mut selected = None;
+    for current_row in 0..record_count {
+        let idx = usize::try_from(cursor.read_varint()?)
+            .map_err(|_| WindowCodecError::Invalid("dictionary index too large"))?;
+        if current_row == row_idx {
+            selected = Some(
+                unique
+                    .get(idx)
+                    .ok_or(WindowCodecError::Invalid("dictionary index out of bounds"))?
+                    .clone(),
+            );
+        }
+    }
+    cursor.finish()?;
+    selected.ok_or(WindowCodecError::Invalid("dictionary row missing"))
 }
 
 fn decode_previous_row_field(
@@ -614,6 +804,31 @@ fn decode_previous_row_field(
     Ok(values)
 }
 
+fn decode_previous_row_field_at(
+    column_idx: usize,
+    row_idx: usize,
+    data: &[u8],
+    specs: &[ColumnSpec],
+    encoded: &EncodedWindow,
+    memo: &mut BTreeMap<(usize, usize), Value>,
+    value_type: &ValueType,
+) -> Result<Value, WindowCodecError> {
+    let mut cursor = Cursor::new(data);
+    let source_idx = usize::try_from(cursor.read_varint()?)
+        .map_err(|_| WindowCodecError::Invalid("previous-row source index too large"))?;
+    if source_idx >= column_idx {
+        return Err(WindowCodecError::Invalid(
+            "previous-row source must be an earlier column",
+        ));
+    }
+    let first_value = cursor.read_cell(value_type)?;
+    cursor.finish()?;
+    if row_idx == 0 {
+        return Ok(first_value);
+    }
+    decode_column_value_at(source_idx, row_idx - 1, specs, encoded, memo)
+}
+
 fn decode_verbatim(
     data: &[u8],
     value_type: &ValueType,
@@ -626,6 +841,29 @@ fn decode_verbatim(
     }
     cursor.finish()?;
     Ok(values)
+}
+
+fn decode_verbatim_at(
+    data: &[u8],
+    value_type: &ValueType,
+    row_idx: usize,
+    record_count: usize,
+) -> Result<Value, WindowCodecError> {
+    if row_idx >= record_count {
+        return Err(WindowCodecError::Invalid(
+            "verbatim row index out of bounds",
+        ));
+    }
+    let mut cursor = Cursor::new(data);
+    let mut selected = None;
+    for current_row in 0..record_count {
+        let value = cursor.read_cell(value_type)?;
+        if current_row == row_idx {
+            selected = Some(value);
+        }
+    }
+    cursor.finish()?;
+    selected.ok_or(WindowCodecError::Invalid("verbatim row missing"))
 }
 
 fn write_cell(out: &mut Vec<u8>, value: &Value) -> Result<(), WindowCodecError> {
