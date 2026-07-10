@@ -1793,14 +1793,31 @@ fn source_requirements(
                         .insert(SourceMetadataRequirement::DeletionMarkers);
                 }
             }
-            ProgramFactKey::SourceCoverage(_) => {
-                let root_requirements = requirements
-                    .get_mut(plan.root_source())
-                    .expect("root source requirements were initialized");
-                root_requirements
-                    .metadata
-                    .insert(SourceMetadataRequirement::Coverage);
-            }
+            ProgramFactKey::SourceCoverage(scope) => match scope {
+                CoverageScope::Program => {
+                    for source_requirements in requirements.values_mut() {
+                        source_requirements
+                            .metadata
+                            .insert(SourceMetadataRequirement::Coverage);
+                    }
+                }
+                CoverageScope::Source(source) => {
+                    let source_requirements = requirements.get_mut(source).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Source(SourceGap::Coverage))
+                    })?;
+                    source_requirements
+                        .metadata
+                        .insert(SourceMetadataRequirement::Coverage);
+                }
+                CoverageScope::Path(_) => {
+                    let root_requirements = requirements
+                        .get_mut(plan.root_source())
+                        .expect("root source requirements were initialized");
+                    root_requirements
+                        .metadata
+                        .insert(SourceMetadataRequirement::Coverage);
+                }
+            },
             ProgramFactKey::RelationEdges | ProgramFactKey::PathCorrelationCoverage => {
                 for source_requirements in requirements.values_mut() {
                     source_requirements
