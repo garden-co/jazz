@@ -6350,13 +6350,30 @@ fn apply_index_by(
     input_deltas: &[RecordDelta],
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let mut deltas = Vec::new();
+    let scalar_key_fields = index_key_fields_are_scalar(index_by, input_descriptor)?;
     for delta in input_deltas {
-        let keys = index_keys(index_by, input_descriptor, delta.raw())?;
         let value = if index_by.store_value {
             primary_key_value_bytes(input_descriptor, delta.raw(), &index_by.value_fields)?
         } else {
             Vec::new()
         };
+        if scalar_key_fields {
+            let key = scalar_index_key(index_by, input_descriptor, delta.raw())?;
+            if let Some(scan) = &index_by.scan
+                && !key_matches_static_scan(&key, scan)?
+            {
+                continue;
+            }
+            deltas.push(RecordDelta {
+                record: index_record_descriptor()
+                    .create(&[Value::Bytes(key), Value::Bytes(value)])?
+                    .into(),
+                weight: delta.weight,
+            });
+            continue;
+        }
+
+        let keys = index_keys(index_by, input_descriptor, delta.raw())?;
         for key in keys {
             if let Some(scan) = &index_by.scan
                 && !key_matches_static_scan(&key, scan)?
@@ -6372,6 +6389,43 @@ fn apply_index_by(
         }
     }
     Ok(deltas)
+}
+
+fn index_key_fields_are_scalar(
+    index_by: &IndexByOp,
+    input_descriptor: &RecordDescriptor,
+) -> Result<bool, IvmRuntimeError> {
+    for field_idx in &index_by.key_fields {
+        let field = input_descriptor
+            .fields()
+            .get(*field_idx)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
+        match &field.value_type {
+            ValueType::Array(_) => return Ok(false),
+            ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)) => {
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+fn scalar_index_key(
+    index_by: &IndexByOp,
+    input_descriptor: &RecordDescriptor,
+    record: &[u8],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in &index_by.key_fields {
+        encode_record_field_key_part(&mut key, input_descriptor, record, *field_idx)?;
+    }
+    if index_by.append_value_to_key {
+        let value = primary_key_value_bytes(input_descriptor, record, &index_by.value_fields)?;
+        key.push(0xff);
+        key.extend(value);
+    }
+    Ok(key)
 }
 
 fn index_keys(
@@ -6532,13 +6586,120 @@ fn encode_record_field_key_part(
         .fields()
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    let borrowed = descriptor.bind(record);
     match &field.value_type {
+        ValueType::U8 => {
+            key.push(0);
+            key.push(borrowed.get_u8(field_idx)?);
+            Ok(())
+        }
+        ValueType::U32 => {
+            key.push(2);
+            key.extend(borrowed.get_u32(field_idx)?.to_be_bytes());
+            Ok(())
+        }
+        ValueType::U64 => {
+            key.push(3);
+            key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
+            Ok(())
+        }
+        ValueType::F64 => {
+            let value = borrowed.get_f64(field_idx)?;
+            if value.is_nan() {
+                return Err(IvmRuntimeError::RecordEncoding(
+                    records::Error::InvalidF64NaN,
+                ));
+            }
+            key.push(4);
+            key.extend(order_preserving_f64_bits(value).to_be_bytes());
+            Ok(())
+        }
+        ValueType::Bool => {
+            key.push(5);
+            key.push(u8::from(borrowed.get_bool(field_idx)?));
+            Ok(())
+        }
+        ValueType::String => {
+            key.push(6);
+            encode_ordered_bytes(key, borrowed.get_str(field_idx)?.as_bytes());
+            Ok(())
+        }
+        ValueType::Bytes => {
+            key.push(7);
+            encode_ordered_bytes(key, borrowed.get_bytes(field_idx)?);
+            Ok(())
+        }
+        ValueType::Uuid => {
+            key.push(10);
+            key.extend_from_slice(borrowed.get_uuid(field_idx)?.as_bytes());
+            Ok(())
+        }
         ValueType::Enum(_) => {
-            let value = descriptor.bind(record).get_enum(field_idx)?;
+            let value = borrowed.get_enum(field_idx)?;
             encode_key_part(key, &Value::U8(value))
         }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::U64) => {
+            match borrowed.get_nullable_u64(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(3);
+                    key.extend(value.to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::F64) => {
+            match borrowed.get_nullable_f64(field_idx)? {
+                Some(value) => {
+                    if value.is_nan() {
+                        return Err(IvmRuntimeError::RecordEncoding(
+                            records::Error::InvalidF64NaN,
+                        ));
+                    }
+                    key.push(9);
+                    key.push(4);
+                    key.extend(order_preserving_f64_bits(value).to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::String) => {
+            match borrowed.get_nullable_string(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(6);
+                    encode_ordered_bytes(key, value.as_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Bytes) => {
+            match borrowed.get_nullable_bytes(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(7);
+                    encode_ordered_bytes(key, value);
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Uuid) => {
+            match borrowed.get_nullable_uuid(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(10);
+                    key.extend_from_slice(value.as_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
         ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Enum(_)) => {
-            match descriptor.bind(record).get_nullable_enum(field_idx)? {
+            match borrowed.get_nullable_enum(field_idx)? {
                 Some(value) => {
                     encode_key_part(key, &Value::Nullable(Some(Box::new(Value::U8(value)))))
                 }
