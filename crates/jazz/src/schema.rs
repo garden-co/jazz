@@ -124,7 +124,9 @@ impl JazzSchema {
             }
             if let Some(policy) = &table.read_policy {
                 assert_eq!(policy.table, table.name, "read policy table must match");
-                policy.validate(&self).expect("valid read policy shape");
+                policy.validate(&self).unwrap_or_else(|error| {
+                    panic!("valid read policy shape for {}: {error:?}", table.name)
+                });
             }
             for (label, policy) in table.write_policies.iter() {
                 assert_eq!(

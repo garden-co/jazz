@@ -898,6 +898,21 @@ impl Query {
     pub fn inherits(mut self, parent_column: impl Into<String>) -> Self {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
+            operation: InheritsOperation::Select,
+        });
+        self
+    }
+
+    /// Require the row referenced by `parent_column` to satisfy the parent
+    /// table policy for `operation`.
+    pub fn inherits_operation(
+        mut self,
+        parent_column: impl Into<String>,
+        operation: InheritsOperation,
+    ) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+            operation,
         });
         self
     }
@@ -1527,6 +1542,34 @@ pub struct ReachableSeed {
 pub struct InheritsVia {
     /// Root-table column referencing the parent row.
     pub parent_column: String,
+    /// Parent operation to require for the referenced row.
+    #[serde(default)]
+    pub operation: InheritsOperation,
+}
+
+/// Parent operation required by an inheritance atom.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum InheritsOperation {
+    /// Parent row must be readable.
+    #[default]
+    Select,
+    /// Parent row must be insertable.
+    Insert,
+    /// Parent row must be updateable.
+    Update,
+    /// Parent row must be deletable.
+    Delete,
 }
 
 /// Recursion semantics for reachability and relation gather.
@@ -2340,6 +2383,16 @@ fn validate_reachable(
                 target_table: root.name.clone(),
             });
         }
+    } else if access.name == root.name {
+        let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
+        let root_column_type = planner_column_type(root, &reachable.access_row_column)?;
+        if !column_types_comparable(access_column_type, root_column_type) {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.access_table.clone(),
+                column: reachable.access_row_column.clone(),
+                target_table: root.name.clone(),
+            });
+        }
     } else {
         match access.references.get(&reachable.access_row_column) {
             Some(target) if target == &root.name => {}
@@ -2575,7 +2628,13 @@ fn is_orderable(column_type: &ColumnType) -> bool {
 }
 
 fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
-    left == right || non_null_column_type(left) == non_null_column_type(right)
+    let left = non_null_column_type(left);
+    let right = non_null_column_type(right);
+    left == right
+        || matches!(
+            (&left, &right),
+            (ColumnType::Enum(_), ColumnType::U8) | (ColumnType::U8, ColumnType::Enum(_))
+        )
 }
 
 fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
@@ -2943,6 +3002,12 @@ fn canonical_reachable_key_with_seed_type(
 fn canonical_inherits_key(inherits: &InheritsVia) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, &inherits.parent_column);
+    bytes.push(match inherits.operation {
+        InheritsOperation::Select => b's',
+        InheritsOperation::Insert => b'i',
+        InheritsOperation::Update => b'u',
+        InheritsOperation::Delete => b'd',
+    });
     bytes
 }
 
@@ -3503,6 +3568,48 @@ mod tests {
             validated.params()["teams"],
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
+    }
+
+    #[test]
+    fn validates_same_table_reachability_correlation_column() {
+        let schema = JazzSchema::new([
+            TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "access_edges",
+                [
+                    ColumnSchema::new("resource_id", ColumnType::Uuid),
+                    ColumnSchema::new("team_id", ColumnType::Uuid),
+                    ColumnSchema::new("administrator", ColumnType::Bool),
+                ],
+            )
+            .with_reference("resource_id", "resources")
+            .with_reference("team_id", "teams"),
+            TableSchema::new(
+                "team_entry",
+                [
+                    ColumnSchema::new("team_id", ColumnType::Uuid),
+                    ColumnSchema::new("target_id", ColumnType::Uuid),
+                ],
+            )
+            .with_reference("team_id", "teams")
+            .with_reference("target_id", "teams"),
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+        ]);
+
+        Query::from("access_edges")
+            .reachable_via_with_access_filters(
+                "access_edges",
+                "resource_id",
+                "team_id",
+                claim("user_id"),
+                [eq(col("administrator"), lit(false))],
+                "team_entry",
+                "team_id",
+                "target_id",
+                [],
+            )
+            .validate(&schema)
+            .unwrap();
     }
 
     #[test]

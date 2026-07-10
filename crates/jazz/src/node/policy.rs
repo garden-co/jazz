@@ -658,15 +658,19 @@ where
             else {
                 return Ok(false);
             };
-            if let Some(parent_policy) = parent_table.read_policy.clone()
-                && !self.policy_allows_current_row(
+            if let Some(parent_policy) = self.parent_policy_for_inherits(
+                &parent_table,
+                inherits.operation,
+                ParentInheritsContext::ExistingRow,
+            ) {
+                if !self.policy_allows_current_row(
                     &parent_table,
                     &parent_policy,
                     &parent_row,
                     identity,
-                )?
-            {
-                return Ok(false);
+                )? {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -696,21 +700,50 @@ where
             else {
                 return Ok(false);
             };
-            if let Some(update_using) = parent_table.write_policies.update_using.clone()
-                && !self.policy_allows_current_row(
+            if let Some(update_using) = self.parent_policy_for_inherits(
+                &parent_table,
+                inherits.operation,
+                ParentInheritsContext::InsertCandidate,
+            ) {
+                if !self.policy_allows_current_row(
                     &parent_table,
                     &update_using,
                     &parent_row,
                     identity,
-                )?
-            {
-                return Ok(false);
+                )? {
+                    return Ok(false);
+                }
             }
             // Child insert inherits parent updateability from whereOld only:
             // parent state is unchanged, so parent update_check/whereNew is
             // intentionally not evaluated here.
         }
         Ok(true)
+    }
+
+    fn parent_policy_for_inherits(
+        &self,
+        parent_table: &TableSchema,
+        operation: crate::query::InheritsOperation,
+        context: ParentInheritsContext,
+    ) -> Option<crate::query::Query> {
+        match (operation, context) {
+            (crate::query::InheritsOperation::Select, ParentInheritsContext::InsertCandidate) => {
+                parent_table.write_policies.update_using.clone()
+            }
+            (crate::query::InheritsOperation::Select, ParentInheritsContext::ExistingRow) => {
+                parent_table.read_policy.clone()
+            }
+            (crate::query::InheritsOperation::Insert, _) => {
+                parent_table.write_policies.insert_check.clone()
+            }
+            (crate::query::InheritsOperation::Update, _) => {
+                parent_table.write_policies.update_using.clone()
+            }
+            (crate::query::InheritsOperation::Delete, _) => {
+                parent_table.write_policies.delete_using.clone()
+            }
+        }
     }
 
     fn policy_join_target_value(
@@ -934,6 +967,12 @@ where
             .expect("tx row memo populated")
             .clone())
     }
+}
+
+#[derive(Clone, Copy)]
+enum ParentInheritsContext {
+    ExistingRow,
+    InsertCandidate,
 }
 
 fn policy_values_equal(left: &Value, right: &Value) -> bool {
