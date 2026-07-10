@@ -1012,6 +1012,7 @@ describe("NAPI integration", () => {
       const teamAccessEdges = makeTableQueryWithIncludes<PilotAppTeamAccessEdge>(
         "team_access_edges",
         pilot-appSchema,
+        { resource: true, team: true },
       );
 
       const firstRows = await new Promise<unknown[]>((resolve, reject) => {
@@ -1030,7 +1031,13 @@ describe("NAPI integration", () => {
           { tier: "global" },
         );
         setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const errors = consoleError.mock.calls.map((call) =>
+            call
+              .map((entry) =>
+                entry instanceof Error ? (entry.stack ?? entry.message) : String(entry),
+              )
+              .join(" "),
+          );
           const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
           if (capabilityError) {
             unsubscribe?.();
@@ -1063,7 +1070,13 @@ describe("NAPI integration", () => {
           { tier: "global" },
         );
         setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const errors = consoleError.mock.calls.map((call) =>
+            call
+              .map((entry) =>
+                entry instanceof Error ? (entry.stack ?? entry.message) : String(entry),
+              )
+              .join(" "),
+          );
           const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
           if (capabilityError) {
             unsubscribe?.();
@@ -1080,7 +1093,11 @@ describe("NAPI integration", () => {
       });
 
       expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
-      const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+      const errors = consoleError.mock.calls.map((call) =>
+        call
+          .map((entry) => (entry instanceof Error ? (entry.stack ?? entry.message) : String(entry)))
+          .join(" "),
+      );
       expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
     } finally {
       consoleError.mockRestore();
@@ -1294,7 +1311,38 @@ describe("NAPI integration", () => {
       const teamAccessEdges = makeTableQueryWithIncludes<PilotAppTeamAccessEdge>(
         "team_access_edges",
         pilot-appSchema,
+        { resource: true, team: true },
       );
+      const primedEdgeRows = await new Promise<unknown[]>((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        const reduced: PilotAppTeamAccessEdge[] = [];
+        unsubscribe = memberDb.subscribeAll(
+          teamAccessEdges,
+          (delta: SubscriptionDelta<PilotAppTeamAccessEdge>) => {
+            applySubscriptionDelta(reduced, delta);
+            if (reduced.some((row) => row.resource_id === corporationId)) {
+              unsubscribe?.();
+              resolve([...reduced]);
+            }
+          },
+          { tier: "global" },
+        );
+        setTimeout(() => {
+          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
+          unsubscribe?.();
+          reject(
+            new Error(
+              capabilityError ??
+                `timed out waiting for primed team_access_edges after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
+            ),
+          );
+        }, 5_000);
+      });
+
+      expect(primedEdgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
+      await settleAsyncSyncWork();
+
       const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
         let unsubscribe: (() => void) | undefined;
         const reduced: PilotAppTeamAccessEdge[] = [];
