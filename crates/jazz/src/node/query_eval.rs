@@ -1167,6 +1167,10 @@ where
 }
 
 fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
+    if tier == DurabilityTier::Global {
+        return GraphBuilder::table(register_global_current_table_name(table))
+            .project_fields(register_storage_fields_for_query_engine(""));
+    }
     let current_keys = deletion_register_current_keys_graph(table, tier);
     GraphBuilder::join(
         GraphBuilder::table(register_table_name(table)),
@@ -6946,8 +6950,13 @@ where
             Err(err) => return Err(err),
         };
         if authorized.route_fields.is_empty() {
+            let fields = output_fields
+                .iter()
+                .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
+                .collect::<Vec<_>>();
             return Ok(PolicyAuthorizationGraph {
-                graph: GraphBuilder::semi_join(base, authorized.graph, ["row_uuid"], ["row_uuid"]),
+                graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+                    .project_fields(fields),
                 route_fields: authorized.route_fields,
             });
         }
@@ -7304,6 +7313,19 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
+        if tier == DurabilityTier::Global {
+            let content = GraphBuilder::table(global_current_table_name(&table.name))
+                .project(global_current_storage_fields(table, true, true));
+            let deleted = GraphBuilder::table(register_global_current_table_name(&table.name))
+                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+                .project(["row_uuid"]);
+            return Ok(GraphBuilder::anti_join(
+                content,
+                deleted,
+                ["row_uuid"],
+                ["row_uuid"],
+            ));
+        }
         let payload = content_version_current_source_graph(table, tier, true).project([
             "row_uuid",
             "tx_time",
