@@ -6377,6 +6377,64 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
 }
 
 #[test]
+fn server_reset_subscription_materializes_without_local_snapshot_eval() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    seed(&server, "todos", cells("first", false, owner));
+    seed(&server, "todos", cells("second", true, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client
+        .node
+        .node
+        .borrow_mut()
+        .reset_subscription_snapshot_for_link_call_count();
+    let stats = client.tick_stats().unwrap();
+    assert_eq!(stats.subscription_events, 1);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .subscription_snapshot_for_link_call_count(),
+        0,
+        "authoritative server reset should not re-run the subscription query locally"
+    );
+
+    let event = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        settled,
+        ..
+    } = event
+    else {
+        panic!("expected subscription delta");
+    };
+    assert!(reset);
+    assert!(settled);
+    assert_eq!(added.len(), 2);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);

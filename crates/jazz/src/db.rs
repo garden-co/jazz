@@ -3195,6 +3195,9 @@ where
 {
     let mut retained = Vec::new();
     let mut changed = 0;
+    let pending_authoritative_resets = node
+        .borrow_mut()
+        .take_pending_authoritative_reset_binding_views();
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;
@@ -3210,7 +3213,7 @@ where
                 state.author,
             )
         };
-        let (snapshot, snapshot_source, settled, snapshot_tier) = {
+        let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
@@ -3257,7 +3260,39 @@ where
                         };
                     let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    if let Some(update) = maintained_update {
+                    let authoritative_reset = remote_settled_tier.is_some()
+                        && pending_authoritative_resets.contains(&settled_binding_view);
+                    if authoritative_reset {
+                        let mut snapshot = node
+                            .borrow_mut()
+                            .authoritative_reset_snapshot_for_binding_view(
+                                &shape,
+                                settled_binding_view,
+                            )?
+                            .unwrap_or_else(|| state_ref.snapshot.clone());
+                        if let Some(update) = maintained_update {
+                            let _ = apply_maintained_update_to_snapshot(
+                                &mut snapshot,
+                                &update,
+                                snapshot_tier,
+                                previous_settled,
+                            );
+                        }
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        (
+                            snapshot,
+                            SubscriptionSnapshotSource::LinkSnapshot,
+                            settled,
+                            snapshot_tier,
+                            true,
+                        )
+                    } else if let Some(update) = maintained_update {
                         let mut event = apply_maintained_update_to_snapshot(
                             &mut state_ref.snapshot,
                             &update,
@@ -3285,50 +3320,62 @@ where
                             changed += 1;
                         }
                         continue;
-                    }
-                    let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
-                        let previous = state_ref.snapshot.clone();
-                        let remote_snapshot = node.borrow_mut().subscription_snapshot_for_link(
-                            &shape,
-                            &binding,
-                            snapshot_tier,
-                            author,
-                        )?;
-                        if has_maintained_subscription
-                            && previous.root_count > 0
-                            && previous_source == SubscriptionSnapshotSource::LocalMaintained
-                            && remote_snapshot.root_count == 0
-                        {
+                    } else {
+                        let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                            let previous = state_ref.snapshot.clone();
+                            let remote_snapshot =
+                                node.borrow_mut().subscription_snapshot_for_link(
+                                    &shape,
+                                    &binding,
+                                    snapshot_tier,
+                                    author,
+                                )?;
+                            if has_maintained_subscription
+                                && previous.root_count > 0
+                                && previous_source == SubscriptionSnapshotSource::LocalMaintained
+                                && remote_snapshot.root_count == 0
+                            {
+                                (previous.clone(), previous_source)
+                            } else {
+                                (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                            }
+                        } else if has_maintained_subscription {
+                            let previous = state_ref.snapshot.clone();
                             (previous.clone(), previous_source)
                         } else {
-                            (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
-                        }
-                    } else if has_maintained_subscription {
-                        let previous = state_ref.snapshot.clone();
-                        (previous.clone(), previous_source)
-                    } else {
-                        (
-                            node.borrow_mut().subscription_snapshot_for_link(
-                                &shape, &binding, read_tier, author,
-                            )?,
-                            SubscriptionSnapshotSource::LinkSnapshot,
-                        )
-                    };
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view,
-                    );
-                    (snapshot, snapshot_source, settled, snapshot_tier)
+                            (
+                                node.borrow_mut().subscription_snapshot_for_link(
+                                    &shape, &binding, read_tier, author,
+                                )?,
+                                SubscriptionSnapshotSource::LinkSnapshot,
+                            )
+                        };
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        (snapshot, snapshot_source, settled, snapshot_tier, false)
+                    }
                 }
             }
         };
         let previous = state.borrow().snapshot.clone();
-        if snapshot != previous || settled != previous_settled {
+        if force_reset_event || snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
-            let event = subscription_delta_event(snapshot_tier, settled, &previous, &snapshot);
+            let event = if force_reset_event {
+                subscription_delta_event_with_reset(
+                    snapshot_tier,
+                    settled,
+                    &previous,
+                    &snapshot,
+                    true,
+                )
+            } else {
+                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
+            };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;

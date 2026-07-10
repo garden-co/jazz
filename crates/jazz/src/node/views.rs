@@ -742,6 +742,7 @@ where
             && result_member_removes.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty();
+        let reset_has_result_removes = !result_member_removes.is_empty();
         // A reset only replaces shared canonical state when it carries the
         // snapshot that will replace it. Empty resets from short-lived duplicate
         // usage subscriptions are coverage stamps; letting them clear non-empty
@@ -793,6 +794,16 @@ where
             self.query
                 .settled_through_by_binding_view
                 .insert(binding_view_key, settled_through);
+            // Resume catch-up can use reset framing while also carrying removals
+            // from the cursor diff. That shape is not a standalone server
+            // snapshot for callback materialization: the receiver still needs
+            // its normal maintained/local refresh path to fold the change into
+            // the existing subscription state.
+            if reset_result_set && !reset_has_result_removes && !preserve_existing_shared_state {
+                self.query
+                    .pending_authoritative_reset_binding_views
+                    .insert(binding_view_key);
+            }
         }
         // Diagnostic-only: the duplicate-content-version scan feeds a
         // debug_assert, so it is wasted work in release. Gate to debug builds.
