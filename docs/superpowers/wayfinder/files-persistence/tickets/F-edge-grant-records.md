@@ -1,7 +1,7 @@
 # Edge grant records
 
 Type: `wayfinder:grilling`
-Status: open
+Status: closed (subsumed 2026-07-10 by E — grant ledger resolution: edges are stateless; UploadId is client-held in the resume record; release is bucket-idempotent from any edge)
 Assignee: (unclaimed)
 Blocked by: [E — core claim ledger](E-claim-ledger.md)
 

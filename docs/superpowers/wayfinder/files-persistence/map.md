@@ -43,6 +43,14 @@ to decide before implementation tickets can be cut.
   verification** (release = claim + copy out of `pending/`; bucket
   lifecycle TTL replaces the sweep); deletion is an explicit
   uploader-or-backend API, never cell death; cells opaque to queries in v1.
+- [Grant ledger](tickets/E-claim-ledger.md) — **there is no ledger**: all
+  checks bucket-derived (HEAD final + tombstone at issue; conditional PUTs
+  guard `pending/`; release = HEAD/copy/delete, idempotent); delete auth
+  via blinded uploader metadata (`HMAC(secret, identity ‖ id)`); zero-byte
+  permanent tombstones block deleted-id resurrection (TTL-expired ids stay
+  re-grantable, stated); edges fully stateless — the client holds the
+  `UploadId` in its resume record. This subsumed
+  [Edge grant records](tickets/F-edge-grant-records.md).
 
 ## Not yet specified
 

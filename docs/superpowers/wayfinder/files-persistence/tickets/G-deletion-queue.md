@@ -10,16 +10,16 @@ Blocked by: [E — grant ledger](E-claim-ledger.md)
 How does the explicit delete API (`jazz.files.delete(fileId)`) execute
 durably?
 
-Per [Descriptor persistence](A-descriptor-persistence.md): deletion is an
-explicit sync-protocol request authorized for the uploader identity (from
-the ledger) or the backend/admin surface — never inferred from cell death.
-Decide: whether the DELETE against the bucket runs synchronously in the
-request (with what timeout/answer semantics) or lands in a durable retried
-queue first (entry schema and home); idempotency (delete of
-already-deleted id succeeds); poison-entry handling (a bucket that 403s
-forever); whether the ledger entry records the deleted state (and serves
-as the bodyless-history marker); what the API returns while CDN copies
-still exist; and operator observability (pending deletes, oldest age).
-
-Blocked by E because auth and the deleted-state marker are ledger reads
-and writes.
+Per [Descriptor persistence](A-descriptor-persistence.md) and
+[Grant ledger](E-claim-ledger.md): deletion is an explicit sync-protocol
+request, authorized by comparing the requester against the blinded
+uploader metadata on the object (backend surface skips the check), and
+executes directly against the bucket — DELETE the final key + PUT the
+zero-byte tombstone. No ledger, no settle observation. Decide: whether the
+two bucket ops run synchronously in the request (timeout/answer semantics;
+what the client does on failure — retry loop in the SDK?) or land in a
+small durable server-side retry record first; the op order and crash
+semantics (tombstone-then-delete vs delete-then-tombstone — which partial
+state is safer); idempotency (deleting an already-deleted/tombstoned id
+succeeds); what the API returns while CDN copies still exist; and operator
+observability for failed deletes (a bucket that 403s forever).
