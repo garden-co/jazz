@@ -6,11 +6,13 @@ Tracker: local-markdown (this directory; tickets are files under `tickets/`)
 ## Destination
 
 A ready-for-agent spec pinning where and how every piece of file-plane state
-persists — client side (descriptor column values, staged bodies, upload-resume
-records, the outbox hold) and server side (the core's permanent claim ledger,
-edge grant records, the core's deletion queue) — consistent with the files PRD
-(`docs/superpowers/specs/2026-07-09-files-spec.md`). Done when nothing is left
-to decide before implementation tickets can be cut.
+persists — client side (descriptor column values plus, after the 2026-07-10
+invisible-core pivot, a single pending-delete intent record: core keeps no
+staged bodies, no resume records, no durable outbox hold) and server side
+(stateless by prior decisions) — consistent with the files PRD
+(`docs/superpowers/specs/2026-07-09-files-spec.md`), which the pivot amends:
+offline upload/download move to a future opt-in package. Done when nothing is
+left to decide before implementation tickets can be cut.
 
 ## Notes
 
@@ -71,20 +73,26 @@ the open tickets below cover the rest.
   Handed to B: OPFS raw files favored on web, filesystem dir on
   native/RN, and **SW offline requires `/files/*` on the app's own
   origin** (same-origin interception only).
+- [Device file store](tickets/B-staging-store.md) — **the invisible-core
+  pivot: core has no device file store.** `fromBlob` uploads in-session
+  from the in-memory Blob; a restart mid-upload loses the body and the
+  descriptor syncs bodyless (URL 404s) — the documented outcome; `url()`
+  is always the public URL. All offline machinery (staging, resume, SW,
+  RN loopback, read cache, hook surface) → future opt-in package, out of
+  scope; pre-pivot store design preserved in the
+  [design inventory](notes/offline-package-inventory.md). PRD amendment
+  flagged (v1 offline promises become opt-in).
+- [Outbox hold across restart](tickets/D-outbox-hold.md) — it doesn't,
+  by design: the hold is an in-memory courtesy; after restart,
+  formerly-held transactions sync normally (bodyless descriptor until an
+  opt-in package reinstates durable holds). Closed by B's pivot.
 
 ## Not yet specified
 
-- Crash-consistency contract and test strategy across the two stores (KV
-  transaction vs staged body write) — sharpens once B and C settle.
-- Storage schema versioning/migration story for the new namespaces —
-  sharpens once A/C/E pick their encodings.
-- Staging/cache-store capacity guardrails (device pressure, many parallel
-  uploads) — sharpens once B settles.
-- React Native staging specifics, if B resolves browser+native first.
-- Whether staged bodies need encryption at rest on any platform.
-- Interceptor runtime details beyond the spike's feasibility questions
-  (SW registration/update lifecycle; RN loopback port/secret lifecycle
-  across app restarts) — sharpens once the interceptor spike and B settle.
+(Empty — the 2026-07-10 invisible-core pivot moved all former entries out
+of scope with the offline package, except namespace versioning, which
+folded down into [Pending-delete intent record](tickets/C-resume-records.md).
+Remaining route: resolve C, then publish the destination spec.)
 
 ## Out of scope
 
@@ -92,9 +100,18 @@ the open tickets below cover the rest.
   (`packages/jazz-tools/src/runtime/file-storage.ts`, files/file_parts chunk
   rows) — migrate/deprecate/leave is a separate product effort, not
   new-plane persistence.
+- **The opt-in offline package** (2026-07-10 pivot, resolved in
+  [Device file store](tickets/B-staging-store.md)) — durable staging,
+  upload resume, the web SW, the RN loopback server, the read cache, and
+  the core hook surface they need. Core stays invisible; any offline
+  footprint is added willingly by the app. A future effort, seeded by the
+  [design inventory](notes/offline-package-inventory.md); it subsumes the
+  former upload-resume half of
+  [ticket C](tickets/C-resume-records.md) and all former fog entries
+  (crash-consistency test strategy, capacity guardrails, RN staging,
+  encryption at rest, interceptor runtime lifecycles).
 - Interceptor _implementation_ (production SW fetch-handler, production RN
-  loopback server) — in v1 scope per the PRD (2026-07-09 update: offline
-  reads ship via web SW + RN loopback server), but built from the
-  destination spec, not on this map. On-map: the throwaway feasibility
-  spike (ticket H) and where the stores persist (ticket B).
+  loopback server) — was "v1 per the PRD, built from the destination
+  spec"; the 2026-07-10 pivot moved it into the opt-in offline package
+  above. On-map history: the throwaway feasibility spike (ticket H).
 - Per-identity rate limits / quotas (PRD: planned future work).
