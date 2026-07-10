@@ -2467,14 +2467,7 @@ fn lower_union_relation_input(
             request,
         )?);
     }
-    let authorized_row_request = (request.output.app_rows.is_none()
-        && request.output.facts.len() == 1
-        && request
-            .output
-            .facts
-            .contains(&ProgramFactKey::AuthorizedRows))
-    .then_some(request);
-    lower_union_inputs(lowered, authorized_row_request)
+    lower_union_inputs(lowered)
 }
 
 fn lower_union_plan(
@@ -2518,12 +2511,11 @@ fn lower_union_plan(
         };
         lowered.push(input);
     }
-    lower_union_inputs(lowered, None)
+    lower_union_inputs(lowered)
 }
 
 fn lower_union_inputs(
     lowered: Vec<LoweredRelationInput>,
-    authorized_row_request: Option<&QueryProgramRequest>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = lowered.into_iter();
     let first = lowered.next().ok_or_else(|| {
@@ -2531,30 +2523,11 @@ fn lower_union_inputs(
     })?;
     let mut graphs = vec![first.graph];
     let mut root_source = first.root_source;
-    let mut fields = first.fields;
+    let fields = first.fields;
     let mut nullable_fields = first.nullable_fields;
     let mut nullable_field_depths = first.nullable_field_depths;
     for branch in lowered {
         if branch.fields != fields {
-            if let Some(request) = authorized_row_request
-                && fields.contains("row_uuid")
-                && branch.fields.contains("row_uuid")
-            {
-                fields.extend(branch.fields.iter().cloned());
-                graphs = graphs
-                    .into_iter()
-                    .map(|graph| project_authorized_row_union_fields(graph, &fields, request))
-                    .collect::<Result<Vec<_>, _>>()?;
-                graphs.push(project_authorized_row_union_fields(
-                    branch.graph,
-                    &fields,
-                    request,
-                )?);
-                nullable_fields.retain(|field| fields.contains(field));
-                nullable_field_depths.retain(|field, _| fields.contains(field));
-                root_source = None;
-                continue;
-            }
             return Err(UnsupportedReason::Operator(
                 "union branches must output the same fields".to_owned(),
             ));
@@ -2583,38 +2556,6 @@ fn lower_union_inputs(
         nullable_fields,
         nullable_field_depths,
     })
-}
-
-fn project_authorized_row_union_fields(
-    graph: GraphBuilder,
-    fields: &BTreeSet<String>,
-    request: &QueryProgramRequest,
-) -> Result<GraphBuilder, UnsupportedReason> {
-    let projections = fields
-        .iter()
-        .map(|field| {
-            missing_authorized_row_route_field(field, request)
-                .unwrap_or_else(|| ProjectField::named(field.clone()))
-        })
-        .collect::<Vec<_>>();
-    Ok(graph.project_fields(projections))
-}
-
-fn missing_authorized_row_route_field(
-    field: &str,
-    request: &QueryProgramRequest,
-) -> Option<ProjectField> {
-    let domain = parameter_domain_for_request(request).ok()?;
-    if let Some(claim) = domain.claim_params.get(field) {
-        let value = claim_value(&claim.path, &request.policy).ok()?;
-        let literal = coerce_literal_for_value_type(value.into(), &claim.ty.value_type());
-        return Some(ProjectField::literal(field.to_owned(), literal));
-    }
-    let param = route_param_from_field(field)?;
-    let value = request.input.binding.values.get(param)?;
-    let value_type = request.input.binding.param_types.get(param)?.value_type();
-    let literal = coerce_literal_for_value_type(value.clone().into(), &value_type);
-    Some(ProjectField::literal(field.to_owned(), literal))
 }
 
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
