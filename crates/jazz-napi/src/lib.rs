@@ -826,6 +826,24 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    #[napi(js_name = "localCurrentRow")]
+    pub fn local_current_row(&self, table: String, row_id: Uint8Array) -> napi::Result<Uint8Array> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let row = match db {
+            NapiDbInnerStorage::Memory(db) => db.local_current_row(&table, row_id),
+            NapiDbInnerStorage::Persistent(db) => db.local_current_row(&table, row_id),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let rows = row.into_iter().collect::<Vec<_>>();
+        encode_core_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     #[napi(js_name = "attachQuery")]
     pub fn attach_query(
         &self,
