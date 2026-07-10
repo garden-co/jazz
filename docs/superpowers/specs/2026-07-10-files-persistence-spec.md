@@ -41,8 +41,10 @@ Two deliverables, buildable together and testable end to end:
 2. **The stateless file plane.** Sync-protocol request/response messages —
    grant, part-URL refresh, release, delete — implemented at the server
    against the S3-compatible backend contract. File ids are
-   identity-bound (`{app}[/t{class}]/{identity}/{random}`), so every
-   authorization is a pure identity-segment comparison: the server keeps
+   identity-bound — the key is `{app}[/t{class}]/{identity}/{random}`,
+   where `{identity}` is `UUIDv5(files-namespace, user_id)` — so every
+   authorization is a pure computation (identity-segment derivation plus
+   class-set, column-declaration, and mime-type checks): the server keeps
    no file-plane state and reads nothing from the bucket at issuance.
    Unclaimed uploads expire via the `pending/` prefix lifecycle rule;
    released bodies are copied to their final, immutably-cacheable key.
@@ -86,33 +88,40 @@ Two deliverables, buildable together and testable end to end:
 
 10. As an app developer, I want the SDK to mint the file id at the first
     cell write — TTL class from the destination column's declaration,
-    identity from the session, random from a CSPRNG — so that ids are
+    the identity segment derived (UUIDv5) from the session identity,
+    random from a CSPRNG — so that ids are
     correct by construction and I never assemble one by hand.
 11. As an end user, I want id minting to work fully offline from the
     first moment (my identity id is always known locally), so that
     offline creation has no first-contact caveat.
 12. As an app developer, I want `file.url()` to be pure local string
-    construction from the id alone (no schema lookup, no server call),
+    construction from the id and static client config — `filesUrl`
+    (default `{serverUrl}/files`) plus the app id — with no schema
+    lookup and no server call,
     so that rendering is synchronous everywhere.
 13. As an app developer, I want a descriptor copied into a
     differently-declared column to keep its baked-in class, so that
     expiry is fixed at upload and never mutated by placement.
 14. As an app developer, I want it stated that every file URL publicly
-    carries the uploader's identity id (pseudonymous, cross-file
-    linkable), so that I don't put files where that linkage is
+    carries a stable pseudonymous UUIDv5 derivation of the uploader's
+    identity id (cross-file linkable, never the raw id), so that I
+    don't put files where that linkage is
     unacceptable.
 
 ### The file plane
 
 15. As an end user, I want an upload grant issued after nothing more than
-    an identity-segment comparison and a class-set check — zero bucket
+    pure computation — identity-segment derivation, class-set and
+    column-declaration checks, and a mime-type check against the
+    destination column's declared set — zero bucket
     reads, zero records written — so that grants are fast and the server
     stays stateless.
 16. As an attacker-shaped user, I want a grant request for a key outside
     my identity namespace refused by comparison alone, so that taking
     over another uploader's URL is impossible by construction.
-17. As an app developer, I want the presigned single PUT and
-    `CompleteMultipartUpload` to carry `If-None-Match: *` and pinned
+17. As an app developer, I want the presigned single PUT to carry
+    `If-None-Match: *` (multipart completion too, where the backend
+    supports it) and pinned
     `Content-Type`/`Content-Disposition`/`Cache-Control` headers, so that
     my own retries can't clobber and clients can't smuggle headers.
 18. As an app developer, I want the grant response to hand me the
@@ -123,13 +132,17 @@ Two deliverables, buildable together and testable end to end:
     an existing upload within its lease from any edge, so that presign
     windows never strand a long upload.
 20. As an app developer, I want release to be HEAD-final-first (already
-    there → success), then complete + copy `pending/…` → final + delete
+    there → success), then complete (multipart only) + copy `pending/…`
+    → final (re-sending pinned headers with `REPLACE`) + delete
     pending, so that retried and concurrent releases converge
     idempotently from any edge.
 21. As an operator, I want unreleased uploads cleaned by the `pending/`
-    prefix lifecycle rule and the native incomplete-multipart abort rule,
+    prefix lifecycle rule, with incomplete multiparts reaped by my
+    backend's own mechanism (lifecycle rule on S3/R2, stale-uploads
+    purge raised to ≥ the lease window on minio, external scheduled
+    sweep on Tigris),
     so that abandoned uploads cost nothing past the lease window with no
-    sweep code anywhere.
+    sweep code in Jazz anywhere.
 22. As an end user, I want files in a TTL'd column to expire when the
     bucket's class rule fires (clock starting at the release copy), so
     that ephemeral content leaves by itself; the descriptor remains and
@@ -158,34 +171,58 @@ Two deliverables, buildable together and testable end to end:
   types, reject otherwise. No previous-value comparison, no grant
   awareness — shape only.
 - **Schema builder & wire:** the TS builder gains the file column factory
-  with an optional `ttl` option validated against the deployment's class
-  set; the DDL wire form carries the class (the JSON-column precedent for
+  with an optional `ttl` option (validated for grammar `^[a-z0-9]{1,15}$`
+  only — set membership is checked at grant time, resolving the earlier
+  contradiction with the PRD) and an optional declared mime-type set
+  (exact types and `type/*` patterns); the DDL wire form carries the
+  class and the type set (the JSON-column precedent for
   parameterized kinds). The Rust schema parser gains the matching kind.
-- **Id format:** one opaque string whose segments encode TTL class (or
-  none), uploader identity id, and a CSPRNG random part; the object key
-  and serving path are `{app}[/t{class}]/{identity}/{random}`. The SDK
+- **Id format:** one opaque string — the `/`-joined key suffix
+  `[t{class}/]{identity}/{random}` — where `{identity}` is
+  `UUIDv5(files-namespace, user_id)` and `{random}` a canonical CSPRNG
+  UUIDv4; class names match `^[a-z0-9]{1,15}$`, so parsing is
+  unambiguous (a UUID never matches `^t[a-z0-9]+$`; two segments =
+  classless, three = classed). Write-path "well-formed" means this
+  grammar and nothing more. The object key
+  and serving path are `{app}[/t{class}]/{identity}/{random}`, with
+  `{app}` supplied by the per-app sync connection, never by the id. The
+  SDK
   finalizes the id at the descriptor's first cell write; `url()` derives
-  from the id alone (always the public URL — the `canonical` option was
+  from the id plus static client config — `filesUrl` and the app id
+  (always the public URL — the `canonical` option was
   retired with the invisible-core amendment).
 - **File-plane protocol messages** on the authenticated sync connection:
-  grant `(file id, size)` → object key, lease expiry, presigned URL(s),
+  grant `(file id, size, mime_type, name, destination column)` → object
+  key, lease expiry, presigned URL(s),
   `UploadId` where multipart; part-URL refresh `(file id, UploadId,
-part numbers)`; release `(file id, UploadId, part ETags)`; delete
+part numbers)`; release `(file id, UploadId?, part ETags?)` — both
+  optional fields absent on the single-PUT path; delete
   `(file id)`. Every one authorizes by comparing the id's identity
-  segment to the session identity (backend surface bypasses); grant
-  additionally checks the class segment against the deployment class set.
+  segment to the UUIDv5 derivation of the session identity
+  (`Session.user_id` as the existing sync auth establishes it; the
+  backend-secret surface bypasses); grant
+  additionally checks the class segment against the deployment class set
+  and the named column's `ttl` declaration, and the `mime_type` against
+  that column's declared type set (no declared set = any type).
   Nothing is persisted server-side; nothing is read from the bucket at
   issuance.
 - **Bucket layout and rules:** uploads land at
   `pending/{app}[/t{class}]/{identity}/{random}` under conditional
-  writes; release copies to the final key (starting the TTL clock) and
+  writes; release copies to the final key (starting the TTL clock,
+  re-sending the pinned headers with the `REPLACE` metadata directive)
+  and
   deletes the pending object; lifecycle rules = one expiry per TTL class
-  prefix, one expiry on `pending/`, one incomplete-multipart abort. The
+  prefix, one expiry on `pending/`; incomplete-multipart cleanup is a
+  per-backend deployment requirement (see the PRD's operator section),
+  not a portable rule. The
   serving endpoint 302s to the public object URL; bucket policy is
   anonymous GetObject with listing denied.
 - **Backend contract additions** to the S3-compatible abstraction:
-  conditional single PUT and conditional multipart completion, server-side
-  copy, presigned part URLs for an existing `UploadId`, HEAD, DELETE —
+  conditional single PUT, multipart completion (conditional only where
+  the backend supports it — best-effort hardening, not contract; see
+  the support matrix in the spec-review-fixes map notes), server-side
+  copy with metadata `REPLACE`, presigned part URLs for an existing
+  `UploadId`, HEAD, DELETE —
   implemented by the real backend and the in-process fake alike.
 - **Delete execution (decided after this spec's first cut, amended by the
   MVP delete cut):** the server side is synchronous and stateless — one
@@ -219,9 +256,12 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
   differently-declared column keeps its class; descriptor readable at a
   historical cut; grant issued with zero bucket calls for own namespace;
   foreign-namespace grant and delete refused; out-of-set class refused at
+  grant; mime type outside the destination column's declared set refused
+  at grant; id class contradicting the column's declaration refused at
   grant; conditional PUT 412s a same-key retry race; part-URL refresh
   within lease from a second edge; release idempotency (double release,
-  release-after-crash converge via HEAD); pending object expiry via the
+  release-after-crash converge via HEAD); the single-PUT release path
+  (no `UploadId`: HEAD + copy + delete); pending object expiry via the
   fake's lifecycle simulation; TTL'd final object expiry with the
   descriptor cell intact; delete by uploader succeeds / stranger denied /
   backend succeeds; permanent vs class-capped cache headers on serving.
@@ -251,6 +291,9 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
 - The descriptor's canonical bytes matter (equality/digests): compact,
   sorted keys, no extra whitespace — treat canonicalization as part of
   the write-path validation, not a client courtesy.
-- The identity segment uses the identity id exactly as the session knows
-  it; no normalization, no hashing (URL blinding is a deferred option
-  recorded in the PRD).
+- The identity segment is `UUIDv5(files-namespace, user_id)` — one
+  uniform, URL-safe derivation covering both self-signed identities
+  (already UUIDs) and external-JWT `sub` strings (arbitrary,
+  app-controlled, sometimes email-like — never embeddable raw in a
+  public URL). This is a public deterministic derivation, not the
+  deferred HMAC blinding recorded in the PRD.

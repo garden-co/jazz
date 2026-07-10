@@ -7,7 +7,12 @@ Derived from: the approved files design (`2026-07-08-files-design.md`, sharpened
 by grilling review, then hardened by a three-model adversarial review, then
 simplified by the descriptor-persistence, grant-ledger, and id-management
 grillings of 2026-07-10, then reshaped by the invisible-core pivot of the
-device-file-store grilling later that day). That design doc remains the
+device-file-store grilling later that day, then amended by the
+protocol-plane grilling of the spec-review-fixes map — same day — which
+resolved the three-model review's protocol findings: grant payload and
+schema-declared mime types, the file id grammar, two-tier serving
+hardening, belt demotion per the backend support matrix, and per-backend
+multipart cleanup). That design doc remains the
 authority on rationale and rejected alternatives, with these deliberate
 amendments in this spec:
 
@@ -37,9 +42,10 @@ amendments in this spec:
    hand. Unclaimed uploads are garbage-collected by bucket lifecycle rules
    on a `pending/` prefix, not by a server sweep.
 7. **File ids are identity-bound, and the server keeps no file-plane state
-   of any kind.** A file id embeds the uploader's identity id plus a random
-   part; the object key is `{app}/{identity}/{random}`. Grant and delete
-   authorization is a pure comparison — "is the key's identity segment
+   of any kind.** A file id embeds a UUIDv5 derivation of the uploader's
+   identity id plus a random part; the object key is
+   `{app}/{identity}/{random}`. Grant and delete
+   authorization is a pure computation — "is the key's identity segment
    yours?" — with **zero bucket calls at issuance and zero records
    anywhere**: no ledger, no tombstones, no uploader metadata. Taking over
    another identity's URL is impossible by construction.
@@ -88,8 +94,9 @@ Files become first-class in Jazz through a **file column**: a column type,
 usable on any table, whose cell holds a **file descriptor** — a small
 canonical-JSON value naming one body: required `v: 1` plus **file id**,
 `name`, `mime_type`, `size`. The file id is **identity-bound**: one opaque
-string embedding the column's TTL class (when one is declared), the
-uploader's identity id, and a cryptographically random part. The SDK
+string embedding the column's TTL class (when one is declared), a stable
+UUIDv5 derivation of the uploader's identity id, and a cryptographically
+random part. The SDK
 finalizes the id at the **first cell write** — the destination column's
 schema names the class — entirely locally and fully offline, from day
 zero, because a client always knows its own identity id. At the type layer
@@ -109,13 +116,17 @@ bucket, keyed `{app}/{identity}/{random}` (or
 `{app}/t{class}/{identity}/{random}` for TTL'd files), uploaded directly by
 the client under a server-issued **upload grant**. The identity-bound key
 is what makes the whole plane stateless and lookup-free: **grant issuance
-is a pure comparison** — the requested key's identity segment must equal
-the requesting session's identity — with zero bucket calls and nothing
+is a pure computation** — the requested key's identity segment must equal
+the UUIDv5 derivation of the requesting session's identity, its class
+segment (if any) must sit in the deployment's class set and match the
+destination column's declaration, and the declared `mime_type` must sit
+in that column's declared type set — with zero bucket calls and nothing
 written or recorded anywhere. Nobody can ever be granted a key outside
 their own namespace, so overwriting or taking over another identity's URL
 is impossible by construction; the conditional-write guard
-(`If-None-Match: *`) on the presigned PUT and multipart completion remains
-only as a self-collision belt. Uploads land under a
+(`If-None-Match: *`) on the presigned single PUT remains as a mandated
+self-collision belt, applied to multipart completion only where the
+backend supports it. Uploads land under a
 `pending/{app}/…` key; the grant response hands the client the multipart
 `UploadId`, which the client holds for the life of the upload (in memory
 in core; the opt-in package persists it durably) — edges keep nothing, so
@@ -156,8 +167,10 @@ files, no signed URLs, and no per-download policy checks: the value Jazz
 provides is the integrated experience (files as values in your own rows,
 synced and permission-gated as metadata), not
 byte-level access control. One privacy semantic is stated plainly: **every
-file URL publicly carries the uploader's identity id** — pseudonymous (an
-opaque id), but stable and linkable across all of that uploader's files.
+file URL publicly carries a stable pseudonymous derivation of the
+uploader's identity id** (a UUIDv5 — never the raw id, which for
+external-JWT identities may be an email-like `sub`), linkable across all
+of that uploader's files.
 Bytes never transit Jazz nodes and never enter Jazz storage, the sync
 lane, or the content channel.
 
@@ -204,10 +217,12 @@ never deletes objects.
 7. As an app developer, I want multiple file columns on one table when I
    need them (avatar and banner), so that cardinality is my schema's choice.
 8. As an app developer, I want every file to have a stable public URL
-   derived purely from the descriptor, so that rendering a file is local
+   derived purely from the descriptor and static client config (app id +
+   files base URL), so that rendering a file is local
    string construction — no server round-trip, no async URL step.
 9. As an app developer, I want file ids minted entirely on-device — the
-   destination column's TTL class, my identity id, and a CSPRNG random
+   destination column's TTL class, the UUIDv5 derivation of my identity
+   id, and a CSPRNG random
    part, finalized at the first cell write — so that offline creation works
    from the very first moment an identity exists, with no server handshake
    before `url()` is usable.
@@ -289,17 +304,22 @@ never deletes objects.
     (which gate metadata) for byte confidentiality, and keep genuinely
     sensitive content out of files or encrypt it myself.
 27. As an app developer, I want it stated equally plainly that every file
-    URL carries the uploader's identity id — pseudonymous but stable and
-    linkable across that uploader's files — so that I treat identity ids as
-    public material or keep such apps off the file plane.
+    URL carries a stable pseudonymous UUIDv5 derivation of the uploader's
+    identity id — never the raw id, but linkable across that uploader's
+    files — so that I treat that linkage as public material or keep such
+    apps off the file plane.
 28. As an operator, I want downloads to be a redirect to the public object
     URL with zero policy evaluation and zero Jazz DB involvement, so that
     serving cost is flat and storage/egress is what I bill.
-29. As an operator, I want the serving layer to send
-    `X-Content-Type-Options: nosniff` and enforce a Content-Disposition
-    policy (inline only for an allowlist of render-safe types; everything
-    else `attachment`), so that my files domain cannot be turned into an XSS
-    or phishing host.
+29. As an operator, I want serving hardened in two tiers — per-object
+    `Content-Type`/`Content-Disposition`/`Cache-Control` pinned at grant
+    time and emitted by the store itself (disposition computed
+    server-side: `inline` only for the fixed allowlist of render-safe
+    types, everything else `attachment`), plus
+    `X-Content-Type-Options: nosniff` guaranteed by my deployment on the
+    public object host (CDN/proxy/bucket config — bytes never transit
+    the Jazz serving endpoint, which only 302s) — so that my files
+    domain cannot be turned into an XSS or phishing host.
 30. _(Moved to the opt-in offline package by the 2026-07-10 invisible-core
     amendment: the web service worker, its staged-body serving, and its
     read-through cache are package concerns, not core.)_
@@ -326,17 +346,20 @@ never deletes objects.
     the one value guarding byte confidentiality is a real barrier, not a
     `Math.random()` accident.
 37. As an app developer, I want grant issuance to authorize by pure
-    comparison — the requested key's identity segment must equal the
-    requesting session's identity — with zero bucket calls and zero
+    computation — the requested key's identity segment must equal the
+    derivation of the requesting session's identity, and its class and
+    declared `mime_type` must match the destination column's declaration
+    and the deployment class set — with zero bucket calls and zero
     records, so that nobody can ever upload into another identity's
     namespace and no server state or lookup exists on the issue path.
 38. As an app developer, I want takeover of another identity's URL to be
     impossible by construction — after deletion, after TTL expiry, even for
     ids that never finished uploading — so that a dangling reference can go
     bodyless but can never start serving someone else's content.
-39. As an app developer, I want the presigned PUT and multipart completion
-    to carry a conditional-write guard (`If-None-Match: *`) as a
-    self-collision belt, so that even a buggy SDK reusing its own random
+39. As an app developer, I want the presigned single PUT to carry a
+    conditional-write guard (`If-None-Match: *`) as a mandated
+    self-collision belt — applied to multipart completion too where the
+    backend supports it — so that even a buggy SDK reusing its own random
     part cannot overwrite its own existing body mid-flight.
 40. As an app developer, I want release to be idempotent by construction —
     a retried release HEADs the final key, finds the object already there,
@@ -348,9 +371,11 @@ never deletes objects.
     machinery exists on anyone else's path.
 42. As an operator, I want unreleased uploads garbage-collected by the
     bucket itself — a lifecycle rule expiring the `pending/` prefix after
-    the lease window, plus the native incomplete-multipart abort rule — so
+    the lease window, plus incomplete-multipart cleanup by whatever
+    mechanism my backend offers (lifecycle rule on S3/R2, stale-uploads
+    purge on minio, external scheduled sweep on Tigris) — so
     that grant farming accumulates nothing and no server sweep machinery
-    exists.
+    exists in Jazz.
 43. As an operator, I want the lease window (= the `pending/` lifecycle
     expiry) to be my knob trading abuse-window against resume-window, so
     that I can tune it per deployment; per-identity rate limits and quotas
@@ -402,11 +427,13 @@ never deletes objects.
 ### Operations & deployment
 
 54. As an operator, I want the backend contract to be exactly the
-    S3-compatible API (conditional presigned single/multipart PUT, multipart
-    create/complete/abort with conditional completion, server-side copy,
-    public GET, HEAD, DELETE, and prefix-scoped lifecycle rules for
-    `pending/` and each TTL class), so that S3, R2, minio, and Tigris all
-    work unchanged.
+    S3-compatible API (conditional presigned single PUT, multipart
+    create/complete/abort — conditional completion applied only where
+    supported — server-side copy with metadata `REPLACE`, public GET,
+    HEAD, DELETE, and prefix-scoped lifecycle expiry for `pending/` and
+    each TTL class), so that S3, R2, minio, and Tigris all work
+    unchanged; incomplete-multipart cleanup and nosniff are per-backend
+    deployment requirements, not contract operations.
 55. As an operator, I want the bucket policy to be public GetObject with
     listing denied, so that unguessable random parts actually protect
     bodies and the bucket can sit directly behind a CDN.
@@ -425,6 +452,22 @@ never deletes objects.
     manually-triggerable lifecycle expiry), so that no cloud account is
     needed to develop or CI-test file features.
 
+### Added by the protocol-plane amendments (2026-07-10)
+
+59. As an app developer, I want to declare the allowed mime types on a
+    file column — `s.file({ types: ["image/*", "application/pdf"] })`,
+    exact types and `type/*` patterns — so that a column's intent is
+    enforced at upload, not just documented, and my UI can derive
+    `accept` attributes from the schema.
+60. As an app developer, I want grant requests to name their destination
+    column so the server validates the declared `mime_type` against that
+    column's declared type set and cross-checks the id's TTL class
+    against its declaration, so that a lying or buggy client fails fast
+    at grant time with a precise error (a column with no declared set
+    accepts any type; enforcement is grant-time only — copies and
+    hand-rolled descriptors escape it, and serving is protected by the
+    disposition policy).
+
 ## Implementation Decisions
 
 - **The file plane is split between the sync protocol and one HTTP
@@ -437,28 +480,62 @@ never deletes objects.
   to the public object URL. The path mirrors the object key exactly, so
   serving needs no lookup — deployments may equally point a CDN straight at
   the bucket. There is no URL-mint operation anywhere — the URL is a pure
-  function of the descriptor, computable locally.
+  function of the descriptor plus static client config: a new `filesUrl`
+  field (`JazzContext`, with the standard `JAZZ_FILES_URL` /
+  framework-prefixed env-var family) naming the public base under which
+  files are reachable — the serving endpoint in 302 mode, the CDN host in
+  CDN-straight-at-bucket mode — defaulting to `{serverUrl}/files` so the
+  single-server deployment configures nothing; plus the app id the client
+  already knows.
 - **The bucket is public-read: GetObject allowed anonymously, listing
   denied.** No presigned GETs exist, so cache headers carry no
   signature-expiry contradiction; Range requests (video seeking) are served
   natively by the store/CDN.
-- **Serving is hardened against content-type abuse.** The presigned PUT
-  pins `Content-Type`, `Content-Disposition`, and `Cache-Control` to
-  grant-time values (a client deviating from them fails the upload). The
-  serving layer/CDN adds `X-Content-Type-Options: nosniff` on every
-  response. Disposition policy: `inline` only for an implementation-owned
-  allowlist of render-safe types (image, video, audio, PDF — never
-  `text/html` or `image/svg+xml`); everything else is served as
-  `attachment`. Cache policy: long-lived `Cache-Control: immutable` for
-  permanent files; `max-age` capped to the class duration for TTL'd files —
-  both pinned at grant time.
+- **Serving is hardened against content-type abuse, in two tiers.**
+  Tier 1 — per-object headers, pinned at grant and emitted by the store
+  itself (portable on all four backends): the grant carries `mime_type`
+  and `name`; the server validates `mime_type` against the destination
+  column's declared type set, pins `Content-Type` from it, computes
+  `Content-Disposition` itself — `inline` only for an
+  implementation-owned allowlist of render-safe types (image, video,
+  audio, PDF — never `text/html` or `image/svg+xml`), everything else
+  `attachment`, filename from `name` sanitized for header safety (CRLF
+  and control characters stripped, RFC 6266/5987 encoding) — and pins
+  `Cache-Control` (long-lived `immutable` for permanent files, `max-age`
+  capped to the class duration for TTL'd files). A client deviating from
+  the pinned headers fails the upload; the release copy re-sends them
+  with the `REPLACE` metadata directive, so preservation never depends
+  on a backend's copy defaults. Tier 2 — `X-Content-Type-Options:
+nosniff` is a deployment requirement on the public object host in
+  every mode, because bytes never transit the Jazz serving endpoint
+  (it only 302s): CloudFront response-headers policy on S3, a custom
+  domain plus Managed Transform on R2, a reverse proxy on minio, bucket
+  Additional Headers on Tigris. nosniff is defense-in-depth; the
+  disposition allowlist and pinned Content-Type are the primary control.
 - **File ids are identity-bound and carry their TTL class.** A file id is
-  one opaque string whose segments encode the destination column's TTL
-  class (when one is declared), the uploader's identity id, and a CSPRNG
-  random part (UUIDv4-grade — a protocol requirement, not SDK guidance:
-  the random part is the only byte-confidentiality barrier). The object
-  key renders it as path segments: `{app}/{identity}/{random}`, or
-  `{app}/t{class}/{identity}/{random}` for TTL'd files. The id is
+  one opaque string — the `/`-joined object-key suffix — whose segments
+  encode the destination column's TTL class (when one is declared), the
+  uploader's identity segment, and a random part:
+  `[t{class}/]{identity}/{random}`. The identity segment is always
+  `UUIDv5(files-namespace, user_id)` — one uniform, URL-safe, locally
+  computable derivation covering both self-signed identities (whose
+  `user_id` is already a UUIDv5 of their public key) and external-JWT
+  identities (whose `sub` is an arbitrary app-controlled string — often
+  an email — that must never appear raw in a public URL). The random
+  part is a canonical UUIDv4 minted from a CSPRNG (a protocol
+  requirement, not SDK guidance: it is the only byte-confidentiality
+  barrier). Class names are constrained to `^[a-z0-9]{1,15}$` at
+  deployment-declaration time, and the class segment renders as
+  `t{class}`; parsing is unambiguous because a UUID can never match
+  `^t[a-z0-9]+$` — two segments mean classless, three mean classed.
+  "Well-formed" on the write path means exactly this grammar and nothing
+  more: a syntactically valid class outside the deployment's set passes
+  the shape check by design (membership is the server's business at
+  grant time). The object key prepends the app — `{app}/{fileId}` —
+  and `{app}` is not part of the id: it comes from the sync connection,
+  which is per-app, so a grant implicitly authorizes only the connected
+  app's namespace; `url()` takes it from the client's own config. The id
+  is
   **finalized at the first cell write** — `fromBlob` keeps the Blob in
   memory and
   returns a handle; when the descriptor first lands in a file column, the
@@ -468,8 +545,9 @@ never deletes objects.
   identity exists (before the first write there is no id or URL; apps
   preview from the Blob they hold). Writing the same handle to a second
   column is an ordinary copy of the already-finalized descriptor. The
-  stated privacy trade: every URL publicly carries the uploader's identity
-  id, pseudonymous but stable and linkable across that uploader's files.
+  stated privacy trade: every URL publicly carries a stable pseudonymous
+  UUIDv5 derivation of the uploader's identity id — never the raw id —
+  linkable across that uploader's files.
 - **File is a schema-level column type lowering onto text — the JSON-column
   facade precedent.** A new `ColumnType::File` at the schema layer; the
   cell value is `Value::Text` carrying the descriptor as canonical JSON. No
@@ -477,12 +555,14 @@ never deletes objects.
   the storage format version is untouched. The write path gets one
   validation branch beside the existing JSON one: strict _shape_ validation
   — canonical form (compact, sorted keys), required `v: 1`, exactly the
-  fields `id`, `name`, `mime_type`, `size`, id well-formed (its class
-  segment is validated against the deployment's set at grant time, not
+  fields `id`, `name`, `mime_type`, `size`, id well-formed (grammar
+  match only; the class segment is validated against the deployment's
+  set and the destination column's declaration at grant time, not
   here — the schema is the client's business, the class set the server's).
   Readers are lenient: unknown future fields/versions are tolerated and
   `url()` needs only the id. On the schema wire, the file column's DDL
-  form carries its class — `FILE('7d')` — exactly as JSON columns carry
+  form carries its class and its declared mime-type set —
+  `FILE('7d', 'image/*')` — exactly as JSON columns carry
   their JSON-Schema.
 - **The descriptor is a convention, not an enforced invariant.** No
   immutability enforcement: in-place field edits, copies into other cells,
@@ -499,18 +579,38 @@ never deletes objects.
   deletion. File bytes are not permission-gated: anyone holding the URL can
   fetch them. Body _deletion_ has its own rule (below) because bodies
   outlive any particular cell.
-- **Authorization is a string comparison — the server keeps no file-plane
-  state and issues grants with zero bucket calls.** At grant time the
+- **Authorization is a pure computation — the server keeps no file-plane
+  state and issues grants with zero bucket calls.** The session identity
+  is `Session.user_id` exactly as the existing sync auth establishes it
+  at the handshake (backend impersonation → JWT → none); identity is
+  account-scoped — the same keypair yields the same id on every device —
+  so "uploader" always means the account, never the device or session
+  (anonymous local-first identities are keypair-backed and
+  namespace-bound like any other; sessions carrying no identity get no
+  file-plane messages). At grant time the
   server checks that the requested key's identity segment equals the
-  requesting session's identity, validates the key's class segment (if
-  any) against the deployment's class set, and
-  presigns — nothing is read, written, or recorded. Nobody can be granted a
+  UUIDv5 derivation of the session identity, validates the key's class
+  segment (if any) against the deployment's class set and the named
+  destination column's `ttl` declaration, validates the declared
+  `mime_type` against that column's declared type set (a column with no
+  declared set accepts any type), and
+  presigns — nothing is read, written, or recorded. Mime and class
+  enforcement is grant-time only: copies and hand-rolled descriptors
+  escape it by design, and the disposition policy is what protects
+  serving. Nobody can be granted a
   key outside their own namespace, so overwrite and takeover of another
   identity's URL are impossible by construction; there are no issuance
   HEADs, no tombstones, and no uploader metadata. The conditional-write
-  guard (`If-None-Match: *`) on the presigned PUT and the multipart
-  completion remains purely as a self-collision belt. Delete authorization
-  is the same comparison (backend skips it). Only the original owner can
+  guard (`If-None-Match: *`) on the presigned single PUT remains as a
+  mandated self-collision belt (best-effort on multipart completion,
+  per backend support). Delete authorization
+  is the same comparison. The backend surface is the existing
+  backend-secret mechanism (`X-Jazz-Backend-Secret` over HTTP, the
+  handshake's `backend_secret` field on sync, with the admin secret
+  authenticating as backend on the socket): a session authenticated as
+  the backend skips the identity comparison for grants and deletes,
+  while a backend impersonating a user acts inside that user's namespace
+  like any session. Only the original owner can
   ever re-claim one of their own ids — after a delete or a TTL expiry —
   and the SDK never does (fresh randoms every time); self-resurrection is
   the owner's own footgun and is stated as such.
@@ -523,11 +623,13 @@ never deletes objects.
   upload-path
   descriptors have bytes when they sync — while later independent commit
   units bypass it (causally dependent writes queue behind it); (3) grant
-  request `(file id, size)` over sync — the class travels inside the id;
-  any authenticated session may request grants for its own namespace;
+  request `(file id, size, mime_type, name, destination column)` over
+  sync — the class travels inside the id;
+  any identity-bearing session may request grants for its own namespace;
   abuse is bounded by the `pending/` lifecycle expiry, with per-identity
-  rate limits as future work; the server verifies the identity segment and
-  the class segment by pure
+  rate limits as future work; the server verifies the identity segment,
+  the class segment (deployment set + column declaration), and the
+  `mime_type` (column's declared type set) by pure
   computation, initiates the multipart upload where needed, and returns the
   pending object key, lease expiry, the `UploadId` (which the client
   holds in memory — no server remembers it), and conditional
@@ -536,23 +638,38 @@ never deletes objects.
   tracking completed part ETags in memory; it may request fresh part URLs
   from any edge within the lease by presenting the `UploadId` (presign
   windows are hours, leases are days); (5) **release** over sync carries
-  the `UploadId` and part ETag list; any edge HEADs the final key (already
-  present → success), completes the multipart (conditional),
-  server-side-copies the pending object to its final key — for TTL'd files
+  `(file id, UploadId?, part ETags?)` — both optional fields absent on
+  the single-PUT path, where release is just HEAD + copy + delete; any
+  edge HEADs the final key (already
+  present → success), completes the multipart (conditionally where the
+  backend supports it),
+  server-side-copies the pending object to its final key re-sending the
+  pinned headers with the `REPLACE` directive — for TTL'd files
   that key sits under the class prefix, and the copy is what starts the
   expiry clock — and deletes the pending object — idempotent end to end by
   construction; the held transaction then enters the ordinary lane. There
   is no step six: no size check, no file-specific acceptance. A client that
   never releases leaves only a pending object the bucket will expire; a
-  client that lies harms only its own URL.
+  client that lies harms only its own URL. The small-file cost is stated
+  plainly: PUT + copy + delete is three bucket writes per file — the
+  price of `pending/` being the lease and GC mechanism.
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
   lifecycle rule expires the `pending/` prefix after the lease window
-  (day-granularity, matching the "order of days" lease), and the native
-  `AbortIncompleteMultipartUpload` rule covers half-finished multiparts.
-  This is prefix-based and therefore portable across S3, R2, minio, and
-  Tigris (R2 lifecycle cannot filter by tag). After lease expiry the SDK
-  restarts the upload with a fresh id and rewrites the still-local
-  descriptor. No sweep code exists anywhere.
+  (day-granularity, matching the "order of days" lease) — prefix-scoped
+  expiry is portable across S3, R2, minio, and Tigris (R2 lifecycle
+  cannot filter by tag; irrelevant here). Half-finished multiparts are a
+  per-backend deployment requirement — abandoned uploads must be reaped
+  within roughly the lease window — because no portable lifecycle action
+  exists: the `AbortIncompleteMultipartUpload` rule on S3 and R2;
+  minio's built-in stale-uploads purge, with its default 24h expiry
+  raised to at least the lease window so slow in-flight uploads survive;
+  on Tigris an external scheduled sweep (`ListMultipartUploads` +
+  `AbortMultipartUpload`, operator infrastructure, not Jazz code) or
+  knowingly accepted part accrual. If a lease expires mid-session, the
+  SDK restarts the upload with a fresh id from the still-in-memory Blob
+  and rewrites the descriptor in an ordinary transaction — in-session
+  only; after a restart nothing resumes. No sweep code exists in Jazz
+  anywhere.
 - **File TTL is a fixed set of classes, declared on the schema and
   realized as key prefixes.** A deployment declares its class set
   (recommended defaults 1d/7d/30d); permanent is the default. The schema
@@ -614,9 +731,17 @@ never deletes objects.
   or expiry, from copies, from hand-rolled ids — are ordinary legal states
   whose URLs 404; historical and branch reads behave identically.
 - **Backend contract is one abstraction — the S3-compatible API**
-  (conditional presigned single PUT, multipart create/upload/abort and
-  conditional complete, server-side copy, public GET, HEAD, DELETE,
-  prefix-scoped lifecycle rules), covering S3, R2, minio, Tigris. Servers
+  (conditional presigned single PUT, multipart
+  create/upload/complete/abort, server-side copy with metadata
+  `REPLACE`, public GET, HEAD, DELETE, prefix-scoped lifecycle expiry),
+  covering S3, R2, minio, Tigris. Conditional multipart completion and
+  destination-guarded copy are best-effort hardening applied where a
+  backend supports them (S3 and minio for conditional completion; S3
+  and R2 — the latter via `cf-copy-destination-if-*` extension
+  headers — for guarded copy), never contract requirements; the
+  per-backend support matrix with citations lives at
+  `docs/superpowers/wayfinder/files-spec-review-fixes/notes/backend-support-matrix.md`.
+  Servers
   hold the object-store credentials (presign, complete, copy, delete);
   clients never see them. Dev and tests run minio or an in-process fake
   that also fakes lifecycle expiry (manually triggerable in tests).
@@ -625,7 +750,9 @@ never deletes objects.
   column's declared class; background upload; no per-call `ttl` — TTL is
   the schema's; creation input is a Blob so `size` is always known — there
   is no `fromStream`), `file.url()` (the stable public URL on every
-  platform; computed synchronously and locally; no `canonical` option —
+  platform; computed synchronously and locally from the id plus static
+  client config — `filesUrl`, default `{serverUrl}/files`, and the app
+  id; no `canonical` option —
   it is retired until an opt-in package rewrites URLs),
   `jazz.files.delete(fileId)` (returns a Promise — resolves on origin
   confirmation, rejects on failure; retries are the caller's), and an
@@ -635,11 +762,14 @@ never deletes objects.
   file-specific). Nothing else: reads, previews, and blob derivation are
   userland.
 - **Vocabulary amendments to the Files section of the core context doc**
-  (part of this work): **file id** becomes identity-bound (uploader
-  identity id + CSPRNG random part; the object key derives from it);
-  **upload grant** pins size only for presigning, authorizes by namespace
-  comparison, leaves no record anywhere, and its lease is realized as
-  bucket lifecycle expiry on the pending prefix; **body verification** is
+  (part of this work): **file id** becomes identity-bound (a UUIDv5
+  derivation of the uploader identity id + CSPRNG random part; the
+  object key derives from it);
+  **upload grant** carries `(file id, size, mime_type, name, destination
+column)`, validates class and mime type against the schema
+  declaration, pins the serving headers at presign, authorizes by
+  namespace derivation, leaves no record anywhere, and its lease is
+  realized as bucket lifecycle expiry on the pending prefix; **body verification** is
   removed as a concept — nothing verifies bodies; **release** becomes
   HEAD + complete-multipart + copy-to-final-key + delete-pending,
   idempotent by construction; a **TTL class** entry is added (a
@@ -668,11 +798,16 @@ never deletes objects.
     and hand-rolled descriptor all accepted), grant authorization
     (own-namespace grant issued with zero bucket calls; a grant naming
     another identity's segment refused; a grant whose id names a class
-    outside the deployment's set refused),
+    outside the deployment's set refused; a grant whose `mime_type` is
+    outside the destination column's declared type set refused; a grant
+    whose id class contradicts the destination column's declaration
+    refused),
     grant/release flow (release = HEAD + complete + copy to the final —
-    possibly classed — key + delete pending; idempotent release retry
-    converging via HEAD; conditional PUT and conditional multipart
-    completion 412 against an existing own object), lifecycle expiry
+    possibly classed — key + delete pending; the single-PUT release path
+    with no `UploadId` = HEAD + copy + delete; idempotent release retry
+    converging via HEAD; conditional PUT 412 against an existing own
+    object, with conditional multipart completion asserted against the
+    fake and minio only — per-backend best-effort), lifecycle expiry
     (fake-triggered: unreleased pending objects expire; TTL'd released
     files expire under their class prefix with descriptors intact;
     permanent files untouched), and explicit deletion (uploader allowed,
@@ -733,8 +868,10 @@ never deletes objects.
   egress (the pending-prefix TTL bounds storage abuse in v1; rate limits
   are planned future work).
 - Blinding the identity segment in URLs (an HMAC'd owner prefix was
-  considered; raw identity ids are accepted for v1 — pseudonymous, stated
-  plainly — and blinding could be layered on later at the cost of a
+  considered; the v1 segment is a public deterministic UUIDv5 derivation
+  of the identity id — disclosure hygiene for external `sub` strings,
+  not blinding, since anyone who knows an identity id can compute its
+  segment — and true blinding could be layered on later at the cost of a
   first-contact handshake).
 - Per-file TTL overrides (`fromBlob`-level `ttl`) — TTL is a property of
   the column's role, declared once in the schema; deferred.
@@ -768,13 +905,19 @@ never deletes objects.
 - **Stated, accepted semantics** implementers must not "fix": file bytes
   readable by anyone holding the URL regardless of row policies, with the
   unguessable (mandated-CSPRNG) random part of the id as the only barrier;
-  every file URL publicly carrying the uploader's identity id —
-  pseudonymous, stable, and linkable across that uploader's files (apps
-  that treat identity ids as sensitive must front their files or stay off
+  every file URL publicly carrying a stable pseudonymous UUIDv5
+  derivation of the uploader's identity id — never the raw id, but
+  linkable across that uploader's files (apps
+  that treat even that linkage as sensitive must front their files or
+  stay off
   the file plane); descriptors are conventions — `name`/`mime_type`/`size`
   are app-trusted, and a descriptor with no body behind it (hand-rolled,
   copied past a deletion, expired, lying uploader, pre-release) is an
-  ordinary state whose URL 404s; only the original owner can ever re-claim
+  ordinary state whose URL 404s; declared mime types and TTL classes
+  enforced at grant time only — copies and hand-rolled descriptors
+  escape them, and serving is protected by the disposition policy, not
+  the declaration; the small-file write path costing three bucket
+  writes (PUT + copy + delete); only the original owner can ever re-claim
   one of their own ids after a delete or expiry — third-party takeover is
   impossible by construction, and the SDK never reuses ids, so an owner
   resurrecting their own URL (with stale CDN copies still floating) is
@@ -803,7 +946,12 @@ never deletes objects.
   URLs, and the inline-safe type allowlist are implementation constants,
   not configuration. The TTL class set is deployment configuration; the
   schema names a class per column (`FILE('7d')` on the schema wire) and
-  the server validates each granted id's class segment against the set.
+  the server validates each granted id's class segment against the set
+  and against the destination column's declaration. Class names match
+  `^[a-z0-9]{1,15}$`. The files base URL (`filesUrl`, default
+  `{serverUrl}/files`) is client deployment configuration alongside the
+  existing `serverUrl` and its env-var family. The TS builder validates
+  a declared `ttl` for grammar only; set membership is checked at grant.
 - The lease window default is on the order of days, realized as the
   `pending/` prefix lifecycle expiry (day granularity), and is
   operator-facing alongside the incomplete-multipart abort rule and one

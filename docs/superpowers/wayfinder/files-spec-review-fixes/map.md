@@ -39,6 +39,14 @@ decision-bearing minors, doc-hygiene).
   nosniff must be a deployment-layer requirement (only Tigris emits it
   natively); MPU-abort lifecycle also non-portable (S3/R2 only). Full
   matrix with citations: [backend-support-matrix](notes/backend-support-matrix.md).
+- [Protocol-plane decisions](tickets/B-protocol-plane.md) — grant names
+  the destination column and validates schema-declared mime types +
+  class; serving hardening split two-tier (store-pinned headers /
+  infra-level nosniff); identity segment = UUIDv5 derivation of the
+  session identity (fixes external-JWT subs in URLs); `filesUrl` client
+  config; belt mandated on single PUT only, best-effort elsewhere;
+  MPU cleanup per-backend. Spec pair amended in place (PRD US 59-60
+  added).
 
 ## Not yet specified
 
