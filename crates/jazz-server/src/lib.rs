@@ -283,6 +283,14 @@ impl ShellDb {
         }
     }
 
+    fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
+        match self {
+            Self::Memory(db) => db.catalogue_schema(schema),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.catalogue_schema(schema),
+        }
+    }
+
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
@@ -526,7 +534,10 @@ impl InMemoryServerShell {
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
         let schema_id = schema.version_id();
         let current = self.db.current_write_schema();
-        if current.schema == schema_id && current.revision > 0 {
+        if current.schema == schema_id
+            && current.revision > 0
+            && self.db.catalogue_schema(schema_id).as_ref() == Some(&schema)
+        {
             self.runtime_schema_state.current_write_revision = current.revision;
             self.runtime_schema_state.last_published_schema = Some(schema_id);
             return Ok(());
@@ -541,7 +552,10 @@ impl InMemoryServerShell {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
         let current = self.db.current_write_schema();
-        if current.schema == schema_id && current.revision > 0 {
+        if current.schema == schema_id
+            && current.revision > 0
+            && self.db.catalogue_schema(schema_id).as_ref() == Some(&schema_version.schema)
+        {
             self.runtime_schema_state.current_write_revision = current.revision;
             self.runtime_schema_state.last_published_schema = Some(schema_id);
             return Ok(schema_id);

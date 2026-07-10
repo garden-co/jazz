@@ -32,7 +32,7 @@ use web_time::Instant;
 /// plain history runs to compact incrementally.
 const POST_TICK_HISTORY_WINDOW_BUDGET: usize = 4;
 
-use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
@@ -1972,6 +1972,16 @@ where
     /// Return the current write-schema pointer known to this database.
     pub fn current_write_schema(&self) -> CurrentWriteSchema {
         self.node.node.borrow().current_write_schema()
+    }
+
+    /// Return a published schema-version payload known to this database.
+    pub fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_schemas()
+            .get(&schema)
+            .map(|schema| schema.schema.clone())
     }
 
     /// Open an exclusive transaction over the current local snapshot.

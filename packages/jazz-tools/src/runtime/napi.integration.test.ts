@@ -305,6 +305,38 @@ async function loadPilotAppRealWasmSchema(): Promise<WasmSchema> {
   return source.mergedSchema;
 }
 
+async function createPilotAppRealSchemaDir(options?: {
+  includePermissionsFile?: boolean;
+}): Promise<string> {
+  const schemaDir = await createTempDir("jazz-napi-pilot-real-schema-");
+  const fixtureJsonPath = fileURLToPath(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR));
+  await writeFile(
+    join(schemaDir, "schema.ts"),
+    `
+      import { readFileSync } from "node:fs";
+
+      const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
+      export const app = { wasmSchema: source.wasmSchema };
+    `,
+  );
+  if (options?.includePermissionsFile ?? true) {
+    await writeFile(
+      join(schemaDir, "permissions.ts"),
+      `
+        import { readFileSync } from "node:fs";
+
+        const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
+        export default Object.fromEntries(
+          Object.entries(source.mergedSchema).flatMap(([tableName, table]: [string, any]) =>
+            table.policies ? [[tableName, table.policies]] : [],
+          ),
+        );
+      `,
+    );
+  }
+  return schemaDir;
+}
+
 async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
@@ -543,7 +575,7 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(runtimeData);
       await server.stop();
     }
-  }, 60_000);
+  }, 120_000);
 
   it("resolves global waits for backend context writes through the local server route", async () => {
     const appId = randomUUID();
@@ -684,6 +716,81 @@ describe("NAPI integration", () => {
       await server.stop();
     }
   }, 120_000);
+
+  it("resolves global waits after deploying the the pilot customer real schema fixture", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-pilot-app-global-wait-deploy-secret";
+    const adminSecret = "napi-pilot-app-global-wait-deploy-admin-secret";
+    const pilot-appSchema = await loadPilotAppRealWasmSchema();
+    const schemaDir = await createPilotAppRealSchemaDir();
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const locationTable = makeWhereTable<PilotAppLocation, PilotAppLocationInit>(
+        "location",
+        pilot-appSchema,
+      );
+
+      runtimeData = await createTempRuntimeData("jazz-napi-pilot-app-global-wait-deploy-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: pilot-appSchema },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdLocation = await withTimeout(
+        backendDb
+          .insert(
+            locationTable,
+            {
+              display_address: "the pilot customer deploy schemaDir global wait",
+            },
+            { id: randomUUID() },
+          )
+          .wait({ tier: "global" }),
+        90_000,
+        "the pilot customer deploy schemaDir backend global insert wait timed out",
+      );
+
+      expect(createdLocation).toMatchObject({
+        display_address: "the pilot customer deploy schemaDir global wait",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await rm(schemaDir, { recursive: true, force: true });
+      await server.stop();
+    }
+  }, 60_000);
 
   it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();
