@@ -110,6 +110,7 @@ fn next_groove_runtime_token() -> u64 {
 #[cfg(test)]
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -125,6 +126,11 @@ pub(super) fn query_versions_for_tx_call_count() -> usize {
 #[cfg(test)]
 fn record_query_versions_for_tx_call() {
     QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_subscription_snapshot_for_link_call() {
+    SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
 fn record_maintained_view_stream_b_add_bundle() {}
@@ -326,6 +332,9 @@ struct QueryServing {
     /// not define an observation boundary for local maintained subscribers.
     /// Publication runs when the final chunk clears this marker.
     deferred_publication_binding_views: BTreeSet<BindingViewKey>,
+    /// Binding views whose settled state was replaced by an authoritative
+    /// server-provided reset since the last facade refresh.
+    pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -550,6 +559,7 @@ where
                 known_state_declared_binding_views: BTreeSet::new(),
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
+                pending_authoritative_reset_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
                 open_exclusive: BTreeMap::new(),
@@ -679,6 +689,7 @@ where
         self.query.known_state_declared_binding_views.clear();
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
+        self.query.pending_authoritative_reset_binding_views.clear();
         self.parking.parked_shape_registrations.clear();
         self.parking.parked_binding_deltas.clear();
         self.recover_from_storage()?;

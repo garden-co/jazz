@@ -3924,6 +3924,22 @@ where
             .contains_key(&binding_view_key)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_subscription_snapshot_for_link_call_count(&mut self) {
+        SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subscription_snapshot_for_link_call_count(&self) -> usize {
+        SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(std::cell::Cell::get)
+    }
+
+    pub(crate) fn take_pending_authoritative_reset_binding_views(
+        &mut self,
+    ) -> BTreeSet<BindingViewKey> {
+        std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
+    }
+
     pub(crate) fn publication_deferred_for_binding_view(
         &self,
         binding_view_key: BindingViewKey,
@@ -3995,6 +4011,193 @@ where
                 observed_result_delta_batches: 0,
             },
         ))
+    }
+
+    pub(crate) fn authoritative_reset_snapshot_for_binding_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding_view_key: BindingViewKey,
+    ) -> Result<Option<RelationSnapshot>, Error> {
+        let Some(result_members) = self
+            .query
+            .settled_result_sets
+            .get(&binding_view_key)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let program_facts = self
+            .query
+            .settled_program_facts
+            .get(&binding_view_key)
+            .cloned()
+            .unwrap_or_default();
+        let result_payloads = program_facts
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload) => {
+                    Some((payload.member.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let result_table = shape.query().table.as_str();
+        let mut rows = Vec::new();
+        let mut row_keys = BTreeSet::new();
+        for member in result_members
+            .iter()
+            .filter(|member| member.table_name() == Some(result_table))
+        {
+            let Some(row) =
+                self.materialize_authoritative_reset_member(shape, member, &result_payloads, true)?
+            else {
+                continue;
+            };
+            row_keys.insert((row.table().to_owned(), row.row_uuid()));
+            rows.push(row);
+        }
+        let root_count = rows.len();
+        let mut edges = Vec::new();
+        for fact in program_facts {
+            let ProgramFactEntry::RelationEdge(edge) = fact else {
+                continue;
+            };
+            edges.push(RelationEdge {
+                source_table: edge.source_table.to_string(),
+                source_row: edge.source_row,
+                relation: edge.path.clone(),
+                target_table: edge.target_table.to_string(),
+                target_row: edge.target_row,
+            });
+            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+                && let Some(version) = &edge.target_version
+                && let Some(row) = self.materialize_authoritative_reset_version_row(
+                    edge.target_table.as_str(),
+                    edge.target_row,
+                    version.tx,
+                    None,
+                )?
+            {
+                rows.push(row);
+            }
+        }
+        Ok(Some(RelationSnapshot {
+            root_count,
+            rows,
+            edges,
+        }))
+    }
+
+    fn materialize_authoritative_reset_member(
+        &mut self,
+        shape: &ValidatedQuery,
+        member: &ResultMemberEntry,
+        result_payloads: &BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+        apply_root_projection: bool,
+    ) -> Result<Option<CurrentRow>, Error> {
+        if let Some(payload) = result_payloads.get(member) {
+            let Some(table_name) = member.table_name() else {
+                return Err(Error::InvalidStoredValue(
+                    "result payload member must name a table",
+                ));
+            };
+            let table = self.table(table_name)?.clone();
+            let mut row = self.current_row_from_result_payload(&table, payload)?;
+            if apply_root_projection
+                && table.name == shape.query().table
+                && let Some(columns) = &shape.query().select
+            {
+                row = row.project(&table, columns)?;
+            }
+            return Ok(Some(row));
+        }
+
+        let Some((table_name, row_uuid, tx_id)) = member.as_row() else {
+            return Err(Error::InvalidStoredValue(
+                "authoritative reset cannot materialize non-row result without payload",
+            ));
+        };
+        let projection = (apply_root_projection && table_name.as_str() == shape.query().table)
+            .then(|| shape.query().select.as_deref())
+            .flatten();
+        if let Some(mut row) =
+            self.materialize_authoritative_reset_current_row(table_name.as_str(), row_uuid)?
+        {
+            if let Some(columns) = projection {
+                let table = self.table(table_name.as_str())?.clone();
+                row = row.project(&table, columns)?;
+            }
+            return Ok(Some(row));
+        }
+        self.materialize_authoritative_reset_version_row(
+            table_name.as_str(),
+            row_uuid,
+            tx_id,
+            projection,
+        )
+    }
+
+    fn materialize_authoritative_reset_current_row(
+        &mut self,
+        table_name: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table = self.table(table_name)?.clone();
+        let global_tables = table.global_current_storage_tables();
+        let Some(content_raw) = self
+            .database
+            .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
+        else {
+            return Ok(None);
+        };
+        let content_record = content_raw.record();
+        let content_tx = self.current_record_sort_key(content_record)?;
+        if let Some(deletion_raw) = self
+            .database
+            .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
+        {
+            let deletion_record = deletion_raw.record();
+            let deletion_tx = self.current_record_sort_key(deletion_record)?;
+            let deletion = deletion_event_from_value(
+                deletion_record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+            )?;
+            if deletion_tx > content_tx && deletion == DeletionEvent::Deleted {
+                return Ok(None);
+            }
+        }
+        let row = decode_current_row(&table, content_record)?;
+        self.materialize_current_row(&table, row).map(Some)
+    }
+
+    fn materialize_authoritative_reset_version_row(
+        &mut self,
+        table_name: &str,
+        row_uuid: RowUuid,
+        tx_id: TxId,
+        projection: Option<&[String]>,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table = self.table(table_name)?.clone();
+        let content_descriptor = table.history_storage_table().record_schema();
+        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
+            return Err(Error::MissingTransaction(tx_id));
+        };
+        let Some(version) = self.query_version_by_alias_with_descriptor(
+            table_name,
+            row_uuid,
+            VersionLayer::Content,
+            tx_id.time,
+            tx_node_alias,
+            &content_descriptor,
+        )?
+        else {
+            return Err(Error::MissingTransaction(tx_id));
+        };
+        let mut row = self.current_row_from_materialized_version(&table, &version)?;
+        if let Some(columns) = projection {
+            row = row.project(&table, columns)?;
+        }
+        Ok(Some(row))
     }
 
     pub(crate) fn settled_through_for_binding_view(
@@ -6444,6 +6647,8 @@ where
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<RelationSnapshot, Error> {
+        #[cfg(test)]
+        record_subscription_snapshot_for_link_call();
         self.subscription_snapshot_for_link_with_prepared_plan(shape, binding, tier, identity, None)
     }
 
