@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { type Row } from "./client.js";
@@ -525,6 +525,192 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("resolves global waits for backend context writes through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-global-wait-secret";
+    const adminSecret = "napi-global-wait-admin-secret";
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+      });
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
+      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
+
+      runtimeData = await createTempRuntimeData("jazz-napi-global-wait-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: todoServerSchema },
+        permissions: todoServerProject.permissions ?? {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdTodo = await withTimeout(
+        backendDb
+          .insert(policyTodosTable, {
+            title: "global-wait-item",
+            done: false,
+            description: "global wait repro",
+            owner_id: "backend",
+          })
+          .wait({ tier: "global" }),
+        15_000,
+        "backend global insert wait timed out",
+      );
+
+      expect(createdTodo).toMatchObject({
+        title: "global-wait-item",
+        done: false,
+        owner_id: "backend",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("publishes inherited seeded-reachability permissions through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-pilot-app-permissions-secret";
+    const adminSecret = "napi-pilot-app-permissions-admin-secret";
+    const schemaDir = await createTempDir("jazz-napi-pilot-app-permissions-schema-");
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+
+    try {
+      const publicApiImport = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
+      await writeFile(
+        join(schemaDir, "schema.ts"),
+        `
+          import { schema as s } from ${JSON.stringify(publicApiImport)};
+
+          const schema = {
+            team: s.table({
+              identity_key: s.string(),
+            }),
+            team_entry: s.table({
+              team_id: s.ref("team"),
+              target_id: s.ref("team"),
+              administrator: s.boolean(),
+            }),
+            dropdowns: s.table({
+              name: s.string(),
+            }),
+            dropdowns_access_edges: s.table({
+              resource_id: s.ref("dropdowns"),
+              team_id: s.ref("team"),
+              grant_role: s.string(),
+              administrator: s.boolean(),
+            }),
+            dropdown_entry: s.table({
+              dropdowns_id: s.ref("dropdowns"),
+              label: s.string(),
+            }),
+          };
+
+          type AppSchema = s.Schema<typeof schema>;
+          export const app: s.App<AppSchema> = s.defineApp(schema);
+        `,
+      );
+      await writeFile(
+        join(schemaDir, "permissions.ts"),
+        `
+          import { schema as s } from ${JSON.stringify(publicApiImport)};
+          import { app } from "./schema.js";
+
+          export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
+            const directlyReachableTeams = policy.team_entry
+              .where({ team_id: session.user_id })
+              .hopTo("target");
+            const memberReachableTeams = directlyReachableTeams.gather({
+              step: ({ current }) =>
+                policy.team_entry
+                  .where({ team_id: current, administrator: false })
+                  .hopTo("target"),
+              maxDepth: 32,
+            });
+
+            policy.dropdowns.allowRead.where((dropdown) =>
+              policy.exists(
+                memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
+                  "dropdowns_access_edges.resource_id": dropdown.id,
+                  grant_role: { in: ["EDITOR"] },
+                  administrator: false,
+                }),
+              ),
+            );
+            policy.dropdowns.allowInsert.where({});
+            policy.dropdowns.allowUpdate
+              .whereOld((dropdown) =>
+                policy.exists(
+                  memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
+                    "dropdowns_access_edges.resource_id": dropdown.id,
+                    grant_role: { in: ["EDITOR"] },
+                    administrator: false,
+                  }),
+                ),
+              )
+              .whereNew({});
+            policy.dropdowns.allowDelete.where({});
+
+            policy.dropdowns_access_edges.allowRead.where({});
+            policy.dropdowns_access_edges.allowInsert.where({});
+            policy.dropdowns_access_edges.allowUpdate.where({});
+            policy.dropdowns_access_edges.allowDelete.where({});
+
+            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns_id"));
+            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowUpdate
+              .whereOld(allowedTo.update("dropdowns_id"))
+              .whereNew(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns_id"));
+          });
+        `,
+      );
+
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+    } finally {
+      await rm(schemaDir, { recursive: true, force: true });
       await server.stop();
     }
   }, 60_000);
