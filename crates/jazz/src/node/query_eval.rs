@@ -1768,19 +1768,17 @@ fn current_query_read_set(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &shape.auxiliary_sources {
+        // Auxiliary closure sources are not result members of the settled binding
+        // view. Keep the result/root source pinned to the settled view, but read
+        // implicit reference targets from current storage so serving can resolve
+        // their rows instead of treating missing result-set entries as coverage
+        // gaps.
         sources.insert(
             source.clone(),
-            if let Some(binding_view) = settled_binding_view {
-                SourceExpr::SettledBindingView {
-                    projection: projection.clone(),
-                    binding_view,
-                }
-            } else {
-                SourceExpr::VisibleCurrent {
-                    projection: projection.clone(),
-                    data: DataSource::Current,
-                    tier,
-                }
+            SourceExpr::VisibleCurrent {
+                projection: projection.clone(),
+                data: DataSource::Current,
+                tier,
             },
         );
     }

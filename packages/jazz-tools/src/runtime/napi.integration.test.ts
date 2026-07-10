@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { type Row } from "./client.js";
@@ -101,6 +102,18 @@ type BoredmTeamAccessEdge = {
   team_id: string;
   grant_role: "EDITOR" | "MANAGER" | "VIEWER";
   administrator: boolean;
+};
+
+type BoredmTemplate = {
+  id: string;
+  corporation_id: string;
+  created_by: string;
+  updated_by: string;
+  archived: boolean;
+  name: string;
+  date_created: Date;
+  date_updated: Date;
+  template_configuration: unknown;
 };
 
 const TEST_SCHEMA: WasmSchema = {
@@ -278,6 +291,10 @@ const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
 const BOREDM_REAL_FIXTURE_DIR = new URL("../testing/fixtures/boredm-real/", import.meta.url);
 
 beforeAll(async () => {
+  if (!globalThis.WebSocket) {
+    (globalThis as typeof globalThis & { WebSocket: typeof WebSocket }).WebSocket =
+      UndiciWebSocket as unknown as typeof WebSocket;
+  }
   await loadNapiModule();
 });
 
@@ -824,60 +841,20 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("subscribes to the BoreDM team access-edge holder through the local server route", async () => {
+  it("serves BoreDM resource-policy holders through the local server route", async () => {
     const appId = randomUUID();
     const backendSecret = "napi-boredm-holder-subscription-secret";
     const adminSecret = "napi-boredm-holder-subscription-admin-secret";
-    const schemaDir = await createTempDir("jazz-napi-boredm-holder-schema-");
-    const publicApiImport = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
-    await writeFile(
-      join(schemaDir, "schema.ts"),
-      `
-        import { schema as s } from ${JSON.stringify(publicApiImport)};
-
-        const schema = {
-          team: s.table({
-            corporation_id: s.ref("team"),
-            name: s.string(),
-          }),
-          team_access_edges: s.table({
-            resource_id: s.ref("team"),
-            team_id: s.ref("team"),
-            grant_role: s.string(),
-            administrator: s.boolean(),
-          }).indexOnly(["resource_id", "team_id"]),
-        };
-
-        type AppSchema = s.Schema<typeof schema>;
-        export const app: s.App<AppSchema> = s.defineApp(schema);
-      `,
-    );
-    await writeFile(
-      join(schemaDir, "permissions.ts"),
-      `
-        import { schema as s } from ${JSON.stringify(publicApiImport)};
-        import { app } from "./schema.js";
-
-        export default s.definePermissions(app, ({ policy }) => {
-          policy.team.allowRead.where({});
-          policy.team.allowInsert.where({});
-          policy.team.allowUpdate.where({});
-          policy.team.allowDelete.where({});
-
-          policy.team_access_edges.allowRead.where({});
-          policy.team_access_edges.allowInsert.where({});
-          policy.team_access_edges.allowUpdate.where({});
-          policy.team_access_edges.allowDelete.where({});
-        });
-      `,
-    );
-    const boredmSchema = (await loadCompiledSchema(schemaDir)).wasmSchema;
+    const boredmSchema = await loadBoredmRealWasmSchema();
+    const memberId = "00000000-0000-4000-8000-000000000001";
+    const corporationId = randomUUID();
+    const templateId = randomUUID();
     const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
       adminSecret,
-      inMemory: true,
+      schema: encodeNativeSchema(boredmSchema),
       jwksUrl: jwtIssuer.jwksUrl,
     });
     let context: {
@@ -889,13 +866,6 @@ describe("NAPI integration", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schemaDir,
-      });
-
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       context = createJazzContext({
         appId,
@@ -912,8 +882,116 @@ describe("NAPI integration", () => {
       });
       await settleAsyncSyncWork();
 
+      const backendDb = context.asBackend();
+      const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "team",
+        boredmSchema,
+      );
+      const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "team_entry",
+        boredmSchema,
+      );
+      const templateTable = makeWhereTable<BoredmTemplate, Omit<BoredmTemplate, "id">>(
+        "template",
+        boredmSchema,
+      );
+      const templateAccessEdgesTable = makeWhereTable<
+        BoredmTeamAccessEdge,
+        Omit<BoredmTeamAccessEdge, "id">
+      >("template_access_edges", boredmSchema);
+      const teamAccessEdgesTable = makeWhereTable<
+        BoredmTeamAccessEdge,
+        Omit<BoredmTeamAccessEdge, "id">
+      >("team_access_edges", boredmSchema);
+      const now = new Date("2026-07-10T00:00:00.000Z");
+      await backendDb
+        .insert(
+          teamTable,
+          {
+            corporation_id: corporationId,
+            created_by: memberId,
+            updated_by: memberId,
+            archived: false,
+            name: "Example Corp",
+            date_created: now,
+            date_updated: now,
+            description: "fixture corporation",
+          },
+          { id: corporationId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamTable,
+          {
+            corporation_id: corporationId,
+            created_by: memberId,
+            updated_by: memberId,
+            archived: false,
+            name: "Jon",
+            date_created: now,
+            date_updated: now,
+            description: "fixture member",
+          },
+          { id: memberId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamEntryTable,
+          {
+            team_id: memberId,
+            target_id: corporationId,
+            added_by: memberId,
+            administrator: false,
+            date_added: now,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          templateTable,
+          {
+            corporation_id: corporationId,
+            created_by: memberId,
+            updated_by: memberId,
+            archived: false,
+            name: "Visible template",
+            date_created: now,
+            date_updated: now,
+            template_configuration: {},
+          },
+          { id: templateId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          templateAccessEdgesTable,
+          {
+            resource_id: templateId,
+            team_id: corporationId,
+            grant_role: "VIEWER",
+            administrator: false,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamAccessEdgesTable,
+          {
+            resource_id: corporationId,
+            team_id: corporationId,
+            grant_role: "VIEWER",
+            administrator: false,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+
       const jwtToken = jwtIssuer.jwtForUser(
-        "00000000-0000-4000-8000-000000000001",
+        memberId,
         { email: "redacted@example.com" },
         { issuer: "boredm.com" },
       );
@@ -922,19 +1000,53 @@ describe("NAPI integration", () => {
           headers: { authorization: `Bearer ${jwtToken}` },
         }),
       );
+      const templates = makeTableQueryWithIncludes<BoredmTemplate>("template", boredmSchema);
       const teamAccessEdges = makeTableQueryWithIncludes<BoredmTeamAccessEdge>(
         "team_access_edges",
         boredmSchema,
-        { resource: {}, team: {} },
       );
+
       const firstRows = await new Promise<unknown[]>((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        const reduced: BoredmTemplate[] = [];
+        unsubscribe = memberDb.subscribeAll(
+          templates,
+          (delta: SubscriptionDelta<BoredmTemplate>) => {
+            applySubscriptionDelta(reduced, delta);
+            if (reduced.some((row) => row.id === templateId)) {
+              unsubscribe?.();
+              resolve([...reduced]);
+              return;
+            }
+          },
+          { tier: "global" },
+        );
+        setTimeout(() => {
+          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
+          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
+          if (capabilityError) {
+            unsubscribe?.();
+            reject(new Error(capabilityError));
+            return;
+          }
+          unsubscribe?.();
+          reject(
+            new Error(
+              `timed out waiting for template subscription; rows=${reduced.length}; errors=${errors.join("\n")}`,
+            ),
+          );
+        }, 5_000);
+      });
+
+      expect(firstRows).toEqual([expect.objectContaining({ id: templateId })]);
+      const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
         let unsubscribe: (() => void) | undefined;
         const reduced: BoredmTeamAccessEdge[] = [];
         unsubscribe = memberDb.subscribeAll(
           teamAccessEdges,
           (delta: SubscriptionDelta<BoredmTeamAccessEdge>) => {
             applySubscriptionDelta(reduced, delta);
-            if (delta.reset || reduced.length > 0) {
+            if (reduced.some((row) => row.resource_id === corporationId)) {
               unsubscribe?.();
               resolve([...reduced]);
               return;
@@ -959,7 +1071,7 @@ describe("NAPI integration", () => {
         }, 5_000);
       });
 
-      expect(firstRows).toEqual([]);
+      expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
       const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
       expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
     } finally {
@@ -968,7 +1080,6 @@ describe("NAPI integration", () => {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await rm(schemaDir, { recursive: true, force: true });
       await server.stop();
       await jwtIssuer.stop();
     }
