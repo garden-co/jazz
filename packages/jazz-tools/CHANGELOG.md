@@ -1,5 +1,24 @@
 # jazz-tools
 
+## 2.0.0-alpha.53
+
+### Major Changes
+
+- 891b264: BREAKING CHANGE: make `jazz-tools/dev` and `jazz-tools/testing` catalogue deploy helpers accept schema, permissions, and migrations JavaScript objects directly instead of project file paths.
+
+### Patch Changes
+
+- f072cb0: feat: the localStorage key used by React's `useLocalFirstAuth` helper is now configurable, to support multiple Jazz apps on the same origin
+- 397f84d: Add `Db.disconnect()` and `Db.reconnect()` for temporarily pausing and resuming sync without shutting down local storage.
+- 9bee23f: The postMessage "devtools protocol" bridge and the separate browser-extension/devtools build are deleted now that the inspector overlay talks to the data layer through its own worker connection: `attachDevTools`, `createExtensionJazzClient`, `createEmbeddedJazzClient`, and the `DevToolsAttachment` type are no longer exported.
+- 27f9ced: Add an in-app inspector overlay to the Jazz dev plugins. During development the Vite, SvelteKit, and Next plugins now mount a floating toggle (or press `Alt+Shift+J`) that opens the embedded Jazz inspector docked at the bottom of your app — no separate window or setup. It's on by default whenever the dev plugin is in use and is dropped entirely from production builds. `jazz-inspector` now ships as a dependency of `jazz-tools`, so it no longer needs to be installed separately.
+- 2d5f287: The embedded inspector overlay now connects to the data layer through its **own worker connection** instead of the postMessage "devtools protocol" bridge. The overlay reads the host app's connection config from a same-origin `window.__jazzInspectorHost` handle and **joins the host's local store** — it reuses the host's OPFS namespace, broker SharedWorker URL, and identity, so it sees the host's actual local data (including unsynced local-only rows) and works offline; no `serverUrl` is required. It receives the host's active subscriptions via a one-way push for Live Query.
+- bc74a87: Avoid firing a duplicate immediate tick for auto-committed direct writes. Insert, update, upsert, delete, and restore ticked both inside `commit_batch` and unconditionally afterwards; the follow-up tick now only fires when the write does not auto-seal, halving scheduler pressure during bursts of bare writes.
+- 42e77fd: Allow `createDb({ driver: { type: "memory" } })` to create a standalone in-memory database without connecting to a sync server.
+- Updated dependencies [bc74a87]
+  - jazz-rn@2.0.0-alpha.53
+  - jazz-wasm@2.0.0-alpha.53
+
 ## 2.0.0-alpha.52
 
 ### Patch Changes
