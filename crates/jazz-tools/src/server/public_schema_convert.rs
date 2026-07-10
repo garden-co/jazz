@@ -4,7 +4,8 @@ use std::fmt;
 use jazz::groove::records::{EnumSchema, Value as GrooveValue};
 use jazz::groove::schema::ColumnType as GrooveColumnType;
 use jazz::query::{
-    JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand, PolicyBranch, Predicate, Query,
+    InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
+    PolicyBranch, Predicate, Query,
 };
 use jazz::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
@@ -14,8 +15,8 @@ use jazz::schema::{
 use crate::public_api::policy::{CmpOp, PolicyValue};
 use crate::public_api::relation_ir::{
     ColumnRef, JoinKind as RelJoinKind, PredicateCmpOp as RelPredicateCmpOp,
-    PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound, RelExpr, RowIdRef,
-    ValueRef as RelValueRef,
+    PredicateExpr as RelPredicateExpr, ProjectExpr as RelProjectExpr,
+    RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
 use crate::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind, Operation, PolicyExpr,
@@ -51,11 +52,271 @@ impl std::error::Error for SchemaConversionError {}
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
-    tables
+    let mut converted = tables
         .into_iter()
         .map(|(name, table)| convert_table(schema, name, table))
-        .collect::<Result<Vec<_>, _>>()
-        .map(JazzSchema::new)
+        .collect::<Result<Vec<_>, _>>()?;
+    coerce_typed_literals(&mut converted);
+    validate_converted_schema(&converted)?;
+    Ok(JazzSchema::new(converted))
+}
+
+fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
+    let schema = JazzSchema {
+        tables: tables.to_vec(),
+        branch_read_policy: None,
+        branch_write_policy: None,
+    };
+    for table in tables {
+        if let Some(policy) = &table.read_policy {
+            policy.validate(&schema).map_err(|error| {
+                err(
+                    format!("$.{}.policies.select.using", table.name),
+                    format!("converted read policy is invalid: {error:?}"),
+                )
+            })?;
+        }
+        for (label, policy) in table.write_policies.iter() {
+            policy.validate(&schema).map_err(|error| {
+                err(
+                    format!("$.{}.policies.{label}", table.name),
+                    format!("converted write policy is invalid: {error:?}"),
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn coerce_typed_literals(tables: &mut [CoreTableSchema]) {
+    let column_types = tables
+        .iter()
+        .map(|table| {
+            let columns = table
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .collect::<BTreeMap<_, _>>();
+            (table.name.clone(), columns)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for table in tables {
+        if let Some(policy) = &mut table.read_policy {
+            coerce_query_typed_literals(policy, &column_types);
+        }
+        coerce_optional_query_typed_literals(&mut table.write_policies.insert_check, &column_types);
+        coerce_optional_query_typed_literals(&mut table.write_policies.update_using, &column_types);
+        coerce_optional_query_typed_literals(&mut table.write_policies.update_check, &column_types);
+        coerce_optional_query_typed_literals(&mut table.write_policies.delete_using, &column_types);
+    }
+}
+
+fn coerce_optional_query_typed_literals(
+    query: &mut Option<Query>,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) {
+    if let Some(query) = query {
+        coerce_query_typed_literals(query, column_types);
+    }
+}
+
+fn coerce_query_typed_literals(
+    query: &mut Query,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) {
+    coerce_predicates_typed_literals(&query.table, &mut query.filters, column_types);
+    for join in &mut query.joins {
+        coerce_join_typed_literals(join, column_types);
+    }
+    for reachable in &mut query.reachable {
+        coerce_predicates_typed_literals(
+            &reachable.access_table,
+            &mut reachable.access_filters,
+            column_types,
+        );
+        coerce_predicates_typed_literals(
+            &reachable.edge_table,
+            &mut reachable.edge_filters,
+            column_types,
+        );
+        if let Some(seed) = &mut reachable.seed {
+            coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
+        }
+    }
+    for branch in &mut query.policy_branches {
+        coerce_predicates_typed_literals(&query.table, &mut branch.filters, column_types);
+        for join in &mut branch.joins {
+            coerce_join_typed_literals(join, column_types);
+        }
+        for reachable in &mut branch.reachable {
+            coerce_predicates_typed_literals(
+                &reachable.access_table,
+                &mut reachable.access_filters,
+                column_types,
+            );
+            coerce_predicates_typed_literals(
+                &reachable.edge_table,
+                &mut reachable.edge_filters,
+                column_types,
+            );
+            if let Some(seed) = &mut reachable.seed {
+                coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
+            }
+        }
+    }
+}
+
+fn coerce_join_typed_literals(
+    join: &mut JoinVia,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) {
+    coerce_predicates_typed_literals(&join.table, &mut join.filters, column_types);
+    for nested in &mut join.nested_joins {
+        coerce_join_typed_literals(nested, column_types);
+    }
+}
+
+fn coerce_predicates_typed_literals(
+    table: &str,
+    predicates: &mut [Predicate],
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) {
+    for predicate in predicates {
+        coerce_predicate_typed_literals(table, predicate, column_types);
+    }
+}
+
+fn coerce_predicate_typed_literals(
+    table: &str,
+    predicate: &mut Predicate,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            coerce_predicates_typed_literals(table, predicates, column_types)
+        }
+        Predicate::Not(predicate) => {
+            coerce_predicate_typed_literals(table, predicate, column_types)
+        }
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right) => {
+            if coerce_operand_pair_typed_literal(table, left, right, column_types)
+                || coerce_operand_pair_typed_literal(table, right, left, column_types)
+            {
+                *predicate = Predicate::Any(Vec::new());
+            }
+        }
+        Predicate::In(left, values) => {
+            values.retain_mut(|value| {
+                !coerce_operand_pair_typed_literal(table, left, value, column_types)
+            });
+            if values.is_empty() {
+                *predicate = Predicate::Any(Vec::new());
+            }
+        }
+        Predicate::Contains(left, right) => {
+            if coerce_operand_pair_typed_literal(table, left, right, column_types)
+                || coerce_operand_pair_typed_literal(table, right, left, column_types)
+            {
+                *predicate = Predicate::Any(Vec::new());
+            }
+        }
+        Predicate::IsNull(_) => {}
+    }
+}
+
+fn coerce_operand_pair_typed_literal(
+    table: &str,
+    column_operand: &Operand,
+    literal_operand: &mut Operand,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) -> bool {
+    let Operand::Column(column) = column_operand else {
+        return false;
+    };
+    if let Some(discriminant) =
+        column_enum_literal_discriminant(table, column, literal_operand, column_types)
+    {
+        *literal_operand = Operand::Literal(GrooveValue::Enum(discriminant));
+        return false;
+    }
+    if column_is_enum(table, column, column_types) {
+        return true;
+    }
+    if !column_is_string(table, column, column_types) {
+        return false;
+    }
+    if let Operand::Literal(GrooveValue::Uuid(uuid)) = literal_operand {
+        *literal_operand = Operand::Literal(GrooveValue::String(uuid.to_string()));
+    }
+    false
+}
+
+fn column_enum_literal_discriminant(
+    table: &str,
+    column: &str,
+    literal_operand: &Operand,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) -> Option<u8> {
+    let Operand::Literal(GrooveValue::String(value)) = literal_operand else {
+        return None;
+    };
+    column_enum_schema(table, column, column_types)
+        .and_then(|schema| schema.discriminant(value).ok())
+}
+
+fn column_is_enum(
+    table: &str,
+    column: &str,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) -> bool {
+    column_enum_schema(table, column, column_types).is_some()
+}
+
+fn column_enum_schema<'a>(
+    table: &str,
+    column: &str,
+    column_types: &'a BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) -> Option<&'a EnumSchema> {
+    let column_type = column_types
+        .get(table)
+        .and_then(|columns| columns.get(column))?;
+    groove_column_type_enum_schema(column_type)
+}
+
+fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&EnumSchema> {
+    match column_type {
+        GrooveColumnType::Enum(schema) => Some(schema),
+        GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
+        _ => None,
+    }
+}
+
+fn column_is_string(
+    table: &str,
+    column: &str,
+    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+) -> bool {
+    let Some(column_type) = column_types
+        .get(table)
+        .and_then(|columns| columns.get(column))
+    else {
+        return false;
+    };
+    groove_column_type_is_string(column_type)
+}
+
+fn groove_column_type_is_string(column_type: &GrooveColumnType) -> bool {
+    match column_type {
+        GrooveColumnType::String => true,
+        GrooveColumnType::Nullable(inner) => groove_column_type_is_string(inner),
+        _ => false,
+    }
 }
 
 fn convert_table(
@@ -191,10 +452,9 @@ fn convert_column_type(
         // INTEGER columns are therefore represented as U32 and the
         // core write path rejects negative values.
         ColumnType::Integer => Ok(GrooveColumnType::U32),
-        ColumnType::BigInt => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
-            "BIGINT is signed, but server shell fixed schemas only support unsigned integer columns",
-        )),
+        // Core fixed-width cells are unsigned. Public BIGINT writes are
+        // accepted only for non-negative values by the client conversion path.
+        ColumnType::BigInt => Ok(GrooveColumnType::U64),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "BatchId columns are not supported by core schema conversion yet",
@@ -495,6 +755,15 @@ fn source_operation_policy(table: &TableSchema, operation: Operation) -> Option<
             .with_check
             .as_ref()),
         Operation::Delete => table.policies.effective_delete_using(),
+    }
+}
+
+fn convert_inherits_operation(operation: Operation) -> InheritsOperation {
+    match operation {
+        Operation::Select => InheritsOperation::Select,
+        Operation::Insert => InheritsOperation::Insert,
+        Operation::Update => InheritsOperation::Update,
+        Operation::Delete => InheritsOperation::Delete,
     }
 }
 
@@ -897,7 +1166,13 @@ fn lower_gather_seed(
     path: &str,
     seed: &RelExpr,
 ) -> Result<(Operand, jazz::query::ReachableSeed), SchemaConversionError> {
-    let (input, filters) = unwrap_rel_filter(seed);
+    let (input, projected_team_column, projected_filters) =
+        unwrap_seed_projection(table, path, seed)?;
+    let (input, filters) = unwrap_rel_filter(input);
+    let filters = filters
+        .into_iter()
+        .chain(projected_filters)
+        .collect::<Vec<_>>();
     let RelExpr::TableScan {
         table: seed_table, ..
     } = input
@@ -947,10 +1222,74 @@ fn lower_gather_seed(
             table: seed_table.as_str().to_owned(),
             user_column: Some(user_column),
             user_claim: Some(user_claim),
-            team_column: "id".to_owned(),
+            team_column: projected_team_column.unwrap_or_else(|| "id".to_owned()),
             filters,
         },
     ))
+}
+
+fn unwrap_seed_projection<'a>(
+    table: &TableName,
+    path: &str,
+    seed: &'a RelExpr,
+) -> Result<(&'a RelExpr, Option<String>, Vec<&'a RelPredicateExpr>), SchemaConversionError> {
+    let RelExpr::Project { input, columns } = seed else {
+        return Ok((seed, None, Vec::new()));
+    };
+    let Some(column) = columns.iter().find(|column| column.alias == "id") else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather projected seed must expose an id column",
+        ));
+    };
+    let RelProjectExpr::Column(projected) = &column.expr else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather projected seed id must be a column projection",
+        ));
+    };
+    let (project_input, filters) = unwrap_rel_filter(input);
+    if let RelExpr::Join {
+        left, right, on, ..
+    } = project_input
+    {
+        let (left, team_column) =
+            unwrap_joined_seed_projection(table, path, left, right, on, projected)?;
+        return Ok((left, team_column, filters));
+    }
+    Ok((input.as_ref(), Some(projected.column.clone()), Vec::new()))
+}
+
+fn unwrap_joined_seed_projection<'a>(
+    table: &TableName,
+    path: &str,
+    left: &'a RelExpr,
+    right: &RelExpr,
+    on: &[crate::public_api::relation_ir::JoinCondition],
+    projected: &ColumnRef,
+) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
+    let RelExpr::TableScan {
+        alias: right_alias, ..
+    } = right
+    else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather projected seed hop must join to a table scan",
+        ));
+    };
+    let Some(join) = on.first() else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather projected seed hop requires a join condition",
+        ));
+    };
+    if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "Gather projected seed id must come from the hop target row id",
+        ));
+    }
+    Ok((left, Some(join.left.column.clone())))
 }
 
 fn lower_gather_step(
@@ -1268,6 +1607,9 @@ fn append_inherited_policy(
         )
     {
         return Ok(query.inherits(via_column));
+    }
+    if operation != Operation::Select && policy_requires_branch(parent_policy) {
+        return Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)));
     }
     let parent_filter = convert_policy_predicate(
         parent_table,
@@ -1608,7 +1950,7 @@ mod tests {
         ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, SchemaBuilder,
         TablePolicies, TableSchema,
     };
-    use jazz::query::{JoinTarget, Operand, Predicate};
+    use jazz::query::{InheritsOperation, JoinTarget, Operand, Predicate};
     use uuid::Uuid;
 
     #[test]
@@ -1790,15 +2132,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_public_column_types() {
+    fn converts_public_bigint_as_core_u64() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::BigInt))
             .build();
 
-        let error = convert_public_schema(&schema).unwrap_err();
-        assert_eq!(error.path, "$.todos.count");
-        assert!(error.message.contains("BIGINT is signed"));
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "todos")
+            .unwrap();
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "count")
+                .unwrap()
+                .column_type,
+            GrooveColumnType::U64
+        );
+    }
 
+    #[test]
+    fn rejects_unsupported_public_column_types() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column(
                 "payload",
@@ -2314,6 +2671,171 @@ mod tests {
             .unwrap();
         let policy = teams.read_policy.as_ref().unwrap();
         assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
+    }
+
+    #[test]
+    fn converts_enum_policy_literals_to_core_discriminants() {
+        let legacy_role_id = ObjectId::from_uuid(
+            uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap(),
+        );
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("access_edges")
+                    .column(
+                        "grant_role",
+                        ColumnType::Enum {
+                            variants: vec![
+                                "EDITOR".to_owned(),
+                                "MANAGER".to_owned(),
+                                "VIEWER".to_owned(),
+                            ],
+                        },
+                    )
+                    .policies(TablePolicies::new().with_select(PolicyExpr::InList {
+                        column: "grant_role".to_owned(),
+                        values: vec![
+                            PolicyValue::Literal(Value::Text("VIEWER".to_owned())),
+                            PolicyValue::Literal(Value::Uuid(legacy_role_id)),
+                        ],
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let access_edges = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "access_edges")
+            .unwrap();
+        let policy = access_edges.read_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::Any(vec![
+                Predicate::Eq(
+                    Operand::Column("grant_role".to_owned()),
+                    Operand::Literal(GrooveValue::Enum(2)),
+                ),
+                Predicate::Any(Vec::new()),
+            ])]
+        );
+    }
+
+    #[test]
+    fn lowers_projected_gather_seed_from_membership_hop() {
+        let seed = PublicRelExpr::Project {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "team_entry".into(),
+                        alias: None,
+                    }),
+                    predicate: RelPredicateExpr::Cmp {
+                        left: RelColumnRef {
+                            scope: None,
+                            column: "team_id".to_owned(),
+                        },
+                        op: RelPredicateCmpOp::Eq,
+                        right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                    },
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "teams".into(),
+                    alias: Some("target".to_owned()),
+                }),
+                on: vec![RelJoinCondition {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "target".to_owned(),
+                    },
+                    right: RelColumnRef {
+                        scope: Some("target".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                }],
+                join_kind: RelJoinKind::Inner,
+            }),
+            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelProjectExpr::Column(RelColumnRef {
+                    scope: Some("target".to_owned()),
+                    column: "id".to_owned(),
+                }),
+            }],
+        };
+
+        let (_from, lowered) =
+            lower_gather_seed(&TableName::new("resources"), "policy", &seed).unwrap();
+        assert_eq!(lowered.table, "team_entry");
+        assert_eq!(lowered.user_column.as_deref(), Some("team_id"));
+        assert_eq!(lowered.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
+        assert_eq!(lowered.team_column, "target");
+    }
+
+    #[test]
+    fn preserves_operation_specific_inherits_for_complex_child_write_policy() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("owner_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_update(
+                        Some(PolicyExpr::Or(vec![
+                            PolicyExpr::Cmp {
+                                column: "owner_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                            },
+                            PolicyExpr::Exists {
+                                table: "parent_admins".to_owned(),
+                                condition: Box::new(PolicyExpr::And(vec![
+                                    PolicyExpr::Cmp {
+                                        column: "parent_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec![
+                                            "__jazz_outer_row".to_owned(),
+                                            "id".to_owned(),
+                                        ]),
+                                    },
+                                    PolicyExpr::Cmp {
+                                        column: "user_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    },
+                                ])),
+                            },
+                        ])),
+                        PolicyExpr::True,
+                    )),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Inherits {
+                        operation: Operation::Update,
+                        via_column: "parent_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("parent_admins")
+                    .fk_column("parent_id", "parents")
+                    .column("user_id", ColumnType::Text),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let children = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "children")
+            .unwrap();
+        let inherits = &children
+            .write_policies
+            .insert_check
+            .as_ref()
+            .unwrap()
+            .inherits[0];
+        assert_eq!(inherits.parent_column, "parent_id");
+        assert_eq!(inherits.operation, InheritsOperation::Update);
     }
 
     #[test]
