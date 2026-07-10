@@ -1,25 +1,25 @@
-# Core deletion queue
+# Explicit-delete execution
 
 Type: `wayfinder:grilling`
 Status: open
 Assignee: (unclaimed)
-Blocked by: [E — core claim ledger](E-claim-ledger.md)
+Blocked by: [E — grant ledger](E-claim-ledger.md)
 
 ## Question
 
-How does the core's durable deletion queue persist and drain?
+How does the explicit delete API (`jazz.files.delete(fileId)`) execute
+durably?
 
-The PRD requires: cell death (overwrite, null, row delete) observed at
-settle enqueues the file id; DELETEs are idempotent and retried; the
-one-live-cell rule makes "unreferenced" exact; bodyless history keeps
-descriptors readable after the object is gone. Decide: queue entry schema
-and home (raw-table namespace vs trait methods); how enqueue commits
-atomically with the settling write; retry/backoff state and poison-entry
-handling (an object store that 403s forever); dedup against double
-enqueue (idempotency key = file id?); interaction with ledger states from
-ticket E (claimed → deleted — does the ledger entry record deletion, and is
-that the bodyless-history marker?); and observability (queue depth,
-oldest-entry age) for operators.
+Per [Descriptor persistence](A-descriptor-persistence.md): deletion is an
+explicit sync-protocol request authorized for the uploader identity (from
+the ledger) or the backend/admin surface — never inferred from cell death.
+Decide: whether the DELETE against the bucket runs synchronously in the
+request (with what timeout/answer semantics) or lands in a durable retried
+queue first (entry schema and home); idempotency (delete of
+already-deleted id succeeds); poison-entry handling (a bucket that 403s
+forever); whether the ledger entry records the deleted state (and serves
+as the bodyless-history marker); what the API returns while CDN copies
+still exist; and operator observability (pending deletes, oldest age).
 
-Blocked by E because enqueue/drain transitions are ledger-state
-transitions.
+Blocked by E because auth and the deleted-state marker are ledger reads
+and writes.

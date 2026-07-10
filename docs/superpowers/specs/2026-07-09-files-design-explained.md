@@ -23,7 +23,7 @@ flowchart LR
     end
     subgraph jazz [Jazz — metadata plane]
         edge[Edge]
-        core[Core + claim ledger]
+        core[Core + grant ledger]
     end
     subgraph fileplane [File plane — bytes]
         s3[(Public-read bucket\nS3 / R2 / minio / Tigris)]
@@ -68,27 +68,40 @@ const appSchema = {
 };
 ```
 
-The cell holds a **file descriptor** — an immutable value naming exactly one
+Under the hood this is the same trick `s.json()` already plays: a
+schema-level column kind that stores its value as canonical JSON text. No
+new value type exists anywhere in the stack — not in the row format, not in
+the WASM/NAPI bindings — only a schema facade plus one write-path check
+that the _shape_ is right.
+
+The cell holds a **file descriptor** — a small versioned value naming one
 body:
 
 | Field       | Meaning                                                                                                    |
 | ----------- | ---------------------------------------------------------------------------------------------------------- |
+| `v`         | descriptor version (`1`); strict on write, lenient on read                                                 |
 | `file id`   | client-minted, **mandated cryptographically random** (UUIDv4-grade); the object key and URL derive from it |
 | `name`      | filename at creation (download filename)                                                                   |
 | `mime_type` | content type, pinned onto the object at upload                                                             |
-| `size`      | bytes, server-verified                                                                                     |
+| `size`      | body length in bytes, as declared by the uploader                                                          |
 
-Two rules make the whole system easy to reason about:
+Two things make this easy to reason about — and note what's _not_ on the
+list:
 
-- **The descriptor is immutable.** You never edit its fields. "Replace the
-  file" means uploading new bytes and swapping the _whole cell_ to the new
-  descriptor — an ordinary column update, gated by the ordinary update
-  policy. Each descriptor-body pair is immutable forever, which is what lets
-  every cache downstream treat bodies as never-changing.
-- **Mutable metadata is a sibling column.** A display name the user can
-  edit, captions, tags — those are normal columns on the same row, queryable
-  and policy-gated like everything else. File identity and app metadata
-  never fight.
+- **The descriptor is a convention, not an enforced invariant.** Jazz
+  validates its shape (canonical `v:1` JSON, known fields) and nothing
+  else. Editing fields in place, copying a descriptor into another cell,
+  even hand-writing one — all ordinary column writes under the ordinary
+  update policy. What stays hard is the _body_: it is immutable at the
+  bucket (an id is never granted twice, and the store itself refuses a
+  write to an occupied key), so no write to any cell can change any bytes.
+  `name`/`mime_type`/`size` are app-trusted metadata — the same class as
+  the `hash` we deliberately dropped: a lying value misleads only that
+  app's own readers.
+- **Queryable metadata is a sibling column.** The file cell is opaque to
+  the query layer (whole-value equality, null checks — text semantics).
+  Anything you filter or sort by — display names, tags, a size you trust —
+  lives in real columns on the same row.
 
 Why a column instead of a dedicated file table (the shape we discarded):
 
@@ -101,14 +114,9 @@ Why a column instead of a dedicated file table (the shape we discarded):
   `s.table({ content: s.file(), ...metadata })`. The reverse isn't true — a
   file table can't put an avatar directly on the profile row.
 
-There is deliberately **no `hash` field**. Bodies are single-writer and
-immutable, so a hash declared by the uploader would only protect the
-uploader's own readers from the uploader — little value for real
-verification cost. Apps that want tamper-evidence add their own column.
-
 ## Choice 2: every file is public by URL — on a public-read bucket
 
-Every accepted file is readable by anyone who has its URL. Full stop.
+Every file is readable by anyone who has its URL. Full stop.
 
 ```
 https://<host>/files/{app}/9f31c2ae-…     ← stable, unauthenticated, forever
@@ -126,8 +134,8 @@ What the permissions system does and does not cover:
 ```
                  ┌──────────────────────────────────┐
    row policies  │  METADATA (the host row)         │  read  → who syncs it
-   gate this ──▶ │  descriptor + sibling columns    │  update→ who swaps/renames
-                 │                                  │  delete→ who deletes
+   gate this ──▶ │  descriptor + sibling columns    │  update→ who edits cells
+                 │                                  │  delete→ who deletes rows
                  └──────────────────────────────────┘
                  ┌──────────────────────────────────┐
    nothing gates │  BYTES (the body)                │  anyone with the URL
@@ -150,12 +158,11 @@ Why public-only instead of the classic published/private split:
 
 The value Jazz adds to files is the **integrated experience** — files as
 values in your own relational rows, synced, subscribed, permission-gated as
-metadata — plus **offline-capable creation**. Apps with genuinely
-confidential content keep it out of files or encrypt client-side;
-byte-level access control can be layered on later without changing the URL
-scheme.
+metadata — plus **offline capability**. Apps with genuinely confidential
+content keep it out of files or encrypt client-side; byte-level access
+control can be layered on later without changing the URL scheme.
 
-## Choice 3: upload is offline-first, with leases and one claim ledger
+## Choice 3: upload is offline-first — and nobody verifies anything
 
 Creating a file works with the network unplugged, because it is just a local
 byte write plus a normal transaction:
@@ -166,70 +173,64 @@ await db.messages.insert({ text: "look at this", attachment });
 // committed locally; the body sits in the device file store (upload staging)
 ```
 
-The interesting part is what happens between "created offline" and "visible
-to everyone", because Jazz never shows anyone a descriptor whose bytes
-weren't verified:
-
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant E as Edge
-    participant K as Core (claim ledger)
+    participant K as Grant ledger (core)
     participant S3 as Public bucket
 
-    Note over C: offline: transaction committed locally,<br/>body staged, commit unit HELD at the outbox
+    Note over C: offline: transaction committed locally,<br/>body staged, commit unit HELD at the outbox (SDK courtesy)
     C->>E: grant request (file id, size)        [sync connection]
     E->>K: register grant (id never seen before?)
-    E-->>C: grant: object key, lease expiry,<br/>conditional presigned PUT / part URLs
-    C->>S3: PUT parts directly (If-None-Match: *, resumable)
+    E-->>C: grant: pending/{app}/{id}, lease expiry,<br/>conditional presigned PUT / part URLs
+    C->>S3: PUT parts to pending/ (If-None-Match: *, resumable)
     C-->>E: (part URLs refreshable within the lease)
     C->>E: release + part ETags                 [sync connection]
-    E->>S3: complete multipart (edge holds the UploadId)
-    Note over C: commit unit released — ordinary lane
-    K->>S3: HEAD (exists? size matches?)
-    alt body verified & grant unclaimed/unexpired
-        K-->>C: verify + claim + accept — one atomic step
-    else absent / mismatched / grant spent or expired
-        K-->>C: whole commit unit rejected<br/>(cell reverted, staged body dropped)
-    end
+    E->>S3: complete multipart, then server-side copy<br/>pending/{app}/{id} → {app}/{id}
+    E->>K: mark grant claimed (idempotent)
+    Note over C: commit unit released — ordinary lane,<br/>ordinary acceptance (nothing file-specific)
+    Note over S3: lifecycle rule expires pending/ after the lease<br/>+ native abort of incomplete multiparts
 ```
 
 The decisions hiding in that diagram:
 
-- **The hold takes the whole transaction** The
-  transaction that writes a fresh descriptor (including its sibling
-  columns) waits at the outbox until the body is confirmed. So when the
-  message above arrives at another device, the attachment is already
-  fetchable.
-- **Independent writes bypass; you choose early visibility.** Later,
-  unrelated commit units skip past the held one — one slow 2 GB video never
-  stalls the session. An app that wants the message text visible before the
-  upload finishes models the file cell in its own row (an attachments row)
-  and renders its own pending state — an app choice, not a forced
-  semantic.
-- **One claim ledger, at the core.** Grants are registered at the core when
-  issued, and "verify the body + claim the grant + accept the transaction"
-  is a single atomic step there. That is what makes "one file id, one live
-  cell, ever" hold across edges, races, and retries: a descriptor copied
-  into a second cell finds its grant already claimed and rejects; two
-  same-id transactions racing through different edges get exactly one
-  acceptance; and a retried release for an already-claimed grant gets the
-  recorded outcome back (idempotent), never a bogus rejection. The ledger
-  is permanent — an id can never be granted twice; after a lease expires,
-  the SDK simply restarts with a fresh id.
-- **Grants are leases, swept without races.** A grant unclaimed within its
-  window (days, operator-tunable) is first atomically marked expired in the
-  ledger — from that moment it can never be claimed — and only then does
-  the sweep delete the object and abort any incomplete multipart (the edge
-  initiated the multipart, so the `UploadId` is on record). The lease is
-  also the resume window: part ETags persist locally, restarts resume where
-  they left off, and fresh part URLs can be requested for the same grant
-  when a presign window (hours) runs out inside a lease (days). Grant
-  issuance itself is open to any authenticated session — abuse is bounded
-  by the sweep in v1, with per-identity rate limits planned.
+- **Nothing is verified — deliberately.** There is no HEAD, no size check,
+  no file-specific acceptance step. Everything verification used to protect
+  is either already unprotected by choice (descriptor fields are
+  app-trusted) or handled structurally: overwrites are impossible at the
+  bucket, and unreleased uploads are garbage-collected by the bucket
+  itself. A client that lies — releases without uploading, declares the
+  wrong size — harms only its own descriptor, whose URL 404s or
+  misdescribes its own body. No one else's path carries the cost of
+  checking.
+- **Release is the only ceremony: complete + copy + claim.** Uploads land
+  under `pending/{app}/{id}`. On release the edge completes the multipart
+  (it holds the `UploadId`), server-side-copies the object to its permanent
+  key — the copy is what makes the public URL go live — and marks the grant
+  claimed in the ledger. All idempotent: a retried release returns the
+  recorded outcome.
+- **Cleanup is the bucket's job, not a sweeper's.** A lifecycle rule
+  expires the `pending/` prefix after the lease window (days), and the
+  native incomplete-multipart abort rule covers half-finished uploads.
+  Prefix-based, so it works on S3, R2, minio, and Tigris alike. No sweep
+  machinery exists; grant farming accumulates nothing past the lease. After
+  an expiry the SDK just restarts with a fresh id (ids are never granted
+  twice).
+- **The hold is an SDK courtesy, not a server gate.** The transaction that
+  writes a `fromBlob` descriptor (including its sibling columns) waits at
+  the outbox until release, so files created through the upload path are
+  fetchable by the time other devices see them. Later, unrelated commit
+  units bypass the held one — one slow 2 GB video never stalls the session.
+  An app that wants the message text visible before the upload finishes
+  models the file cell in its own row and renders its own pending state.
+- **The grant ledger is small and permanent**: file id → uploader identity
+  - granted/claimed. Consulted exactly three times — issue (never re-grant
+    an id), release (mark claimed), delete (who may). That's the whole
+    server-side brain of the file plane.
 
 No second credential system exists anywhere in this: grant, part-URL
-refresh, and release are messages on the already-authenticated sync
+refresh, release, and delete are messages on the already-authenticated sync
 connection.
 
 The client observes all of it through one state machine on the handle:
@@ -239,10 +240,9 @@ local ──▶ uploading(progress) ──▶ released ──▶ accepted
                                           └──▶ rejected
 ```
 
-which is the existing durability-tier story extended by one file-specific
-stage — and the app's surface for "this device holds unreleased files",
-which matters because until release, the creating device holds the only
-copy.
+where accepted/rejected are the ordinary transaction fates — and the
+"unreleased files on this device" signal matters, because until release the
+creating device holds the only copy.
 
 ## Choice 4: download is a redirect to a public object
 
@@ -270,10 +270,10 @@ trip, no async step, no expiry:
 <video src={msg.attachment.url()} />
 ```
 
-One honest caveat: the URL goes live at **acceptance**. Before that it
-404s — which is fine, because the only party who can render the file before
-acceptance is the device that just created it, and that device is already
-holding the Blob (see the API section).
+One honest caveat: the URL goes live at **release** (the copy to the
+permanent key). Before that it 404s — which is fine, because the only party
+who can render the file before release is the device that just created it,
+and that device is already holding the Blob (see the API section).
 
 ## Choice 5: reads are the web's — offline lives _below_ the URL
 
@@ -290,8 +290,8 @@ work offline. The offline layer therefore sits _below_ the URL, as a
 **per-platform interceptor** that every URL load passes through. Both
 interceptors run the same three-step logic over the device file store:
 serve this device's **staged** body (own files render immediately —
-offline, even before acceptance), else serve the **cached** body, else
-fetch through and write the cache.
+offline, even before release), else serve the **cached** body, else fetch
+through and write the cache.
 
 - **Web: a Jazz-shipped service worker** intercepting `/files/*` — the
   mechanism the web uses for every other offline asset, and the only one
@@ -319,33 +319,36 @@ reversible, bodies are refetchable by URL). Any file opened once is
 readable offline, and your own files are readable offline from the moment
 you create them.
 
-## Choice 6: deletion is "the cell died"
+## Choice 6: deletion is explicit — cells never kill bodies
 
-There is no delete-a-file operation, because there is nothing extra to
-delete. A file's body is deleted when its cell dies, through ordinary,
-policy-gated writes:
+Editing rows never deletes bytes. Overwrite a file cell, null it, delete
+the whole row — the object stays. Copies of a descriptor, history, and
+branches all stay coherent by default, and there is no settle-observation
+machinery deciding when a body is "unreferenced."
 
-- the cell is **overwritten** with a new descriptor (file replaced),
-- the cell is **set to null** (file removed),
-- the **row is deleted**.
+Removing a body is one deliberate call:
 
-The one-live-cell rule from Choice 3 makes "this body is unreferenced"
-exact, so responsibility can have a single owner: the **core** — the one
-place that observes writes settle globally — appends the dead file id to a
-durable deletion queue and issues idempotent, retried DELETEs against the
-bucket. Two devices swapping the same cell offline need no special rule:
-conflict resolution picks one descriptor like any column write, and the
-loser's overwritten descriptor is ordinary cell death, its body queued for
-deletion. The metadata change is visible immediately; the object disappears
-eventually; the URL then 404s. CDN-cached copies age out on their own —
-with immutable caching, purge is best-effort at most, and the design says
-so rather than pretending otherwise.
+```ts
+await jazz.files.delete(msg.attachment.id);
+```
 
-One deliberate wrinkle: **bodyless history**. Historical reads and branches
-can surface a descriptor at a past cut after its object is deleted. That is
-correct, not a bug — bodies live outside history, so deleting an object is
-truncation-like for the bytes while the descriptor stays readable. Its URL
-404s like any deleted file's.
+- **Who may:** the uploader identity — recorded in the grant ledger when
+  the grant was issued — or the app's backend surface. Richer rules
+  ("album owners can delete") are app-backend logic that ends in a backend
+  delete call.
+- **How it runs:** the request travels over the sync connection like grant
+  and release; the core executes it durably — a durable queue of
+  idempotent, retried DELETEs — so an accepted delete always eventually
+  happens. The URL then 404s; CDN-cached copies age out on their own
+  (immutable caching makes purge best-effort at most, and the design says
+  so rather than pretending otherwise).
+- **The flip side, stated plainly:** storage persists until someone
+  deletes it. An app that wants tidy storage deletes when its domain says
+  so — Jazz won't guess from row edits.
+
+Descriptors pointing at a deleted body — live cells, copies, historical
+reads, branches — are all the same ordinary state: metadata readable, URL
+404s. **Bodyless descriptors are legal**, not a crash.
 
 ## The API, end to end
 
@@ -362,7 +365,7 @@ const appSchema = {
 const attachment = await jazz.files.fromBlob(blob);
 const msg = await db.messages.insert({ text: "specs attached", attachment });
 
-// preview immediately — you already hold the bytes; the URL goes live at acceptance
+// preview immediately — you already hold the bytes; the URL goes live at release
 img.src = URL.createObjectURL(blob);
 
 // observe the upload
@@ -370,19 +373,22 @@ attachment.uploadState.subscribe((st) => {
   // "local" | "uploading" (with progress) | "released" | "accepted" | "rejected"
 });
 
-// render once accepted — plain URL, no async, no auth
+// render once released — plain URL, no async, no auth
 <img src={msg.attachment.url()} />;
 
 // read bytes — userland, like any web resource
 const blob2 = await (await fetch(msg.attachment.url())).blob();
 
-// replace — swap the whole cell to a fresh upload (old body gets deleted)
+// replace — swap the cell to a fresh upload (the old body stays until deleted)
 await db.messages.update(msg.id, {
   attachment: await jazz.files.fromBlob(newBlob),
 });
 
-// remove — kill the cell (or delete the row)
+// remove the reference — kill the cell (bytes untouched)
 await db.messages.update(msg.id, { attachment: null });
+
+// remove the bytes — explicit, uploader-or-backend only
+await jazz.files.delete(oldAttachment.id);
 ```
 
 (`fromBlob` follows the existing `file-storage.ts` runtime shape; its
@@ -391,20 +397,22 @@ Exact builder spellings like `s.file` may shift during implementation.)
 
 ## What we deliberately didn't build
 
-| Not built                          | Because                                                                                                                           |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| A file table / built-in file rows  | the column subsumes it (a files table is a table with a file column) and puts files where the data is                             |
-| Private files / signed URLs        | would poison caching and flat-cost serving; metadata permissions + mandated-entropy ids are the v1 story                          |
-| SDK read API (`toBlob`/`toStream`) | the real read path is the URL; blob derivation is two lines of userland `fetch`                                                   |
-| SDK-level offline reads            | only URL interceptors can honestly provide offline (they cover `<img>` tags); v1 ships a web SW and an RN loopback server instead |
-| `fromStream` / unknown-size upload | the descriptor and the grant both need `size` up front; a Blob knows it, a stream doesn't                                         |
-| Content hashing & dedup            | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe                                    |
-| Descriptor move/copy between cells | needs refcounting or a transfer protocol; v1 is one file id, one live cell                                                        |
-| Lists of files in one cell         | one file column per cell in v1; use multiple columns or a side table                                                              |
-| Upload through Jazz servers        | our bandwidth would pay for every upload                                                                                          |
-| Standalone file service            | second deployable + duplicated policy evaluation; revisit when traffic warrants                                                   |
-| General orphan GC                  | ledger-coordinated grant leases + a lifecycle backstop close the abuse faucet                                                     |
-| Rate limits / per-identity quotas  | leases bound storage abuse in v1; rate limits on grants and egress are planned future work                                        |
+| Not built                           | Because                                                                                                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| A file table / built-in file rows   | the column subsumes it (a files table is a table with a file column) and puts files where the data is                             |
+| Private files / signed URLs         | would poison caching and flat-cost serving; metadata permissions + mandated-entropy ids are the v1 story                          |
+| Descriptor immutability enforcement | it protected an app only from itself; the body is immutable at the bucket, which is the part that matters                         |
+| Body verification                   | everything it protected is either app-trusted by choice or handled structurally (conditional PUTs, pending-prefix TTL)            |
+| Automatic deletion on cell death    | inference machinery + refcounting questions for a call the app can make explicitly; `jazz.files.delete` is the one reclamation    |
+| Server sweep for unclaimed uploads  | the bucket's own lifecycle rules (prefix expiry + multipart abort) do it with zero code                                           |
+| SDK read API (`toBlob`/`toStream`)  | the real read path is the URL; blob derivation is two lines of userland `fetch`                                                   |
+| SDK-level offline reads             | only URL interceptors can honestly provide offline (they cover `<img>` tags); v1 ships a web SW and an RN loopback server instead |
+| `fromStream` / unknown-size upload  | the grant needs `size` up front; a Blob knows it, a stream doesn't                                                                |
+| Content hashing & dedup             | hash protects only the uploader's own readers; dedup needs refcounting before deletion is safe                                    |
+| Lists of files in one cell          | one file column per cell in v1; use multiple columns or a side table                                                              |
+| Upload through Jazz servers         | our bandwidth would pay for every upload                                                                                          |
+| Standalone file service             | second deployable + duplicated policy evaluation; revisit when traffic warrants                                                   |
+| Rate limits / per-identity quotas   | the pending-prefix TTL bounds storage abuse in v1; rate limits on grants and egress are planned future work                       |
 
 Each of these is expanded in the design doc's "Rejected alternatives"
 section — required reading before reopening any of them.

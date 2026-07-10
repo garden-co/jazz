@@ -7,19 +7,16 @@ Blocked by: (none)
 
 ## Question
 
-How does the core's permanent claim ledger persist, and how is
-verify+claim+accept made one atomic step against the existing storage
-semantics?
+How does the grant ledger persist, and who owns it?
 
-The PRD requires: grants registered at issuance (before presigned URLs are
-returned), ids never grantable twice, claims consumed atomically with
-acceptance, sweep marks-expired before deleting, idempotent claim outcomes
-for retried releases. The server uses the same `Storage` trait (RocksDB
-default). Decide: ledger entry schema (file id → granted | claimed |
-expired, issuing identity, lease deadline, UploadId?); home (raw-table
-namespace vs dedicated trait methods); how the claim write and the batch
-fate/acceptance write commit atomically (the trait is a sync KV with lazy
-transactions — is one storage transaction across both guaranteed?); the
-growth story for a permanent, append-only ledger (compaction? never?
-size math at realistic upload volumes); and what the deletion queue
-(ticket G) reads from it.
+Per [Descriptor persistence](A-descriptor-persistence.md) the ledger is
+small: file id → uploader identity + granted/claimed (+ object key),
+permanent so an id is never grantable twice. It is consulted at grant
+issuance (id never seen), at release (mark claimed; idempotent for
+retries), and at delete (uploader check). There is no verify+claim+accept
+coupling and no sweep. Decide: does the ledger live at the core (edges ask
+it) or at the issuing edge with core replication; entry schema and home
+(`__`-prefixed raw-table namespace vs dedicated `Storage` trait methods);
+idempotency of mark-claimed under retried release; the growth story for a
+permanent ledger (size math at realistic upload volumes; compaction
+never?); and what the delete path (ticket G) reads from it.

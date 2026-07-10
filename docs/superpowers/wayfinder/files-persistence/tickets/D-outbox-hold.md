@@ -7,8 +7,10 @@ Blocked by: [C — upload-resume records](C-resume-records.md)
 
 ## Question
 
-How does "the file-writing commit unit holds at the outbox until release,
-while independent units bypass it" survive a restart?
+How does the SDK-courtesy outbox hold — "a `fromBlob`-carrying commit unit
+holds until its upload completes, while independent units bypass it" (per
+[Descriptor persistence](A-descriptor-persistence.md), a client-side
+courtesy, not a server gate) — survive a restart?
 
 The in-memory outbox is not durable; durability lives in local batch
 records / sealed submissions / batch fates keyed by `BatchId`

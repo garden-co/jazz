@@ -37,7 +37,12 @@ to decide before implementation tickets can be cut.
 
 <!-- one line per closed ticket: gist + link -->
 
-(none yet)
+- [Descriptor persistence](tickets/A-descriptor-persistence.md) —
+  `ColumnType::File` facade lowering onto `Value::Text` (canonical JSON,
+  `v:1`, strict-write/lenient-read); **no immutability enforcement, no body
+  verification** (release = claim + copy out of `pending/`; bucket
+  lifecycle TTL replaces the sweep); deletion is an explicit
+  uploader-or-backend API, never cell death; cells opaque to queries in v1.
 
 ## Not yet specified
 
