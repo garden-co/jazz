@@ -481,9 +481,17 @@ where
                     .node
                     .settled_binding_view_source_rows(&request.source.table, *binding_view)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let graph = inline_current_graph(&table, rows)
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let descriptor = current_row_descriptor(&table);
+                let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                    &table,
+                    rows,
+                    self.node
+                        .catalogue
+                        .current_schema_version_alias
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?,
+                    "settled-binding-view",
+                    &request.requirements,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 return Ok(ResolvedSource {
                     table_schema: table,
                     graph,
@@ -491,7 +499,7 @@ where
                         source: request.source.clone(),
                         descriptor,
                         row_uuid_field: "row_uuid".to_owned(),
-                        metadata: BTreeMap::new(),
+                        metadata,
                     },
                     routing_fields: BTreeSet::new(),
                     content_version: None,
@@ -8566,6 +8574,137 @@ pub(super) fn inline_current_graph(
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
+fn inline_current_graph_with_source_metadata(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    let mut metadata = BTreeMap::new();
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::VersionWitnesses)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::VersionWitnesses,
+            SourceMetadataFields::VersionWitnesses {
+                schema_version_field: "schema_version".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                branch_or_prefix_field: None,
+            },
+        );
+    }
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::Coverage)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::Coverage,
+            SourceMetadataFields::Coverage {
+                coverage_field: "coverage".to_owned(),
+            },
+        );
+    }
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::SettlePosition)
+    {
+        metadata.insert(
+            SourceMetadataRequirement::SettlePosition,
+            SourceMetadataFields::SettlePosition {
+                settle_position_field: "settle_position".to_owned(),
+            },
+        );
+    }
+    for requirement in &requirements.metadata {
+        if let SourceMetadataRequirement::Provenance(field) = requirement {
+            metadata.insert(
+                SourceMetadataRequirement::Provenance(*field),
+                SourceMetadataFields::Provenance {
+                    field: source_provenance_field(*field).to_owned(),
+                },
+            );
+        }
+    }
+
+    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let records = rows
+        .iter()
+        .map(|row| {
+            inline_current_record_with_source_metadata(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        GraphBuilder::inline_records(descriptor.clone(), records),
+        descriptor,
+        metadata,
+    ))
+}
+
+fn inline_current_record_with_source_metadata(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+) -> Result<Vec<u8>, Error> {
+    let mut values = Vec::new();
+    values.push(Value::Uuid(row.row_uuid().0));
+    for column in &table.columns {
+        values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
+    }
+    let provenance = row.provenance()?.unwrap_or(RowProvenance {
+        created_by: AuthorId::SYSTEM,
+        created_at: TxTime(0),
+        updated_by: AuthorId::SYSTEM,
+        updated_at: TxTime(0),
+    });
+    values.extend([
+        Value::Uuid(provenance.created_by.0),
+        Value::U64(provenance.created_at.0),
+        Value::Uuid(provenance.updated_by.0),
+        Value::U64(provenance.updated_at.0),
+    ]);
+    let (tx_time, tx_node_alias) = row
+        .projected_tx_alias()
+        .unwrap_or((TxTime(0), NodeAlias(0)));
+    values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+    if descriptor.field_index("table").is_some() {
+        values.extend([
+            Value::String(table.name.clone()),
+            Value::String("content".to_owned()),
+            Value::U64(schema_version_alias.0),
+            Value::Array(Vec::new()),
+            Value::Uuid(provenance.created_by.0),
+            Value::U64(provenance.created_at.0),
+            Value::Uuid(provenance.updated_by.0),
+            Value::U64(provenance.updated_at.0),
+        ]);
+    }
+    if descriptor.field_index("coverage").is_some() {
+        values.push(Value::String(coverage.to_owned()));
+    }
+    if descriptor.field_index("settle_position").is_some() {
+        values.push(Value::Nullable(None));
+    }
+    Ok(descriptor.create(&values)?)
+}
+
 fn inline_include_deleted_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
@@ -9033,6 +9172,7 @@ mod tests {
     use groove::storage::{Durability, RocksDbStorage};
 
     use crate::ids::{AuthorId, NodeUuid, RowUuid};
+    use crate::node::query_engine::{CoverageScope, ProgramFactOutput};
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage};
@@ -11156,6 +11296,68 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn settled_binding_view_sources_provide_source_coverage_metadata() {
+        let (_server_dir, mut server) = open_node();
+        let (_reader_dir, mut reader) = open_node();
+        let alice = author(1);
+        let shape = Query::from("issues")
+            .filter(eq(col("assignee"), param("user")))
+            .validate(&schema())
+            .unwrap();
+        let binding = shape
+            .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+            .unwrap();
+
+        register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(&mut server, &shape, &binding);
+        register_query_shape(&mut reader, &shape, RegisterShapeOptions::default());
+        subscribe_query_binding(&mut reader, &shape, &binding);
+
+        commit_global_issue(&mut server, 0, "open", alice, 1);
+        let mut peer = PeerState::new();
+        let initial = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
+        reader.apply_sync_message(initial).unwrap();
+
+        let settled_binding_view = reader
+            .settled_binding_view_key_for_query(&shape, &binding)
+            .unwrap()
+            .expect("receiver should have a settled binding view after rehydrate");
+        let mut request = reader
+            .current_query_program_request(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::AppRows,
+                &ReadViewSpec::default(),
+                Some(settled_binding_view),
+            )
+            .unwrap();
+        request
+            .output
+            .facts
+            .insert(ProgramFactKey::SourceCoverage(CoverageScope::Program));
+
+        let program = reader
+            .compile_query_program_request(request)
+            .expect("settled binding-view source should lower source coverage facts");
+        assert!(
+            matches!(
+                &program.lowered.output,
+                ProgramOutputSchemas::RowSet(terminals)
+                    if terminals.iter().any(|terminal| matches!(
+                        terminal,
+                        OutputTerminalSchema::Fact(ProgramFactOutput {
+                            key: ProgramFactKey::SourceCoverage(CoverageScope::Program),
+                            ..
+                        })
+                    ))
+            ),
+            "compiled program should include a source coverage terminal"
         );
     }
 

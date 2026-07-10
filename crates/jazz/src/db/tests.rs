@@ -1043,6 +1043,25 @@ fn relation_schema() -> JazzSchema {
     ])
 }
 
+fn access_edge_include_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_access_edges",
+            [
+                ColumnSchema::new("resource_id", ColumnType::Uuid),
+                ColumnSchema::new("team_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("resource_id", "teams")
+        .with_reference("team_id", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn policy_relation_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
@@ -1910,6 +1929,85 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1), row(0x22)]);
     assert_eq!(snapshot.edges.len(), 1);
     assert_eq!(snapshot.edges[0].target_row, row(0x22));
+}
+
+#[test]
+fn maintained_subscription_with_two_reference_includes_opens_with_source_coverage() {
+    let schema = access_edge_include_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0xee, AuthorId::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "teams",
+            row(0xa1),
+            BTreeMap::from([("name".to_owned(), Value::String("resource team".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "teams",
+            row(0xb1),
+            BTreeMap::from([("name".to_owned(), Value::String("member team".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "team_access_edges",
+            row(0xc1),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(row(0xa1).0)),
+                ("team_id".to_owned(), Value::Uuid(row(0xb1).0)),
+            ]),
+        )
+        .unwrap();
+
+    let query = Query::from("team_access_edges")
+        .include("resource_id")
+        .include("team_id");
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    let message = client_transport
+        .try_recv()
+        .expect("expected include subscription view update");
+    let SyncMessage::ViewUpdate {
+        subscription: served,
+        result_member_adds,
+        ..
+    } = message
+    else {
+        panic!("expected include subscription view update, got {message:?}");
+    };
+    assert_eq!(served, subscription);
+    let tables = result_member_adds
+        .iter()
+        .filter_map(|member| member.as_real_row().map(|row| row.table.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 }
 
 #[test]
