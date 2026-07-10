@@ -24,6 +24,7 @@ type PolicyQueryShape = {
 
 type PolicyInherits = {
   parentColumn: string;
+  operation: "Select" | "Insert" | "Update" | "Delete";
 };
 
 type PolicyJoin = {
@@ -408,6 +409,20 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
 
 function writePolicyInherits(writer: PostcardWriter, inherits: PolicyInherits): void {
   writer.string(inherits.parentColumn);
+  writer.u64(policyInheritsOperationTag(inherits.operation));
+}
+
+function policyInheritsOperationTag(operation: PolicyInherits["operation"]): number {
+  switch (operation) {
+    case "Select":
+      return 0;
+    case "Insert":
+      return 1;
+    case "Update":
+      return 2;
+    case "Delete":
+      return 3;
+  }
 }
 
 function writePolicyReachable(writer: PostcardWriter, reachable: PolicyReachable): void {
@@ -524,7 +539,7 @@ function policyExprToQueryShape(
       filters: [],
       joins: [],
       reachable: [],
-      inherits: [{ parentColumn: expr.via_column }],
+      inherits: [{ parentColumn: expr.via_column, operation: expr.operation }],
     };
   }
   if (expr.type === "InheritsReferencing") {
