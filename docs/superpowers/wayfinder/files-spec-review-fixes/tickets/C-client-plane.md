@@ -32,3 +32,11 @@ spec pair:
   codebase already does before asking); decide `fromBlob`'s input type
   per platform (web Blob / Node / RN); state the class-set-evolution
   footgun (removing a class orphans its bodies).
+
+User input (2026-07-10, ahead of the grilling): supported mime types may
+become schema-declared per file column (see the matching note on
+[B — protocol-plane](B-protocol-plane.md)). If adopted, the inline-safe
+allowlist question changes shape: from a global product allowlist to a
+fixed inline-safe classifier over mime types, with the serving policy
+derivable per column (all declared types inline-safe → inline, else
+attachment). Coordinate with B's decision before pinning the constant.
