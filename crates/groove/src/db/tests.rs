@@ -7449,6 +7449,136 @@ fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
 }
 
 #[test]
+fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("artists", PrimaryKeyValue::U64(11));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
+    );
+}
+
+#[test]
+fn semi_join_hydration_snapshot_filters_missing_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(8),
+            Value::U64(12),
+            Value::String("Unknown Session".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
 fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();

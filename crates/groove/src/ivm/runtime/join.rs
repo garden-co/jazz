@@ -138,6 +138,114 @@ impl JoinState {
 
 impl AntiJoinState {
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply_semi(
+        &self,
+        left_arrangement: &mut AsOf<ArrangementState, SubTick>,
+        right_arrangement: &mut AsOf<ArrangementState, SubTick>,
+        left_descriptor: RecordDescriptor,
+        right_descriptor: RecordDescriptor,
+        _output_descriptor: &RecordDescriptor,
+        left_on: &[String],
+        right_on: &[String],
+        left_delta: &[RecordDelta],
+        right_delta: &[RecordDelta],
+        left_sub_tick: SubTick,
+        right_sub_tick: SubTick,
+        update_mode: ArrangementUpdateMode,
+    ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        if left_on.len() != right_on.len() {
+            return Err(IvmRuntimeError::JoinKeyArityMismatch {
+                left: left_on.len(),
+                right: right_on.len(),
+            });
+        }
+
+        let keyed_left_delta = keyed_join_deltas(&left_descriptor, left_on, left_delta)?;
+        let keyed_right_delta = keyed_join_deltas(&right_descriptor, right_on, right_delta)?;
+        let mut affected_keys = HashSet::<JoinKey>::new();
+        let mut old_right_counts = HashMap::<JoinKey, i64>::new();
+        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::new();
+        if update_mode == ArrangementUpdateMode::Accumulate {
+            for delta in &keyed_left_delta {
+                let key = &delta.key;
+                if affected_keys.insert(key.clone()) {
+                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_left_buckets.insert(
+                        key.clone(),
+                        left_arrangement
+                            .value()
+                            .bucket(key)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            for delta in &keyed_right_delta {
+                let key = &delta.key;
+                if affected_keys.insert(key.clone()) {
+                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_left_buckets.insert(
+                        key.clone(),
+                        left_arrangement
+                            .value()
+                            .bucket(key)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+        }
+        advance_arrangement(
+            left_arrangement,
+            &keyed_left_delta,
+            left_sub_tick,
+            update_mode,
+        )?;
+        advance_arrangement(
+            right_arrangement,
+            &keyed_right_delta,
+            right_sub_tick,
+            update_mode,
+        )?;
+
+        let mut deltas = Vec::new();
+        match update_mode {
+            ArrangementUpdateMode::Accumulate => {
+                for key in affected_keys {
+                    let old_right_count = old_right_counts.get(&key).copied().unwrap_or_default();
+                    let new_right_count = right_arrangement.value().key_count(&key);
+                    if old_right_count == 0 && new_right_count == 0 {
+                        continue;
+                    }
+                    let old_visible = if old_right_count > 0 {
+                        old_left_buckets.get(&key)
+                    } else {
+                        None
+                    };
+                    let new_visible = if new_right_count > 0 {
+                        left_arrangement.value().bucket(&key)
+                    } else {
+                        None
+                    };
+                    append_bucket_diff(&mut deltas, new_visible, old_visible);
+                }
+            }
+            ArrangementUpdateMode::Replace => {
+                let mut left_keys = HashSet::<JoinKey>::new();
+                for delta in &keyed_left_delta {
+                    let key = &delta.key;
+                    if left_keys.insert(key.clone()) && right_arrangement.value().key_count(key) > 0
+                    {
+                        append_bucket(&mut deltas, left_arrangement.value().bucket(key), 1);
+                    }
+                }
+            }
+        }
+
+        Ok(consolidate_deltas(deltas))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
         &self,
         left_arrangement: &mut AsOf<ArrangementState, SubTick>,
