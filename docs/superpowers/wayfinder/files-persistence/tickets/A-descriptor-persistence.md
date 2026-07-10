@@ -33,6 +33,9 @@ the encoding means for history/branch reads of past descriptors.
    `name`, `mime_type`, `size`. Shape strictly validated on write (like
    JSON-schema validation for JSON columns); readers lenient (unknown
    fields/versions tolerated; `url()` needs only the id).
+   _Amended same day (file-TTL feature decision, recorded in the PRD): an
+   optional `ttl` field naming a deployment-declared TTL class; absent =
+   permanent; the class is part of the object key and URL._
 3. **No immutability enforcement.** In-place edits, copies, hand-rolled
    descriptors: all legal, ordinary policy-gated writes. Body immutability
    lives at the bucket only (one grant per id ever + `If-None-Match: *`).

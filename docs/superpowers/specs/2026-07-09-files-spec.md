@@ -35,9 +35,15 @@ deliberate amendments in this spec:
    URLs simply 404 if no body exists.
 6. **Deletion is an explicit API and cleanup is bucket TTL.** Cell death
    never deletes objects. `jazz.files.delete(fileId)` — authorized for the
-   uploader identity or the backend — is the one way to remove a body.
-   Unclaimed uploads are garbage-collected by bucket lifecycle rules on a
-   `pending/` prefix, not by a server sweep.
+   uploader identity or the backend — is the one way to remove a body by
+   hand. Unclaimed uploads are garbage-collected by bucket lifecycle rules
+   on a `pending/` prefix, not by a server sweep.
+7. **Files can carry a TTL.** A file may opt into a **TTL class** at
+   creation (`fromBlob(blob, { ttl: "7d" })`) from a fixed,
+   deployment-declared set; the class rides in the descriptor and the
+   object key (`{app}/t7d/{id}`), and expiry is the same bucket lifecycle
+   mechanism — one rule per class, no server machinery. Absent class =
+   permanent.
 
 Where the design doc and this spec disagree on those points, this spec wins.
 
@@ -63,7 +69,9 @@ Files become first-class in Jazz through a **file column**: a column type,
 usable on any table, whose cell holds a **file descriptor** — a small
 canonical-JSON value naming one body: required `v: 1` plus client-minted
 **file id** (mandated cryptographically random, UUIDv4-grade), `name`,
-`mime_type`, `size`. At the type layer this is a schema-level
+`mime_type`, `size`, and an optional `ttl` (a TTL class from the
+deployment's declared set; absent = permanent). At the type layer this is a
+schema-level
 `ColumnType::File` that lowers onto the existing text value type — the same
 facade pattern JSON columns already use — so no value-enum, row-format, or
 binding changes exist anywhere. The write path validates the descriptor's
@@ -76,19 +84,22 @@ in-place edits and copies are ordinary policy-gated writes, and the
 any column.
 
 The **file body** — the bytes — lives on a public-read S3-compatible bucket,
-keyed `{app}/{file-id}`, uploaded directly by the client under a
-server-issued **upload grant**. Body immutability is enforced by the bucket,
-not by validation: an id is never granted twice (the grant ledger is
-permanent) and every presigned PUT carries a conditional-write guard, so an
-existing object can never be overwritten. Uploads land under a
-`pending/{app}/{file-id}` key; **release** completes the multipart (the edge
-holds the `UploadId`), server-side-copies the object to its permanent key,
-and marks the grant claimed — no HEAD, no size check, no acceptance-time
-role at all. A client that lies about releasing harms only itself: its URL
-404s. Unreleased uploads are garbage-collected by a bucket lifecycle rule
-expiring the `pending/` prefix (plus the native incomplete-multipart abort
-rule) — the lease window _is_ the lifecycle expiry, and no server sweep
-exists.
+keyed `{app}/{file-id}` (or `{app}/t{class}/{file-id}` for TTL'd files),
+uploaded directly by the client under a server-issued **upload grant**. Body
+immutability is enforced by the bucket, not by validation: an id is never
+granted twice (the grant ledger is permanent) and every presigned PUT
+carries a conditional-write guard, so an existing object can never be
+overwritten. Uploads land under a `pending/{app}/{file-id}` key; **release**
+completes the multipart (the edge holds the `UploadId`), server-side-copies
+the object to its final key — permanent or TTL-class prefix — and marks the
+grant claimed — no HEAD, no size check, no acceptance-time role at all. A
+client that lies about releasing harms only itself: its URL 404s.
+Unreleased uploads are garbage-collected by a bucket lifecycle rule expiring
+the `pending/` prefix (plus the native incomplete-multipart abort rule) —
+the lease window _is_ the lifecycle expiry, and no server sweep exists.
+TTL'd files ride the very same mechanism: one lifecycle rule per declared
+class expires its prefix, with the clock starting at release (the copy is
+what creates the object).
 
 Creation is fully offline-capable: `fromBlob` stages the body in the device
 file store and yields a descriptor to write into a cell; the SDK holds that
@@ -98,10 +109,12 @@ present when they sync, not a server-enforced gate. Later, independent
 writes bypass the held unit.
 
 Reading a file _is the web_: one stable, unauthenticated, public URL —
-`GET /files/{app}/{file-id}` — redirecting to the public object URL. Bodies
-are immutable, so every response carries long-lived immutable cache headers
-with no signature expiry asterisk: trivially CDN-cacheable, cheap to serve,
-cheap to bill. The SDK offers no byte-read API: apps `fetch` the URL and
+`GET /files/{app}/{file-id}`, with the TTL class in the path for classed
+files — redirecting to the public object URL. Bodies are immutable, so
+permanent files carry long-lived immutable cache headers with no signature
+expiry asterisk, and TTL'd files carry `Cache-Control: max-age` capped to
+their class duration: trivially CDN-cacheable, cheap to serve, cheap to
+bill. The SDK offers no byte-read API: apps `fetch` the URL and
 derive blobs in userland. Offline reads are provided _below_ the URL by
 per-platform interceptors — a Jazz-shipped service worker on web, a
 loopback HTTP server inside the native module on React Native — each
@@ -114,11 +127,12 @@ as metadata) plus offline capability, not byte-level access control. Bytes
 never transit Jazz nodes and never enter Jazz storage, the sync lane, or
 the content channel.
 
-Removing a body is an explicit act: `jazz.files.delete(fileId)`, authorized
-for the uploader identity (recorded in the ledger at grant time) or the
-backend surface. Cell death — overwrites, nulls, row deletes — never
-deletes objects; descriptors left pointing at a deleted body are an
-ordinary, legal state whose URL 404s.
+Removing a body is an explicit act — `jazz.files.delete(fileId)`,
+authorized for the uploader identity (recorded in the ledger at grant time)
+or the backend surface — or time's: a TTL'd file's body is deleted by the
+bucket when its class expires. Cell death — overwrites, nulls, row deletes
+— never deletes objects; descriptors left pointing at a deleted or expired
+body are an ordinary, legal state whose URL 404s.
 
 ## User Stories
 
@@ -184,141 +198,158 @@ ordinary, legal state whose URL 404s.
 17. As an app developer, I want uploads to go directly from the client to
     the object store under a presigned grant, so that my server's bandwidth
     bill doesn't scale with upload traffic.
-18. As an app developer, I want the SDK to hold the transaction that writes
+18. As an app developer, I want `fromBlob(blob, { ttl: "7d" })` to pick a
+    TTL class from the deployment's declared set — recorded in the
+    descriptor, validated at shape-check and grant time, fixed for the
+    file's life — so that ephemeral files clean themselves up without my
+    code remembering to delete them.
+19. As an app developer, I want the SDK to hold the transaction that writes
     a fromBlob descriptor at the outbox until the upload is released, so
     that files created through the upload path are fetchable by the time
     other devices see them — as a courtesy of the SDK, not a server gate.
-19. As an app developer, I want to _choose_ early visibility when I need it
+20. As an app developer, I want to _choose_ early visibility when I need it
     — by putting the file cell in its own row (an attachments row) so the
     referencing row syncs immediately — so that "message text now,
     attachment when uploaded" is my app's decision, not a forced protocol
     semantic.
-20. As an app developer, I want the body staged in the device file store at
+21. As an app developer, I want the body staged in the device file store at
     least until the writing transaction is accepted upstream (never evicted
     before then — it may be the only copy), so that upload resume works
     across restarts and my own files render offline from day one.
 
 ### Reading & serving
 
-21. As an end user, I want every file's URL to work in an `<img>` tag, a
+22. As an end user, I want every file's URL to work in an `<img>` tag, a
     `<video>` element (including Range/seeking, served natively by the
     store), or a pasted link with no auth, cookies, or headers, so that
     files behave like normal web resources.
-22. As an end user, I want file bytes served from a public-read bucket
-    through a CDN with long-lived immutable caching and no signature expiry,
-    so that media-heavy apps load fast and caches never sour.
-23. As an app developer, I want reads to be URL-only — I `fetch` the URL and
+23. As an end user, I want file bytes served from a public-read bucket
+    through a CDN with no signature expiry — long-lived immutable caching
+    for permanent files, `Cache-Control: max-age` capped to the class
+    duration for TTL'd ones — so that media-heavy apps load fast and caches
+    never sour or outlive a file's intent by more than one class length.
+24. As an app developer, I want reads to be URL-only — I `fetch` the URL and
     derive blobs in userland — so that the SDK surface stays tiny and the
     read path is entirely the web platform's.
-24. As an app developer, I want it stated plainly that file bytes are
+25. As an app developer, I want it stated plainly that file bytes are
     readable by anyone holding the URL — the unguessable file id is the only
     barrier — so that I never mistake the row policies (which gate metadata)
     for byte confidentiality, and keep genuinely sensitive content out of
     files or encrypt it myself.
-25. As an operator, I want downloads to be a redirect to the public object
+26. As an operator, I want downloads to be a redirect to the public object
     URL with zero policy evaluation and zero Jazz DB involvement, so that
     serving cost is flat and storage/egress is what I bill.
-26. As an operator, I want the serving layer to send
+27. As an operator, I want the serving layer to send
     `X-Content-Type-Options: nosniff` and enforce a Content-Disposition
     policy (inline only for an allowlist of render-safe types; everything
     else `attachment`), so that my files domain cannot be turned into an XSS
     or phishing host.
-27. As an end user on web, I want a Jazz-shipped service worker
+28. As an end user on web, I want a Jazz-shipped service worker
     intercepting `/files/*` — serving this device's staged bodies and a
     read-through cache of downloads — so that my own files render
     immediately (offline, pre-release) and any file opened once is
     readable offline, all through plain `<img>` tags.
-28. As an end user on React Native, I want the native module to run a
+29. As an end user on React Native, I want the native module to run a
     loopback HTTP server with the same serve-staged/serve-cached/
     proxy-and-cache behavior, with `file.url()` returning the loopback URL
     on RN, so that `<Image>`, video components, and WebViews get the same
     offline story with no per-component code.
-29. As an app developer on RN, I want a canonical-URL accessor alongside
+30. As an app developer on RN, I want a canonical-URL accessor alongside
     the loopback `url()` (e.g. `url({ canonical: true })`), so that URLs I
     store, sync, or share never leak a device-local address.
-30. As an operator, I want the loopback server bound to 127.0.0.1 on a
+31. As an operator, I want the loopback server bound to 127.0.0.1 on a
     random port with a per-boot secret path segment, so that other apps on
     the device cannot enumerate or fetch bodies through it.
-31. As an app developer, I want the interceptor's body cache LRU-evicted
+32. As an app developer, I want the interceptor's body cache LRU-evicted
     under a configurable budget (staged bodies exempt until acceptance),
     so that offline availability never grows device storage without bound —
     eviction is reversible; bodies are refetchable by URL.
 
 ### Permissions & integrity
 
-32. As an app developer, I want the host table's row policies — read,
+33. As an app developer, I want the host table's row policies — read,
     update, delete — to be the only permission surface for file cells,
     gating descriptor sync and every descriptor write exactly as on any
     column, so that there is nothing file-specific to learn and nothing
     that can silently disagree with row permissions.
-33. As an app developer, I want file ids mandated to be minted from a
+34. As an app developer, I want file ids mandated to be minted from a
     cryptographic RNG with at least UUIDv4 entropy, so that the one value
     guarding all bytes is a real barrier, not a `Math.random()` accident.
-34. As an app developer, I want grant issuance to refuse any file id the
+35. As an app developer, I want grant issuance to refuse any file id the
     ledger has ever seen, and the presigned PUT to carry a conditional-write
     guard (`If-None-Match: *`), so that no client — however malicious — can
     ever overwrite an existing body: immutability is the bucket's law, not
     a validation promise.
-35. As an app developer, I want release to be idempotent — a retried release
+36. As an app developer, I want release to be idempotent — a retried release
     for an already-claimed grant returns the recorded outcome — so that a
     dropped ack never makes a completed upload look failed.
-36. As an app developer, I want a client that lies about its upload (wrong
+37. As an app developer, I want a client that lies about its upload (wrong
     size in the descriptor, release without bytes) to harm only itself —
     its own URL 404s or misdescribes its own body — so that no verification
     machinery exists on anyone else's path.
-37. As an operator, I want unreleased uploads garbage-collected by the
+38. As an operator, I want unreleased uploads garbage-collected by the
     bucket itself — a lifecycle rule expiring the `pending/` prefix after
     the lease window, plus the native incomplete-multipart abort rule — so
     that grant farming accumulates nothing and no server sweep machinery
     exists.
-38. As an operator, I want the lease window (= the `pending/` lifecycle
+39. As an operator, I want the lease window (= the `pending/` lifecycle
     expiry) to be my knob trading abuse-window against resume-window, so
     that I can tune it per deployment; per-identity rate limits and quotas
     on grant issuance come later.
 
 ### Deletion & history
 
-39. As an end user, I want deleting a file to be an explicit act —
+40. As an end user, I want deleting a file to be an explicit act —
     `jazz.files.delete(fileId)` — so that removing a body is deliberate and
     auditable, never a side effect of editing rows.
-40. As an app developer, I want file deletion authorized for the uploader
+41. As an app developer, I want file deletion authorized for the uploader
     identity (recorded in the ledger at grant time) and for the backend
     surface, so that users can remove what they uploaded, apps can moderate
     and clean up through their backend, and richer rules stay app logic.
-41. As an operator, I want the core to execute deletes durably — a durable
+42. As an operator, I want the core to execute deletes durably — a durable
     queue of idempotent, retried DELETEs — so that a delete once accepted
     always eventually happens, with no racing deleters.
-42. As an app developer, I want cell death (overwrite, null, row delete) to
+43. As an app developer, I want cell death (overwrite, null, row delete) to
     never touch objects, so that copies and history stay coherent by
-    default and storage reclamation is always the explicit API; bodies
-    persist until someone deletes them.
-43. As an app developer, I want historical reads and branches to surface a
-    descriptor at a past cut even after its body is deleted, so that
-    bodyless history is a defined semantic rather than a crash (the URL
-    404s; there is no SDK body read to error).
-44. As an end user, I want a deleted file's URL to stop serving bytes once
+    default and storage reclamation is always the explicit API or a TTL
+    class; bodies persist until someone — or time — deletes them.
+44. As an end user, I want a TTL'd file's body deleted by the bucket itself
+    when its class expires (the clock starting at release), with the
+    descriptor cells remaining and the URL 404ing, so that ephemeral
+    content leaves no storage bill behind and expiry needs no server
+    machinery.
+45. As an app developer, I want historical reads and branches to surface a
+    descriptor at a past cut even after its body is deleted or expired, so
+    that bodyless history is a defined semantic rather than a crash (the
+    URL 404s; there is no SDK body read to error).
+46. As an end user, I want a deleted file's URL to stop serving bytes once
     the object is deleted (with CDN-cached copies aging out on their own),
     so that deletion means withdrawal, with the CDN caveat stated honestly.
-45. As an app developer, I want two devices concurrently swapping the same
+47. As an app developer, I want two devices concurrently swapping the same
     cell offline to resolve like any conflicting column write — one value
     wins, nothing file-specific happens, no body is deleted — so that
     concurrency needs no file-specific rules.
 
 ### Operations & deployment
 
-46. As an operator, I want the backend contract to be exactly the
+48. As an operator, I want the backend contract to be exactly the
     S3-compatible API (conditional presigned single/multipart PUT, multipart
     create/complete/abort, server-side copy, public GET, DELETE, and
     prefix-scoped lifecycle expiry + incomplete-multipart abort rules), so
     that S3, R2, minio, and Tigris all work unchanged.
-47. As an operator, I want the bucket policy to be public GetObject with
+49. As an operator, I want the bucket policy to be public GetObject with
     listing denied, so that unguessable ids actually protect bodies and the
     bucket can sit directly behind a CDN.
-48. As an operator, I want edges and the core to hold the object-store
+50. As an operator, I want to declare the deployment's TTL class set
+    (recommended defaults: 1d, 7d, 30d) and get exactly one lifecycle rule
+    per class alongside the `pending/` and incomplete-multipart rules, so
+    that file expiry is a handful of bucket rules I can audit, not a
+    service I run.
+51. As an operator, I want edges and the core to hold the object-store
     credentials (edges presign, complete multiparts, and perform the
     release copy; the core executes deletes), so that clients never see
     store credentials.
-49. As a developer running tests or local dev, I want the file plane to run
+52. As a developer running tests or local dev, I want the file plane to run
     against minio or an in-process fake (including conditional writes,
     server-side copy, and manually-triggerable lifecycle expiry), so that no
     cloud account is needed to develop or CI-test file features.
@@ -329,12 +360,13 @@ ordinary, legal state whose URL 404s.
   endpoint.** Grant requests, part-URL refresh, release confirmation, and
   file deletion are request/response message pairs on the client's
   already-authenticated sync connection — no second credential system. The
-  only HTTP surface is the serving endpoint `GET /files/{app}/{file-id}`,
-  public and unauthenticated, which 302-redirects to the public object URL.
-  The path mirrors the object key `{app}/{file-id}` exactly, so serving
-  needs no lookup — deployments may equally point a CDN straight at the
-  bucket. There is no URL-mint operation anywhere — the URL is a pure
-  function of app and file id, computable locally.
+  only HTTP surface is the serving endpoint `GET /files/{app}/{file-id}`
+  (TTL'd files: `GET /files/{app}/t{class}/{file-id}`), public and
+  unauthenticated, which 302-redirects to the public object URL. The path
+  mirrors the object key exactly, so serving needs no lookup — deployments
+  may equally point a CDN straight at the bucket. There is no URL-mint
+  operation anywhere — the URL is a pure function of the descriptor (app,
+  ttl class, file id), computable locally.
 - **The bucket is public-read: GetObject allowed anonymously, listing
   denied.** No presigned GETs exist, so immutable cache headers carry no
   signature-expiry contradiction; Range requests (video seeking) are served
@@ -346,7 +378,9 @@ ordinary, legal state whose URL 404s.
   response. Disposition policy: `inline` only for an implementation-owned
   allowlist of render-safe types (image, video, audio, PDF — never
   `text/html` or `image/svg+xml`); everything else is served as
-  `attachment`.
+  `attachment`. Cache policy: permanent files get long-lived
+  `Cache-Control: immutable`; TTL'd files get `max-age` capped to their
+  class duration — both pinned at grant time.
 - **File is a schema-level column type lowering onto text — the JSON-column
   facade precedent.** A new `ColumnType::File` at the schema layer; the
   cell value is `Value::Text` carrying the descriptor as canonical JSON. No
@@ -354,8 +388,10 @@ ordinary, legal state whose URL 404s.
   the storage format version is untouched. The write path gets one
   validation branch beside the existing JSON one: strict _shape_ validation
   — canonical form (compact, sorted keys), required `v: 1`, exactly `id`,
-  `name`, `mime_type`, `size`, id well-formed. Readers are lenient: unknown
-  future fields/versions are tolerated and `url()` needs only the id.
+  `name`, `mime_type`, `size` plus an optional `ttl` (one of the
+  deployment's declared class names), id well-formed. Readers are lenient:
+  unknown future fields/versions are tolerated and `url()` needs only the
+  id (and ttl class, when present).
 - **The descriptor is a convention, not an enforced invariant.** No
   immutability enforcement: in-place field edits, copies into other cells,
   and hand-rolled descriptors are ordinary writes under the ordinary update
@@ -375,11 +411,22 @@ ordinary, legal state whose URL 404s.
   fetch them. Body _deletion_ has its own rule (below) because bodies
   outlive any particular cell.
 - **Body immutability is the bucket's law.** Object addressing is
-  `{app}/{file-id}`, never content-derived. The grant ledger is permanent —
-  an id is never grantable twice — and every presigned PUT carries
-  `If-None-Match: *` (S3 conditional write), so the store itself fails any
-  write to an occupied key with 412. No `hash` field, no dedup, no
-  refcounting.
+  `{app}/{file-id}` (permanent) or `{app}/t{class}/{file-id}` (TTL'd),
+  never content-derived. The grant ledger is permanent — an id is never
+  grantable twice — and every presigned PUT carries `If-None-Match: *`
+  (S3 conditional write), so the store itself fails any write to an
+  occupied key with 412. No `hash` field, no dedup, no refcounting.
+- **File TTL is a fixed set of classes, realized as key prefixes.** The
+  deployment declares its class set (recommended defaults: 1d, 7d, 30d);
+  permanent is the default and keeps the unprefixed key. Each class gets
+  exactly one bucket lifecycle expiration rule on its prefix — the same
+  mechanism that already cleans `pending/`, so file expiry adds zero server
+  machinery. The class is chosen at creation (`fromBlob(blob, { ttl })`),
+  recorded in the descriptor, validated against the class set at
+  shape-validation and grant time, and fixed for the file's life. The
+  expiry clock starts at release — the server-side copy is what creates the
+  object under the class prefix. Expiry deletes the body only: descriptor
+  cells remain and their URLs 404, the already-legal bodyless state.
 - **The grant ledger is small and permanent: file id → uploader identity,
   granted/claimed state, object key.** It is consulted exactly three times:
   at grant issuance (refuse any id ever seen), at release (mark claimed —
@@ -393,10 +440,12 @@ ordinary, legal state whose URL 404s.
   transaction; (2) the SDK holds that transaction at the outbox until
   release — a client-side courtesy so upload-path descriptors have bytes
   when they sync — while later independent commit units bypass it (causally
-  dependent writes queue behind it); (3) grant request `(file id, size)`
-  over sync — any authenticated session may request grants; abuse is
-  bounded by the `pending/` lifecycle expiry, with per-identity rate limits
-  as future work; the edge registers the grant in the ledger, initiates the
+  dependent writes queue behind it); (3) grant request
+  `(file id, size, ttl class?)` over sync — any authenticated session may
+  request grants; abuse is bounded by the `pending/` lifecycle expiry, with
+  per-identity rate limits as future work; the edge validates any requested
+  ttl against the deployment's class set, registers the grant in the
+  ledger, initiates the
   multipart upload where needed (it owns the `UploadId`, stored with the
   grant), and returns the pending object key `pending/{app}/{file-id}`,
   lease expiry, and conditional presigned URLs (single PUT below a
@@ -405,10 +454,11 @@ ordinary, legal state whose URL 404s.
   may request fresh part URLs for the same grant within the lease (presign
   windows are hours, leases are days); (5) **release** over sync carries
   the part ETag list; the edge completes the multipart, server-side-copies
-  `pending/{app}/{file-id}` → `{app}/{file-id}` (multipart copy above the
-  single-copy size limit), and marks the grant claimed in the ledger —
-  idempotent end to end; the held transaction then enters the ordinary
-  lane. There is no step six: no HEAD, no size check, no file-specific
+  `pending/{app}/{file-id}` to the final key — `{app}/{file-id}`, or
+  `{app}/t{class}/{file-id}` for TTL'd files, whose expiry clock starts at
+  this copy — (multipart copy above the single-copy size limit), and marks
+  the grant claimed in the ledger — idempotent end to end; the held
+  transaction then enters the ordinary lane. There is no step six: no HEAD, no size check, no file-specific
   acceptance. A client that never releases leaves only a pending object the
   bucket will expire; a client that lies harms only its own URL.
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
@@ -472,7 +522,8 @@ ordinary, legal state whose URL 404s.
   (manually triggerable in tests).
 - **TS API:** `fromBlob(blob, opts)` (create; returns a descriptor handle
   to write into cells, background upload; creation input is a Blob so
-  `size` is always known — there is no `fromStream`), `file.url()` (the
+  `size` is always known — there is no `fromStream`; `opts.ttl` picks a
+  TTL class from the deployment's set), `file.url()` (the
   stable public URL on web/server, the loopback URL on RN; computed
   synchronously and locally; `url({ canonical: true })` always returns the
   public one), `jazz.files.delete(fileId)`, and an observable upload state
@@ -486,8 +537,11 @@ ordinary, legal state whose URL 404s.
   registered in the permanent grant ledger, and its lease is realized as
   bucket lifecycle expiry on the pending prefix; **body verification** is
   removed as a concept — nothing verifies bodies; **release** becomes
-  complete-multipart + copy-to-permanent-key + mark-claimed; the descriptor
-  loses its `content hash` and `visibility` fields; the **publish** and
+  complete-multipart + copy-to-final-key + mark-claimed; a **TTL class**
+  entry is added (a deployment-declared expiry class realized as a key
+  prefix with one lifecycle rule); the descriptor
+  loses its `content hash` and `visibility` fields and gains an optional
+  `ttl`; the **publish** and
   **capability URL** entries are removed — every file body is
   world-readable by URL, and row policies gate only the metadata.
 
@@ -503,13 +557,15 @@ ordinary, legal state whose URL 404s.
   developer):
   - Rust: jazz-tools-style integration tests (a `JazzServer` with
     `TestingClient`s, or `test_client` where one runtime suffices) covering
-    descriptor shape validation (malformed rejected; in-place edit, copy,
-    and hand-rolled descriptor all accepted), grant/release flow (release =
-    complete + copy + claim; idempotent release retry; ledger refuses a
-    known id; conditional PUT 412s against an existing object), lifecycle
-    expiry of unreleased uploads (fake-triggered; released files
-    untouched), and explicit deletion (uploader allowed, other identity
-    denied, backend allowed; durable retried DELETEs; URL 404s after).
+    descriptor shape validation (malformed rejected; a `ttl` outside the
+    deployment's class set rejected; in-place edit, copy, and hand-rolled
+    descriptor all accepted), grant/release flow (release = complete + copy
+    to the final key, permanent or class prefix; idempotent release retry;
+    ledger refuses a known id; conditional PUT 412s against an existing
+    object), lifecycle expiry of unreleased uploads and of TTL'd files
+    (fake-triggered; permanent and unexpired files untouched), and explicit
+    deletion (uploader allowed, other identity denied, backend allowed;
+    durable retried DELETEs; URL 404s after).
   - TS: tests through the public `fromBlob`/`url()`/`delete`/upload-state
     surface against a really-served endpoint, in the style of the existing
     client/db integration tests in the TS SDK.
@@ -528,7 +584,10 @@ ordinary, legal state whose URL 404s.
   file-writing transaction, and a dependent one queuing behind it; offline
   create → later release; a copied descriptor serving bytes, then 404ing
   after the uploader deletes; delete authorization (uploader yes, stranger
-  no, backend yes); a lying release (no bytes uploaded) accepted and
+  no, backend yes); a TTL'd file landing under its class prefix, serving
+  with `max-age` capped to the class, and 404ing after fake-triggered
+  expiry while its descriptor cells remain; a lying release (no bytes
+  uploaded) accepted and
   404ing only for its own descriptor; concurrent same-cell swaps resolving
   to one winner with no object deleted; bodyless historical read after
   explicit deletion; interceptor behavior (web SW and RN loopback): staged
@@ -557,8 +616,13 @@ ordinary, legal state whose URL 404s.
   cost of previous-value comparisons and object-store round-trips on the
   write path.
 - Automatic deletion on cell death, and any GC of released-but-unreferenced
-  bodies. Explicit `jazz.files.delete` is the only reclamation; apps that
-  want tidy storage delete when their domain says so.
+  bodies. Explicit `jazz.files.delete` and TTL-class expiry are the only
+  reclamation; apps that want tidy storage delete when their domain says
+  so or create with a `ttl`.
+- Extending or shortening a file's TTL after creation — a re-copy would
+  reset the lifecycle clock; deferred until a real need appears. Exact
+  per-file expiry timestamps likewise (they need scheduled-delete
+  machinery; classes ride bucket rules).
 - Content hashing, content-hash dedup, and refcounting (no `hash` field;
   apps wanting tamper-evidence add their own metadata column).
 - Lists of files in one cell (`list(file)` columns); use multiple columns
@@ -585,7 +649,11 @@ ordinary, legal state whose URL 404s.
   columns written in the same transaction as a fromBlob descriptor
   becoming visible only when the hold releases (apps wanting early
   visibility model the file cell in its own row); storage persisting until
-  an explicit delete — cell death never reclaims it; on web, no SW
+  an explicit delete or TTL-class expiry — cell death never reclaims it; a
+  TTL'd file's expiry clock starting at release, not creation, and its
+  CDN-cached copies serving up to one class-length past expiry (`max-age`
+  is capped to the class, not synchronized with it — apps needing tighter
+  bounds pick a shorter class); on web, no SW
   controls the very first page load, so requests then fall through to the
   network and the Blob-in-hand preview remains the guaranteed pre-release
   path; CDN-cached copies of a deleted file's bytes persisting until cache
@@ -598,7 +666,10 @@ ordinary, legal state whose URL 404s.
   not configuration.
 - The lease window default is on the order of days, realized as the
   `pending/` prefix lifecycle expiry (day granularity), and is
-  operator-facing alongside the incomplete-multipart abort rule.
+  operator-facing alongside the incomplete-multipart abort rule and the
+  per-class TTL rules. The TTL class set (recommended defaults: 1d, 7d,
+  30d) is deployment configuration, not an implementation constant;
+  lifecycle granularity makes classes day-grained.
 - The design doc's "Rejected alternatives" section is required reading
   before proposing any deviation from the shapes above — with the caveats
   listed in this spec's header.
