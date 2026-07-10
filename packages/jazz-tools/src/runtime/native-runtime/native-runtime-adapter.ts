@@ -3230,8 +3230,11 @@ function materializeRelationRows(
     childRowsBySourceAndRelation.set(key, children);
   }
   const materialized = new Map<string, RowState>();
-  let roots = rows
-    .slice(0, materialization.rootTable === null ? rows.length : rootCount)
+  const rootCandidates =
+    materialization.rootTable === null
+      ? rows.slice(0, rootCount)
+      : rows.filter((row) => row.table === materialization.rootTable).slice(0, rootCount);
+  let roots = rootCandidates
     .map((row) =>
       materializeRelationRow(
         row,
