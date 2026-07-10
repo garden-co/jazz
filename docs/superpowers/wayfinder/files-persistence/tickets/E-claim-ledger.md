@@ -40,9 +40,12 @@ ledger job is bucket-derived:
    `jazz.files.delete` = HEAD + compare (backend skips) + DELETE final +
    PUT zero-byte `tombstones/{app}/{id}`.
 4. **Tombstones close deleted-id resurrection:** issuance checks them;
-   they are permanent zero-byte objects (negligible growth). TTL-expired
-   ids REMAIN re-grantable (lifecycle can't write tombstones) — accepted,
-   stated semantic: don't trust a dangling TTL'd reference.
+   they are permanent zero-byte objects (negligible growth). Only
+   never-released ids (pending/ expired before release) remain
+   re-grantable — accepted, stated semantic: don't trust a dangling
+   reference that never uploaded. _(An interim file-TTL-classes feature
+   made TTL-expired ids re-grantable too; it was reverted the same day —
+   released ids are now always protected by final key or tombstone.)_
 5. **Edges are fully stateless:** the grant response hands the multipart
    `UploadId` to the client, which persists it in its resume record; any
    edge can refresh part URLs or perform the release. No edge storage, no
@@ -51,3 +54,18 @@ ledger job is bucket-derived:
 Growth story: zero. Server-side file-plane state: zero.
 
 Assets: PRD + explainer amended in the same commit.
+
+## Amendment (2026-07-10, later): identity-bound ids supersede the bucket-derived checks
+
+A user-driven grilling ("id management brings a lot of complexity")
+replaced entropy-only ids with **identity-bound ids**: the object key is
+`{app}[/t{class}]/{identity}/{random}`, and grant/delete authorization is
+a pure identity-segment comparison against the session. Consequences,
+recorded in the PRD: **no issuance HEADs, no tombstones, no blinded
+uploader metadata** (all three dissolved); third-party URL takeover is
+impossible by construction; only the original owner can re-claim their own
+id; TTL classes were reinstated (schema-declared, class embedded in the id
+string); ids are offline-mintable from day zero; URLs publicly carry the
+uploader's identity id (stated privacy semantic). "Zero server-side
+file-plane state" still holds — now with zero bucket reads at issuance
+too. Edges remain stateless; the client still holds the `UploadId`.
