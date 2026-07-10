@@ -513,7 +513,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
-      ? (this.pendingRow(tx, table, rowId) ?? this.readRow(table, rowId, writeIdentity))
+      ? (this.pendingRow(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
       : this.readRow(table, rowId, writeIdentity);
     let cells: Uint8Array;
     try {
@@ -985,10 +985,27 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
+    if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = identity
-      ? this.db.allForIdentity(query, identity, readOptions())
-      : this.db.all(query, readOptions());
+    const rows = this.db.allForIdentity(query, identity, readOptions());
+    return rowsFromBatches(readRowBatches(rows), this.schema).find(
+      (row) => row.table === table && row.id === formatUuid(rowId),
+    );
+  }
+
+  private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
+    const exactReader = (
+      this.db as { localCurrentRow?: (table: string, rowId: Uint8Array) => Uint8Array }
+    ).localCurrentRow;
+    if (exactReader) {
+      const rows = rowsFromBatches(
+        readRowBatches(exactReader.call(this.db, table, rowId)),
+        this.schema,
+      );
+      return rows[0];
+    }
+    const query = this.prepareQuery(JSON.stringify({ table }));
+    const rows = this.db.all(query, readOptions());
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -1023,9 +1040,9 @@ export class NativeRuntimeAdapter implements Runtime {
     rowId: Uint8Array,
     patch: Record<string, Value>,
     tx: PendingTx,
-    identity?: Uint8Array,
+    _identity?: Uint8Array,
   ): RowState {
-    const current = this.pendingRow(tx, table, rowId) ?? this.readRow(table, rowId, identity);
+    const current = this.pendingRow(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId);
     const merged: Record<string, Value> = {};
     for (const column of this.table(table).columns) {
       const existing = current?.valuesByColumn?.get(column.name);
