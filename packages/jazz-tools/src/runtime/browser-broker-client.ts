@@ -393,6 +393,9 @@ export class BrowserBrokerClient {
         brokerPingIntervalMs: this.options.brokerPingIntervalMs,
         brokerPongTimeoutMs: this.options.brokerPongTimeoutMs,
         storageResetTimeoutMs: this.options.storageResetTimeoutMs,
+        // The core replays this to the broker after reconnects; without it a
+        // tab hidden since birth would be replayed as visible.
+        visibility: this.visibility,
       });
       this.flushQueuedEvents();
     })();

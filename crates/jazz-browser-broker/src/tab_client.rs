@@ -157,6 +157,10 @@ pub struct TabClientOptions {
     pub broker_ping_interval_ms: Option<f64>,
     pub broker_pong_timeout_ms: Option<f64>,
     pub storage_reset_timeout_ms: Option<f64>,
+    /// The tab's visibility at construction time. The core replays this to the
+    /// broker after a reconnect, so it must match the hello the shell sent, not
+    /// assume the tab was visible.
+    pub visibility: Option<Visibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -393,7 +397,7 @@ impl TabClientCore {
             role: Role::Follower,
             leader_tab_id: None,
             leadership_id: 0,
-            visibility: Visibility::Visible,
+            visibility: options.visibility.unwrap_or(Visibility::Visible),
             closed: false,
             reconnecting: false,
             has_port: false,

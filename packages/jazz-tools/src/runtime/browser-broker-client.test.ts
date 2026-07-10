@@ -335,6 +335,54 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("replays the initial visibility on reconnect for a tab that was never visible", async () => {
+    const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a", "instance-b"] });
+
+    // No reportVisibility call: a background tab that never becomes visible
+    // only ever communicates its visibility through the connect options.
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "hidden",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: {
+          locks: { request() {} },
+        },
+      },
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "broker-ping",
+      brokerInstanceId: "instance-b",
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(
+      () =>
+        env.workers[1] !== undefined &&
+        env.workers[1].port.postedMessages.some(
+          (message) => (message as { type?: unknown }).type === "visibility",
+        ),
+      300,
+      "reconnected client should replay its visibility",
+    );
+
+    expect(env.workers[1]!.port.postedMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "visibility",
+          brokerInstanceId: "instance-b",
+          visibility: "hidden",
+        }),
+      ]),
+    );
+
+    await client.shutdown();
+  });
+
   it("uses an explicit broker worker URL override", async () => {
     const env = createFakeWorkerEnv();
 

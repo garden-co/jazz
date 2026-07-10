@@ -13,6 +13,7 @@ fn new_client() -> TabClientCore {
         broker_ping_interval_ms: None,
         broker_pong_timeout_ms: None,
         storage_reset_timeout_ms: None,
+        visibility: None,
     })
 }
 
@@ -216,6 +217,35 @@ fn reconnect_replays_the_latest_reported_visibility() {
     client.handle(TabClientEvent::VisibilityReported {
         visibility: Visibility::Hidden,
     });
+
+    control(&mut client, broker_hello("instance-b"));
+    client.handle(TabClientEvent::PortAttached);
+    control(&mut client, broker_hello("instance-b"));
+    let commands = client.handle(TabClientEvent::ReconnectFinished { error: None });
+
+    assert_eq!(
+        posted_messages(&commands),
+        vec![&TabMessage::Visibility {
+            broker_instance_id: "instance-b".to_string(),
+            visibility: Visibility::Hidden,
+        }]
+    );
+}
+
+#[test]
+fn reconnect_replays_the_initial_visibility_from_options() {
+    // A tab hidden since birth never fires VisibilityReported; the replay must
+    // come from the constructor options, not a hardcoded Visible default.
+    let mut client = TabClientCore::new(TabClientOptions {
+        tab_id: "tab-a".to_string(),
+        broker_ping_interval_ms: None,
+        broker_pong_timeout_ms: None,
+        storage_reset_timeout_ms: None,
+        visibility: Some(Visibility::Hidden),
+    });
+    client.handle(TabClientEvent::PortAttached);
+    control(&mut client, broker_hello(INSTANCE));
+    client.handle(TabClientEvent::ConnectCompleted);
 
     control(&mut client, broker_hello("instance-b"));
     client.handle(TabClientEvent::PortAttached);
@@ -596,6 +626,7 @@ fn liveness_uses_normalized_ping_plus_pong_and_expiry_reconnects() {
         broker_ping_interval_ms: Some(10.0),
         broker_pong_timeout_ms: Some(20.0),
         storage_reset_timeout_ms: None,
+        visibility: None,
     });
     client.handle(TabClientEvent::PortAttached);
     control(&mut client, broker_hello(INSTANCE));
