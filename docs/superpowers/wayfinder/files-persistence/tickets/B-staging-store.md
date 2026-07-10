@@ -57,6 +57,9 @@ contract with idempotent sweep, demote-at-acceptance) is preserved as the
 package effort's starting inventory:
 [offline package — design inventory](../notes/offline-package-inventory.md).
 
-PRD amendment flagged: the v1 offline promises (interceptors, offline
-creation from day one) become opt-in-package territory; the edit rides
-along with the destination spec's publication.
+PRD amended 2026-07-10 (same session): amendment 9 (invisible core) added
+to `docs/superpowers/specs/2026-07-09-files-spec.md`, with the solution
+narrative, user stories 14/20/22/30–34, upload flow, device-file-store and
+reads bullets, TS API (`canonical` retired), testing scenarios, out-of-
+scope, and stated semantics all updated; the slice-1 spec's deferred-work
+pointers updated to match.

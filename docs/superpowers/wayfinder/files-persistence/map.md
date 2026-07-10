@@ -80,8 +80,8 @@ the open tickets below cover the rest.
   is always the public URL. All offline machinery (staging, resume, SW,
   RN loopback, read cache, hook surface) → future opt-in package, out of
   scope; pre-pivot store design preserved in the
-  [design inventory](notes/offline-package-inventory.md). PRD amendment
-  flagged (v1 offline promises become opt-in).
+  [design inventory](notes/offline-package-inventory.md). PRD amended
+  same day (amendment 9: invisible core); slice-1 spec pointers updated.
 - [Outbox hold across restart](tickets/D-outbox-hold.md) — it doesn't,
   by design: the hold is an in-memory courtesy; after restart,
   formerly-held transactions sync normally (bodyless descriptor until an

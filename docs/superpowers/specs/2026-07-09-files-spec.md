@@ -6,8 +6,10 @@ Triage: ready-for-agent
 Derived from: the approved files design (`2026-07-08-files-design.md`, sharpened
 by grilling review, then hardened by a three-model adversarial review, then
 simplified by the descriptor-persistence, grant-ledger, and id-management
-grillings of 2026-07-10). That design doc remains the authority on rationale
-and rejected alternatives, with these deliberate amendments in this spec:
+grillings of 2026-07-10, then reshaped by the invisible-core pivot of the
+device-file-store grilling later that day). That design doc remains the
+authority on rationale and rejected alternatives, with these deliberate
+amendments in this spec:
 
 1. **Private files are dropped.** Every file body is public by URL; there is
    no `published` column, no URL minting, and no signed URLs. Permissions
@@ -16,12 +18,9 @@ and rejected alternatives, with these deliberate amendments in this spec:
    core vocabulary already records (a file is "a column type whose cell holds
    a descriptor of exactly one immutable body"); the design doc's file-table
    data model is superseded.
-3. **Reads are URL-only, with offline provided below the URL.** The SDK has
-   no byte-read API (`toBlob`/`toStream` are gone); apps fetch the URL and
-   derive blobs in userland. Offline reads ship in v1 as URL interceptors:
-   a service worker on web, a loopback HTTP server inside the native module
-   on React Native — both serving staged bodies (own files, pre-release)
-   and a read-through body cache.
+3. **Reads are URL-only.** The SDK has no byte-read API (`toBlob`/`toStream`
+   are gone); apps fetch the URL and derive blobs in userland. Offline reads
+   are not a core concern (see amendment 9).
 4. **The bucket is public-read** (GetObject only, listing denied). The
    serving path mirrors the object key and redirects to the plain public
    object URL — no presigned GETs anywhere.
@@ -50,6 +49,17 @@ and rejected alternatives, with these deliberate amendments in this spec:
    The class is embedded in the file id itself, so the descriptor stays
    four-field and `url()` needs no schema. Identity-bound keys make expiry
    safe — an expired id can only ever be re-claimed by its original owner.
+9. **The core is invisible: no device file store, no offline machinery
+   (2026-07-10 pivot).** `fromBlob` keeps the Blob in memory and uploads
+   in-session; the outbox hold is an in-memory courtesy that deliberately
+   does not survive restart; an upload interrupted by a restart is lost —
+   the committed descriptor syncs bodyless and its URL 404s, the ordinary
+   documented state; `url()` returns the public URL on every platform. The
+   only durable client-side file-plane record is the pending-delete intent.
+   Offline upload durability (staged bodies, resume records, durable holds)
+   and offline reads (web service worker, RN loopback server, read-through
+   cache) move to a **future opt-in package** — any offline footprint is
+   added willingly by the app, never by the core.
 
 Where the design doc and this spec disagree on those points, this spec wins.
 
@@ -104,8 +114,9 @@ is impossible by construction; the conditional-write guard
 (`If-None-Match: *`) on the presigned PUT and multipart completion remains
 only as a self-collision belt. Uploads land under a
 `pending/{app}/…` key; the grant response hands the client the multipart
-`UploadId`, which the client persists in its resume record — edges keep
-nothing, so any edge can refresh part URLs or perform the release.
+`UploadId`, which the client holds for the life of the upload (in memory
+in core; the opt-in package persists it durably) — edges keep nothing, so
+any edge can refresh part URLs or perform the release.
 **Release** is stateless and idempotent: HEAD the final key (already there
 → success), complete the multipart, server-side-copy the object to its
 final key, and delete the pending object. No size check, no verification,
@@ -115,12 +126,17 @@ bucket lifecycle rule expiring the `pending/` prefix (plus the native
 incomplete-multipart abort rule) — the lease window _is_ the lifecycle
 expiry, and no server sweep exists.
 
-Creation is fully offline-capable: `fromBlob` stages the body in the device
-file store and yields a descriptor to write into a cell; the SDK holds that
-transaction at the outbox until the upload completes — a client-side
-courtesy so that descriptors written through the upload path have bytes
-present when they sync, not a server-enforced gate. Later, independent
-writes bypass the held unit.
+Creation is offline-capable within a session: `fromBlob` keeps the Blob in
+memory, measures `size`, and yields a descriptor to write into a cell; the
+upload runs in-session — grant → PUT → release — straight from that Blob.
+The SDK holds the writing transaction at the outbox until release — an
+**in-memory** client-side courtesy so that descriptors written through the
+upload path have bytes present when they sync, not a server-enforced gate
+— and later, independent writes bypass the held unit. A restart mid-upload
+loses the body: the committed descriptor syncs and its URL 404s — the
+ordinary bodyless state, documented as the interrupted-upload outcome.
+Nothing re-uploads; durable staging and resume belong to the opt-in
+offline package.
 
 Reading a file _is the web_: one stable, unauthenticated, public URL —
 `GET /files/{app}/{identity}/{random}` — redirecting to the public object
@@ -129,14 +145,13 @@ URL. Bodies are immutable, so permanent files carry long-lived
 TTL'd files carry `max-age` capped to their class — trivially
 CDN-cacheable, cheap to serve, cheap to bill. The SDK offers no byte-read
 API: apps `fetch` the URL and derive blobs in userland. Offline reads are
-provided _below_ the URL by per-platform interceptors — a Jazz-shipped
-service worker on web, a loopback HTTP server inside the native module on
-React Native — each serving this device's staged bodies (so `url()`
-renders own files immediately, offline and pre-release) and a
-read-through, LRU-bounded body cache of downloads. There are no private
+not a core concern: a future opt-in package provides them below the URL
+(per-platform interceptors and a read-through cache); the core stays
+invisible, and apps that want offline availability add it willingly.
+There are no private
 files, no signed URLs, and no per-download policy checks: the value Jazz
 provides is the integrated experience (files as values in your own rows,
-synced and permission-gated as metadata) plus offline capability, not
+synced and permission-gated as metadata), not
 byte-level access control. One privacy semantic is stated plainly: **every
 file URL publicly carries the uploader's identity id** — pseudonymous (an
 opaque id), but stable and linkable across all of that uploader's files.
@@ -208,14 +223,15 @@ never deletes objects.
 13. As an end user, I want my other, independent writes to keep syncing while
     a large file is still uploading, so that one slow video doesn't stall my
     whole session.
-14. As an end user, I want an interrupted upload to resume from the last
-    completed part after an app restart, so that a 2 GB upload doesn't start
-    over because I closed the laptop.
+14. _(Moved to the opt-in offline package by the 2026-07-10 invisible-core
+    amendment: resume-after-restart requires durable staging and resume
+    records, which core deliberately does not keep. In core, a restart
+    mid-upload yields a bodyless descriptor whose URL 404s.)_
 15. As an app developer, I want the client to be able to request fresh
     presigned part URLs for an in-flight upload within its lease — from any
     edge, by presenting the `UploadId` the grant handed it — so that
-    uploads longer than a presign window still complete and resume, with no
-    edge affinity.
+    uploads longer than a presign window, or interrupted by network blips
+    within a session, still complete with no edge affinity.
 16. As an end user, I want to see upload progress and state
     (`local → uploading(progress) → released → accepted | rejected`) on the
     file handle, so that the app can show me what's pending and warn me
@@ -235,16 +251,21 @@ never deletes objects.
 20. As an app developer, I want the SDK to hold the transaction that writes
     a fromBlob descriptor at the outbox until the upload is released, so
     that files created through the upload path are fetchable by the time
-    other devices see them — as a courtesy of the SDK, not a server gate.
+    other devices see them — as an in-memory courtesy of the SDK, not a
+    server gate: after a restart the hold is gone and the transaction syncs
+    normally, bodyless if the upload never released.
 21. As an app developer, I want to _choose_ early visibility when I need it
     — by putting the file cell in its own row (an attachments row) so the
     referencing row syncs immediately — so that "message text now,
     attachment when uploaded" is my app's decision, not a forced protocol
     semantic.
-22. As an app developer, I want the body staged in the device file store at
-    least until the writing transaction is accepted upstream (never evicted
-    before then — it may be the only copy), so that upload resume works
-    across restarts and my own files render offline from day one.
+22. As an app developer, I want it stated plainly that core keeps no copy
+    of the body beyond the in-memory Blob — an upload interrupted by a
+    restart is lost and its descriptor's URL 404s — so that I know exactly
+    what durability I get for free, and reach for the opt-in offline
+    package when my app needs staged bodies and resume-across-restarts.
+    _(Durable staging moved to the package by the 2026-07-10 invisible-core
+    amendment.)_
 
 ### Reading & serving
 
@@ -276,26 +297,19 @@ never deletes objects.
     policy (inline only for an allowlist of render-safe types; everything
     else `attachment`), so that my files domain cannot be turned into an XSS
     or phishing host.
-30. As an end user on web, I want a Jazz-shipped service worker
-    intercepting `/files/*` — serving this device's staged bodies and a
-    read-through cache of downloads — so that my own files render
-    immediately (offline, pre-release) and any file opened once is
-    readable offline, all through plain `<img>` tags.
-31. As an end user on React Native, I want the native module to run a
-    loopback HTTP server with the same serve-staged/serve-cached/
-    proxy-and-cache behavior, with `file.url()` returning the loopback URL
-    on RN, so that `<Image>`, video components, and WebViews get the same
-    offline story with no per-component code.
-32. As an app developer on RN, I want a canonical-URL accessor alongside
-    the loopback `url()` (e.g. `url({ canonical: true })`), so that URLs I
-    store, sync, or share never leak a device-local address.
-33. As an operator, I want the loopback server bound to 127.0.0.1 on a
-    random port with a per-boot secret path segment, so that other apps on
-    the device cannot enumerate or fetch bodies through it.
-34. As an app developer, I want the interceptor's body cache LRU-evicted
-    under a configurable budget (staged bodies exempt until acceptance),
-    so that offline availability never grows device storage without bound —
-    eviction is reversible; bodies are refetchable by URL.
+30. _(Moved to the opt-in offline package by the 2026-07-10 invisible-core
+    amendment: the web service worker, its staged-body serving, and its
+    read-through cache are package concerns, not core.)_
+31. _(Moved to the opt-in offline package: the RN loopback HTTP server. In
+    core, `file.url()` returns the public URL on every platform — `<img>`,
+    `<Image>`, and video components fetch it like any web resource.)_
+32. _(Retired by the same amendment: with no loopback URL in core, `url()`
+    is always the canonical public URL and no `canonical` option exists;
+    the package reintroduces the distinction if and when it rewrites URLs.)_
+33. _(Moved to the opt-in offline package: loopback binding and per-boot
+    secret are package operational concerns.)_
+34. _(Moved to the opt-in offline package: the body cache and its LRU
+    budget are package concerns; core caches nothing.)_
 
 ### Permissions & integrity
 
@@ -441,7 +455,8 @@ never deletes objects.
   the random part is the only byte-confidentiality barrier). The object
   key renders it as path segments: `{app}/{identity}/{random}`, or
   `{app}/t{class}/{identity}/{random}` for TTL'd files. The id is
-  **finalized at the first cell write** — `fromBlob` stages the body and
+  **finalized at the first cell write** — `fromBlob` keeps the Blob in
+  memory and
   returns a handle; when the descriptor first lands in a file column, the
   SDK mints the full id using that column's declared class. Minting is
   entirely on-device and local — a client always knows its own identity id
@@ -495,12 +510,13 @@ never deletes objects.
   ever re-claim one of their own ids — after a delete or a TTL expiry —
   and the SDK never does (fresh randoms every time); self-resurrection is
   the owner's own footgun and is stated as such.
-- **Upload flow:** (1) create fully offline — `fromBlob` writes the body
-  into the device file store (staging), measures `size`, and returns a
+- **Upload flow:** (1) create offline-capable — `fromBlob` keeps the Blob
+  in memory, measures `size`, and returns a
   handle; at the **first cell write** the SDK finalizes the identity-bound
   id (class segment from the destination column's declaration + identity +
   fresh random) and the write is an ordinary local transaction; (2) the SDK holds that transaction
-  at the outbox until release — a client-side courtesy so upload-path
+  at the outbox until release — an in-memory client-side courtesy so
+  upload-path
   descriptors have bytes when they sync — while later independent commit
   units bypass it (causally dependent writes queue behind it); (3) grant
   request `(file id, size)` over sync — the class travels inside the id;
@@ -510,10 +526,10 @@ never deletes objects.
   the class segment by pure
   computation, initiates the multipart upload where needed, and returns the
   pending object key, lease expiry, the `UploadId` (which the client
-  persists in its resume record — no server remembers it), and conditional
+  holds in memory — no server remembers it), and conditional
   presigned URLs (single PUT below a tens-of-MB implementation constant,
   multipart above); (4) the client PUTs directly to the pending key,
-  persisting completed part ETags locally; it may request fresh part URLs
+  tracking completed part ETags in memory; it may request fresh part URLs
   from any edge within the lease by presenting the `UploadId` (presign
   windows are hours, leases are days); (5) **release** over sync carries
   the `UploadId` and part ETag list; any edge HEADs the final key (already
@@ -549,42 +565,29 @@ never deletes objects.
   declaration affects only files written after the change. Extension is
   out of scope. Identity-bound keys make expiry safe: an expired id is
   re-claimable only by its original owner.
-- **The device file store holds staged bodies and a read-through cache,
-  read only by the interceptors.** Staged: bodies this device created, from
-  `fromBlob` until the writing transaction is accepted upstream (surviving
-  restarts for resume; never evicted before acceptance — they may be the
-  only copy). Cached: bodies fetched through an interceptor, keyed by file
-  id (safe — bodies are immutable and 1:1), LRU-evicted under a
-  configurable budget; eviction is reversible since bodies are refetchable
-  by URL. The store must live where the platform's interceptor can read it
-  (browser: SW-readable — OPFS/Cache API). The SDK itself never exposes
-  reads from it.
-- **Reads are URL-only; offline reads are interceptors below the URL.**
+- **There is no device file store in core (2026-07-10 invisible-core
+  pivot).** Core stages nothing, caches nothing, and keeps no durable
+  upload state: the Blob in memory is the only client-side copy of a body,
+  and the only durable client-side file-plane record is the pending-delete
+  intent. An upload interrupted by a restart is lost; the committed
+  descriptor syncs bodyless and its URL 404s — the ordinary documented
+  state. Durable staging, upload resume, and the read-through cache belong
+  to a future **opt-in offline package**, whose design inventory (store
+  home per platform, layout, crash-consistency contract, lifecycle) is
+  preserved in the wayfinder map's notes
+  (`docs/superpowers/wayfinder/files-persistence/notes/offline-package-inventory.md`).
+- **Reads are URL-only.**
   The SDK exposes no `toBlob`/`toStream`: apps `fetch(file.url())` and
-  derive blobs in userland. Offline capability ships in v1 as per-platform
-  URL interceptors with identical behavior — serve staged (own files:
-  `url()` renders immediately, offline and pre-release), else serve
-  cached, else fetch through and write the cache:
-  - **Web:** a Jazz-shipped service worker intercepting `/files/*`; the
-    app registers it. On the very first page load (no controlling SW yet)
-    requests fall through to the network — the Blob-in-hand preview
-    (`URL.createObjectURL`) remains the guaranteed pre-release path.
-    Deployment requirement (spike-verified): a SW intercepts only
-    same-origin, in-scope requests, so web deployments wanting SW offline
-    must expose `/files/*` on the app's own origin (proxy or CDN
-    path-through) — a cross-origin file host bypasses the SW entirely.
-    Implementation note: cache write-through must be wrapped in
-    `event.waitUntil`.
-  - **React Native:** a loopback HTTP server inside the Jazz native
-    module (one Rust implementation over the same device file store),
-    bound to 127.0.0.1 on a random port with a per-boot secret path
-    segment (localhost is reachable by other apps); it dies with the app
-    process, which is fine — nothing renders then. On RN, `file.url()`
-    returns the loopback URL so `<Image>`, video components, and WebViews
-    work unmodified; `url({ canonical: true })` returns the shareable
-    public URL — device-local addresses must never be stored in rows or
-    shared. Cleartext-to-localhost exemptions apply (ATS allows localhost;
-    Android needs the manifest exemption).
+  derive blobs in userland, and `url()` returns the public URL on every
+  platform. Offline reads are the opt-in package's job — per-platform URL
+  interceptors below the URL (a web service worker, an RN loopback
+  server), feasibility-proven by the map's spike; two spike findings
+  outlive the pivot as standing constraints on any future package:
+  a SW intercepts only same-origin, in-scope requests, so web deployments
+  wanting SW offline must expose `/files/*` on the app's own origin
+  (proxy or CDN path-through); and pre-release rendering is always the
+  Blob-in-hand preview (`URL.createObjectURL`) — in core that is the
+  _only_ pre-release path, since nothing serves staged bodies.
 - **Deletion is an explicit, authorized API — never a side effect.**
   `jazz.files.delete(fileId)` travels over the sync connection like grant
   and release. Authorization is the identity-segment comparison — the
@@ -613,9 +616,9 @@ never deletes objects.
   into cells — the id is finalized at the first cell write from the
   column's declared class; background upload; no per-call `ttl` — TTL is
   the schema's; creation input is a Blob so `size` is always known — there
-  is no `fromStream`), `file.url()` (the stable public URL on web/server, the
-  loopback URL on RN; computed synchronously and locally;
-  `url({ canonical: true })` always returns the public one),
+  is no `fromStream`), `file.url()` (the stable public URL on every
+  platform; computed synchronously and locally; no `canonical` option —
+  it is retired until an opt-in package rewrites URLs),
   `jazz.files.delete(fileId)`, and an observable upload state on the
   handle: `local → uploading(progress) → released → accepted | rejected`
   (accepted/rejected are the ordinary transaction fates — nothing
@@ -634,7 +637,10 @@ never deletes objects.
   named per column in the schema and baked into the file id); the
   descriptor loses its `content hash` and `visibility` fields; the
   **publish** and **capability URL** entries are removed — every file body
-  is world-readable by URL, and row policies gate only the metadata.
+  is world-readable by URL, and row policies gate only the metadata; the
+  **device file store** and **interceptor** entries move out of core
+  vocabulary to the opt-in offline package (2026-07-10 pivot) — core keeps
+  no staged bodies, no cache, and no durable upload state.
 
 ## Testing Decisions
 
@@ -670,9 +676,11 @@ never deletes objects.
     (including conditional writes, server-side copy, multipart abort, and
     manually-triggerable lifecycle expiry), with an in-process fake under
     the file plane in tests and minio as an optional real target.
-- **Explicit scenarios to cover:** resume-after-restart within the lease,
-  including part-URL refresh past a presign window; restart after lease
-  expiry (fresh id, restart); URL 404 before release and live after the
+- **Explicit scenarios to cover:** part-URL refresh past a presign window
+  within a live session; in-session restart after lease expiry (fresh id,
+  minted from the still-in-memory Blob); an upload interrupted by a client
+  restart — the descriptor syncs bodyless and its URL 404s, with no resume
+  machinery anywhere (the documented core outcome); URL 404 before release and live after the
   release copy; a file written into a TTL-declared column landing under
   its class prefix, serving with class-capped `max-age`, then 404ing after
   fake-triggered expiry while its descriptor cells stay intact; a
@@ -690,11 +698,9 @@ never deletes objects.
   bytes uploaded) accepted and 404ing only for its own descriptor;
   concurrent same-cell swaps resolving to one winner with no object
   deleted; bodyless historical read after explicit deletion and after TTL
-  expiry; interceptor behavior (web SW and RN loopback): staged body
-  served offline and pre-release, cached body served offline after one
-  online read, fetch-through writing the cache, LRU eviction respecting
-  the budget and never evicting pre-acceptance staged bodies, and the RN
-  loopback refusing requests without the per-boot secret path.
+  expiry. (Interceptor scenarios — staged/cached serving, fetch-through,
+  LRU budgets, loopback secret — moved to the opt-in offline package with
+  the 2026-07-10 invisible-core amendment.)
 - **Prior art:** the existing jazz-tools integration suites for
   permissions, claims, client restart, and large-blob permissions are the
   closest templates on the Rust side; the client/db `.test.ts` suites in
@@ -702,10 +708,15 @@ never deletes objects.
 
 ## Out of Scope
 
+- **All offline machinery — the opt-in offline package (2026-07-10
+  invisible-core pivot).** Durable staging, upload resume across restarts,
+  the web service worker, the RN loopback server, the read-through LRU
+  cache, and the core hook surface they plug into. Core stays invisible;
+  any offline footprint is added willingly by the app. Design inventory
+  preserved at
+  `docs/superpowers/wayfinder/files-persistence/notes/offline-package-inventory.md`.
 - Any SDK byte-read API (`toBlob`/`toStream` — blob derivation is
-  userland; offline reads are the interceptors' job, not an API).
-- Interceptors beyond web SW and RN loopback (e.g. desktop webview
-  shells); they can reuse the loopback design later.
+  userland; offline reads are the opt-in package's job, not an API).
 - `fromStream` / unknown-length uploads (creation takes a Blob; size must
   be known at grant time).
 - Per-identity rate limits and quotas on grant issuance and download
@@ -758,8 +769,11 @@ never deletes objects.
   impossible by construction, and the SDK never reuses ids, so an owner
   resurrecting their own URL (with stale CDN copies still floating) is
   their own footgun; the URL 404ing until release (apps preview from the
-  Blob they hold); sibling columns written in the same transaction as a
-  fromBlob descriptor becoming visible only when the hold releases (apps
+  Blob they hold — in core the only pre-release render path); sibling
+  columns written in the same transaction as a
+  fromBlob descriptor becoming visible only when the in-memory hold
+  releases — after a restart the hold is gone and they sync regardless,
+  bodyless if the upload never released (apps
   wanting early visibility model the file cell in its own row); storage
   persisting until an explicit delete or TTL expiry — cell death never
   reclaims it; TTL'd bodies possibly served by CDNs up to one class-length
@@ -767,14 +781,13 @@ never deletes objects.
   expiry clock starting at the release copy, not at creation; a
   descriptor's class being fixed at upload — copies into differently-
   declared columns keep it, and re-declaring a column affects only new
-  files; on web, no
-  SW controls the very first page load, so requests then fall through to
-  the network and the Blob-in-hand preview remains the guaranteed
-  pre-release path; CDN-cached copies of a deleted permanent file's bytes
+  files; CDN-cached copies of a deleted permanent file's bytes
   persisting until cache eviction (immutable caching makes purge
   best-effort at most); permanent local-first data loss if the creating
-  device dies before release (the handle's upload state is the app's
-  warning surface); a manually deleted object serving 404/410 (operator
+  app restarts or the device dies before release — core keeps no copy
+  beyond the in-memory Blob (the handle's upload state is the app's
+  warning surface, and the opt-in offline package is the durability
+  upgrade); a manually deleted object serving 404/410 (operator
   error, not a protocol state).
 - The single-PUT vs multipart size threshold, the presign window for part
   URLs, and the inline-safe type allowlist are implementation constants,

@@ -7,9 +7,11 @@ Scope: the resolved half of the files-persistence wayfinder map
 (`docs/superpowers/wayfinder/files-persistence/map.md`) — the
 [Descriptor persistence](../wayfinder/files-persistence/tickets/A-descriptor-persistence.md)
 and [Grant ledger](../wayfinder/files-persistence/tickets/E-claim-ledger.md)
-resolutions. Client-side byte machinery (staging store, resume records,
-outbox hold) and delete execution mode are open map tickets and are NOT in
-this slice. Feature-level authority: the files PRD
+resolutions. Updated for the 2026-07-10 invisible-core pivot: core has no
+client-side byte machinery at all (no staging store, no resume records, no
+durable outbox hold — see the PRD's amendment 9); the one remaining open
+map ticket is the pending-delete intent record, NOT in this slice.
+Feature-level authority: the files PRD
 (`2026-07-09-files-spec.md`).
 
 ## Problem Statement
@@ -113,8 +115,9 @@ Two deliverables, buildable together and testable end to end:
     `Content-Type`/`Content-Disposition`/`Cache-Control` headers, so that
     my own retries can't clobber and clients can't smuggle headers.
 18. As an app developer, I want the grant response to hand me the
-    multipart `UploadId` and lease expiry, so that my device owns resume
-    state and any edge can later serve me statelessly.
+    multipart `UploadId` and lease expiry, so that my session owns the
+    upload state (in memory, per the invisible-core amendment) and any
+    edge can later serve me statelessly.
 19. As an app developer, I want to request fresh presigned part URLs for
     an existing upload within its lease from any edge, so that presign
     windows never strand a long upload.
@@ -160,8 +163,9 @@ Two deliverables, buildable together and testable end to end:
 - **Id format:** one opaque string whose segments encode TTL class (or
   none), uploader identity id, and a CSPRNG random part; the object key
   and serving path are `{app}[/t{class}]/{identity}/{random}`. The SDK
-  finalizes the id at the descriptor's first cell write; `url()` and
-  `url({ canonical: true })` derive from the id alone.
+  finalizes the id at the descriptor's first cell write; `url()` derives
+  from the id alone (always the public URL — the `canonical` option was
+  retired with the invisible-core amendment).
 - **File-plane protocol messages** on the authenticated sync connection:
   grant `(file id, size)` → object key, lease expiry, presigned URL(s),
   `UploadId` where multipart; part-URL refresh `(file id, UploadId,
@@ -188,13 +192,15 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
   intent retried across restarts (permanent denials drop it; calls
   dedupe; the promise resolves on origin confirmation). The server half
   is in this slice; the intent record's persistence belongs to the
-  resume-records ticket.
-- **Explicitly deferred to open map tickets** (do not improvise):
-  where staged bodies live per platform, the resume record's shape and
-  home (including the pending-delete intent record), and how the outbox
-  hold is represented across restarts. This slice may stub the client
-  upload driver to the point where protocol and column behavior are
-  fully testable.
+  pending-delete-intent ticket (the former resume-records ticket, slimmed
+  by the invisible-core pivot).
+- **Explicitly deferred to the one open map ticket** (do not improvise):
+  the pending-delete intent record's shape and home. Everything else the
+  map once deferred here was resolved by the 2026-07-10 invisible-core
+  pivot: there are no staged bodies, no resume records, and the outbox
+  hold is in-memory only (PRD amendment 9). This slice may stub the
+  client upload driver to the point where protocol and column behavior
+  are fully testable.
 
 ## Testing Decisions
 
@@ -227,12 +233,12 @@ part numbers)`; release `(file id, UploadId, part ETags)`; delete
 
 ## Out of Scope
 
-- Everything the open map tickets own: device file store (staging +
-  interceptor cache) home and crash-consistency, upload-resume record
-  persistence, outbox-hold representation across restarts, delete
-  execution mode (sync vs durable retry), and the interceptor spike's
-  feasibility questions (SW/loopback serving, Range/206).
-- The production interceptors themselves (web SW, RN loopback server).
+- The pending-delete intent record's shape and home (the one open map
+  ticket).
+- The opt-in offline package (2026-07-10 invisible-core pivot): durable
+  staging, upload resume, the web SW, the RN loopback server, the
+  read-through cache, and the core hook surface — see the PRD's
+  amendment 9 and the map's design-inventory note.
 - Everything the files PRD already rules out: private files, hashing and
   dedup, per-call TTL, TTL extension, rate limits/quotas, a standalone
   file service, URL blinding.
