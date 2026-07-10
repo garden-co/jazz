@@ -2510,7 +2510,8 @@ fn validate_predicate(
                 let value_type = operand_type(table, value, params)?;
                 match (left_type.clone(), value_type) {
                     (Some(left_type), Some(value_type))
-                        if !in_operand_types_compatible(&left_type, &value_type) =>
+                        if !in_operand_types_compatible(&left_type, &value_type)
+                            && !in_literal_value_coercible(&left_type, value) =>
                     {
                         return Err(QueryError::OperandTypeMismatch);
                     }
@@ -2641,8 +2642,28 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     if column_types_comparable(left, right) {
         return true;
     }
+    let left = non_null_column_type(left);
+    let right = non_null_column_type(right);
+    if matches!(left, ColumnType::Enum(_)) && matches!(right, ColumnType::String | ColumnType::Uuid)
+    {
+        return true;
+    }
+    match left {
+        ColumnType::Array(member) => column_types_comparable(&member, &right),
+        _ => false,
+    }
+}
+
+fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
+    let Operand::Literal(value) = value else {
+        return false;
+    };
     match non_null_column_type(left) {
-        ColumnType::Array(member) => column_types_comparable(&member, right),
+        ColumnType::String => matches!(value, Value::Uuid(_)),
+        ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
+        ColumnType::Array(member) => {
+            in_literal_value_coercible(&member, &Operand::Literal(value.clone()))
+        }
         _ => false,
     }
 }
