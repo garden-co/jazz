@@ -2839,6 +2839,154 @@ mod tests {
     }
 
     #[test]
+    fn preserves_insert_inherits_when_parent_select_uses_seeded_reachability() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("teams").column("identity_key", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("team_team_edges")
+                    .fk_column("child_team", "teams")
+                    .fk_column("parent_team", "teams"),
+            )
+            .table(TableSchemaBuilder::new("resources"))
+            .table(
+                TableSchemaBuilder::new("resource_access_edges")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("resource_id", "resources")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "resource_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build();
+
+        let seed = PublicRelExpr::Project {
+            input: Box::new(PublicRelExpr::Filter {
+                input: Box::new(PublicRelExpr::TableScan {
+                    table: "teams".into(),
+                    alias: None,
+                }),
+                predicate: RelPredicateExpr::Cmp {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "identity_key".to_owned(),
+                    },
+                    op: RelPredicateCmpOp::Eq,
+                    right: RelValueRef::SessionRef(vec!["sub".to_owned()]),
+                },
+            }),
+            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelProjectExpr::Column(RelColumnRef {
+                    scope: None,
+                    column: "id".to_owned(),
+                }),
+            }],
+        };
+        let step = PublicRelExpr::Project {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "team_team_edges".into(),
+                        alias: None,
+                    }),
+                    predicate: RelPredicateExpr::Cmp {
+                        left: RelColumnRef {
+                            scope: None,
+                            column: "child_team".to_owned(),
+                        },
+                        op: RelPredicateCmpOp::Eq,
+                        right: RelValueRef::RowId(RelRowIdRef::Frontier),
+                    },
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "teams".into(),
+                    alias: None,
+                }),
+                on: vec![RelJoinCondition {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "parent_team".to_owned(),
+                    },
+                    right: RelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                }],
+                join_kind: RelJoinKind::Inner,
+            }),
+            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelProjectExpr::Column(RelColumnRef {
+                    scope: None,
+                    column: "id".to_owned(),
+                }),
+            }],
+        };
+        let access_rel = PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::Gather {
+                    seed: Box::new(seed),
+                    step: Box::new(step),
+                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
+                    bound: RelRecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "resource_access_edges".into(),
+                    alias: Some("access".to_owned()),
+                }),
+                on: vec![RelJoinCondition {
+                    left: RelColumnRef {
+                        scope: None,
+                        column: "id".to_owned(),
+                    },
+                    right: RelColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "team".to_owned(),
+                    },
+                }],
+                join_kind: RelJoinKind::Inner,
+            }),
+            predicate: RelPredicateExpr::Cmp {
+                left: RelColumnRef {
+                    scope: Some("access".to_owned()),
+                    column: "resource".to_owned(),
+                },
+                op: RelPredicateCmpOp::Eq,
+                right: RelValueRef::RowId(RelRowIdRef::Outer),
+            },
+        };
+
+        let mut schema = schema;
+        schema
+            .get_mut(&TableName::new("resources"))
+            .unwrap()
+            .policies
+            .select
+            .using = Some(PolicyExpr::ExistsRel { rel: access_rel });
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let children = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "children")
+            .unwrap();
+        let inherits = &children
+            .write_policies
+            .insert_check
+            .as_ref()
+            .unwrap()
+            .inherits[0];
+        assert_eq!(inherits.parent_column, "resource_id");
+        assert_eq!(inherits.operation, InheritsOperation::Select);
+    }
+
+    #[test]
     fn converts_inherited_select_branch_with_parent_column_join() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
