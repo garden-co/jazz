@@ -1,0 +1,103 @@
+<!doctype html>
+<!-- PROTOTYPE — interceptor spike, throwaway. Run: python3 -m http.server -d . 8931 -->
+<meta charset="utf-8" />
+<title>SW interceptor spike</title>
+<h1>SW interceptor spike</h1>
+<div id="status">booting…</div>
+<img id="img" width="64" height="64" style="border: 1px solid #888" />
+<pre id="log"></pre>
+<script>
+  const log = (m) => (document.getElementById("log").textContent += m + "\n");
+  const results = {};
+
+  async function makePngBlob() {
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    g.fillStyle = "#2a9d8f";
+    g.fillRect(0, 0, 64, 64);
+    g.fillStyle = "#e9c46a";
+    g.fillRect(16, 16, 32, 32);
+    return new Promise((res) => c.toBlob(res, "image/png"));
+  }
+
+  async function main() {
+    results.controlledOnFirstLoad = !!navigator.serviceWorker.controller;
+    await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      document.getElementById("status").textContent = "registered — reloading to become controlled";
+      sessionStorage.setItem("firstLoadControlled", String(results.controlledOnFirstLoad));
+      location.reload();
+      return;
+    }
+
+    // 1) stage bodies: one PNG in Cache API, one PNG in OPFS, one 1 MiB buffer in Cache API
+    const png = await makePngBlob();
+    const cache = await caches.open("spike-file-store");
+    await cache.put(
+      "/files/demo/idy/img1",
+      new Response(png, { headers: { "Content-Type": "image/png" } }),
+    );
+
+    const big = new Uint8Array(1 << 20);
+    for (let i = 0; i < big.length; i++) big[i] = i & 0xff;
+    await cache.put(
+      "/files/demo/idy/big1",
+      new Response(new Blob([big]), { headers: { "Content-Type": "video/mp4" } }),
+    );
+
+    let opfsOk = false;
+    try {
+      const root = await navigator.storage.getDirectory();
+      const fh = await root.getFileHandle("opfsimg", { create: true });
+      const w = await fh.createWritable();
+      await w.write(png);
+      await w.close();
+      opfsOk = true;
+    } catch (e) {
+      log("OPFS page-side write failed: " + e);
+    }
+    results.opfsPageWrite = opfsOk;
+
+    // 2) <img> through the SW (no such file at origin — only the SW can serve it)
+    const imgLoaded = await new Promise((res) => {
+      const img = document.getElementById("img");
+      img.onload = () => res(true);
+      img.onerror = () => res(false);
+      img.src = "/files/demo/idy/img1";
+    });
+    results.imgViaSw = imgLoaded;
+
+    // 3) OPFS read from inside the SW
+    const opfsResp = await fetch("/files/opfs/opfsimg");
+    results.opfsViaSw = opfsResp.ok && opfsResp.headers.get("X-Spike-Source") === "sw";
+
+    // 4) Range/206 synthesis from a cached body
+    const r = await fetch("/files/demo/idy/big1", { headers: { Range: "bytes=100-199" } });
+    const buf = new Uint8Array(await r.arrayBuffer());
+    results.range206 =
+      r.status === 206 &&
+      r.headers.get("Content-Range") === "bytes 100-199/1048576" &&
+      buf.length === 100 &&
+      buf[0] === 100 % 256 &&
+      buf[99] === 199 % 256;
+
+    // 5) suffix range (video players use these)
+    const rs = await fetch("/files/demo/idy/big1", { headers: { Range: "bytes=-100" } });
+    results.suffixRange =
+      rs.status === 206 && rs.headers.get("Content-Range") === "bytes 1048476-1048575/1048576";
+
+    // 6) fetch-through + cache write for a real origin file
+    const t1 = await fetch("/files/passthrough.txt"); // served by http.server via SW fetch-through
+    results.fetchThrough = t1.ok;
+    const cached = await (await caches.open("spike-file-store")).match("/files/passthrough.txt");
+    results.cacheWriteThrough = !!cached;
+
+    results.firstLoadControlled = sessionStorage.getItem("firstLoadControlled");
+
+    document.getElementById("status").textContent = "DONE " + JSON.stringify(results);
+    log(JSON.stringify(results, null, 2));
+  }
+  main();
+</script>

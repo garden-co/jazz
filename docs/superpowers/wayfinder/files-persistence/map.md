@@ -63,6 +63,14 @@ the open tickets below cover the rest.
   origin confirms (permanent denials drop it; calls dedupe; promise
   resolves on confirmation). Intent record's shape/home belongs to
   [C — upload-resume records](tickets/C-resume-records.md).
+- [Interceptor spike](tickets/H-interceptor-spike.md) — both interceptors
+  proven by executed prototypes: SW serves `<img>` loads from OPFS/Cache
+  with correct 206 Range synthesis (video-safe), first-load fallthrough
+  confirmed, cache puts need `event.waitUntil`; the Rust loopback
+  Range-serves off a filesystem dir, loopback-only, secret-gated.
+  Handed to B: OPFS raw files favored on web, filesystem dir on
+  native/RN, and **SW offline requires `/files/*` on the app's own
+  origin** (same-origin interception only).
 
 ## Not yet specified
 

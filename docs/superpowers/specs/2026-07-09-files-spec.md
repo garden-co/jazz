@@ -569,6 +569,12 @@ never deletes objects.
     app registers it. On the very first page load (no controlling SW yet)
     requests fall through to the network — the Blob-in-hand preview
     (`URL.createObjectURL`) remains the guaranteed pre-release path.
+    Deployment requirement (spike-verified): a SW intercepts only
+    same-origin, in-scope requests, so web deployments wanting SW offline
+    must expose `/files/*` on the app's own origin (proxy or CDN
+    path-through) — a cross-origin file host bypasses the SW entirely.
+    Implementation note: cache write-through must be wrapped in
+    `event.waitUntil`.
   - **React Native:** a loopback HTTP server inside the Jazz native
     module (one Rust implementation over the same device file store),
     bound to 127.0.0.1 on a random port with a per-boot secret path

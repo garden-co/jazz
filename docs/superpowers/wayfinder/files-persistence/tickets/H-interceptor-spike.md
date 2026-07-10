@@ -1,7 +1,7 @@
 # Interceptor spike (web SW + RN loopback)
 
 Type: `wayfinder:prototype`
-Status: open
+Status: closed (resolved 2026-07-10)
 Assignee: guido (claimed 2026-07-10)
 Blocked by: (none)
 
@@ -33,3 +33,29 @@ constraints on the store choice (ticket
 [B — device file store](B-staging-store.md)) and any `url()` shape
 implications. Not a deliverable: production code — this is a spike; the
 artifacts are throwaway by contract.
+
+## Resolution (2026-07-10)
+
+Both interceptors proven with executed throwaway prototypes
+([assets + full findings](../prototypes/NOTES.md)):
+
+- **Web SW:** interception of `<img>`-initiated `/files/*` loads works;
+  OPFS is readable from the SW context (async handles); Range/206
+  synthesis (explicit + suffix) works from stored bodies — video seeking
+  is safe; first-load fallthrough confirmed (Blob preview stays);
+  fetch-through + cache write-through work, with the requirement that the
+  cache put be wrapped in `event.waitUntil`.
+- **Loopback (RN model):** a ~120-line std-only Rust server binds
+  loopback-only (LAN refused), enforces the secret path (403), and serves
+  200/206 with correct Content-Range and nosniff straight off a
+  filesystem directory via seek.
+
+Constraints handed to [B — device file store](B-staging-store.md):
+OPFS raw files are the natural browser home (both staging writes and SW
+reads proven against them); a plain filesystem directory is strongly
+favored on native/RN (seek-based Range vs whole-value KV reads); and the
+**SW can only intercept same-origin in-scope URLs**, so web deployments
+wanting SW offline must expose `/files/*` on the app's own origin
+(proxy/CDN path-through) — recorded in the PRD as a deployment
+requirement. On-device items (ATS/cleartext exemptions, Fresco/AVPlayer
+vs 127.0.0.1, suspend mid-stream) remain for implementation.

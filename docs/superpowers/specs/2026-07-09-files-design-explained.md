@@ -332,7 +332,10 @@ through and write the cache.
   mechanism the web uses for every other offline asset, and the only one
   that also covers plain `<img>` tags. The app registers it once. Caveat:
   no SW controls the very first page load, so requests then fall through
-  to the network — the Blob-in-hand preview never fully dies.
+  to the network — the Blob-in-hand preview never fully dies. One
+  deployment rule (spike-verified): a SW sees only same-origin requests,
+  so `/files/*` must be served on the app's own origin (proxy or CDN
+  path-through) — a cross-origin file host bypasses the SW entirely.
 - **React Native: a loopback HTTP server** inside the Jazz native module —
   there are no service workers on RN, and images/video load through native
   networking that JS can't intercept, so the interception point becomes a
