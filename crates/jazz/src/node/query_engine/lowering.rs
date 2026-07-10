@@ -5210,6 +5210,8 @@ fn closure_membership_graph_for_path(
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
     let segments = closure_path_segments(path);
+    let can_lower_as_parent_semijoin =
+        route_fields.is_empty() && matches!(path, ClosurePath::ImplicitRootReference { .. });
     let mut current_graph = root_graph.project_fields(
         project_source_fields_with_routes(root_source, route_fields)
             .into_iter()
@@ -5231,25 +5233,52 @@ fn closure_membership_graph_for_path(
             })
         })?;
         let source_key = user_column_field(&segment.source_field);
-        let joined = GraphBuilder::join(
-            current_graph.unwrap_nullable(source_key.clone()),
-            target.graph.clone(),
-            [source_key],
-            [target.row_shape.row_uuid_field.clone()],
-        )
-        .project_fields(
-            project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
-                .into_iter()
-                .chain([ProjectField::renamed(
-                    "left.__closure_root_row_uuid",
-                    "__closure_root_row_uuid",
-                )])
-                .chain(
-                    route_fields
-                        .iter()
-                        .map(|field| ProjectField::renamed(left_field(field), field.clone())),
-                ),
-        );
+        let Some(source_key_type) = source_field_type(&current_source, &source_key) else {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Operator(format!(
+                    "closure source field {source_key:?} is not projected"
+                ))],
+                explain: ExplainPlan::default(),
+            }));
+        };
+        let joined = if can_lower_as_parent_semijoin {
+            let (source_base, source_key_type) =
+                unwrap_nullable_layers(current_graph, source_key.clone(), source_key_type);
+            let source_keys = match source_key_type {
+                ValueType::Array(_) => {
+                    source_base.unnest(source_key.clone(), CLOSURE_REQUIRED_ELEMENT)
+                }
+                _ => source_base,
+            };
+            let source_key = source_key_for_required(source_key_type, &source_key);
+            GraphBuilder::semi_join(
+                target.graph.clone(),
+                source_keys.project_fields(vec![ProjectField::named(source_key.clone())]),
+                [target.row_shape.row_uuid_field.clone()],
+                [source_key],
+            )
+            .project_fields(project_source_fields_with_routes(target, route_fields))
+        } else {
+            GraphBuilder::join(
+                current_graph.unwrap_nullable(source_key.clone()),
+                target.graph.clone(),
+                [source_key],
+                [target.row_shape.row_uuid_field.clone()],
+            )
+            .project_fields(
+                project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
+                    .into_iter()
+                    .chain([ProjectField::renamed(
+                        "left.__closure_root_row_uuid",
+                        "__closure_root_row_uuid",
+                    )])
+                    .chain(
+                        route_fields
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    ),
+            )
+        };
         outputs.push((index, segment.target.clone(), joined.clone()));
         current_graph = joined;
         current_source = target.clone();
