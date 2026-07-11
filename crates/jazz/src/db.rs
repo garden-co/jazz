@@ -3263,13 +3263,34 @@ where
                     let authoritative_reset = remote_settled_tier.is_some()
                         && pending_authoritative_resets.contains(&settled_binding_view);
                     if authoritative_reset {
-                        let mut snapshot = node
-                            .borrow_mut()
-                            .authoritative_reset_snapshot_for_binding_view(
+                        let authoritative_snapshot = {
+                            let mut node_ref = node.borrow_mut();
+                            match node_ref.authoritative_reset_snapshot_for_binding_view(
                                 &shape,
                                 settled_binding_view,
-                            )?
-                            .unwrap_or_else(|| state_ref.snapshot.clone());
+                            ) {
+                                Ok(snapshot) => snapshot,
+                                Err(crate::node::Error::MissingTransaction(_)) => {
+                                    node_ref.record_authoritative_reset_missing_payload_fallback();
+                                    None
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        };
+                        let (mut snapshot, force_reset_event) =
+                            if let Some(snapshot) = authoritative_snapshot {
+                                (snapshot, true)
+                            } else {
+                                (
+                                    node.borrow_mut().subscription_snapshot_for_link(
+                                        &shape,
+                                        &binding,
+                                        snapshot_tier,
+                                        author,
+                                    )?,
+                                    false,
+                                )
+                            };
                         if let Some(update) = maintained_update {
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
@@ -3290,7 +3311,7 @@ where
                             SubscriptionSnapshotSource::LinkSnapshot,
                             settled,
                             snapshot_tier,
-                            true,
+                            force_reset_event,
                         )
                     } else if let Some(update) = maintained_update {
                         let mut event = apply_maintained_update_to_snapshot(
@@ -3326,14 +3347,35 @@ where
                             if previous.root_count == 0
                                 && previous.edges.is_empty()
                                 && node.borrow().has_settled_result_set(settled_binding_view)
-                                && let Some(snapshot) = node
-                                    .borrow_mut()
-                                    .authoritative_reset_snapshot_for_binding_view(
+                            {
+                                let authoritative_snapshot = {
+                                    let mut node_ref = node.borrow_mut();
+                                    match node_ref.authoritative_reset_snapshot_for_binding_view(
                                         &shape,
                                         settled_binding_view,
-                                    )?
-                            {
-                                (snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                                    ) {
+                                        Ok(snapshot) => snapshot,
+                                        Err(crate::node::Error::MissingTransaction(_)) => {
+                                            node_ref
+                                                .record_authoritative_reset_missing_payload_fallback();
+                                            None
+                                        }
+                                        Err(error) => return Err(error.into()),
+                                    }
+                                };
+                                if let Some(snapshot) = authoritative_snapshot {
+                                    (snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                                } else {
+                                    (
+                                        node.borrow_mut().subscription_snapshot_for_link(
+                                            &shape,
+                                            &binding,
+                                            snapshot_tier,
+                                            author,
+                                        )?,
+                                        SubscriptionSnapshotSource::LinkSnapshot,
+                                    )
+                                }
                             } else {
                                 let remote_snapshot =
                                     node.borrow_mut().subscription_snapshot_for_link(

@@ -2246,6 +2246,11 @@ where
         self.sync_metrics.transport_backpressure_retries += 1;
     }
 
+    pub(crate) fn record_authoritative_reset_missing_payload_fallback(&mut self) {
+        self.sync_metrics
+            .authoritative_reset_missing_payload_fallbacks += 1;
+    }
+
     /// Deterministic counters for query-engine read authorization paths.
     pub fn query_engine_read_metrics(&self) -> &QueryEngineReadMetrics {
         &self.query_engine_read_metrics
@@ -4063,6 +4068,9 @@ pub struct SyncMetrics {
     pub receiver_per_bundle_ingests: u64,
     /// Receiver-level shared ingest batches committed.
     pub receiver_bulk_ingest_commits: u64,
+    /// Authoritative reset callback materialization fell back because the
+    /// reset referenced a version not yet available in this receiver.
+    pub authoritative_reset_missing_payload_fallbacks: u64,
     /// Rung-3 text strategies that degraded to the builtin char-walk merge.
     pub rung3_text_merge_fallbacks: u64,
 }
