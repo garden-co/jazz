@@ -259,6 +259,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::SemiJoin { left: input, .. }
         | GraphBuilder::AntiJoin { left: input, .. } => graph_declared_output_fields(input),
         GraphBuilder::Unnest {
             input,
@@ -539,7 +540,9 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                 collect_binding_source_params(input, domain);
             }
         }
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             collect_binding_source_params(left, domain);
             collect_binding_source_params(right, domain);
         }
@@ -5207,6 +5210,8 @@ fn closure_membership_graph_for_path(
     route_fields: &BTreeSet<String>,
 ) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
     let segments = closure_path_segments(path);
+    let can_lower_as_parent_semijoin =
+        route_fields.is_empty() && matches!(path, ClosurePath::ImplicitRootReference { .. });
     let mut current_graph = root_graph.project_fields(
         project_source_fields_with_routes(root_source, route_fields)
             .into_iter()
@@ -5228,25 +5233,52 @@ fn closure_membership_graph_for_path(
             })
         })?;
         let source_key = user_column_field(&segment.source_field);
-        let joined = GraphBuilder::join(
-            current_graph.unwrap_nullable(source_key.clone()),
-            target.graph.clone(),
-            [source_key],
-            [target.row_shape.row_uuid_field.clone()],
-        )
-        .project_fields(
-            project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
-                .into_iter()
-                .chain([ProjectField::renamed(
-                    "left.__closure_root_row_uuid",
-                    "__closure_root_row_uuid",
-                )])
-                .chain(
-                    route_fields
-                        .iter()
-                        .map(|field| ProjectField::renamed(left_field(field), field.clone())),
-                ),
-        );
+        let Some(source_key_type) = source_field_type(&current_source, &source_key) else {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Operator(format!(
+                    "closure source field {source_key:?} is not projected"
+                ))],
+                explain: ExplainPlan::default(),
+            }));
+        };
+        let joined = if can_lower_as_parent_semijoin {
+            let (source_base, source_key_type) =
+                unwrap_nullable_layers(current_graph, source_key.clone(), source_key_type);
+            let source_keys = match source_key_type {
+                ValueType::Array(_) => {
+                    source_base.unnest(source_key.clone(), CLOSURE_REQUIRED_ELEMENT)
+                }
+                _ => source_base,
+            };
+            let source_key = source_key_for_required(source_key_type, &source_key);
+            GraphBuilder::semi_join(
+                target.graph.clone(),
+                source_keys.project_fields(vec![ProjectField::named(source_key.clone())]),
+                [target.row_shape.row_uuid_field.clone()],
+                [source_key],
+            )
+            .project_fields(project_source_fields_with_routes(target, route_fields))
+        } else {
+            GraphBuilder::join(
+                current_graph.unwrap_nullable(source_key.clone()),
+                target.graph.clone(),
+                [source_key],
+                [target.row_shape.row_uuid_field.clone()],
+            )
+            .project_fields(
+                project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
+                    .into_iter()
+                    .chain([ProjectField::renamed(
+                        "left.__closure_root_row_uuid",
+                        "__closure_root_row_uuid",
+                    )])
+                    .chain(
+                        route_fields
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    ),
+            )
+        };
         outputs.push((index, segment.target.clone(), joined.clone()));
         current_graph = joined;
         current_source = target.clone();
@@ -5736,17 +5768,19 @@ fn content_version_witness_graph(
         ));
     };
     let version = version_witness_fields(&source.row_shape)?;
-    Ok(GraphBuilder::join(
-        source.graph.clone(),
+    Ok(GraphBuilder::semi_join(
         content_version.graph.clone(),
+        source.graph.clone(),
+        ["row_uuid", "tx_time", "tx_node_id"],
         [
             source.row_shape.row_uuid_field.clone(),
             version.tx_time_field.clone(),
             version.tx_node_field.clone(),
         ],
-        ["row_uuid", "tx_time", "tx_node_id"],
     )
-    .project_fields(version_witness_fields_for_tagged_rows(source, event_kind)?))
+    .project_fields(unprefixed_version_witness_fields_for_tagged_rows(
+        source, event_kind,
+    )?))
 }
 
 fn result_membership_fields(
@@ -6001,6 +6035,21 @@ fn version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
+    prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")
+}
+
+fn unprefixed_version_witness_fields_for_tagged_rows(
+    source: &ResolvedSource,
+    event_kind: &str,
+) -> CapabilityResult<Vec<ProjectField>> {
+    prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "")
+}
+
+fn prefixed_version_witness_fields_for_tagged_rows(
+    source: &ResolvedSource,
+    event_kind: &str,
+    prefix: &str,
+) -> CapabilityResult<Vec<ProjectField>> {
     if source.content_version.is_none() {
         return Err(Box::new(CapabilityReport {
             gaps: vec![UnsupportedReason::Runtime(
@@ -6015,22 +6064,22 @@ fn version_witness_fields_for_tagged_rows(
             "table_name",
             Value::String(source.table_schema.name.clone()),
         ),
-        ProjectField::renamed("right.row_uuid", "row_uuid"),
-        ProjectField::renamed("right.tx_time", "content_tx_time"),
-        ProjectField::renamed("right.tx_node_id", "content_tx_node_id"),
-        ProjectField::renamed("right.tx_time", "tx_time"),
-        ProjectField::renamed("right.tx_node_id", "tx_node_id"),
-        ProjectField::renamed("right.schema_version", "schema_version"),
-        ProjectField::renamed("right.parents", "parents"),
-        ProjectField::renamed("right.created_by", "created_by"),
-        ProjectField::renamed("right.created_at", "created_at"),
-        ProjectField::renamed("right.updated_by", "updated_by"),
-        ProjectField::renamed("right.updated_at", "updated_at"),
+        ProjectField::renamed(format!("{prefix}row_uuid"), "row_uuid"),
+        ProjectField::renamed(format!("{prefix}tx_time"), "content_tx_time"),
+        ProjectField::renamed(format!("{prefix}tx_node_id"), "content_tx_node_id"),
+        ProjectField::renamed(format!("{prefix}tx_time"), "tx_time"),
+        ProjectField::renamed(format!("{prefix}tx_node_id"), "tx_node_id"),
+        ProjectField::renamed(format!("{prefix}schema_version"), "schema_version"),
+        ProjectField::renamed(format!("{prefix}parents"), "parents"),
+        ProjectField::renamed(format!("{prefix}created_by"), "created_by"),
+        ProjectField::renamed(format!("{prefix}created_at"), "created_at"),
+        ProjectField::renamed(format!("{prefix}updated_by"), "updated_by"),
+        ProjectField::renamed(format!("{prefix}updated_at"), "updated_at"),
         ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
     ];
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::renamed(
-            right_field(&user_column_field(&column.name)),
+            format!("{prefix}{}", user_column_field(&column.name)),
             table_user_column_field(&source.table_schema.name, &column.name),
         )
     }));
