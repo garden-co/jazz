@@ -499,6 +499,87 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
 }
 
 #[test]
+fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")))
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(global_seq),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            ViewUpdateParts {
+                subscription,
+                settled_through: global_seq,
+                defer_settlement: false,
+                reset_result_set: true,
+                version_bundles: Vec::new(),
+                peer_complete_tx_payload_refs: Vec::new(),
+                result_member_adds: vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+            ViewUpdateParts {
+                subscription,
+                settled_through: global_seq,
+                defer_settlement: false,
+                reset_result_set: false,
+                version_bundles: vec![VersionBundle {
+                    tx,
+                    versions,
+                    fate: Fate::Accepted,
+                    global_seq: Some(global_seq),
+                    durability,
+                }],
+                peer_complete_tx_payload_refs: vec![tx_id],
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row_uuid, title_cells("one"))])
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().parked_orphans, 0);
+}
+
+#[test]
 fn receiver_batch_resolves_current_winner_across_bundles() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));

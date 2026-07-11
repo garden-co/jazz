@@ -591,11 +591,6 @@ where
         let mut receiver_batch_global_seqs = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         for update in &updates {
-            if !update.peer_complete_tx_payload_refs.is_empty()
-                || !update.result_member_removes.is_empty()
-            {
-                continue;
-            }
             for bundle in &update.version_bundles {
                 if !bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     let staged = self.stage_view_bundle(
