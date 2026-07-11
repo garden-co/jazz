@@ -735,6 +735,110 @@ fn customer_resource_policy_minimal_schema() -> JazzSchema {
     ])
 }
 
+fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
+    let res_i_policy = Policy::shape(
+        Query::from("res_i")
+            .reachable_via_with_access_filters(
+                "res_i_access_edges",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "group_entry",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    );
+    let res_j_policy = Policy::shape(
+        Query::from("res_j")
+            .reachable_via_with_access_filters(
+                "res_j_access_edges",
+                "resource",
+                "team",
+                lit("relation-seeded"),
+                [eq(col("administrator"), lit(false))],
+                "group_entry",
+                "member_id",
+                "target_id",
+                [eq(col("administrator"), lit(false))],
+            )
+            .seeded_by("group_access_edges", "user_id", "sub", "group_id"),
+    );
+
+    JazzSchema::new([
+        TableSchema::new("org", [ColumnSchema::new("label", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new("group", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_access_edges",
+            [
+                ColumnSchema::new("group_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::Uuid),
+                ColumnSchema::new("role", ColumnType::String),
+            ],
+        )
+        .with_reference("group_id", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "group_entry",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+                ColumnSchema::new("date_added", ColumnType::U64),
+            ],
+        )
+        .with_reference("member_id", "group")
+        .with_reference("target_id", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("res_i", resource_columns_for_customer_fixture())
+            .with_reference("org_id", "org")
+            .with_reference("created_by", "group")
+            .with_reference("updated_by", "group")
+            .with_read_policy(res_i_policy)
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_i_access_edges",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("grant_role", ColumnType::String),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "res_i")
+        .with_reference("team", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("res_j", resource_columns_for_customer_fixture())
+            .with_reference("org_id", "org")
+            .with_reference("created_by", "group")
+            .with_reference("updated_by", "group")
+            .with_read_policy(res_j_policy)
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "res_j_access_edges",
+            [
+                ColumnSchema::new("resource", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("grant_role", ColumnType::String),
+                ColumnSchema::new("administrator", ColumnType::Bool),
+            ],
+        )
+        .with_reference("resource", "res_j")
+        .with_reference("team", "group")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn same_table_seeded_resource_policy_schema() -> JazzSchema {
     let resource_policy = Policy::shape(
         Query::from("resources")
@@ -7920,6 +8024,100 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         "zero-grant identity should also reuse shared canonical fragments without seeing rows: first={:?}, spy={:?}",
         member_reads,
         spy_reads
+    );
+}
+
+#[test]
+fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes() {
+    let schema = customer_two_resource_policy_minimal_schema();
+    let db = open_db(0x6a, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x12; 16]);
+    db.insert_with_id(
+        "org",
+        row(0x01),
+        BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
+    )
+    .unwrap();
+    let direct_group = row(0x31);
+    let transitive_group = row(0x32);
+    for (group, name) in [(direct_group, "direct"), (transitive_group, "transitive")] {
+        db.insert_with_id("group", group, team_cells(name)).unwrap();
+    }
+    db.insert_with_id(
+        "group_access_edges",
+        row(0xa1),
+        group_access_test_cells(direct_group, member),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "group_entry",
+        row(0xc1),
+        group_entry_test_cells(direct_group, transitive_group, false),
+    )
+    .unwrap();
+
+    let res_i_direct = row(0xd1);
+    let res_i_transitive = row(0xd2);
+    let res_j_direct = row(0xe1);
+    let res_j_transitive = row(0xe2);
+    for (table, resource, title) in [
+        ("res_i", res_i_direct, "i-direct"),
+        ("res_i", res_i_transitive, "i-transitive"),
+        ("res_j", res_j_direct, "j-direct"),
+        ("res_j", res_j_transitive, "j-transitive"),
+    ] {
+        db.insert_with_id(table, resource, resource_test_cells(title))
+            .unwrap();
+    }
+    for (table, edge, resource, group) in [
+        ("res_i_access_edges", row(0xb1), res_i_direct, direct_group),
+        (
+            "res_i_access_edges",
+            row(0xb2),
+            res_i_transitive,
+            transitive_group,
+        ),
+        ("res_j_access_edges", row(0xb3), res_j_direct, direct_group),
+        (
+            "res_j_access_edges",
+            row(0xb4),
+            res_j_transitive,
+            transitive_group,
+        ),
+    ] {
+        db.insert_with_id(
+            table,
+            edge,
+            resource_access_test_cells(resource, group, false),
+        )
+        .unwrap();
+    }
+
+    let res_i = db.prepare_query(&Query::from("res_i")).unwrap();
+    let res_j = db.prepare_query(&Query::from("res_j")).unwrap();
+    let opts = ReadOpts::default();
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let mut first = block_on(db.subscribe_for_identity(&res_i, opts.clone(), member)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(first.next_event()).unwrap())),
+        vec![res_i_direct, res_i_transitive]
+    );
+    let first_reads = db.node.node.borrow().take_storage_read_metrics();
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let mut second = block_on(db.subscribe_for_identity(&res_j, opts, member)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(second.next_event()).unwrap())),
+        vec![res_j_direct, res_j_transitive]
+    );
+    let second_reads = db.node.node.borrow().take_storage_read_metrics();
+
+    assert!(
+        second_reads.total.reads < first_reads.total.reads,
+        "second shape should probe shared hydrated fragments, not rescan them: first={:?}, second={:?}",
+        first_reads,
+        second_reads
     );
 }
 
