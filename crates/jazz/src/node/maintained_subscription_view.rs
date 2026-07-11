@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::{MultisinkDeltas, RecordDeltas};
-use groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use groove::records::{BorrowedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
     owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    tx_ids_from_value, validate_cell_value, version_tx_id_from_aliases,
+    tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
@@ -23,7 +23,24 @@ use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
-type VersionDescriptorCache = BTreeMap<(String, VersionLayer), RecordDescriptor>;
+type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
+
+#[derive(Clone, Debug)]
+struct VersionDecodePlan {
+    descriptor: RecordDescriptor,
+    content_projector: Option<RecordProjector>,
+    row_idx: usize,
+    tx_time_idx: usize,
+    tx_node_idx: usize,
+    schema_version_idx: usize,
+    parents_idx: usize,
+    created_by_idx: usize,
+    created_at_idx: usize,
+    updated_by_idx: usize,
+    updated_at_idx: usize,
+    user_field_indices: Vec<usize>,
+    user_validation_descriptors: Vec<RecordDescriptor>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedSubscriptionView {
@@ -170,7 +187,7 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
-        let mut descriptor_cache = VersionDescriptorCache::new();
+        let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
             .iter()
             .map(|(record, weight)| {
@@ -179,7 +196,7 @@ impl MaintainedSubscriptionView {
                     kind,
                     tables,
                     node_aliases,
-                    &mut descriptor_cache,
+                    &mut decode_plan_cache,
                 )
                 .map(|event| (event, weight))
             })
@@ -538,7 +555,7 @@ fn decode_typed_terminal_record(
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    descriptor_cache: &mut VersionDescriptorCache,
+    decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
         MaintainedTerminalKind::ResultCurrent(schema) => {
@@ -637,22 +654,22 @@ fn decode_typed_terminal_record(
         }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
-            decode_typed_version_witness(record, schema, tables, descriptor_cache)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::VersionContent)
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
             validate_witness_event_kind(record, "version_deletion")?;
-            decode_typed_version_witness(record, schema, tables, descriptor_cache)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::VersionDeletion)
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
-            decode_typed_version_witness(record, schema, tables, descriptor_cache)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::ReplacementContent)
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
             validate_witness_event_kind(record, "replacement_deletion")?;
-            decode_typed_version_witness(record, schema, tables, descriptor_cache)
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
                 .map(DecodedMaintainedEvent::ReplacementDeletion)
         }
         MaintainedTerminalKind::RelationEdge(schema) => {
@@ -762,7 +779,7 @@ fn decode_typed_version_witness(
     record: BorrowedRecord<'_>,
     schema: &VersionWitnessSchema,
     tables: &TableSchemas,
-    descriptor_cache: &mut VersionDescriptorCache,
+    decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<VersionRow, super::Error> {
     let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
         Value::String(value) => value,
@@ -778,87 +795,199 @@ fn decode_typed_version_witness(
             "maintained witness table_name must exist",
         ))?;
     let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
-    let tx_time = TxTime(record_u64(record, &schema.identity.tx_time_field)?);
     let layer = if deletion.is_some() {
         VersionLayer::Deletion
     } else {
         VersionLayer::Content
     };
+    let cache_key = (table.name.clone(), layer);
+    if !decode_plan_cache.contains_key(&cache_key) {
+        let plan = build_version_decode_plan(record.descriptor(), schema, table, layer)?;
+        decode_plan_cache.insert(cache_key.clone(), plan);
+    }
+    let plan = decode_plan_cache
+        .get(&cache_key)
+        .expect("version decode plan was just inserted");
+    if layer == VersionLayer::Content {
+        validate_witness_content_cells(record, plan, table)?;
+        let projector = plan
+            .content_projector
+            .as_ref()
+            .ok_or(super::Error::InvalidStoredValue(
+                "content witness decode plan missing projector",
+            ))?;
+        let projected = projector
+            .project(record)
+            .map_err(|_| super::Error::InvalidStoredValue("content witness projection failed"))?;
+        return Ok(VersionRow {
+            table: groove::Intern::new(table.name.clone()),
+            record: projected,
+        });
+    }
+    let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
     let parts = VersionRowParts {
         table: table.name.clone(),
-        row_uuid: RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
-        tx_node_alias: NodeAlias(record_u64(record, &schema.identity.tx_node_field)?),
-        schema_version_alias: crate::ids::SchemaVersionAlias(record_u64(
+        row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
+        tx_node_alias: NodeAlias(record_u64_idx(record, plan.tx_node_idx)?),
+        schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
             record,
-            &schema.identity.schema_field,
+            plan.schema_version_idx,
         )?),
         tx_time,
-        parents: tx_ids_from_value(record.get_idx(field_idx(record, &schema.parents_field)?)?)?,
-        created_by: AuthorId(record.get_uuid(field_idx(record, &schema.created_by_field)?)?),
-        created_at: TxTime(record_u64(record, &schema.created_at_field)?),
-        updated_by: AuthorId(record.get_uuid(field_idx(record, &schema.updated_by_field)?)?),
-        updated_at: TxTime(record_u64(record, &schema.updated_at_field)?),
+        parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
+        created_by: AuthorId(record.get_uuid(plan.created_by_idx)?),
+        created_at: TxTime(record_u64_idx(record, plan.created_at_idx)?),
+        updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
+        updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
         cells: BTreeMap::new(),
         deletion,
     };
-    let descriptor = *descriptor_cache
-        .entry((table.name.clone(), layer))
-        .or_insert_with(|| {
-            if layer == VersionLayer::Deletion {
-                table.register_storage_table().record_schema()
-            } else {
-                table.history_storage_table().record_schema()
-            }
-        });
-    let values = if layer == VersionLayer::Deletion {
-        register_values_from_parts(&parts)?
-    } else {
-        history_values_from_witness_record(record, schema, table, &parts)?
-    };
+    let values = register_values_from_parts(&parts)?;
     Ok(VersionRow {
         table: groove::Intern::new(parts.table),
-        record: owned_record_from_storage_values_with_descriptor(descriptor, values)?,
+        record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
     })
 }
 
-fn history_values_from_witness_record(
-    record: BorrowedRecord<'_>,
+fn build_version_decode_plan(
+    terminal_descriptor: RecordDescriptor,
     schema: &VersionWitnessSchema,
     table: &TableSchema,
-    version: &VersionRowParts,
-) -> Result<Vec<Value>, super::Error> {
-    let mut values = vec![
-        Value::Uuid(version.row_uuid.0),
-        Value::U64(version.tx_time.0),
-        Value::U64(version.tx_node_alias.0),
-        Value::U64(version.schema_version_alias.0),
-        Value::Array(
-            version
-                .parents
-                .iter()
-                .map(|parent| super::codec::tx_id_value(*parent))
-                .collect(),
-        ),
-        Value::Uuid(version.created_by.0),
-        Value::U64(version.created_at.0),
-        Value::Uuid(version.updated_by.0),
-        Value::U64(version.updated_at.0),
-    ];
-    for column in &table.columns {
-        let field =
+    layer: VersionLayer,
+) -> Result<VersionDecodePlan, super::Error> {
+    let descriptor = if layer == VersionLayer::Deletion {
+        table.register_storage_table().record_schema()
+    } else {
+        table.history_storage_table().record_schema()
+    };
+    let user_field_indices = table
+        .columns
+        .iter()
+        .map(|column| {
             schema
                 .user_fields
                 .get(&column.name)
                 .ok_or(super::Error::InvalidStoredValue(
                     "maintained witness schema missing user field",
-                ))?;
-        let value = nullable_value(record.get_idx(field_idx(record, field)?)?)?;
-        if let Some(value) = &value {
-            validate_cell_value(column, value)?;
-        }
-        values.push(Value::Nullable(value.map(Box::new)));
+                ))
+                .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let user_validation_descriptors = table
+        .columns
+        .iter()
+        .map(|column| RecordDescriptor::new([("cell", column.column_type.clone().value_type())]))
+        .collect();
+    let content_projector = if layer == VersionLayer::Content {
+        Some(build_content_witness_projector(
+            terminal_descriptor,
+            descriptor,
+            schema,
+            table,
+        )?)
+    } else {
+        None
+    };
+    Ok(VersionDecodePlan {
+        descriptor,
+        content_projector,
+        row_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
+        tx_time_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
+        tx_node_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_node_field)?,
+        schema_version_idx: field_idx_in_descriptor(
+            terminal_descriptor,
+            &schema.identity.schema_field,
+        )?,
+        parents_idx: field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
+        created_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
+        created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
+        updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
+        updated_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
+        user_field_indices,
+        user_validation_descriptors,
+    })
+}
+
+fn build_content_witness_projector(
+    terminal_descriptor: RecordDescriptor,
+    storage_descriptor: RecordDescriptor,
+    schema: &VersionWitnessSchema,
+    table: &TableSchema,
+) -> Result<RecordProjector, super::Error> {
+    let mut mapping = vec![
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
+            0,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
+            1,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_node_field)?,
+            2,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.identity.schema_field)?,
+            3,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
+            4,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
+            5,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
+            6,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
+            7,
+        ),
+        (
+            field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
+            8,
+        ),
+    ];
+    for (idx, column) in table.columns.iter().enumerate() {
+        let source = schema
+            .user_fields
+            .get(&column.name)
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained witness schema missing user field",
+            ))
+            .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))?;
+        mapping.push((source, 9 + idx));
     }
-    Ok(values)
+    RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
+        super::Error::InvalidStoredValue("content witness projector construction failed")
+    })
+}
+
+fn validate_witness_content_cells(
+    record: BorrowedRecord<'_>,
+    plan: &VersionDecodePlan,
+    table: &TableSchema,
+) -> Result<(), super::Error> {
+    for ((_, field_idx), descriptor) in table
+        .columns
+        .iter()
+        .zip(&plan.user_field_indices)
+        .zip(&plan.user_validation_descriptors)
+    {
+        let value = nullable_value(record.get_idx(*field_idx)?)?;
+        if let Some(value) = &value {
+            descriptor
+                .create(std::slice::from_ref(value))
+                .map_err(|_| {
+                    super::Error::InvalidStoredValue("maintained witness cell validation failed")
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
@@ -884,6 +1013,13 @@ fn record_u64(record: BorrowedRecord<'_>, field: &str) -> Result<u64, super::Err
     }
 }
 
+fn record_u64_idx(record: BorrowedRecord<'_>, field_idx: usize) -> Result<u64, super::Error> {
+    match record.get_idx(field_idx)? {
+        Value::U64(value) => Ok(value),
+        _ => Err(super::Error::InvalidStoredValue("field must be u64")),
+    }
+}
+
 fn nullable_u64(record: BorrowedRecord<'_>, field: &str) -> Result<Option<u64>, super::Error> {
     match record.get_idx(field_idx(record, field)?)? {
         Value::Nullable(None) => Ok(None),
@@ -903,6 +1039,17 @@ fn nullable_u64(record: BorrowedRecord<'_>, field: &str) -> Result<Option<u64>, 
 fn field_idx(record: BorrowedRecord<'_>, field: &str) -> Result<usize, super::Error> {
     record
         .descriptor()
+        .field_index(field)
+        .ok_or(super::Error::InvalidStoredValue(
+            "maintained view terminal missing field",
+        ))
+}
+
+fn field_idx_in_descriptor(
+    descriptor: RecordDescriptor,
+    field: &str,
+) -> Result<usize, super::Error> {
+    descriptor
         .field_index(field)
         .ok_or(super::Error::InvalidStoredValue(
             "maintained view terminal missing field",
