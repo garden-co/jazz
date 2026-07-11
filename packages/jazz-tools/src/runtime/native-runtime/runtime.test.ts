@@ -488,12 +488,16 @@ describe("NativeRuntimeAdapter server transport", () => {
     const decoded = decodeTestDeltas([updates.mock.calls[0]![0]]);
     expect(decoded).toHaveLength(1);
     expect(decoded[0]).toHaveLength(1);
-    expect(decoded[0]![0]).toMatchObject({
+    const firstDelta = decoded[0]![0]!;
+    expect(firstDelta).toMatchObject({
       kind: 0,
       id: "00000000-0000-0000-0000-000000000123",
       index: 0,
     });
-    expect(decoded[0]![0]?.row.values[0]).toEqual({ type: "Text", value: "settled row" });
+    if (firstDelta.kind !== 0) {
+      throw new Error(`expected added delta, got kind ${firstDelta.kind}`);
+    }
+    expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
   });
 
   it("uses the caller-supplied table for update and delete", () => {

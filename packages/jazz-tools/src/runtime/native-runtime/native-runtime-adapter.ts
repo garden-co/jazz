@@ -3,7 +3,6 @@ import type {
   ColumnType,
   InsertValues,
   NativeRowDelta,
-  SubscriptionWireDelta,
   TablePolicies,
   Value,
   WasmSchema,
@@ -3441,7 +3440,7 @@ function applySubscriptionDeltaWithWireDelta(
   delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
   schema: WasmSchema,
   reset = false,
-): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: SubscriptionWireDelta } {
+): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
     : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
@@ -3591,7 +3590,7 @@ function wireDeltaFromNativeBatches(
   rowIndexByKey: Map<string, number>,
   removedEntries: Array<{ id: string; index: number }>,
   schema: WasmSchema,
-): SubscriptionWireDelta {
+): NativeRowDelta {
   const added: RowState[] = [];
   for (const row of rowsFromBatches(delta.added, schema)) {
     added.push(row);
