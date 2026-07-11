@@ -3560,7 +3560,8 @@ where
             if incoming.contains(&version_ref) {
                 continue;
             }
-            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some();
+            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some()
+                && self.query_transaction(tx_id)?.is_some();
             if !has_body {
                 missing.insert(version_ref);
             } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
