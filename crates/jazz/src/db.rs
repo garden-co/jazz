@@ -3253,8 +3253,16 @@ where
                     }
                     let maintained_update =
                         if let Some(maintained) = maintained_subscription.as_mut() {
-                            node.borrow_mut()
-                                .drain_local_maintained_view_subscription(maintained)?
+                            let mut node_ref = node.borrow_mut();
+                            match node_ref.drain_local_maintained_view_subscription(maintained) {
+                                Ok(update) => update,
+                                Err(crate::node::Error::MissingTransaction(_)) => {
+                                    node_ref.record_authoritative_reset_missing_payload_fallback();
+                                    retained.push(Rc::downgrade(&state));
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
                         } else {
                             None
                         };
@@ -3277,31 +3285,30 @@ where
                                 Err(error) => return Err(error.into()),
                             }
                         };
-                        let (mut snapshot, force_reset_event) = if let Some(snapshot) =
-                            authoritative_snapshot
-                        {
-                            (snapshot, true)
-                        } else {
-                            let fallback = {
-                                let mut node_ref = node.borrow_mut();
-                                match node_ref.subscription_snapshot_for_link(
-                                    &shape,
-                                    &binding,
-                                    snapshot_tier,
-                                    author,
-                                ) {
-                                    Ok(snapshot) => snapshot,
-                                    Err(crate::node::Error::MissingTransaction(_)) => {
-                                        node_ref
+                        let (mut snapshot, force_reset_event) =
+                            if let Some(snapshot) = authoritative_snapshot {
+                                (snapshot, true)
+                            } else {
+                                let fallback = {
+                                    let mut node_ref = node.borrow_mut();
+                                    match node_ref.subscription_snapshot_for_link(
+                                        &shape,
+                                        &binding,
+                                        snapshot_tier,
+                                        author,
+                                    ) {
+                                        Ok(snapshot) => snapshot,
+                                        Err(crate::node::Error::MissingTransaction(_)) => {
+                                            node_ref
                                             .record_authoritative_reset_missing_payload_fallback();
-                                        retained.push(Rc::downgrade(&state));
-                                        continue;
+                                            retained.push(Rc::downgrade(&state));
+                                            continue;
+                                        }
+                                        Err(error) => return Err(error.into()),
                                     }
-                                    Err(error) => return Err(error.into()),
-                                }
+                                };
+                                (fallback, false)
                             };
-                            (fallback, false)
-                        };
                         if let Some(update) = maintained_update {
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
