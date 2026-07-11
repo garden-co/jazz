@@ -1306,6 +1306,32 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         .missing_known_state_row_version_refs(&update)
         .unwrap()
         .is_empty());
+
+    let tx_node_alias = reader.node_aliases.get(&tx_id.node).copied().unwrap();
+    let mut batch = reader.database.open_batch();
+    batch.delete(
+        "jazz_transactions",
+        groove::db::PrimaryKeyValue::Composite(vec![
+            groove::db::PrimaryKeyValue::U64(tx_id.time.0),
+            groove::db::PrimaryKeyValue::U64(tx_node_alias.0),
+        ]),
+    );
+    reader.database.commit_batch(batch).unwrap();
+    assert_eq!(
+        reader
+            .missing_known_state_row_version_refs(&update)
+            .unwrap(),
+        missing,
+        "a local version row without its transaction metadata still needs repair"
+    );
+    reader
+        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+        .unwrap();
+    assert!(reader
+        .missing_known_state_row_version_refs(&update)
+        .unwrap()
+        .is_empty());
+
     reader.apply_sync_message(update).unwrap();
     assert_eq!(
         reader

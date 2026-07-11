@@ -4248,11 +4248,13 @@ where
                     .then_some(target_schema),
             )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
-                Some((
-                    previous,
-                    self.version_tx_id(previous)?,
-                    self.version_made_at(previous)?,
-                ))
+                let previous_tx_id = self.version_tx_id(previous)?;
+                let previous_made_at = if previous_tx_id == tx.tx_id {
+                    tx.tx_id.time
+                } else {
+                    self.version_made_at(previous)?
+                };
+                Some((previous, previous_tx_id, previous_made_at))
             } else {
                 None
             };
