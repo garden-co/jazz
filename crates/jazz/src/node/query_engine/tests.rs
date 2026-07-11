@@ -70,7 +70,9 @@ fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeS
                 collect_binding_source_fingerprint(input, sources);
             }
         }
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             collect_binding_source_fingerprint(left, sources);
             collect_binding_source_fingerprint(right, sources);
         }

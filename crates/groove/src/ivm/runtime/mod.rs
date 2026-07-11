@@ -1329,6 +1329,9 @@ impl IvmRuntime {
                 let right = self.infer_builder_output_cached(right, output_memo)?;
                 Ok(join_descriptor(&left, &right))
             }
+            GraphBuilder::SemiJoin { left, .. } => {
+                self.infer_builder_output_cached(left, output_memo)
+            }
             GraphBuilder::AntiJoin { left, .. } => {
                 self.infer_builder_output_cached(left, output_memo)
             }
@@ -1661,7 +1664,7 @@ impl IvmRuntime {
         let mut referenced = HashSet::new();
         for node in self.graph.nodes().values() {
             match &node.descriptor.operator {
-                OpType::Join(join) | OpType::AntiJoin(join) => {
+                OpType::Join(join) | OpType::SemiJoin(join) | OpType::AntiJoin(join) => {
                     if let [left, right] = node.descriptor.inputs.as_slice() {
                         referenced.insert(ArrangementKey {
                             scope: ScopeId::root(),
@@ -2298,6 +2301,43 @@ impl IvmRuntime {
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 let node_descriptor = NodeDescriptor::new(
                     OpType::Join(JoinOp {
+                        kind: JoinOpKind::Inner,
+                        left_key,
+                        right_key,
+                        left_descriptor,
+                        right_descriptor,
+                        residual_predicate: None,
+                    }),
+                    [compiled_left.node, compiled_right.node],
+                    output,
+                );
+                let node = self
+                    .graph
+                    .dedup_node(node_descriptor, NodeDurability::Ephemeral);
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
+            }
+            GraphBuilder::SemiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+            } => {
+                let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
+                let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
+                let output = inferred_output;
+                let left_descriptor = compiled_left.output;
+                let right_descriptor = compiled_right.output;
+                let left_key = left_on
+                    .iter()
+                    .map(|field| field_ref_name(&left_descriptor, field).map(PlanExpr::field))
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let right_key = right_on
+                    .iter()
+                    .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let node_descriptor = NodeDescriptor::new(
+                    OpType::SemiJoin(JoinOp {
                         kind: JoinOpKind::Inner,
                         left_key,
                         right_key,
@@ -3353,7 +3393,9 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
         GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             1 + count_builder_nodes(left) + count_builder_nodes(right)
         }
     }
@@ -3374,7 +3416,9 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             builder_contains_binding_source(left) || builder_contains_binding_source(right)
         }
         GraphBuilder::Table { .. }
@@ -3446,7 +3490,9 @@ fn collect_builder_field_names(
                 collect_builder_field_names(input, runtime, occupied)?;
             }
         }
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             collect_builder_field_names(left, runtime, occupied)?;
             collect_builder_field_names(right, runtime, occupied)?;
         }
@@ -3669,6 +3715,25 @@ fn lift_literal_filter(
             };
             Ok(Some(LiftedLiteralFilter {
                 graph: GraphBuilder::AntiJoin {
+                    left: Box::new(lifted.graph),
+                    right: right.clone(),
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::SemiJoin {
                     left: Box::new(lifted.graph),
                     right: right.clone(),
                     left_on: left_on.clone(),
@@ -3906,7 +3971,9 @@ fn append_binding_project_field(
 
 fn binding_project_source(input: &GraphBuilder, binding_field: &str) -> String {
     match input {
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             if graph_outputs_binding(left, binding_field) {
                 format!("left.{binding_field}")
             } else if graph_outputs_binding(right, binding_field) {
@@ -3935,7 +4002,9 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => graph_outputs_binding(input, binding_field),
         GraphBuilder::Recursive { seed, .. } => graph_outputs_binding(seed, binding_field),
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             graph_outputs_binding(left, binding_field)
                 || graph_outputs_binding(right, binding_field)
         }
@@ -4033,6 +4102,21 @@ fn propagate_binding_through_frontier(
             Some(GraphBuilder::Join {
                 left: Box::new(left),
                 right: Box::new(right),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+            })
+        }
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+        } => {
+            let left =
+                propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::SemiJoin {
+                left: Box::new(left),
+                right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
             })
@@ -4155,6 +4239,17 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             left_on,
             right_on,
         } => GraphBuilder::Join {
+            left: Box::new(replace_binding_shape(*left, shape)),
+            right: Box::new(replace_binding_shape(*right, shape)),
+            left_on,
+            right_on,
+        },
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+        } => GraphBuilder::SemiJoin {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
@@ -4529,6 +4624,7 @@ impl NodeState {
 enum OperatorState {
     Stateless,
     Join(JoinState),
+    SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
     Recursive(AsOf<RecursiveState, Tick>),
 }
@@ -4536,6 +4632,7 @@ enum OperatorState {
 fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
+        OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         _ => OperatorState::Stateless,
@@ -4576,7 +4673,9 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
-        GraphBuilder::Join { left, right, .. } | GraphBuilder::AntiJoin { left, right, .. } => {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
             builder_contains_recursive(left) || builder_contains_recursive(right)
         }
         GraphBuilder::Table { .. }
@@ -4979,6 +5078,22 @@ where
                     &right.deltas,
                 )
             }
+            OpType::SemiJoin(join) => {
+                let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
+                    return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+                };
+                let left = self.update_node(*left_input)?;
+                let right = self.update_node(*right_input)?;
+                self.update_semi_join(
+                    node,
+                    join,
+                    output_desc,
+                    *left_input,
+                    *right_input,
+                    &left.deltas,
+                    &right.deltas,
+                )
+            }
             OpType::AntiJoin(join) => {
                 let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
@@ -5292,6 +5407,66 @@ where
             &mut right_arrangement,
             &join.left_descriptor,
             &join.right_descriptor,
+            &output_desc,
+            &left_key.fields,
+            &right_key.fields,
+            left_delta,
+            right_delta,
+            self.arrangement_sub_tick(&left_key),
+            self.arrangement_sub_tick(&right_key),
+            self.context.arrangement_update_mode,
+        )?;
+        if left_key == right_key {
+            left_arrangement = right_arrangement;
+        } else {
+            self.arrangement_states.insert(right_key, right_arrangement);
+        }
+        self.arrangement_states.insert(left_key, left_arrangement);
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_semi_join(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+        output_desc: RecordDescriptor,
+        left_input: NodeId,
+        right_input: NodeId,
+        left_delta: &[RecordDelta],
+        right_delta: &[RecordDelta],
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let operator_key = self.operator_key(node)?;
+        let operator = self
+            .operator_states
+            .entry(operator_key)
+            .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
+        let OperatorState::SemiJoin(join_state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        let join_state = join_state.clone();
+        let (left_on, right_on) = self.join_field_names(node, join);
+        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
+        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let mut left_arrangement = self
+            .arrangement_states
+            .remove(&left_key)
+            .unwrap_or_default();
+        let mut right_arrangement = if left_key == right_key {
+            left_arrangement.clone()
+        } else {
+            self.arrangement_states
+                .remove(&right_key)
+                .unwrap_or_default()
+        };
+        let deltas = join_state.apply_semi(
+            &mut left_arrangement,
+            &mut right_arrangement,
+            join.left_descriptor,
+            join.right_descriptor,
             &output_desc,
             &left_key.fields,
             &right_key.fields,
@@ -7386,7 +7561,6 @@ pub enum IvmRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ivm::JoinOpKind;
     use crate::schema::{
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
@@ -8337,23 +8511,11 @@ mod tests {
             .node;
         let output = *runtime.table_descriptor("albums").unwrap();
 
-        let join = JoinOp {
-            kind: JoinOpKind::Inner,
-            left_key: vec![PlanExpr::Field("id".to_owned())],
-            right_key: vec![PlanExpr::Field("id".to_owned())],
-            left_descriptor: output,
-            right_descriptor: output,
-            residual_predicate: None,
-        };
-        let unsupported = [OpType::SemiJoin(join), OpType::Distinct, OpType::Negate];
+        let unsupported = [OpType::Distinct, OpType::Negate];
 
         for operator in unsupported {
-            let inputs = match operator {
-                OpType::SemiJoin(_) => vec![input, input],
-                _ => vec![input],
-            };
             let node = runtime.graph.dedup_node(
-                NodeDescriptor::new(operator, inputs, output),
+                NodeDescriptor::new(operator, [input], output),
                 NodeDurability::Ephemeral,
             );
             assert!(matches!(
