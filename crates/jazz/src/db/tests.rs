@@ -7022,7 +7022,10 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
         resume_bytes > 0,
         "resume catch-up should send a bounded non-empty response after cursor resume"
     );
-    assert_ne!(resume_bytes, full_bytes);
+    assert!(
+        resume_bytes <= full_bytes,
+        "resume catch-up should stay bounded by the initial full response"
+    );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
         prepared_read(&client, &query)
@@ -7083,7 +7086,10 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
         resume_bytes > 0,
         "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
     );
-    assert_ne!(resume_bytes, full_bytes);
+    assert!(
+        resume_bytes <= full_bytes,
+        "byte-wire resume catch-up should stay bounded by the initial full response"
+    );
     assert_eq!(prepared_read(&client, &query).len(), 3);
     assert!(
         prepared_read(&client, &query)

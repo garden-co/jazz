@@ -3323,21 +3323,35 @@ where
                     } else {
                         let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
-                            let remote_snapshot =
-                                node.borrow_mut().subscription_snapshot_for_link(
-                                    &shape,
-                                    &binding,
-                                    snapshot_tier,
-                                    author,
-                                )?;
-                            if has_maintained_subscription
-                                && previous.root_count > 0
-                                && previous_source == SubscriptionSnapshotSource::LocalMaintained
-                                && remote_snapshot.root_count == 0
+                            if previous.root_count == 0
+                                && previous.edges.is_empty()
+                                && node.borrow().has_settled_result_set(settled_binding_view)
+                                && let Some(snapshot) = node
+                                    .borrow_mut()
+                                    .authoritative_reset_snapshot_for_binding_view(
+                                        &shape,
+                                        settled_binding_view,
+                                    )?
                             {
-                                (previous.clone(), previous_source)
+                                (snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                             } else {
-                                (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                                let remote_snapshot =
+                                    node.borrow_mut().subscription_snapshot_for_link(
+                                        &shape,
+                                        &binding,
+                                        snapshot_tier,
+                                        author,
+                                    )?;
+                                if has_maintained_subscription
+                                    && previous.root_count > 0
+                                    && previous_source
+                                        == SubscriptionSnapshotSource::LocalMaintained
+                                    && remote_snapshot.root_count == 0
+                                {
+                                    (previous.clone(), previous_source)
+                                } else {
+                                    (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
+                                }
                             }
                         } else if has_maintained_subscription {
                             let previous = state_ref.snapshot.clone();

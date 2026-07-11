@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use groove::db::{
-    CommitMetrics, Database, DatabaseBatch, Error as GrooveDbError, GraphBuilder, PredicateExpr,
-    PrimaryKeyValue, Subscription,
+    CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
+    GraphBuilder, PredicateExpr, PrimaryKeyValue, Subscription,
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
@@ -39,7 +39,8 @@ use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
     CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
-    MergeStrategy, STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
+    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -2429,6 +2430,156 @@ where
             store.delete(&key)?;
         }
         self.query.settled_through_by_binding_view.clear();
+        self.clear_all_settled_result_state()?;
+        Ok(())
+    }
+
+    pub(crate) fn persist_settled_result_state_delta(
+        &self,
+        binding_view_key: BindingViewKey,
+        cleared: bool,
+        member_adds: &[ResultMemberEntry],
+        member_removes: &[ResultMemberEntry],
+        member_rewrite: Option<&BTreeSet<ResultMemberEntry>>,
+        fact_adds: &[ViewFactEntry],
+        fact_removes: &[ViewFactEntry],
+        fact_rewrite: Option<&BTreeSet<ViewFactEntry>>,
+    ) -> Result<(), Error> {
+        self.persist_settled_result_members_delta(
+            binding_view_key,
+            cleared,
+            member_adds,
+            member_removes,
+            member_rewrite,
+        )?;
+        self.persist_settled_program_facts_delta(
+            binding_view_key,
+            cleared,
+            fact_adds,
+            fact_removes,
+            fact_rewrite,
+        )?;
+        Ok(())
+    }
+
+    fn persist_settled_result_members_delta(
+        &self,
+        binding_view_key: BindingViewKey,
+        cleared: bool,
+        adds: &[ResultMemberEntry],
+        removes: &[ResultMemberEntry],
+        rewrite: Option<&BTreeSet<ResultMemberEntry>>,
+    ) -> Result<(), Error> {
+        let store = self
+            .database
+            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
+        if cleared || rewrite.is_some() {
+            let prefix = binding_view_store_prefix(binding_view_key);
+            let keys = store
+                .prefix_entries(&prefix)?
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>();
+            let mut operations = keys
+                .into_iter()
+                .map(|key| DirectRecordStoreWrite::Delete { key })
+                .collect::<Vec<_>>();
+            if let Some(members) = rewrite {
+                for member in members {
+                    operations.push(DirectRecordStoreWrite::Set {
+                        key: settled_result_member_key(binding_view_key, member)?,
+                        value: vec![Value::U64(1)],
+                    });
+                }
+            }
+            store.write_many(&operations)?;
+            return Ok(());
+        }
+
+        let mut operations = Vec::with_capacity(removes.len() + adds.len());
+        for member in removes {
+            operations.push(DirectRecordStoreWrite::Delete {
+                key: settled_result_member_key(binding_view_key, member)?,
+            });
+        }
+        for member in adds {
+            operations.push(DirectRecordStoreWrite::Set {
+                key: settled_result_member_key(binding_view_key, member)?,
+                value: vec![Value::U64(1)],
+            });
+        }
+        if !operations.is_empty() {
+            store.write_many(&operations)?;
+        }
+        Ok(())
+    }
+
+    fn persist_settled_program_facts_delta(
+        &self,
+        binding_view_key: BindingViewKey,
+        cleared: bool,
+        adds: &[ViewFactEntry],
+        removes: &[ViewFactEntry],
+        rewrite: Option<&BTreeSet<ViewFactEntry>>,
+    ) -> Result<(), Error> {
+        let store = self
+            .database
+            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
+        if cleared || rewrite.is_some() {
+            let prefix = binding_view_store_prefix(binding_view_key);
+            let keys = store
+                .prefix_entries(&prefix)?
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>();
+            let mut operations = keys
+                .into_iter()
+                .map(|key| DirectRecordStoreWrite::Delete { key })
+                .collect::<Vec<_>>();
+            if let Some(facts) = rewrite {
+                for fact in facts {
+                    operations.push(DirectRecordStoreWrite::Set {
+                        key: settled_program_fact_key(binding_view_key, fact)?,
+                        value: vec![Value::U64(1)],
+                    });
+                }
+            }
+            store.write_many(&operations)?;
+            return Ok(());
+        }
+
+        let mut operations = Vec::with_capacity(removes.len() + adds.len());
+        for fact in removes {
+            operations.push(DirectRecordStoreWrite::Delete {
+                key: settled_program_fact_key(binding_view_key, fact)?,
+            });
+        }
+        for fact in adds {
+            operations.push(DirectRecordStoreWrite::Set {
+                key: settled_program_fact_key(binding_view_key, fact)?,
+                value: vec![Value::U64(1)],
+            });
+        }
+        if !operations.is_empty() {
+            store.write_many(&operations)?;
+        }
+        Ok(())
+    }
+
+    fn clear_all_settled_result_state(&mut self) -> Result<(), Error> {
+        for store_name in [SETTLED_RESULT_MEMBERS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
+            let store = self.database.direct_record_store(store_name)?;
+            let keys = store
+                .prefix_entries(&[])?
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect::<Vec<_>>();
+            for key in keys {
+                store.delete(&key)?;
+            }
+        }
+        self.query.settled_result_sets.clear();
+        self.query.settled_program_facts.clear();
         Ok(())
     }
 
@@ -2531,6 +2682,8 @@ where
 
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
+        self.query.settled_result_sets.clear();
+        self.query.settled_program_facts.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[])? {
             if entry.key.len() != 3 {
@@ -2574,6 +2727,67 @@ where
                 BindingViewKey::new(shape_id, binding_id, read_view),
                 settled_through,
             );
+        }
+        let store = self
+            .database
+            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
+        for entry in store.prefix_entries(&[])? {
+            if entry.key.len() != 4 {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member key must have four columns",
+                ));
+            }
+            let binding_view_key = binding_view_key_from_store_key(
+                &entry.key,
+                "settled result member binding key must be valid",
+            )?;
+            let member_bytes = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled result member payload must be bytes",
+                    ));
+                }
+            };
+            let member = postcard::from_bytes::<ResultMemberEntry>(member_bytes).map_err(|_| {
+                Error::InvalidStoredValue("settled result member payload must decode")
+            })?;
+            self.query
+                .settled_result_sets
+                .entry(binding_view_key)
+                .or_default()
+                .insert(member);
+        }
+
+        let store = self
+            .database
+            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
+        for entry in store.prefix_entries(&[])? {
+            if entry.key.len() != 4 {
+                return Err(Error::InvalidStoredValue(
+                    "settled program fact key must have four columns",
+                ));
+            }
+            let binding_view_key = binding_view_key_from_store_key(
+                &entry.key,
+                "settled program fact binding key must be valid",
+            )?;
+            let fact_bytes = match &entry.key[3] {
+                Value::Bytes(bytes) => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact payload must be bytes",
+                    ));
+                }
+            };
+            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
+                Error::InvalidStoredValue("settled program fact payload must decode")
+            })?;
+            self.query
+                .settled_program_facts
+                .entry(binding_view_key)
+                .or_default()
+                .insert(fact);
         }
         Ok(())
     }
@@ -4504,6 +4718,54 @@ fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {
         Value::Uuid(binding_view_key.binding_id.0),
         Value::Uuid(binding_view_key.read_view.id),
     ]
+}
+
+fn binding_view_store_prefix(binding_view_key: BindingViewKey) -> Vec<Value> {
+    known_state_fact_key(binding_view_key).to_vec()
+}
+
+fn settled_result_member_key(
+    binding_view_key: BindingViewKey,
+    member: &ResultMemberEntry,
+) -> Result<Vec<Value>, Error> {
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(postcard::to_allocvec(member).map_err(
+        |_| Error::InvalidStoredValue("settled result member must encode"),
+    )?));
+    Ok(key)
+}
+
+fn settled_program_fact_key(
+    binding_view_key: BindingViewKey,
+    fact: &ViewFactEntry,
+) -> Result<Vec<Value>, Error> {
+    let mut key = binding_view_store_prefix(binding_view_key);
+    key.push(Value::Bytes(postcard::to_allocvec(fact).map_err(|_| {
+        Error::InvalidStoredValue("settled program fact must encode")
+    })?));
+    Ok(key)
+}
+
+fn binding_view_key_from_store_key(
+    key: &[Value],
+    context: &'static str,
+) -> Result<BindingViewKey, Error> {
+    if key.len() < 3 {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let shape_id = match &key[0] {
+        Value::Uuid(uuid) => ShapeId(*uuid),
+        _ => return Err(Error::InvalidStoredValue(context)),
+    };
+    let binding_id = match &key[1] {
+        Value::Uuid(uuid) => BindingId(*uuid),
+        _ => return Err(Error::InvalidStoredValue(context)),
+    };
+    let read_view = match &key[2] {
+        Value::Uuid(uuid) => ReadViewKey { id: *uuid },
+        _ => return Err(Error::InvalidStoredValue(context)),
+    };
+    Ok(BindingViewKey::new(shape_id, binding_id, read_view))
 }
 
 fn clean_close_marker_key() -> [Value; 1] {
