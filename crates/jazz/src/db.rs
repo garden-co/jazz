@@ -3244,10 +3244,36 @@ where
                         }
                         .read_view_key(),
                     };
+                    let delivered_binding_view = BindingViewKey {
+                        shape_id: shape.shape_id(),
+                        binding_id: binding.binding_id(),
+                        read_view: RegisterShapeOptions {
+                            tier: read_tier,
+                            read_view: read_view.clone(),
+                        }
+                        .read_view_key(),
+                    };
+                    let authoritative_reset_binding_view =
+                        if pending_authoritative_resets.contains(&delivered_binding_view) {
+                            delivered_binding_view
+                        } else {
+                            settled_binding_view
+                        };
+                    let authoritative_reset_pending =
+                        pending_authoritative_resets.contains(&authoritative_reset_binding_view);
                     if node
                         .borrow()
                         .publication_deferred_for_binding_view(settled_binding_view)
+                        || node
+                            .borrow()
+                            .publication_deferred_for_binding_view(delivered_binding_view)
                     {
+                        if authoritative_reset_pending {
+                            node.borrow_mut()
+                                .defer_authoritative_reset_for_binding_view(
+                                    authoritative_reset_binding_view,
+                                );
+                        }
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
@@ -3258,6 +3284,9 @@ where
                                 Ok(update) => update,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
+                                    node_ref.defer_authoritative_reset_for_binding_view(
+                                        authoritative_reset_binding_view,
+                                    );
                                     retained.push(Rc::downgrade(&state));
                                     continue;
                                 }
@@ -3268,18 +3297,20 @@ where
                         };
                     let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let authoritative_reset = remote_settled_tier.is_some()
-                        && pending_authoritative_resets.contains(&settled_binding_view);
+                    let authoritative_reset = authoritative_reset_pending;
                     if authoritative_reset {
                         let authoritative_snapshot = {
                             let mut node_ref = node.borrow_mut();
                             match node_ref.authoritative_reset_snapshot_for_binding_view(
                                 &shape,
-                                settled_binding_view,
+                                authoritative_reset_binding_view,
                             ) {
                                 Ok(snapshot) => snapshot,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
+                                    node_ref.defer_authoritative_reset_for_binding_view(
+                                        authoritative_reset_binding_view,
+                                    );
                                     None
                                 }
                                 Err(error) => return Err(error.into()),
@@ -3301,6 +3332,9 @@ where
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
                                             .record_authoritative_reset_missing_payload_fallback();
+                                            node_ref.defer_authoritative_reset_for_binding_view(
+                                                authoritative_reset_binding_view,
+                                            );
                                             retained.push(Rc::downgrade(&state));
                                             continue;
                                         }
@@ -3364,18 +3398,23 @@ where
                             let previous = state_ref.snapshot.clone();
                             if previous.root_count == 0
                                 && previous.edges.is_empty()
-                                && node.borrow().has_settled_result_set(settled_binding_view)
+                                && node
+                                    .borrow()
+                                    .has_settled_result_set(authoritative_reset_binding_view)
                             {
                                 let authoritative_snapshot = {
                                     let mut node_ref = node.borrow_mut();
                                     match node_ref.authoritative_reset_snapshot_for_binding_view(
                                         &shape,
-                                        settled_binding_view,
+                                        authoritative_reset_binding_view,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
                                                 .record_authoritative_reset_missing_payload_fallback();
+                                            node_ref.defer_authoritative_reset_for_binding_view(
+                                                authoritative_reset_binding_view,
+                                            );
                                             None
                                         }
                                         Err(error) => return Err(error.into()),
@@ -3396,6 +3435,10 @@ where
                                             Err(crate::node::Error::MissingTransaction(_)) => {
                                                 node_ref
                                                     .record_authoritative_reset_missing_payload_fallback();
+                                                node_ref
+                                                    .defer_authoritative_reset_for_binding_view(
+                                                        authoritative_reset_binding_view,
+                                                    );
                                                 retained.push(Rc::downgrade(&state));
                                                 continue;
                                             }
@@ -3417,6 +3460,9 @@ where
                                         Err(crate::node::Error::MissingTransaction(_)) => {
                                             node_ref
                                                 .record_authoritative_reset_missing_payload_fallback();
+                                            node_ref.defer_authoritative_reset_for_binding_view(
+                                                authoritative_reset_binding_view,
+                                            );
                                             retained.push(Rc::downgrade(&state));
                                             continue;
                                         }

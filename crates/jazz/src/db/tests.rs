@@ -6493,8 +6493,188 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
         1
     );
     assert_eq!(node.subscription_snapshot_for_link_call_count(), 1);
+    assert!(
+        node.has_pending_authoritative_reset_for_test(binding_view_key),
+        "missing payload fallback must keep the authoritative reset pending for a later retry"
+    );
     drop(node);
     assert!(prepared_all(&client, &query, ReadOpts::default()).is_empty());
+}
+
+#[test]
+fn authoritative_reset_skips_stale_member_without_falling_back() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let opts = global_subscribe_opts();
+    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let live_row = row(0x7a);
+    let stale_row = row(0x7b);
+    let tx_id = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", live_row, client.next_now_ms())
+                .made_by(client_author)
+                .permission_subject(client_author)
+                .cells(cells("live", false, client_author)),
+        )
+        .unwrap();
+
+    let binding_view_key = BindingViewKey::new(
+        prepared.shape().shape_id(),
+        prepared.binding().binding_id(),
+        RegisterShapeOptions {
+            tier: opts.tier,
+            read_view: opts.read_view,
+        }
+        .read_view_key(),
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            [
+                ResultMemberEntry::row(("todos".to_owned().into(), live_row, tx_id)),
+                ResultMemberEntry::row(("todos".to_owned().into(), stale_row, tx_id)),
+            ],
+            GlobalSeq(42),
+        );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .reset_subscription_snapshot_for_link_call_count();
+
+    let changed = client.refresh_subscriptions().unwrap();
+    assert_eq!(changed, 1);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .subscription_snapshot_for_link_call_count(),
+        0,
+        "stale members with present tx metadata must not force local query fallback"
+    );
+    let event = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        settled,
+        ..
+    } = event
+    else {
+        panic!("expected subscription delta");
+    };
+    assert!(reset);
+    assert!(settled);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), live_row);
+}
+
+#[test]
+fn propagated_authoritative_reset_uses_delivered_binding_view() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let live_row = row(0x7c);
+    let tx_id = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", live_row, client.next_now_ms())
+                .made_by(client_author)
+                .permission_subject(client_author)
+                .cells(cells("delivered reset", false, client_author)),
+        )
+        .unwrap();
+    let delivered_binding_view_key = BindingViewKey::new(
+        prepared.shape().shape_id(),
+        prepared.binding().binding_id(),
+        RegisterShapeOptions {
+            tier: opts.tier,
+            read_view: opts.read_view,
+        }
+        .read_view_key(),
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            delivered_binding_view_key,
+            [ResultMemberEntry::row((
+                "todos".to_owned().into(),
+                live_row,
+                tx_id,
+            ))],
+            GlobalSeq(42),
+        );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .reset_subscription_snapshot_for_link_call_count();
+
+    let changed = client.refresh_subscriptions().unwrap();
+    assert_eq!(changed, 1);
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .subscription_snapshot_for_link_call_count(),
+        0,
+        "propagated resets are delivered under the app subscription binding view, not the upstream global coverage key"
+    );
+    let event = block_on(subscription.next_event()).unwrap();
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        settled,
+        ..
+    } = event
+    else {
+        panic!("expected subscription delta");
+    };
+    assert!(reset);
+    assert!(
+        !settled,
+        "this synthetic unit injects only the delivered binding-view reset; real upstream traffic also advances the global coverage settle stamp"
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), live_row);
 }
 
 #[test]

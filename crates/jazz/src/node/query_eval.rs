@@ -3962,6 +3962,25 @@ where
         std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
     }
 
+    pub(crate) fn defer_authoritative_reset_for_binding_view(
+        &mut self,
+        binding_view_key: BindingViewKey,
+    ) {
+        self.query
+            .pending_authoritative_reset_binding_views
+            .insert(binding_view_key);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_authoritative_reset_for_test(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        self.query
+            .pending_authoritative_reset_binding_views
+            .contains(&binding_view_key)
+    }
+
     pub(crate) fn publication_deferred_for_binding_view(
         &self,
         binding_view_key: BindingViewKey,
@@ -4213,6 +4232,9 @@ where
             &content_descriptor,
         )?
         else {
+            if self.query_transaction(tx_id)?.is_some() {
+                return Ok(None);
+            }
             return Err(Error::MissingTransaction(tx_id));
         };
         let mut row = self.current_row_from_materialized_version(&table, &version)?;
