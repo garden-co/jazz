@@ -367,6 +367,7 @@ struct PhysicalTableNameKey {
 struct RegisteredBinding {
     values: Vec<Value>,
     read_view: ReadViewKey,
+    binding_view_key: BindingViewKey,
 }
 
 /// Locally open exclusive transactions and local-only permission attribution.

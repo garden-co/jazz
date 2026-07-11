@@ -3840,10 +3840,10 @@ where
             .cloned()
             .zip(subscribe.values.iter().cloned())
             .collect::<BTreeMap<_, _>>();
-        let _binding = shape.bind(value_map)?;
+        let binding = shape.bind(value_map)?;
         let binding_view_key = BindingViewKey {
             shape_id: subscribe.shape_id,
-            binding_id: subscribe.subscription.binding_id,
+            binding_id: binding.binding_id(),
             read_view: subscribe.subscription.read_view,
         };
         if subscribe.known_state.is_some() {
@@ -3864,6 +3864,7 @@ where
                 RegisteredBinding {
                     values: subscribe.values,
                     read_view: subscribe.subscription.read_view,
+                    binding_view_key,
                 },
             );
         Ok(())
@@ -3896,9 +3897,6 @@ where
         &self,
         binding_view_key: BindingViewKey,
     ) -> bool {
-        let Some(shape) = self.query.registered_shapes.get(&binding_view_key.shape_id) else {
-            return false;
-        };
         let Some(bindings) = self
             .query
             .registered_bindings
@@ -3910,15 +3908,7 @@ where
             if registered.read_view != binding_view_key.read_view {
                 return false;
             }
-            let value_map = shape
-                .params()
-                .keys()
-                .cloned()
-                .zip(registered.values.iter().cloned())
-                .collect::<BTreeMap<_, _>>();
-            shape
-                .bind(value_map)
-                .is_ok_and(|binding| binding.binding_id() == binding_view_key.binding_id)
+            registered.binding_view_key == binding_view_key
         })
     }
 
@@ -4340,11 +4330,6 @@ where
         if let Some(binding_view_key) = self.canonical_whole_table_binding_view_key(subscription)? {
             return Ok(binding_view_key);
         }
-        let Some(shape) = self.query.registered_shapes.get(&subscription.shape_id) else {
-            return Err(Error::InvalidStoredValue(
-                "subscription referenced unregistered shape",
-            ));
-        };
         let Some(registered) = self
             .query
             .registered_bindings
@@ -4355,18 +4340,7 @@ where
                 "subscription referenced unregistered binding",
             ));
         };
-        let value_map = shape
-            .params()
-            .keys()
-            .cloned()
-            .zip(registered.values.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        let binding = shape.bind(value_map)?;
-        Ok(BindingViewKey {
-            shape_id: subscription.shape_id,
-            binding_id: binding.binding_id(),
-            read_view: registered.read_view,
-        })
+        Ok(registered.binding_view_key)
     }
 
     fn canonical_whole_table_binding_view_key(
