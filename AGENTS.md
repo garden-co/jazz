@@ -46,3 +46,26 @@ Wide maintained-vs-one-shot soaks use
 alongside the existing m3 soak conventions.
 
 **Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
+
+**Gate cadence — batched (Anselm-approved 2026-07-11).** Levers may be *batched*
+before a full canonical gate run: land several commits, then run the full gate
+set once per batch **before push**, rather than paying the full set per lever.
+Per-lever, use focused checks (the affected suites + all three mechanism canaries)
+and `/code-review` as the stopgap. Never push a batch that has not passed the full
+set. Two tiers make this concrete:
+- *Iteration tier* (intra-batch, per lever): focused crate suites + the three
+  incremental-delivery canaries + oracle at low seed count; skip smoke. ~fast.
+- *Landing tier* (before push): the full canonical set below + smoke +
+  `dev/gates/no-sensitive-data.sh`.
+
+**Sensitive-data guard.** `dev/gates/no-sensitive-data.sh` (in lefthook pre-commit)
+fails on customer-identifying strings. Real customer schemas/data live ONLY in
+`jazz-private`; `jazz_core` uses anonymized, name-blind fixtures (perf/lowering
+gates are name-blind, so fidelity is preserved). Never commit real schema, dumps,
+PII, or non-anonymized fixtures to this public repo.
+
+**Perf loop.** Iterate perf on the in-repo native harness (anonymized fixture,
+`cargo bench` under `[profile.perf]`) — not the workspace/NAPI/artifact-copy route,
+which is milestone-only end-to-end validation. Every perf receipt emits its own
+phase breakdown (attribution-by-default). Lanes should end reports with a
+one-line **tooling-friction** note: what setup would have saved wall-clock.
