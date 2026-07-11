@@ -83,10 +83,11 @@ fn authority_rejects_later_child_of_rejected_parent_with_cascade() {
         core.transaction_state(child).unwrap().0,
         Fate::Rejected(RejectionReason::Cascade { root })
     );
-    assert!(core
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn client_side_rejection_cascades_to_local_mergeable_descendant() {
@@ -185,10 +186,11 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     let SyncMessage::CommitUnit { tx, versions } = child_unit else {
         panic!("expected commit unit");
     };
-    assert!(core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap()
+            .is_empty()
+    );
 
     let SyncMessage::CommitUnit { tx, versions } = exclusive_unit else {
         panic!("expected commit unit");
@@ -238,14 +240,16 @@ fn duplicate_unknown_parent_commit_unit_parks_once() {
     let SyncMessage::CommitUnit { tx, versions } = child_unit else {
         panic!("expected commit unit");
     };
-    assert!(core
-        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .is_empty());
-    assert!(core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(core.sync_metrics().parked_orphans, 1);
     assert_eq!(core.sync_metrics().parked_orphans_resolved, 0);
 }
@@ -366,7 +370,11 @@ fn over_limit_commit_unit_rejects_as_malformed_and_next_unit_still_applies() {
     let (good_tx, good_unit) = writer
         .commit_mergeable_unit(MergeableCommit::new("todos", row(2), 11).cells(title_cells("ok")))
         .unwrap();
-    let [good_fate] = core.apply_sync_message(good_unit).unwrap().try_into().unwrap();
+    let [good_fate] = core
+        .apply_sync_message(good_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         good_fate,
         SyncMessage::FateUpdate {
@@ -489,9 +497,17 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
         }])
         .unwrap();
 
-    assert_eq!(
-        reader.current_rows("todos", DurabilityTier::Global).unwrap(),
-        vec![(row(1), title_cells("one")), (row(2), title_cells("two"))]
+    let version_rows = reader.query_all_versions().unwrap();
+    assert_eq!(version_rows.len(), 2);
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(1))
+    );
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
     assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 2);
@@ -506,7 +522,9 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 
     let row_uuid = row(1);
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")))
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
@@ -580,6 +598,94 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
 }
 
 #[test]
+fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+    let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+    let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            ViewUpdateParts {
+                subscription,
+                settled_through: GlobalSeq(1),
+                defer_settlement: false,
+                reset_result_set: true,
+                version_bundles: vec![VersionBundle {
+                    tx: tx.clone(),
+                    versions: vec![first],
+                    fate: Fate::Accepted,
+                    global_seq: Some(GlobalSeq(1)),
+                    durability: DurabilityTier::Global,
+                }],
+                peer_complete_tx_payload_refs: Vec::new(),
+                result_member_adds: vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row(1),
+                    tx_id,
+                ))],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+            ViewUpdateParts {
+                subscription,
+                settled_through: GlobalSeq(1),
+                defer_settlement: false,
+                reset_result_set: true,
+                version_bundles: vec![VersionBundle {
+                    tx,
+                    versions: vec![second],
+                    fate: Fate::Accepted,
+                    global_seq: Some(GlobalSeq(1)),
+                    durability: DurabilityTier::Global,
+                }],
+                peer_complete_tx_payload_refs: Vec::new(),
+                result_member_adds: vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row(2),
+                    tx_id,
+                ))],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    let version_rows = reader.query_all_versions().unwrap();
+    assert_eq!(version_rows.len(), 2);
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(1))
+    );
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
+#[test]
 fn receiver_batch_resolves_current_winner_across_bundles() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
@@ -587,7 +693,9 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     let row_uuid = row(1);
 
     let (_old_tx, old_unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("old")))
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("old")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: old,
@@ -611,7 +719,9 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
     };
 
     let (new_tx, new_unit) = writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("new")))
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("new")),
+        )
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: new,
@@ -670,7 +780,9 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
         .unwrap();
 
     assert_eq!(
-        reader.current_rows("todos", DurabilityTier::Global).unwrap(),
+        reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap(),
         vec![(row_uuid, title_cells("new"))]
     );
     assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
@@ -694,8 +806,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-            source_branch: None,
-            merge_strategy: None,
+        source_branch: None,
+        merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -715,8 +827,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
             result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
     assert_eq!(
@@ -748,8 +860,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         })
         .unwrap();
     assert_eq!(
@@ -773,19 +885,22 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     // benign drops, not protocol corruption.
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
-        subscription: unknown_usage_site,
-        settled_through: GlobalSeq(0),
-        reset_result_set: false,
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    })
-    .unwrap();
+            subscription: unknown_usage_site,
+            settled_through: GlobalSeq(0),
+            reset_result_set: false,
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
 
-    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
     assert!(reader.query.settled_result_sets.is_empty());
     assert!(reader.query.settled_program_facts.is_empty());
 }
@@ -797,9 +912,7 @@ fn m3_seeded_sync_interleavings_converge_against_oracle() {
     let seeds = if let Ok(seed) = std::env::var("JAZZ_SEED") {
         vec![seed.parse::<u64>().expect("JAZZ_SEED must be a u64")]
     } else {
-        const FIXED_SEEDS: [u64; 9] = [
-            11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288,
-        ];
+        const FIXED_SEEDS: [u64; 9] = [11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288];
         let extra = std::env::var("JAZZ_SEED_COUNT")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -859,17 +972,21 @@ fn undelivered_local_commits_are_lost_with_destroyed_client_storage() {
         assert!(core.transaction_state(lost).is_none());
         assert!(reader.transaction_state(lost).is_none());
     }
-    assert!(client
-        .current_rows("todos", DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
+    assert!(
+        client
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
 
     let empty_update = peer.current_rows_update(&mut core, "todos").unwrap();
     reader.apply_sync_message(empty_update).unwrap();
-    assert!(reader
-        .subscription_current_rows("todos", DurabilityTier::Global)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
 
     // README durability contract: Local is only local storage durability.
     // If commit units never reach an upstream tier and that storage is
@@ -1047,11 +1164,13 @@ fn originating_causality_rejection_retains_child_payload() {
         stored.versions()[0].test_cells(&schema().tables[0]),
         title_cells("child")
     );
-    assert!(writer
-        .row_history("todos", row)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.tx_id() != child));
+    assert!(
+        writer
+            .row_history("todos", row)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.tx_id() != child)
+    );
 }
 #[test]
 fn originating_cascade_rejection_retains_root_cause() {
@@ -1210,8 +1329,13 @@ fn fate_update_rejects_backward_global_seq_and_keeps_durability_monotone() {
         (Fate::Accepted, Some(GlobalSeq(5)), DurabilityTier::Global)
     );
 
-    node.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalSeq(6)), Some(DurabilityTier::Local))
-        .unwrap();
+    node.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(6)),
+        Some(DurabilityTier::Local),
+    )
+    .unwrap();
     assert_eq!(
         node.transaction_state(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalSeq(6)), DurabilityTier::Global)
@@ -1303,7 +1427,9 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
 
     let mut too_many = Vec::new();
     for _ in 0..=crate::protocol_limits::MAX_FETCH_ROW_VERSIONS {
-        too_many.push(crate::protocol::RowVersionRef::new("todos", alice_row, alice_tx));
+        too_many.push(crate::protocol::RowVersionRef::new(
+            "todos", alice_row, alice_tx,
+        ));
     }
     assert!(matches!(
         alice_peer.handle_row_versions_fetch(
@@ -1365,7 +1491,9 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         .unwrap();
     assert_eq!(
         missing,
-        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)]
+        vec![crate::protocol::RowVersionRef::new(
+            "todos", row_uuid, tx_id
+        )]
     );
     let mut peer = PeerState::relay();
     let messages = peer
@@ -1376,17 +1504,18 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice()
-    else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
         panic!("expected row-version payloads");
     };
     reader
         .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .unwrap();
-    assert!(reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&update)
+            .unwrap()
+            .is_empty()
+    );
 
     let tx_node_alias = reader.node_aliases.get(&tx_id.node).copied().unwrap();
     let mut batch = reader.database.open_batch();
@@ -1408,10 +1537,12 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     reader
         .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
         .unwrap();
-    assert!(reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&update)
+            .unwrap()
+            .is_empty()
+    );
 
     reader.apply_sync_message(update).unwrap();
     assert_eq!(
@@ -1505,7 +1636,10 @@ fn boredm_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<String
                 Value::String(format!("option_{idx}_c")),
             ]),
         ),
-        ("allow_custom".to_owned(), nullable(Some(Value::Bool(false)))),
+        (
+            "allow_custom".to_owned(),
+            nullable(Some(Value::Bool(false))),
+        ),
         ("show_column".to_owned(), Value::Bool(true)),
         ("order".to_owned(), nullable(Some(Value::U32(idx as u32)))),
         ("required".to_owned(), Value::Bool(idx.is_multiple_of(3))),
@@ -1587,10 +1721,16 @@ fn open_boredm_native_btree_node(
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        NativeBtreeStorage::open_with_sync_policy(temp_dir.path().join("btree.db"), &refs, BtreeSyncPolicy::OnClose)
-            .unwrap();
-    (temp_dir, NodeState::new(node_uuid, schema, storage).unwrap())
+    let storage = NativeBtreeStorage::open_with_sync_policy(
+        temp_dir.path().join("btree.db"),
+        &refs,
+        BtreeSyncPolicy::OnClose,
+    )
+    .unwrap();
+    (
+        temp_dir,
+        NodeState::new(node_uuid, schema, storage).unwrap(),
+    )
 }
 
 fn apply_boredm_reset_receipt<S>(
@@ -1672,7 +1812,10 @@ fn boredm_real_dropdown_entry_reset_ingest_timing_receipt() {
         BTreeMap::from([
             ("team_id".to_owned(), Value::Uuid(member_team.0)),
             ("target_id".to_owned(), Value::Uuid(access_team.0)),
-            ("added_by".to_owned(), nullable(Some(Value::Uuid(member_team.0)))),
+            (
+                "added_by".to_owned(),
+                nullable(Some(Value::Uuid(member_team.0))),
+            ),
             ("administrator".to_owned(), Value::Bool(false)),
             ("date_added".to_owned(), Value::U64(1)),
         ]),
@@ -1683,7 +1826,10 @@ fn boredm_real_dropdown_entry_reset_ingest_timing_receipt() {
         BTreeMap::from([
             ("team_id".to_owned(), Value::Uuid(access_team.0)),
             ("target_id".to_owned(), Value::Uuid(access_team.0)),
-            ("added_by".to_owned(), nullable(Some(Value::Uuid(member_team.0)))),
+            (
+                "added_by".to_owned(),
+                nullable(Some(Value::Uuid(member_team.0))),
+            ),
             ("administrator".to_owned(), Value::Bool(false)),
             ("date_added".to_owned(), Value::U64(1)),
         ]),
@@ -1693,7 +1839,11 @@ fn boredm_real_dropdown_entry_reset_ingest_timing_receipt() {
         seed_rows.push((
             "dropdowns",
             dropdown,
-            boredm_dropdown_cells(member_team.0, member_team.0, format!("dropdown_{parent_idx}")),
+            boredm_dropdown_cells(
+                member_team.0,
+                member_team.0,
+                format!("dropdown_{parent_idx}"),
+            ),
         ));
         seed_rows.push((
             "dropdowns_access_edges",
@@ -1844,7 +1994,10 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     };
     reader.apply_sync_message(late).unwrap();
 
-    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
     assert_eq!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -1881,7 +2034,10 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
 
     reader.apply_sync_message(late).unwrap();
 
-    assert_eq!(reader.sync_metrics().dropped_detached_subscription_messages, 1);
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
     assert!(reader.query.settled_result_sets.is_empty());
 }
 
@@ -2266,10 +2422,12 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     assert!(result_member_removes.is_empty());
     assert_eq!(version_bundles.len(), 1);
 
-    assert!(reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&update)
+            .unwrap()
+            .is_empty()
+    );
     reader.apply_sync_message(update).unwrap();
     assert_eq!(
         reader
@@ -2331,7 +2489,6 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
     };
     assert_eq!(result_member_adds.len(), 1);
     assert!(version_bundles.is_empty());
-
 }
 
 #[test]
@@ -2544,7 +2701,9 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
         .unwrap();
     assert_eq!(
         missing,
-        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)]
+        vec![crate::protocol::RowVersionRef::new(
+            "todos", row_uuid, tx_id
+        )]
     );
     let messages = peer
         .handle_row_versions_fetch(
@@ -2554,8 +2713,7 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice()
-    else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
         panic!("expected row-version payloads");
     };
     reader
@@ -2585,9 +2743,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     let values = Vec::new();
 
     let (tx_a, unit_a) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")),
-        )
+        .commit_mergeable_unit(MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")))
         .unwrap();
     let SyncMessage::CommitUnit {
         tx: tx_a_record,
@@ -2692,10 +2848,12 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     assert_eq!(result_member_adds, control_members);
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_b);
-    assert!(reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reader
+            .missing_known_state_row_version_refs(&update)
+            .unwrap()
+            .is_empty()
+    );
     reader.apply_sync_message(update).unwrap();
     assert_eq!(
         reader
@@ -2960,7 +3118,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
-        },
+            },
         result_member_adds,
         result_member_removes,
         ..
@@ -3028,7 +3186,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
-        },
+            },
         result_member_adds,
         result_member_removes,
         ..
@@ -3122,7 +3280,9 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
         .unwrap();
 
     assert_eq!(
-        reader.sync_metrics().peer_payload_inventory_missing_fallbacks,
+        reader
+            .sync_metrics()
+            .peer_payload_inventory_missing_fallbacks,
         1
     );
     assert_eq!(reader.sync_metrics().parked_orphans, 0);
@@ -3196,8 +3356,8 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-            source_branch: None,
-            merge_strategy: None,
+        source_branch: None,
+        merge_strategy: None,
     };
     let versions = vec![
         version_record(row(1), Vec::new(), title_cells("a"), None),
@@ -3208,7 +3368,8 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
     let mut reversed = versions;
     reversed.reverse();
 
-    assert!(core
-        .ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
-        .is_ok());
+    assert!(
+        core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
+            .is_ok()
+    );
 }

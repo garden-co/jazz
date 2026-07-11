@@ -8,9 +8,11 @@
 
 use super::policy::ViewEvaluationContext;
 use super::*;
+use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry, RowVersionRef,
+    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
+    RowVersionRef, VersionBundle, VersionRecord,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -35,6 +37,54 @@ fn maintained_view_find_content_witness<'a>(
             && version.row_uuid() == row_uuid
             && version.deletion().is_none()
     })
+}
+
+fn merge_receiver_version_bundle(
+    bundles: &mut BTreeMap<TxId, VersionBundle>,
+    bundle: &VersionBundle,
+) -> Result<(), Error> {
+    let Some(existing) = bundles.get_mut(&bundle.tx.tx_id) else {
+        bundles.insert(bundle.tx.tx_id, bundle.clone());
+        return Ok(());
+    };
+    if existing.tx != bundle.tx
+        || existing.fate != bundle.fate
+        || existing.global_seq != bundle.global_seq
+        || existing.durability != bundle.durability
+    {
+        return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+    }
+    let mut seen = existing
+        .versions
+        .iter()
+        .map(|version| {
+            (
+                version_bundle_record_key(version),
+                version.record().raw().to_vec(),
+            )
+        })
+        .collect::<BTreeMap<_, Vec<u8>>>();
+    for version in &bundle.versions {
+        let key = version_bundle_record_key(version);
+        match seen.get(&key) {
+            Some(raw) if raw.as_slice() == version.record().raw() => {}
+            Some(_) => return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id)),
+            None => {
+                seen.insert(key, version.record().raw().to_vec());
+                existing.versions.push(version.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn version_bundle_record_key(version: &VersionRecord) -> (String, RowUuid, SchemaVersionId, bool) {
+    (
+        version.table().to_owned(),
+        version.row_uuid(),
+        version.schema_version(),
+        version.deletion().is_some(),
+    )
 }
 
 fn content_row_members_for_bundle(
@@ -560,6 +610,12 @@ where
         if updates.is_empty() {
             return Ok(());
         }
+        let mut bundle_counts_by_tx = BTreeMap::<TxId, usize>::new();
+        for update in &updates {
+            for bundle in &update.version_bundles {
+                *bundle_counts_by_tx.entry(bundle.tx.tx_id).or_default() += 1;
+            }
+        }
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -575,6 +631,11 @@ where
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
+                && update.version_bundles.iter().all(|bundle| {
+                    bundle_counts_by_tx
+                        .get(&bundle.tx.tx_id)
+                        .is_some_and(|count| *count == 1)
+                })
             {
                 bulk_candidates.extend(update.version_bundles.iter().cloned());
             }
@@ -586,23 +647,28 @@ where
             }
         }
         let bulk_loaded_tx_ids = self.ingest_reset_view_bundles_in_bulk(&bulk_candidates)?;
+        let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
+        for update in &updates {
+            for bundle in &update.version_bundles {
+                if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
+                    continue;
+                }
+                merge_receiver_version_bundle(&mut receiver_candidates, bundle)?;
+            }
+        }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_seqs = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
-        for update in &updates {
-            for bundle in &update.version_bundles {
-                if !bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
-                    let staged = self.stage_view_bundle(
-                        &mut receiver_batch,
-                        bundle,
-                        &mut receiver_batch_tx_ids,
-                        &mut receiver_batch_global_seqs,
-                    )?;
-                    if staged {
-                        receiver_batch_bundle_count += 1;
-                    }
-                }
+        for bundle in receiver_candidates.values() {
+            let staged = self.stage_view_bundle(
+                &mut receiver_batch,
+                bundle,
+                &mut receiver_batch_tx_ids,
+                &mut receiver_batch_global_seqs,
+            )?;
+            if staged {
+                receiver_batch_bundle_count += 1;
             }
         }
         if !receiver_batch.is_empty() {
