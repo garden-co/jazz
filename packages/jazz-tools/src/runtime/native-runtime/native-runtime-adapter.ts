@@ -254,6 +254,7 @@ type SubscriptionState = {
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
+  visibleRows: RowState[];
   relationRows: RowState[];
   relationRootCount: number;
   relationEdges: NativeRelationSubscriptionEdge[];
@@ -262,6 +263,9 @@ type SubscriptionState = {
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
+  visibleOpened: boolean;
+  deferredVisiblePublication: boolean;
+  deferredVisibleReset: boolean;
   callback?: Function;
   cancelled: boolean;
 };
@@ -804,6 +808,7 @@ export class NativeRuntimeAdapter implements Runtime {
       identity,
       rows: [],
       rowIndexByKey: new Map(),
+      visibleRows: [],
       relationRows: [],
       relationRootCount: 0,
       relationEdges: [],
@@ -816,6 +821,9 @@ export class NativeRuntimeAdapter implements Runtime {
       session,
       opts,
       opened: false,
+      visibleOpened: false,
+      deferredVisiblePublication: false,
+      deferredVisibleReset: false,
       cancelled: false,
     });
     return handle;
@@ -825,9 +833,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     subscription.callback = onUpdate;
-    if (subscription.opened) {
+    if (subscription.visibleOpened) {
       subscription.callback(
-        nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
+        nativeResetDeltaFromRows(subscription.visibleRows, this.schema, subscription.outputColumns),
       );
     }
     this.startSubscriptionReader(handle, subscription);
@@ -1510,7 +1518,8 @@ export class NativeRuntimeAdapter implements Runtime {
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
-      subscription.callback?.(
+      this.publishSubscriptionRows(
+        subscription,
         wasOpened
           ? nativeDeltaFromRows(
               subscription.rows,
@@ -1519,6 +1528,8 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription.outputColumns,
             )
           : nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns),
+        chunk.settled,
+        !wasOpened,
       );
     } else if (
       chunk.relationSnapshot &&
@@ -1535,13 +1546,16 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.relationMaterialization,
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      subscription.callback?.(
+      this.publishSubscriptionRows(
+        subscription,
         nativeDeltaFromRows(
           subscription.rows,
           previousRows,
           this.schema,
           subscription.outputColumns,
         ),
+        chunk.settled,
+        false,
       );
     } else {
       if (chunk.reset) {
@@ -1573,7 +1587,7 @@ export class NativeRuntimeAdapter implements Runtime {
               this.schema,
               subscription.outputColumns,
             );
-        subscription.callback?.(wireDelta);
+        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else {
         const applied = applySubscriptionDeltaWithWireDelta(
           subscription.rows,
@@ -1585,9 +1599,54 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
-        subscription.callback?.(applied.wireDelta);
+        this.publishSubscriptionRows(
+          subscription,
+          applied.wireDelta,
+          chunk.settled,
+          chunk.reset === true,
+        );
       }
     }
+  }
+
+  private publishSubscriptionRows(
+    subscription: SubscriptionState,
+    wireDelta: NativeRowDelta,
+    settled: boolean | undefined,
+    reset: boolean,
+  ): void {
+    if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
+      subscription.deferredVisiblePublication = true;
+      subscription.deferredVisibleReset ||= reset;
+      return;
+    }
+
+    let visibleDelta = wireDelta;
+    if (
+      subscription.deferredVisiblePublication ||
+      subscription.deferredVisibleReset ||
+      !subscription.visibleOpened
+    ) {
+      visibleDelta =
+        subscription.deferredVisibleReset || !subscription.visibleOpened
+          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
+          : nativeDeltaFromRows(
+              subscription.rows,
+              subscription.visibleRows,
+              this.schema,
+              subscription.outputColumns,
+            );
+    }
+
+    subscription.callback?.(visibleDelta);
+    subscription.visibleRows = [...subscription.rows];
+    subscription.visibleOpened = true;
+    subscription.deferredVisiblePublication = false;
+    subscription.deferredVisibleReset = false;
+  }
+
+  private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
+    return (subscription.opts as { tier?: unknown }).tier === "global";
   }
 
   private scheduleServerPump(): void {
