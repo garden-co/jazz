@@ -2458,7 +2458,7 @@ pub(crate) mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{Value, ValueType};
+    use crate::records::{EnumSchema, Value, ValueType};
     use std::cell::Cell;
 
     fn reverse_prefix_values<S: OrderedKvStorage>(
@@ -2504,6 +2504,58 @@ mod tests {
             .unwrap()
     }
 
+    fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {
+        let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+        let row = uuid::Uuid::from_bytes([0x54; 16]);
+        let ref_row = uuid::Uuid::from_bytes([0x75; 16]);
+        (
+            RecordDescriptor::new([
+                ("u8", ValueType::U8),
+                ("u16", ValueType::U16),
+                ("u32", ValueType::U32),
+                ("u64_max", ValueType::U64),
+                ("f64", ValueType::F64),
+                ("bool", ValueType::Bool),
+                ("text", ValueType::String),
+                ("bytes", ValueType::Bytes),
+                ("uuid", ValueType::Uuid),
+                ("enum", ValueType::Enum(status)),
+                (
+                    "nullable_tuple",
+                    ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                        ValueType::Uuid,
+                        ValueType::U64,
+                    ]))),
+                ),
+                (
+                    "nested_array",
+                    ValueType::Array(Box::new(ValueType::Array(Box::new(ValueType::U8)))),
+                ),
+            ]),
+            vec![
+                Value::U8(u8::MAX),
+                Value::U16(u16::MAX),
+                Value::U32(u32::MAX),
+                Value::U64(u64::MAX),
+                Value::F64(0.125),
+                Value::Bool(false),
+                Value::String("stored value".to_owned()),
+                Value::Bytes(vec![9, 8, 7, 6]),
+                Value::Uuid(row),
+                Value::Enum(1),
+                Value::Nullable(Some(Box::new(Value::Tuple(vec![
+                    Value::Uuid(ref_row),
+                    Value::U64(u64::MAX - 7),
+                ])))),
+                Value::Array(vec![
+                    Value::Array(vec![Value::U8(1), Value::U8(2)]),
+                    Value::Array(vec![]),
+                    Value::Array(vec![Value::U8(3)]),
+                ]),
+            ],
+        )
+    }
+
     fn seed_window_records<S: OrderedKvStorage>(
         storage: &S,
         value_descriptor: RecordDescriptor,
@@ -2533,6 +2585,24 @@ mod tests {
             window_key_descriptor(),
             value_descriptor,
         )
+    }
+
+    #[test]
+    fn record_store_round_trips_exhaustive_record_descriptor() {
+        let storage = MemoryStorage::new(&["records"]);
+        let (descriptor, values) = complex_record_descriptor_and_values();
+        let raw = descriptor.create(&values).unwrap();
+        storage.set("records", b"row:1", &raw).unwrap();
+        let store = RecordStore::new(&storage, "records", &descriptor);
+
+        let record = store.get(b"row:1").unwrap().unwrap();
+        assert_eq!(record.to_values().unwrap(), values);
+        assert_eq!(store.get_raw(b"row:1").unwrap().unwrap(), raw);
+
+        let prefix = store.prefix(b"row:").unwrap();
+        assert_eq!(prefix, vec![(b"row:1".to_vec(), raw.clone())]);
+        let ranged = store.range(b"row:", b"row;").unwrap();
+        assert_eq!(ranged, vec![(b"row:1".to_vec(), raw)]);
     }
 
     #[test]
