@@ -31,3 +31,9 @@ rustc-hash = "2.1.1"
 
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
+
+[profile.perf]
+inherits = "release"
+opt-level = 3
+lto = false
+debug = 1
