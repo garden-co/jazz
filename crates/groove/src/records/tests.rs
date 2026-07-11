@@ -861,6 +861,119 @@ fn tuple_round_trip_matches_seeded_oracle() {
 }
 
 #[test]
+fn exhaustive_value_type_matrix_round_trips_through_codec_projection_and_postcard() {
+    let status = EnumSchema::new("status", ["draft", "ready", "done"]).unwrap();
+    let id = uuid::Uuid::from_bytes([0x31; 16]);
+    let nested_id = uuid::Uuid::from_bytes([0x42; 16]);
+    let descriptor = RecordDescriptor::new([
+        ("u8_min", ValueType::U8),
+        ("u16_max", ValueType::U16),
+        ("u32_max", ValueType::U32),
+        ("u64_zero", ValueType::U64),
+        ("u64_max", ValueType::U64),
+        ("f64", ValueType::F64),
+        ("bool", ValueType::Bool),
+        ("string", ValueType::String),
+        ("bytes", ValueType::Bytes),
+        ("uuid", ValueType::Uuid),
+        ("enum", ValueType::Enum(status.clone())),
+        (
+            "nullable_none",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        (
+            "nullable_some_tuple",
+            ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::Uuid,
+                ValueType::U64,
+            ]))),
+        ),
+        (
+            "array_nested",
+            ValueType::Array(Box::new(ValueType::Array(Box::new(ValueType::U16)))),
+        ),
+        (
+            "array_tuple",
+            ValueType::Array(Box::new(ValueType::Tuple(vec![
+                ValueType::Uuid,
+                ValueType::U64,
+            ]))),
+        ),
+        (
+            "tuple",
+            ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64, ValueType::Bool]),
+        ),
+    ]);
+    let values = vec![
+        Value::U8(u8::MIN),
+        Value::U16(u16::MAX),
+        Value::U32(u32::MAX),
+        Value::U64(0),
+        Value::U64(u64::MAX),
+        Value::F64(-42.25),
+        Value::Bool(true),
+        Value::String("all value types".to_owned()),
+        Value::Bytes(vec![0, 1, 2, 3, 254, 255]),
+        Value::Uuid(id),
+        Value::Enum(2),
+        Value::Nullable(None),
+        Value::Nullable(Some(Box::new(Value::Tuple(vec![
+            Value::Uuid(nested_id),
+            Value::U64(u64::MAX - 1),
+        ])))),
+        Value::Array(vec![
+            Value::Array(vec![Value::U16(1), Value::U16(2)]),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::U16(u16::MAX)]),
+        ]),
+        Value::Array(vec![
+            Value::Tuple(vec![Value::Uuid(id), Value::U64(1)]),
+            Value::Tuple(vec![Value::Uuid(nested_id), Value::U64(u64::MAX)]),
+        ]),
+        Value::Tuple(vec![Value::Uuid(id), Value::U64(9), Value::Bool(false)]),
+    ];
+
+    let raw = descriptor.create(&values).unwrap();
+    assert_eq!(descriptor.bind(&raw).to_values().unwrap(), values);
+
+    let encoded_descriptor = postcard::to_allocvec(&descriptor).unwrap();
+    let decoded_descriptor: RecordDescriptor = postcard::from_bytes(&encoded_descriptor).unwrap();
+    assert_eq!(decoded_descriptor.fields(), descriptor.fields());
+    assert_eq!(decoded_descriptor.bind(&raw).to_values().unwrap(), values);
+
+    let owned = OwnedRecord::new(raw.clone(), descriptor);
+    let encoded_record = postcard::to_allocvec(&owned).unwrap();
+    let decoded_record: OwnedRecord = postcard::from_bytes(&encoded_record).unwrap();
+    assert_eq!(decoded_record.raw(), raw.as_slice());
+    assert_eq!(decoded_record.to_values().unwrap(), values);
+
+    let (projected_descriptor, projected_raw) = RecordDescriptor::project(
+        &[*decoded_record.descriptor()],
+        &[decoded_record.raw()],
+        &[(0, 10), (0, 14), (0, 4), (0, 12)],
+    )
+    .unwrap();
+    assert_eq!(
+        projected_descriptor
+            .bind(&projected_raw)
+            .to_values()
+            .unwrap(),
+        vec![
+            Value::Enum(2),
+            Value::Array(vec![
+                Value::Tuple(vec![Value::Uuid(id), Value::U64(1)]),
+                Value::Tuple(vec![Value::Uuid(nested_id), Value::U64(u64::MAX)]),
+            ]),
+            Value::U64(u64::MAX),
+            Value::Nullable(Some(Box::new(Value::Tuple(vec![
+                Value::Uuid(nested_id),
+                Value::U64(u64::MAX - 1),
+            ])))),
+        ]
+    );
+}
+
+#[test]
 fn encodes_record_offsets_relative_to_record_start() {
     let descriptor = descriptor([ValueType::U8, ValueType::String, ValueType::Bytes]);
     let record = descriptor

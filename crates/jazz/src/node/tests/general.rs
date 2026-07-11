@@ -46,6 +46,132 @@ fn lowered_record_wrapper_field_indexes_match_open_descriptors() {
 }
 
 #[test]
+fn boredm_real_fixture_version_layouts_round_trip_all_storage_records() {
+    fn fixture_schema() -> JazzSchema {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/jazz-tools/src/testing/fixtures/boredm-real/schema.native.bin");
+        let bytes = std::fs::read(path).unwrap();
+        postcard::from_bytes(&bytes).unwrap()
+    }
+
+    fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {
+        match column_type {
+            groove::schema::ColumnType::U8 => Value::U8(seed),
+            groove::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
+            groove::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
+            groove::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
+            groove::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
+            groove::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
+            groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
+            groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
+            groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
+            groove::schema::ColumnType::Enum(_) => Value::Enum(0),
+            groove::schema::ColumnType::Tuple(members) => Value::Tuple(
+                members
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, member)| sample_value(member, seed.wrapping_add(idx as u8 + 1)))
+                    .collect(),
+            ),
+            groove::schema::ColumnType::Array(member) => Value::Array(vec![
+                sample_value(member, seed.wrapping_add(1)),
+                sample_value(member, seed.wrapping_add(2)),
+            ]),
+            groove::schema::ColumnType::Nullable(member) => {
+                Value::Nullable(Some(Box::new(sample_value(member, seed.wrapping_add(1)))))
+            }
+        }
+    }
+
+    fn parts_for(table: &TableSchema, seed: u8, deletion: Option<DeletionEvent>) -> VersionRowParts {
+        VersionRowParts {
+            table: table.name.clone(),
+            row_uuid: RowUuid(uuid::Uuid::from_bytes([seed; 16])),
+            tx_node_alias: NodeAlias(u64::from(seed) + 10),
+            schema_version_alias: SchemaVersionAlias(u64::from(seed) + 20),
+            tx_time: TxTime::from(u64::from(seed) + 30),
+            parents: vec![TxId::new(
+                TxTime::from(u64::from(seed) + 1),
+                node(seed.wrapping_add(1)),
+            )],
+            created_by: AuthorId(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
+            created_at: TxTime::from(u64::from(seed) + 40),
+            updated_by: AuthorId(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
+            updated_at: TxTime::from(u64::from(seed) + 50),
+            cells: table
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| {
+                    (
+                        column.name.clone(),
+                        sample_value(
+                            &column.column_type,
+                            seed.wrapping_add((idx as u8).wrapping_add(4)),
+                        ),
+                    )
+                })
+                .collect(),
+            deletion,
+        }
+    }
+
+    let schema = fixture_schema();
+    assert!(!schema.tables.is_empty());
+    for (idx, table) in schema.tables.iter().enumerate() {
+        let seed = (idx as u8).wrapping_add(1);
+        let content = VersionRow::from_parts_with_schema_version(
+            table,
+            parts_for(table, seed, None),
+            None,
+        )
+        .unwrap();
+        assert_eq!(content.record.descriptor().fields(), table.history_storage_table().record_schema().fields());
+        let content_values = content.record.to_values().unwrap();
+        assert_eq!(
+            table
+                .history_storage_table()
+                .record_schema()
+                .create(&content_values)
+                .unwrap(),
+            content.record.raw()
+        );
+
+        let current_values = global_current_values(table, &content, Some(GlobalSeq(7))).unwrap();
+        let global_current_table = table.global_current_storage_tables().remove(0);
+        global_current_table
+            .record_schema()
+            .create(&current_values)
+            .unwrap();
+
+        let deletion = VersionRow::from_parts_with_schema_version(
+            table,
+            parts_for(table, seed.wrapping_add(100), Some(DeletionEvent::Deleted)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(deletion.record.descriptor().fields(), table.register_storage_table().record_schema().fields());
+        let deletion_values = deletion.record.to_values().unwrap();
+        assert_eq!(
+            table
+                .register_storage_table()
+                .record_schema()
+                .create(&deletion_values)
+                .unwrap(),
+            deletion.record.raw()
+        );
+
+        let register_current_values =
+            register_global_current_values(&deletion, Some(GlobalSeq(8)));
+        let register_global_current_table = table.global_current_storage_tables().remove(1);
+        register_global_current_table
+            .record_schema()
+            .create(&register_current_values)
+            .unwrap();
+    }
+}
+
+#[test]
 fn mergeable_commits_persist_transaction_and_history_rows() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
