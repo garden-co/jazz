@@ -13,7 +13,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState};
+use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -23,65 +23,9 @@ use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
 const FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";
-const HEAVY_CHILD_TABLE: &str = "t67";
-const HEAVY_CHILD_ROWS: usize = 19_894;
-const HOLDER_PARENT_ROWS: usize = 30;
-const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v8";
-const ACCESS_ROLE_DISCRIMINANTS: &[u8] = &[0, 1, 2];
-const ACCESS_ROLE_STRINGS: &[&str] = &[
-    "EDITOR",
-    "e17",
-    "e18",
-    "e19",
-    "00000000-0000-4000-8000-000000000004",
-    "00000000-0000-4000-8000-000000000005",
-    "00000000-0000-4000-8000-000000000006",
-];
+const MEMBER_SEED_ROWS: &str = "member-seed-rows.json";
+const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v13-row-dump";
 const SEED_CACHE_READY: &str = ".jazz_policy_graph_seed_ready";
-
-const HOLDER_TABLES: &[&str] = &[
-    "t1", "t100", "t101", "t102", "t103", "t104", "t105", "t106", "t107", "t108", "t112", "t121",
-    "t142", "t143", "t164", "t168", "t19", "t191", "t195", "t2", "t23", "t27", "t3", "t30", "t56",
-    "t58", "t68", "t7", "t75", "t91", "t95", "t96", "t97",
-];
-
-const INHERITS_TABLES: &[(&str, &str, &str)] = &[
-    ("t16", "c145", "t19"),
-    ("t160", "c1770", "t101"),
-    ("t166", "c1842", "t164"),
-    ("t67", "c724", "t68"),
-];
-
-const ACCESS_TABLES: &[(&str, &str)] = &[
-    ("t109", "t100"),
-    ("t115", "t101"),
-    ("t123", "t102"),
-    ("t126", "t112"),
-    ("t145", "t19"),
-    ("t162", "t103"),
-    ("t165", "t164"),
-    ("t167", "t97"),
-    ("t181", "t104"),
-    ("t187", "t1"),
-    ("t190", "t105"),
-    ("t192", "t191"),
-    ("t196", "t195"),
-    ("t202", "t106"),
-    ("t206", "t107"),
-    ("t210", "t108"),
-    ("t24", "t23"),
-    ("t28", "t27"),
-    ("t31", "t30"),
-    ("t59", "t58"),
-    ("t63", "t56"),
-    ("t69", "t68"),
-    ("t76", "t75"),
-    ("t90", "t7"),
-    ("t92", "t2"),
-    ("t93", "t3"),
-    ("t98", "t96"),
-    ("t99", "t91"),
-];
 
 fn main() {
     let session_id = std::env::var("CODEX_SESSION_ID")
@@ -92,7 +36,8 @@ fn main() {
     let config = Config::from_env();
     let schema = policy_graph_schema_fixture();
     let seeded = seed_core(&schema, &config);
-    let expected = expected_counts();
+    let manifest = member_seed_manifest();
+    let expected = manifest.expected_counts();
     assert_core_visibility(&seeded, &expected, config.identity);
 
     if config.runs_phase("cold") {
@@ -126,12 +71,205 @@ fn assert_core_visibility(
         ))
         .unwrap_or_else(|error| panic!("core visibility {table}: {error}"));
         let expected_count = expected[&table];
-        assert_eq!(
-            rows.len(),
-            expected_count,
-            "core visibility mismatch for {table}"
-        );
+        if rows.len() != expected_count {
+            let local_rows = jazz::db::block_on(seeded.core.all_for_identity(
+                &prepared,
+                ReadOpts::default(),
+                identity.author(seeded),
+            ))
+            .unwrap_or_default();
+            let system_rows = jazz::db::block_on(seeded.core.all_for_identity(
+                &prepared,
+                read_opts.clone(),
+                AuthorId::SYSTEM,
+            ))
+            .unwrap_or_default();
+            let policy_debug = if table == "t105" {
+                Some(t105_access_debug(seeded, identity.author(seeded)))
+            } else {
+                None
+            };
+            panic!(
+                "core visibility mismatch for {table}: got={} expected={} local_rows={} system_rows={} policy_debug={:?}",
+                rows.len(),
+                expected_count,
+                local_rows.len(),
+                system_rows.len(),
+                policy_debug,
+            );
+        }
     }
+}
+
+fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
+    let t1_member = visible_count(seeded, "t1", member);
+    let t188_member = visible_count(seeded, "t188", member);
+    let t190_member = visible_count(seeded, "t190", member);
+    let t190_system = visible_count(seeded, "t190", AuthorId::SYSTEM);
+    let prepared = seeded
+        .core
+        .prepare_query(&Query::from("t190"))
+        .expect("prepare t190 debug");
+    let rows = jazz::db::block_on(seeded.core.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        AuthorId::SYSTEM,
+    ))
+    .unwrap_or_default();
+    let table = find_table(&seeded.schema, "t190");
+    let samples = rows
+        .iter()
+        .take(5)
+        .map(|row| {
+            format!(
+                "resource={:?} team={:?} role={:?} admin={:?}",
+                row.cell(table, "c456"),
+                row.cell(table, "c457"),
+                row.cell(table, "c458"),
+                row.cell(table, "c459")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let t190_teams = rows
+        .iter()
+        .filter_map(|row| match row.cell(table, "c457") {
+            Some(Value::Uuid(uuid)) => Some(RowUuid(uuid)),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let member_t1_rows = visible_rows(seeded, "t1", member);
+    let member_t1_ids = member_t1_rows
+        .iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let t190_team_hits = t190_teams.intersection(&member_t1_ids).count();
+    format!(
+        "t1_member={t1_member} t188_member={t188_member} t190_member={t190_member} t190_system={t190_system} t190_team_hits_in_member_t1={t190_team_hits}/{} t190_samples=[{samples}]",
+        t190_teams.len()
+    )
+}
+
+fn visible_count(seeded: &Seeded, table: &str, author: AuthorId) -> usize {
+    visible_rows(seeded, table, author).len()
+}
+
+fn visible_rows(
+    seeded: &Seeded,
+    table: &str,
+    author: AuthorId,
+) -> Vec<CurrentRow> {
+    let prepared = seeded
+        .core
+        .prepare_query(&Query::from(table))
+        .unwrap_or_else(|error| panic!("prepare {table} debug: {error}"));
+    jazz::db::block_on(seeded.core.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        author,
+    ))
+    .unwrap_or_default()
+}
+
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(FIXTURE_DIR)
+        .join(name)
+}
+
+fn member_seed_manifest() -> MemberSeedManifest {
+    member_seed_dump().manifest
+}
+
+fn member_seed_dump() -> MemberSeedDump {
+    let bytes = fs::read(fixture_path(MEMBER_SEED_ROWS))
+        .expect("read policy graph perf member seed row dump");
+    let value: JsonValue =
+        serde_json::from_slice(&bytes).expect("decode policy graph perf member seed row dump");
+    let identity = value
+        .get("identity")
+        .expect("member seed row dump identity");
+    let member_row = identity
+        .get("member_row")
+        .and_then(JsonValue::as_str)
+        .expect("member seed row dump member_row")
+        .to_owned();
+    let claims = identity
+        .get("claims")
+        .and_then(JsonValue::as_object)
+        .expect("member seed row dump claims")
+        .iter()
+        .map(|(key, value)| (key.clone(), json_to_claim_value(value, &member_row)))
+        .collect::<BTreeMap<_, _>>();
+    let tables = value
+        .get("subscriptions")
+        .and_then(JsonValue::as_array)
+        .expect("member seed row dump subscriptions")
+        .iter()
+        .map(|table| {
+            let name = table
+                .get("name")
+                .and_then(JsonValue::as_str)
+                .expect("manifest table name")
+                .to_owned();
+            let expected = table
+                .get("expected")
+                .and_then(JsonValue::as_u64)
+                .expect("manifest table expected") as usize;
+            ManifestTable { name, expected }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tables.len(),
+        39,
+        "member seed row dump must cover all 39 subscriptions"
+    );
+    let rows = value
+        .get("rows")
+        .and_then(JsonValue::as_array)
+        .expect("member seed row dump rows")
+        .iter()
+        .map(|row| SeedRow {
+            table: row
+                .get("table")
+                .and_then(JsonValue::as_str)
+                .expect("seed row table")
+                .to_owned(),
+            id: row
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .expect("seed row id")
+                .to_owned(),
+            cells: row
+                .get("cells")
+                .and_then(JsonValue::as_object)
+                .expect("seed row cells")
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    MemberSeedDump {
+        identity: MemberSeedIdentity { member_row, claims },
+        manifest: MemberSeedManifest { tables },
+        rows,
+    }
+}
+
+impl MemberSeedManifest {
+    fn expected_counts(&self) -> BTreeMap<String, usize> {
+        self.tables
+            .iter()
+            .map(|table| (table.name.clone(), table.expected))
+            .collect()
+    }
+
 }
 
 struct Config {
@@ -156,7 +294,7 @@ impl Config {
                 .collect(),
             fresh_seed: std::env::var_os("JAZZ_POLICY_GRAPH_FRESH_SEED").is_some(),
             identity: match std::env::var("JAZZ_POLICY_GRAPH_IDENTITY")
-                .unwrap_or_else(|_| "system".to_owned())
+                .unwrap_or_else(|_| "member".to_owned())
                 .as_str()
             {
                 "system" => BenchIdentity::System,
@@ -198,6 +336,7 @@ impl BenchIdentity {
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
     core: Db<RocksDbStorage>,
+    schema: JazzSchema,
     member: AuthorId,
     claims: BTreeMap<String, Value>,
     seed_cache_hit: bool,
@@ -214,7 +353,7 @@ struct OpenSubscription {
     expected: usize,
     stream: SubscriptionStream,
     rows: BTreeSet<RowUuid>,
-    opened_ms: Option<u128>,
+    first_settled_ms: Option<u128>,
     materialized_ms: Option<u128>,
 }
 
@@ -222,8 +361,14 @@ struct RunSummary {
     wall_ms: u128,
     server_open_bundle_ms: u128,
     subscribe_ms: u128,
-    client_apply_ms: u128,
-    expected_count_ms: u128,
+    settle_loop_ms: u128,
+    client_apply_tick_ms: u128,
+    settled_first_callback_all_ms: u128,
+    expected_count_all_ms: u128,
+    one_shot_validate_ms: u128,
+    consolidated_windows: usize,
+    consolidated_window_records: usize,
+    history_window_consolidation_us: u128,
     ticks: usize,
     subscriptions: usize,
     rows_materialized: usize,
@@ -241,8 +386,39 @@ struct SubscriptionTimeline {
     name: String,
     rows: usize,
     expected: usize,
-    opened_ms: u128,
+    first_settled_ms: u128,
     materialized_ms: u128,
+}
+
+#[derive(Clone, Debug)]
+struct MemberSeedDump {
+    identity: MemberSeedIdentity,
+    manifest: MemberSeedManifest,
+    rows: Vec<SeedRow>,
+}
+
+#[derive(Clone, Debug)]
+struct MemberSeedIdentity {
+    member_row: String,
+    claims: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug)]
+struct SeedRow {
+    table: String,
+    id: String,
+    cells: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Clone, Debug)]
+struct MemberSeedManifest {
+    tables: Vec<ManifestTable>,
+}
+
+#[derive(Clone, Debug)]
+struct ManifestTable {
+    name: String,
+    expected: usize,
 }
 
 #[derive(Default)]
@@ -306,15 +482,14 @@ fn duplex_counted() -> CountedDuplex {
 }
 
 fn policy_graph_schema_fixture() -> JazzSchema {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(FIXTURE_DIR)
-        .join("schema.native.bin");
+    let path = fixture_path("schema.native.bin");
     let bytes = fs::read(path).expect("read policy graph perf native schema fixture");
     postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let start = Instant::now();
+    let dump = member_seed_dump();
     let cache_key = format!("{}-{:016x}", SEED_CACHE_VERSION, config.seed);
     let cache_dir = seed_cache_root().join(cache_key);
     let cache_hit = !config.fresh_seed && cache_dir.join(SEED_CACHE_READY).is_file();
@@ -329,7 +504,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         fs::create_dir_all(&tmp_cache).expect("create policy graph seed cache");
         {
             let core = open_history_complete_node_at(&tmp_cache, schema.clone(), node(1));
-            write_seed_plan(&core, schema);
+            write_seed_rows(&core, schema, &dump.rows);
         }
         fs::write(tmp_cache.join(SEED_CACHE_READY), SEED_CACHE_VERSION)
             .expect("write policy graph seed ready marker");
@@ -340,19 +515,16 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached policy graph seed");
     let core_db =
         open_history_complete_db_at(core_dir.path(), schema.clone(), node(1), AuthorId::SYSTEM);
-    let member = policy_graph_author(0x31, 1);
-    let member_uuid = member.0;
-    let claims = BTreeMap::from([
-        ("sub".to_owned(), Value::Uuid(member_uuid)),
-        ("user_id".to_owned(), Value::Uuid(member_uuid)),
-        ("userId".to_owned(), Value::Uuid(member_uuid)),
-        ("c787".to_owned(), Value::Uuid(member_uuid)),
-        ("isAdmin".to_owned(), Value::Bool(false)),
-    ]);
+    let member = AuthorId(
+        uuid::Uuid::parse_str(&dump.identity.member_row)
+            .expect("member seed row dump member_row uuid"),
+    );
+    let claims = dump.identity.claims;
     core_db.set_identity_claims(member, claims.clone());
     Seeded {
         _core_dir: Rc::new(core_dir),
         core: core_db,
+        schema: schema.clone(),
         member,
         claims,
         seed_cache_hit: cache_hit,
@@ -360,263 +532,140 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn write_seed_plan(core: &Node<RocksDbStorage>, schema: &JazzSchema) {
-    let member = policy_graph_row(0x31, 1);
-    let corporation = policy_graph_row(0x32, 1);
-    let mut writes = Vec::<(String, RowUuid, BTreeMap<String, Value>)>::new();
-
-    writes.push((
-        "t1".to_owned(),
-        member,
-        table_cells(schema, "t1", member, member, 0, None),
-    ));
-    writes.push((
-        "t1".to_owned(),
-        corporation,
-        table_cells(schema, "t1", corporation, member, 1, None),
-    ));
-    writes.push((
-        "t50".to_owned(),
-        policy_graph_row(0x35, 1),
-        BTreeMap::from([
-            ("c457".to_owned(), Value::Uuid(member.0)),
-            ("c632".to_owned(), Value::U32(0)),
-        ]),
-    ));
-    writes.push((
-        "t188".to_owned(),
-        policy_graph_row(0x34, 1),
-        BTreeMap::from([
-            ("c457".to_owned(), Value::Uuid(member.0)),
-            ("c1948".to_owned(), Value::Uuid(corporation.0)),
-            ("c1949".to_owned(), nullable(Some(Value::Uuid(member.0)))),
-            ("c459".to_owned(), Value::Bool(false)),
-            ("c1950".to_owned(), Value::U64(1)),
-        ]),
-    ));
-    writes.push((
-        "t188".to_owned(),
-        policy_graph_row(0x34, 2),
-        BTreeMap::from([
-            ("c457".to_owned(), Value::Uuid(corporation.0)),
-            ("c1948".to_owned(), Value::Uuid(corporation.0)),
-            ("c1949".to_owned(), nullable(Some(Value::Uuid(member.0)))),
-            ("c459".to_owned(), Value::Bool(false)),
-            ("c1950".to_owned(), Value::U64(1)),
-        ]),
-    ));
-
-    let mut holder_rows = BTreeMap::<String, Vec<RowUuid>>::new();
-    for (table_idx, table) in HOLDER_TABLES.iter().enumerate() {
-        let count = if *table == "t68" {
-            HOLDER_PARENT_ROWS
-        } else if *table == "t1" {
-            continue;
-        } else {
-            1
-        };
-        for row_idx in 0..count {
-            let row = policy_graph_row(holder_kind(table_idx), row_idx as u32);
-            holder_rows
-                .entry((*table).to_owned())
-                .or_default()
-                .push(row);
-            writes.push((
-                (*table).to_owned(),
-                row,
-                table_cells(schema, table, member, member, row_idx, None),
-            ));
-        }
-    }
-    holder_rows.insert("t1".to_owned(), vec![member, corporation]);
-
-    for (access_idx, (access_table, holder_table)) in ACCESS_TABLES.iter().enumerate() {
-        if let Some(resources) = holder_rows.get(*holder_table) {
-            for (idx, resource) in resources.iter().enumerate() {
-                let roles = access_role_values(schema, access_table);
-                for (role_idx, role) in roles.into_iter().enumerate() {
-                    writes.push((
-                        (*access_table).to_owned(),
-                        policy_graph_row(
-                            0x80_u8.wrapping_add(access_idx as u8),
-                            (idx * 8 + role_idx) as u32,
-                        ),
-                        BTreeMap::from([
-                            ("c456".to_owned(), Value::Uuid(resource.0)),
-                            ("c457".to_owned(), Value::Uuid(corporation.0)),
-                            ("c458".to_owned(), role),
-                            ("c459".to_owned(), Value::Bool(false)),
-                        ]),
-                    ));
-                }
-            }
-        }
-    }
-
-    for (idx, (table, via, parent_table)) in INHERITS_TABLES.iter().enumerate() {
-        let count = if *table == HEAVY_CHILD_TABLE {
-            HEAVY_CHILD_ROWS
-        } else {
-            1
-        };
-        let parents = holder_rows
-            .get(*parent_table)
-            .unwrap_or_else(|| panic!("missing parent rows for {parent_table}"));
-        for row_idx in 0..count {
-            let parent = parents[row_idx % parents.len()];
-            let row = policy_graph_row(0x50_u8.wrapping_add(idx as u8), row_idx as u32);
-            writes.push((
-                (*table).to_owned(),
-                row,
-                table_cells(
-                    schema,
-                    table,
-                    corporation,
-                    member,
-                    row_idx,
-                    Some((*via, parent)),
-                ),
-            ));
-        }
-    }
-
+fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[SeedRow]) {
     let node = core.node();
-    for (idx, (table, row, cells)) in writes.into_iter().enumerate() {
+    for (idx, row) in rows.iter().enumerate() {
+        let table = find_table(schema, &row.table);
+        let row_id = RowUuid(
+            uuid::Uuid::parse_str(&row.id)
+                .unwrap_or_else(|error| panic!("seed row uuid {}: {error}", row.id)),
+        );
+        let cells = row
+            .cells
+            .iter()
+            .map(|(column, value)| {
+                let column_schema = table
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .unwrap_or_else(|| panic!("seed row missing column {}/{}", row.table, column));
+                (
+                    column.clone(),
+                    json_to_cell_value(value, &column_schema.column_type),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let tx_id = node
             .borrow_mut()
             .commit_mergeable(
-                MergeableCommit::new(&table, row, (idx + 1) as u64)
+                MergeableCommit::new(&row.table, row_id, (idx + 1) as u64)
                     .made_by(AuthorId::SYSTEM)
                     .cells(cells),
             )
-            .unwrap_or_else(|error| panic!("seed commit row {table}/{row:?}: {error}"));
+            .unwrap_or_else(|error| panic!("seed commit row {}/{row_id:?}: {error}", row.table));
         node.borrow_mut()
             .finalize_local_mergeable_commit(tx_id)
-            .unwrap_or_else(|error| panic!("seed finalize row {table}/{row:?}: {error}"));
+            .unwrap_or_else(|error| panic!("seed finalize row {}/{row_id:?}: {error}", row.table));
     }
 }
 
-fn access_role_values(schema: &JazzSchema, access_table: &str) -> Vec<Value> {
-    let table = find_table(schema, access_table);
-    let role_type = &table
-        .columns
-        .iter()
-        .find(|column| column.name == "c458")
-        .unwrap_or_else(|| panic!("missing c458 on {access_table}"))
-        .column_type;
-    match role_type {
-        ColumnType::Enum(_) => ACCESS_ROLE_DISCRIMINANTS
-            .iter()
-            .copied()
-            .map(Value::Enum)
-            .collect(),
-        ColumnType::String => ACCESS_ROLE_STRINGS
-            .iter()
-            .map(|role| Value::String((*role).to_owned()))
-            .collect(),
-        other => panic!("unsupported access role type on {access_table}: {other:?}"),
-    }
-}
-
-fn table_cells(
-    schema: &JazzSchema,
-    table: &str,
-    corporation: RowUuid,
-    member: RowUuid,
-    idx: usize,
-    inherited_parent: Option<(&str, RowUuid)>,
-) -> BTreeMap<String, Value> {
-    let table_schema = find_table(schema, table);
-    let mut cells = BTreeMap::new();
-    for column in &table_schema.columns {
-        if matches!(column.column_type, ColumnType::Nullable(_))
-            && !matches!(
-                column.name.as_str(),
-                "c146" | "c728" | "c733" | "c734" | "c735"
-            )
-        {
-            continue;
+fn json_to_claim_value(value: &JsonValue, member_row: &str) -> Value {
+    match value {
+        JsonValue::Bool(value) => Value::Bool(*value),
+        JsonValue::String(value) if value == member_row => {
+            Value::Uuid(uuid::Uuid::parse_str(value).expect("claim member uuid"))
         }
-        let value = match column.name.as_str() {
-            "c449" => Value::Uuid(corporation.0),
-            "c450" | "c451" => Value::Uuid(member.0),
-            "c452" => Value::Bool(false),
-            "c142" => Value::String(format!("{table}-holder-{idx}")),
-            "c453" | "c454" => Value::U64(1),
-            "c146" => maybe_nullable(
-                &column.column_type,
-                Value::String("policy graph perf".to_owned()),
-            ),
-            "c724" if table == HEAVY_CHILD_TABLE => {
-                Value::Uuid(inherited_parent.expect("heavy child parent").1.0)
-            }
-            name if inherited_parent.is_some_and(|(via, _)| via == name) => {
-                Value::Uuid(inherited_parent.unwrap().1.0)
-            }
-            "c725" => Value::String("data_entry".to_owned()),
-            "c726" => Value::String(format!("field_{idx}")),
-            "c727" => Value::Array(vec![
-                Value::String(format!("option_{idx}_a")),
-                Value::String(format!("option_{idx}_b")),
-            ]),
-            "c728" => maybe_nullable(&column.column_type, Value::Bool(false)),
-            "c729" => Value::Bool(true),
-            "c730" => Value::Bool(idx.is_multiple_of(3)),
-            "c731" | "c732" | "c734" | "c735" => {
-                maybe_nullable(&column.column_type, Value::String("solid".to_owned()))
-            }
-            "c733" | "c488" => maybe_nullable(&column.column_type, Value::U32(idx as u32)),
-            "c736" => Value::String("{}".to_owned()),
-            _ => sample_value(&column.column_type, idx as u64, corporation, member),
-        };
-        cells.insert(column.name.clone(), value);
+        JsonValue::String(value) => Value::String(value.clone()),
+        other => panic!("unsupported identity claim value {other:?}"),
     }
-    cells
 }
 
-fn sample_value(
-    column_type: &ColumnType,
-    seed: u64,
-    corporation: RowUuid,
-    member: RowUuid,
-) -> Value {
+fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
     match column_type {
-        ColumnType::U8 => Value::U8(seed as u8),
-        ColumnType::U16 => Value::U16(seed as u16),
-        ColumnType::U32 => Value::U32(seed as u32),
-        ColumnType::U64 => Value::U64(seed + 1),
-        ColumnType::F64 => Value::F64(seed as f64 + 0.5),
-        ColumnType::Bool => Value::Bool(seed.is_multiple_of(2)),
-        ColumnType::String => Value::String(format!("v{seed}")),
-        ColumnType::Bytes => Value::Bytes(vec![seed as u8]),
-        ColumnType::Uuid => Value::Uuid(if seed.is_multiple_of(2) {
-            corporation.0
-        } else {
-            member.0
+        ColumnType::Nullable(inner) => {
+            if value.is_null() {
+                nullable(None)
+            } else {
+                nullable(Some(json_to_cell_value(value, inner)))
+            }
+        }
+        ColumnType::U8 => Value::U8(json_u64(value) as u8),
+        ColumnType::U16 => Value::U16(json_u64(value) as u16),
+        ColumnType::U32 => Value::U32(json_u64(value) as u32),
+        ColumnType::U64 => Value::U64(json_u64(value)),
+        ColumnType::F64 => Value::F64(json_f64(value)),
+        ColumnType::Bool => Value::Bool(
+            value
+                .as_bool()
+                .unwrap_or_else(|| panic!("expected bool cell, got {value:?}")),
+        ),
+        ColumnType::String => Value::String(match value {
+            JsonValue::String(value) => value.clone(),
+            JsonValue::Null => String::new(),
+            other => serde_json::to_string(other).expect("serialize json cell as string"),
         }),
-        ColumnType::Enum(_) => Value::Enum(0),
-        ColumnType::Tuple(members) => Value::Tuple(
-            members
+        ColumnType::Bytes => Value::Bytes(match value {
+            JsonValue::Array(values) => values.iter().map(|value| json_u64(value) as u8).collect(),
+            JsonValue::String(value) => value.as_bytes().to_vec(),
+            other => panic!("expected bytes cell, got {other:?}"),
+        }),
+        ColumnType::Uuid => Value::Uuid(
+            uuid::Uuid::parse_str(
+                value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("expected uuid string cell, got {value:?}")),
+            )
+            .unwrap_or_else(|error| panic!("invalid uuid cell {value:?}: {error}")),
+        ),
+        ColumnType::Enum(schema) => {
+            let label = value
+                .as_str()
+                .unwrap_or_else(|| panic!("expected enum string cell, got {value:?}"));
+            Value::Enum(
+                schema
+                    .discriminant(label)
+                    .unwrap_or_else(|error| panic!("enum label {label} missing: {error}")),
+            )
+        }
+        ColumnType::Tuple(members) => {
+            let values = value
+                .as_array()
+                .unwrap_or_else(|| panic!("expected tuple array cell, got {value:?}"));
+            assert_eq!(
+                values.len(),
+                members.len(),
+                "tuple value/member length mismatch"
+            );
+            Value::Tuple(
+                values
+                    .iter()
+                    .zip(members)
+                    .map(|(value, member_type)| json_to_cell_value(value, member_type))
+                    .collect(),
+            )
+        }
+        ColumnType::Array(member_type) => Value::Array(
+            value
+                .as_array()
+                .unwrap_or_else(|| panic!("expected array cell, got {value:?}"))
                 .iter()
-                .enumerate()
-                .map(|(idx, member_type)| {
-                    sample_value(member_type, seed + idx as u64 + 1, corporation, member)
-                })
+                .map(|value| json_to_cell_value(value, member_type))
                 .collect(),
         ),
-        ColumnType::Array(member_type) => Value::Array(vec![sample_value(
-            member_type,
-            seed + 1,
-            corporation,
-            member,
-        )]),
-        ColumnType::Nullable(member_type) => nullable(Some(sample_value(
-            member_type,
-            seed + 1,
-            corporation,
-            member,
-        ))),
     }
+}
+
+fn json_u64(value: &JsonValue) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .unwrap_or_else(|| panic!("expected unsigned integer cell, got {value:?}"))
+}
+
+fn json_f64(value: &JsonValue) -> f64 {
+    value
+        .as_f64()
+        .unwrap_or_else(|| panic!("expected float cell, got {value:?}"))
 }
 
 fn run_cold(
@@ -701,14 +750,18 @@ fn run_connect_and_subscribe(
                 .unwrap_or_else(|| panic!("missing expected count for {table}")),
             stream,
             rows: BTreeSet::new(),
-            opened_ms: None,
+            first_settled_ms: None,
             materialized_ms: None,
         });
     }
     let subscribe_ms = subscribe_start.elapsed().as_millis();
 
-    let apply_start = Instant::now();
+    let settle_start = Instant::now();
     let mut server_open_bundle_ms = 0_u128;
+    let mut client_apply_tick_ms = 0_u128;
+    let mut consolidated_windows = 0_usize;
+    let mut consolidated_window_records = 0_usize;
+    let mut history_window_consolidation_us = 0_u128;
     let mut ticks = 0_usize;
     while !subscriptions
         .iter()
@@ -722,18 +775,48 @@ fn run_connect_and_subscribe(
         }
 
         let server_start = Instant::now();
-        seeded.core.tick().expect("core tick");
-        relay.db.tick().expect("relay tick");
+        let core_tick = seeded.core.tick_stats().expect("core tick");
+        let relay_tick = relay.db.tick_stats().expect("relay tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
+        accumulate_tick_stats(
+            core_tick,
+            &mut consolidated_windows,
+            &mut consolidated_window_records,
+            &mut history_window_consolidation_us,
+        );
+        accumulate_tick_stats(
+            relay_tick,
+            &mut consolidated_windows,
+            &mut consolidated_window_records,
+            &mut history_window_consolidation_us,
+        );
 
         let _queued_to_client = client_relay.right_inbound.borrow().len();
-        client.db.tick().expect("client tick");
+        let client_start = Instant::now();
+        let client_tick = client.db.tick_stats().expect("client tick");
         drain_subscriptions(start, &mut subscriptions);
+        client_apply_tick_ms += client_start.elapsed().as_millis();
+        accumulate_tick_stats(
+            client_tick,
+            &mut consolidated_windows,
+            &mut consolidated_window_records,
+            &mut history_window_consolidation_us,
+        );
         ticks += 1;
     }
-    let client_apply_ms = apply_start.elapsed().as_millis();
+    let settle_loop_ms = settle_start.elapsed().as_millis();
+    let settled_first_callback_all_ms = subscriptions
+        .iter()
+        .map(|sub| sub.first_settled_ms.unwrap_or_default())
+        .max()
+        .unwrap_or_default();
+    let expected_count_all_ms = subscriptions
+        .iter()
+        .map(|sub| sub.materialized_ms.unwrap_or_default())
+        .max()
+        .unwrap_or_default();
 
-    let expected_count_start = Instant::now();
+    let one_shot_validate_start = Instant::now();
     for sub in &subscriptions {
         let prepared = client
             .db
@@ -748,7 +831,7 @@ fn run_connect_and_subscribe(
             sub.name
         );
     }
-    let expected_count_ms = expected_count_start.elapsed().as_millis();
+    let one_shot_validate_ms = one_shot_validate_start.elapsed().as_millis();
 
     let rows_materialized = subscriptions
         .iter()
@@ -760,7 +843,7 @@ fn run_connect_and_subscribe(
             name: sub.name,
             rows: sub.rows.len(),
             expected: sub.expected,
-            opened_ms: sub.opened_ms.unwrap_or_default(),
+            first_settled_ms: sub.first_settled_ms.unwrap_or_default(),
             materialized_ms: sub.materialized_ms.unwrap_or_default(),
         })
         .collect::<Vec<_>>();
@@ -772,8 +855,14 @@ fn run_connect_and_subscribe(
         wall_ms: start.elapsed().as_millis(),
         server_open_bundle_ms: server_open_bundle_ms + connect_ms,
         subscribe_ms,
-        client_apply_ms,
-        expected_count_ms,
+        settle_loop_ms,
+        client_apply_tick_ms,
+        settled_first_callback_all_ms,
+        expected_count_all_ms,
+        one_shot_validate_ms,
+        consolidated_windows,
+        consolidated_window_records,
+        history_window_consolidation_us,
         ticks,
         subscriptions: timelines.len(),
         rows_materialized,
@@ -789,46 +878,22 @@ fn run_connect_and_subscribe(
 }
 
 fn subscription_tables() -> Vec<String> {
-    let mut tables = HOLDER_TABLES
-        .iter()
-        .map(|table| (*table).to_owned())
+    let tables = member_seed_manifest()
+        .tables
+        .into_iter()
+        .map(|table| table.name)
         .collect::<Vec<_>>();
-    tables.extend(
-        INHERITS_TABLES
-            .iter()
-            .map(|(table, _, _)| (*table).to_owned()),
-    );
-    tables.push("t50".to_owned());
-    tables.push("t188".to_owned());
-    tables.sort();
-    tables.dedup();
     assert_eq!(tables.len(), 39);
     tables
 }
 
-fn expected_counts() -> BTreeMap<String, usize> {
-    subscription_tables()
-        .into_iter()
-        .map(|table| {
-            let count = match table.as_str() {
-                "t1" => 2,
-                "t188" => 2,
-                "t68" => HOLDER_PARENT_ROWS,
-                HEAVY_CHILD_TABLE => HEAVY_CHILD_ROWS,
-                _ => 1,
-            };
-            (table, count)
-        })
-        .collect()
-}
-
 fn drain_subscriptions(start: Instant, subscriptions: &mut [OpenSubscription]) {
-    let elapsed = start.elapsed().as_millis();
     for sub in subscriptions {
         while let Some(event) = sub.stream.try_next_event() {
-            apply_event(&mut sub.rows, event);
-            if sub.opened_ms.is_none() {
-                sub.opened_ms = Some(elapsed);
+            let settled = apply_event(&mut sub.rows, event);
+            let elapsed = start.elapsed().as_millis();
+            if settled && sub.first_settled_ms.is_none() {
+                sub.first_settled_ms = Some(elapsed);
             }
             if sub.rows.len() == sub.expected && sub.materialized_ms.is_none() {
                 sub.materialized_ms = Some(elapsed);
@@ -837,13 +902,14 @@ fn drain_subscriptions(start: Instant, subscriptions: &mut [OpenSubscription]) {
     }
 }
 
-fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
+fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) -> bool {
     match event {
         SubscriptionEvent::Delta {
             reset,
             added,
             updated,
             removed,
+            settled,
             ..
         } => {
             if reset {
@@ -855,9 +921,21 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
             for row in added.into_iter().chain(updated) {
                 rows.insert(row.row_uuid());
             }
+            settled
         }
-        SubscriptionEvent::Closed => {}
+        SubscriptionEvent::Closed => false,
     }
+}
+
+fn accumulate_tick_stats(
+    stats: jazz::db::DbTickStats,
+    consolidated_windows: &mut usize,
+    consolidated_window_records: &mut usize,
+    history_window_consolidation_us: &mut u128,
+) {
+    *consolidated_windows += stats.consolidated_windows;
+    *consolidated_window_records += stats.consolidated_window_records;
+    *history_window_consolidation_us += stats.history_window_consolidation_us;
 }
 
 fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSummary) {
@@ -868,20 +946,38 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     fields.insert("wall_ms".to_owned(), json!(summary.wall_ms));
     fields.insert(
         "settled_first_callback_all_ms".to_owned(),
-        json!(summary.client_apply_ms),
+        json!(summary.settled_first_callback_all_ms),
     );
     fields.insert(
         "expected_count_all_ms".to_owned(),
-        json!(summary.expected_count_ms),
+        json!(summary.expected_count_all_ms),
     );
     fields.insert(
         "phase_breakdown".to_owned(),
         json!({
             "server_open_bundle_ms": summary.server_open_bundle_ms,
             "subscribe_ms": summary.subscribe_ms,
-            "client_apply_ms": summary.client_apply_ms,
-            "expected_count_ms": summary.expected_count_ms,
+            "settle_loop_ms": summary.settle_loop_ms,
+            "client_apply_tick_ms": summary.client_apply_tick_ms,
+            "one_shot_validate_ms": summary.one_shot_validate_ms,
+            "history_window_consolidation_ms": summary.history_window_consolidation_us as f64 / 1000.0,
         }),
+    );
+    fields.insert(
+        "one_shot_validate_ms".to_owned(),
+        json!(summary.one_shot_validate_ms),
+    );
+    fields.insert(
+        "consolidated_windows".to_owned(),
+        json!(summary.consolidated_windows),
+    );
+    fields.insert(
+        "consolidated_window_records".to_owned(),
+        json!(summary.consolidated_window_records),
+    );
+    fields.insert(
+        "history_window_consolidation_us".to_owned(),
+        json!(summary.history_window_consolidation_us),
     );
     fields.insert("ticks".to_owned(), json!(summary.ticks));
     fields.insert("subscriptions".to_owned(), json!(summary.subscriptions));
@@ -931,7 +1027,7 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
                         "name": timeline.name,
                         "rows": timeline.rows,
                         "expected": timeline.expected,
-                        "opened_ms": timeline.opened_ms,
+                        "first_settled_ms": timeline.first_settled_ms,
                         "materialized_ms": timeline.materialized_ms,
                     })
                 })
@@ -1012,32 +1108,6 @@ fn nullable(value: Option<Value>) -> Value {
     Value::Nullable(value.map(Box::new))
 }
 
-fn maybe_nullable(column_type: &ColumnType, value: Value) -> Value {
-    if matches!(column_type, ColumnType::Nullable(_)) {
-        nullable(Some(value))
-    } else {
-        value
-    }
-}
-
-fn policy_graph_uuid(kind: u8, idx: u32) -> uuid::Uuid {
-    let mut bytes = [kind; 16];
-    bytes[12..].copy_from_slice(&idx.to_be_bytes());
-    uuid::Uuid::from_bytes(bytes)
-}
-
-fn policy_graph_row(kind: u8, idx: u32) -> RowUuid {
-    RowUuid(policy_graph_uuid(kind, idx))
-}
-
-fn policy_graph_author(kind: u8, idx: u32) -> AuthorId {
-    AuthorId(policy_graph_uuid(kind, idx))
-}
-
-fn holder_kind(table_idx: usize) -> u8 {
-    0x40_u8.wrapping_add(table_idx as u8)
-}
-
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
 }
@@ -1074,11 +1144,11 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
         .filter(|sub| sub.rows.len() != sub.expected)
         .map(|sub| {
             format!(
-                "{}={}/{} opened={:?}",
+                "{}={}/{} first_settled={:?}",
                 sub.name,
                 sub.rows.len(),
                 sub.expected,
-                sub.opened_ms
+                sub.first_settled_ms
             )
         })
         .collect::<Vec<_>>()
