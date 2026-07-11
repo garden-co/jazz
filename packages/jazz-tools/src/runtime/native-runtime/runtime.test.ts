@@ -438,6 +438,64 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]![1]).toBeNull();
   });
 
+  it("settle-gates global native subscription chunks before app callbacks", () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
+    const events = [
+      {
+        type: "delta",
+        reset: true,
+        settled: false,
+        delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+      },
+      {
+        type: "delta",
+        reset: false,
+        settled: true,
+        delta: encodeSubscriptionDelta({
+          added: [{ table: "todos", rowId, title: "settled row" }],
+          updated: [],
+          removed: [],
+        }),
+      },
+    ];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () => ({
+              readAll: () => events.splice(0),
+              close: () => true,
+            }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+
+    expect(updates).toHaveBeenCalledTimes(1);
+    const decoded = decodeTestDeltas([updates.mock.calls[0]![0]]);
+    expect(decoded).toHaveLength(1);
+    expect(decoded[0]).toHaveLength(1);
+    expect(decoded[0]![0]).toMatchObject({
+      kind: 0,
+      id: "00000000-0000-0000-0000-000000000123",
+      index: 0,
+    });
+    expect(decoded[0]![0]?.row.values[0]).toEqual({ type: "Text", value: "settled row" });
+  });
+
   it("uses the caller-supplied table for update and delete", () => {
     const calls: unknown[] = [];
     const write = {

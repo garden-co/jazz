@@ -1685,6 +1685,7 @@ export class Db {
     if (
       this.config.serverUrl &&
       queryOptions.propagation !== "local-only" &&
+      queryOptions.tier !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
