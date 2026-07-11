@@ -743,6 +743,10 @@ where
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty();
         let reset_has_result_removes = !result_member_removes.is_empty();
+        let persisted_member_adds = result_member_adds.clone();
+        let persisted_member_removes = result_member_removes.clone();
+        let persisted_fact_adds = program_fact_adds.clone();
+        let persisted_fact_removes = program_fact_removes.clone();
         // A reset only replaces shared canonical state when it carries the
         // snapshot that will replace it. Empty resets from short-lived duplicate
         // usage subscriptions are coverage stamps; letting them clear non-empty
@@ -753,43 +757,76 @@ where
                 .settled_result_sets
                 .get(&binding_view_key)
                 .is_some_and(|members| !members.is_empty());
-        if reset_result_set && !preserve_existing_shared_state {
+        let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
+        if reset_cleared_shared_state {
             self.query.settled_result_sets.remove(&binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .settled_through_by_binding_view
                 .remove(&binding_view_key);
         }
-        let row_result_set = self
-            .query
-            .settled_result_sets
-            .entry(binding_view_key)
-            .or_default();
-        for member in result_member_removes {
-            if row_result_set.remove(&member) {
-                continue;
+        let mut result_members_need_rewrite = false;
+        let member_rewrite;
+        let fact_rewrite;
+        {
+            let row_result_set = self
+                .query
+                .settled_result_sets
+                .entry(binding_view_key)
+                .or_default();
+            for member in result_member_removes {
+                if row_result_set.remove(&member) {
+                    continue;
+                }
+                if let Some((removed_table, removed_row_uuid, _)) = member.as_row() {
+                    let before_len = row_result_set.len();
+                    row_result_set.retain(|existing| {
+                        !matches!(
+                            existing.as_row(),
+                            Some((existing_table, existing_row_uuid, _))
+                                if existing_table == removed_table
+                                    && existing_row_uuid == removed_row_uuid
+                        )
+                    });
+                    result_members_need_rewrite |= row_result_set.len() != before_len;
+                }
             }
-            if let Some((removed_table, removed_row_uuid, _)) = member.as_row() {
-                row_result_set.retain(|existing| {
-                    !matches!(
-                        existing.as_row(),
-                        Some((existing_table, existing_row_uuid, _))
-                            if existing_table == removed_table
-                                && existing_row_uuid == removed_row_uuid
-                    )
-                });
+            for member in result_member_adds {
+                if let Some((added_table, added_row_uuid, _)) = member.as_row() {
+                    let before_len = row_result_set.len();
+                    row_result_set.retain(|existing| {
+                        !matches!(
+                            existing.as_row(),
+                            Some((existing_table, existing_row_uuid, _))
+                                if existing_table == added_table
+                                    && existing_row_uuid == added_row_uuid
+                        )
+                    });
+                    result_members_need_rewrite |= row_result_set.len() != before_len;
+                }
+                row_result_set.insert(member);
             }
+            member_rewrite = if reset_cleared_shared_state || result_members_need_rewrite {
+                Some(row_result_set.clone())
+            } else {
+                None
+            };
+
+            let program_facts = self
+                .query
+                .settled_program_facts
+                .entry(binding_view_key)
+                .or_default();
+            for fact in program_fact_removes {
+                program_facts.remove(&fact);
+            }
+            program_facts.extend(program_fact_adds);
+            fact_rewrite = if reset_cleared_shared_state {
+                Some(program_facts.clone())
+            } else {
+                None
+            };
         }
-        row_result_set.extend(result_member_adds);
-        let program_facts = self
-            .query
-            .settled_program_facts
-            .entry(binding_view_key)
-            .or_default();
-        for fact in program_fact_removes {
-            program_facts.remove(&fact);
-        }
-        program_facts.extend(program_fact_adds);
         if !defer_settlement {
             self.query
                 .settled_through_by_binding_view
@@ -809,8 +846,12 @@ where
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
         {
-            let row_result_set = row_result_set
-                .iter()
+            let row_result_set = self
+                .query
+                .settled_result_sets
+                .get(&binding_view_key)
+                .into_iter()
+                .flat_map(|members| members.iter())
                 .filter_map(ResultMemberEntry::as_row)
                 .collect::<BTreeSet<_>>();
             if let Some((table, row_uuid, first, second)) =
@@ -823,6 +864,16 @@ where
             }
         }
         if !defer_settlement {
+            self.persist_settled_result_state_delta(
+                binding_view_key,
+                reset_cleared_shared_state,
+                &persisted_member_adds,
+                &persisted_member_removes,
+                member_rewrite.as_ref(),
+                &persisted_fact_adds,
+                &persisted_fact_removes,
+                fact_rewrite.as_ref(),
+            )?;
             self.persist_known_state_fact(binding_view_key, settled_through)?;
         }
         if self

@@ -23,9 +23,9 @@ use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
 #[cfg(any(test, debug_assertions))]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionRecord,
+    ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
+    ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
+    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
 };
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
@@ -33,6 +33,25 @@ use crate::schema::TableSchema;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
 
 const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
+
+fn fast_current_membership_position(
+    known_state: &Option<KnownStateDeclaration>,
+) -> Option<crate::time::GlobalSeq> {
+    match known_state {
+        Some(KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position,
+        }) => Some(*position),
+        Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
+    }
+}
+
+fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
+    match member {
+        ResultMemberEntry::Row(row) => row.settle_position,
+        ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
+    }
+}
 
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
@@ -926,7 +945,15 @@ impl PeerState {
         let raw_fact_add_count = transitions.program_fact_adds.len();
         let filter_start = Instant::now();
         let output_tables = tables.clone();
-        let result_member_adds = transitions
+        let known_state = self
+            .subscriptions
+            .get(&subscription)
+            .and_then(|state| state.known_state.clone());
+        let known_membership_position = fast_current_membership_position(&known_state);
+        let watermark = node.applied_global_watermark();
+        let simple_membership_delta =
+            transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
+        let mut result_member_adds = transitions
             .adds
             .into_iter()
             .filter(|member| {
@@ -939,18 +966,48 @@ impl PeerState {
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
-        let result_member_removes = previous_member_result_set
+        let mut result_member_removes = previous_member_result_set
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
+        let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
+            && let Some(position) = known_membership_position
+            && watermark.0 > 0
+            && position >= watermark
+        {
+            result_member_adds.clear();
+            result_member_removes.clear();
+            (Vec::new(), Vec::new(), false)
+        } else if reset_result_set
+            && simple_membership_delta
+            && let Some(position) = known_membership_position
+            && result_member_adds
+                .iter()
+                .any(|member| member_settle_position(member).is_some())
+        {
+            result_member_adds.retain(|member| {
+                member_settle_position(member).is_none_or(|settled| settled > position)
+            });
+            result_member_removes.clear();
+            (Vec::new(), Vec::new(), false)
+        } else {
+            (
+                transitions.program_fact_adds,
+                transitions.program_fact_removes,
+                reset_result_set,
+            )
+        };
         let filter_elapsed = filter_start.elapsed();
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
-        let known_state = self
-            .subscriptions
-            .get(&subscription)
-            .and_then(|state| state.known_state.clone());
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
+        let trace_positioned_members = trace_rehydrate.then(|| {
+            result_member_adds
+                .iter()
+                .filter(|member| member_settle_position(member).is_some())
+                .count()
+        });
+        let trace_known_state = trace_rehydrate.then(|| format!("{known_state:?}"));
         let bundle_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -964,8 +1021,8 @@ impl PeerState {
                 previous_result_set: BTreeSet::new(),
                 result_member_adds,
                 result_member_removes,
-                program_fact_adds: transitions.program_fact_adds,
-                program_fact_removes: transitions.program_fact_removes,
+                program_fact_adds,
+                program_fact_removes,
                 identity: self.identity(),
                 tier,
                 maintained_facts: &maintained,
@@ -993,10 +1050,14 @@ impl PeerState {
             };
             let open_reads = open_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
+            let positioned_members = trace_positioned_members.expect("trace positioned members");
+            let known_state = trace_known_state.expect("trace known state");
             eprintln!(
-                "CUSTOMER_REHYDRATE stage=rehydrate table={} subscription={subscription:?} reset={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                "CUSTOMER_REHYDRATE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
                 shape.query().table,
                 reset_result_set,
+                known_state,
+                positioned_members,
                 open_elapsed.as_millis(),
                 filter_elapsed.as_millis(),
                 bundle_elapsed.as_millis(),
@@ -1168,7 +1229,7 @@ impl PeerState {
                 program_fact_removes: source_program_fact_removes,
             });
         }
-        let result_member_adds = self
+        let mut result_member_adds = self
             .subscriptions
             .get(&maintained_subscription)
             .ok_or(Error::InvalidStoredValue(
@@ -1190,6 +1251,24 @@ impl PeerState {
             .subscriptions
             .get(&target_subscription)
             .and_then(|state| state.known_state.clone());
+        let known_membership_position = fast_current_membership_position(&known_state);
+        let mut reset_result_set = true;
+        if let Some(position) = known_membership_position
+            && node.applied_global_watermark().0 > 0
+            && position >= node.applied_global_watermark()
+        {
+            result_member_adds.clear();
+            reset_result_set = false;
+        } else if let Some(position) = known_membership_position
+            && result_member_adds
+                .iter()
+                .any(|member| member_settle_position(member).is_some())
+        {
+            result_member_adds.retain(|member| {
+                member_settle_position(member).is_none_or(|settled| settled > position)
+            });
+            reset_result_set = false;
+        }
         let update = {
             let maintained = &self
                 .subscriptions
@@ -1218,7 +1297,9 @@ impl PeerState {
             )
         };
         let mut update = update?;
-        view_update_reset_result_set(&mut update);
+        if reset_result_set {
+            view_update_reset_result_set(&mut update);
+        }
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);

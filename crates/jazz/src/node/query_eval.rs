@@ -4223,6 +4223,16 @@ where
             binding_id: binding.binding_id(),
             read_view: subscription.read_view,
         };
+        if !self.has_settled_result_set(binding_view_key) {
+            let _ = self.load_known_state_fact(binding_view_key)?;
+            // Slow exact declarations are still known-state declarations: they
+            // must describe a binding view the server has previously settled
+            // for this client. A purely local first subscription could include
+            // rows the serving peer has not observed yet; truncating that to an
+            // exact set would silently overclaim and can make stale rehydrate
+            // responses suppress local live state.
+            return Ok(None);
+        }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
             return Ok(Some(KnownStateDeclaration::Fast {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
@@ -4234,15 +4244,6 @@ where
                 completeness: KnownStateCompleteness::FastCurrentMembership,
                 position,
             }));
-        }
-        if !self.has_settled_result_set(binding_view_key) {
-            // Slow exact declarations are still known-state declarations: they
-            // must describe a binding view the server has previously settled
-            // for this client. A purely local first subscription could include
-            // rows the serving peer has not observed yet; truncating that to an
-            // exact set would silently overclaim and can make stale rehydrate
-            // responses suppress local live state.
-            return Ok(None);
         }
         let mut refs = Vec::new();
         for row in self.query_rows_for_link(shape, binding, DurabilityTier::Local, identity)? {
