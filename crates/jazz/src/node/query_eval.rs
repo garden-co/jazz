@@ -3938,6 +3938,24 @@ where
         SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(std::cell::Cell::get)
     }
 
+    #[cfg(test)]
+    pub(crate) fn inject_pending_authoritative_reset_for_test(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        members: impl IntoIterator<Item = ResultMemberEntry>,
+        settled_through: GlobalSeq,
+    ) {
+        self.query
+            .settled_result_sets
+            .insert(binding_view_key, members.into_iter().collect());
+        self.query
+            .settled_through_by_binding_view
+            .insert(binding_view_key, settled_through);
+        self.query
+            .pending_authoritative_reset_binding_views
+            .insert(binding_view_key);
+    }
+
     pub(crate) fn take_pending_authoritative_reset_binding_views(
         &mut self,
     ) -> BTreeSet<BindingViewKey> {

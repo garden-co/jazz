@@ -8,9 +8,9 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
-    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, RowVersionRef, ShapeAst, Subscribe, SubscribeRejectReason,
-    TableLens,
+    BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
+    ShapeAst, Subscribe, SubscribeRejectReason, TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -21,7 +21,8 @@ use crate::query::{
     col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
-use crate::time::TxTime;
+use crate::time::{GlobalSeq, TxTime};
+use crate::tx::TxId;
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireStreamDecoder,
     current_wire_features,
@@ -6432,6 +6433,68 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     assert_eq!(added.len(), 2);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
+}
+
+#[test]
+fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let opts = global_subscribe_opts();
+    let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+
+    let missing_tx = TxId::new(
+        TxTime(116_898_697_390_129_152),
+        NodeUuid::from_bytes([0x77; 16]),
+    );
+    let binding_view_key = BindingViewKey::new(
+        prepared.shape().shape_id(),
+        prepared.binding().binding_id(),
+        RegisterShapeOptions {
+            tier: opts.tier,
+            read_view: opts.read_view,
+        }
+        .read_view_key(),
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .inject_pending_authoritative_reset_for_test(
+            binding_view_key,
+            [ResultMemberEntry::row((
+                "todos".to_owned().into(),
+                row(0x7a),
+                missing_tx,
+            ))],
+            GlobalSeq(42),
+        );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .reset_subscription_snapshot_for_link_call_count();
+
+    let changed = client.refresh_subscriptions().unwrap();
+    assert_eq!(changed, 1);
+    let node = client.node.node.borrow();
+    assert_eq!(
+        node.sync_metrics()
+            .authoritative_reset_missing_payload_fallbacks,
+        1
+    );
+    assert_eq!(node.subscription_snapshot_for_link_call_count(), 1);
+    drop(node);
+    assert!(prepared_all(&client, &query, ReadOpts::default()).is_empty());
 }
 
 #[test]
