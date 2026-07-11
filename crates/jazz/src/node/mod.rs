@@ -31,9 +31,9 @@ use crate::ids::{
 };
 use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
-    BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ReadViewKey, ResultMemberEntry,
-    ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
+    BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
+    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
 };
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
@@ -3512,17 +3512,19 @@ where
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
-        let (result_member_adds, version_bundles) = match message {
+        let (result_member_adds, version_bundles, program_fact_adds) = match message {
             SyncMessage::ViewUpdate {
                 result_member_adds,
                 version_bundles,
+                program_fact_adds,
                 ..
             }
             | SyncMessage::ViewUpdateChunk {
                 result_member_adds,
                 version_bundles,
+                program_fact_adds,
                 ..
-            } => (result_member_adds, version_bundles),
+            } => (result_member_adds, version_bundles, program_fact_adds),
             _ => return Ok(Vec::new()),
         };
         let incoming = version_bundles
@@ -3557,6 +3559,40 @@ where
             .filter_map(ResultMemberEntry::as_row)
         {
             let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
+            if incoming.contains(&version_ref) {
+                continue;
+            }
+            let has_body = self.local_version_row_for_ref(&version_ref)?.is_some()
+                && self.query_transaction(tx_id)?.is_some();
+            if !has_body {
+                missing.insert(version_ref);
+            } else if let Some(version) = self.local_version_record_for_ref(&version_ref)? {
+                self.collect_missing_text_ancestor_refs(
+                    &version,
+                    &mut missing,
+                    &mut visited_text_ancestors,
+                )?;
+            }
+        }
+        for (table, row_uuid, tx_id) in program_fact_adds
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::RelationEdge(edge) => Some(edge),
+                _ => None,
+            })
+            .flat_map(|edge| {
+                [
+                    edge.source_version.as_ref().map(|version| {
+                        (edge.source_table.to_string(), edge.source_row, version.tx)
+                    }),
+                    edge.target_version.as_ref().map(|version| {
+                        (edge.target_table.to_string(), edge.target_row, version.tx)
+                    }),
+                ]
+            })
+            .flatten()
+        {
+            let version_ref = RowVersionRef::new(table, row_uuid, tx_id);
             if incoming.contains(&version_ref) {
                 continue;
             }
