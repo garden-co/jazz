@@ -3881,7 +3881,7 @@ where
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
         {
-            self.query.settled_result_sets.remove(&binding_view_key);
+            self.clear_settled_result_view(binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .known_state_declared_binding_views
@@ -3945,9 +3945,10 @@ where
         members: impl IntoIterator<Item = ResultMemberEntry>,
         settled_through: GlobalSeq,
     ) {
-        self.query
-            .settled_result_sets
-            .insert(binding_view_key, members.into_iter().collect());
+        self.clear_settled_result_view(binding_view_key);
+        for member in members {
+            self.insert_settled_result_member_indexed(binding_view_key, member);
+        }
         self.query
             .settled_through_by_binding_view
             .insert(binding_view_key, settled_through);

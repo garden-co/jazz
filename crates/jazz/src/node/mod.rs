@@ -78,6 +78,8 @@ pub(crate) use query_eval::{
 };
 pub(crate) use views::MaintainedViewBundleInputs;
 
+type ResultRowMembershipKey = (groove::Intern<String>, RowUuid);
+
 use branches::BranchRecord;
 use codec::*;
 use content_store::ContentStore;
@@ -317,6 +319,13 @@ struct QueryServing {
     registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
     /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
+    /// Point index for ordinary current-row settled result members.
+    ///
+    /// This mirrors the row-shaped subset of `settled_result_sets` so applying a
+    /// new current winner can remove the previous winner without scanning the
+    /// full result set.
+    settled_result_row_index:
+        BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
     /// Server-stamped settled-through cursor for each canonical binding view.
@@ -555,6 +564,7 @@ where
                 registered_shapes: BTreeMap::new(),
                 registered_bindings: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
+                settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
@@ -685,6 +695,7 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.settled_result_sets.clear();
+        self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
@@ -701,6 +712,84 @@ where
             self.ensure_schema_version_alias(self.catalogue.current_schema_version_id)?;
         self.catalogue.current_schema_version_alias = Some(schema_alias);
         Ok(())
+    }
+
+    fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
+        member
+            .as_row()
+            .map(|(table, row_uuid, _)| (table, row_uuid))
+    }
+
+    fn insert_settled_result_member_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        member: ResultMemberEntry,
+    ) {
+        if let Some(row_key) = Self::result_member_row_key(&member) {
+            self.query
+                .settled_result_row_index
+                .entry(binding_view_key)
+                .or_default()
+                .insert(row_key, member.clone());
+        }
+        self.query
+            .settled_result_sets
+            .entry(binding_view_key)
+            .or_default()
+            .insert(member);
+    }
+
+    fn remove_settled_result_member_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        member: &ResultMemberEntry,
+    ) -> bool {
+        let removed = self
+            .query
+            .settled_result_sets
+            .get_mut(&binding_view_key)
+            .is_some_and(|members| members.remove(member));
+        if removed
+            && let Some(row_key) = Self::result_member_row_key(member)
+            && self
+                .query
+                .settled_result_row_index
+                .get(&binding_view_key)
+                .and_then(|index| index.get(&row_key))
+                == Some(member)
+            && let Some(index) = self
+                .query
+                .settled_result_row_index
+                .get_mut(&binding_view_key)
+        {
+            index.remove(&row_key);
+        }
+        removed
+    }
+
+    fn remove_settled_result_member_for_row_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        table: groove::Intern<String>,
+        row_uuid: RowUuid,
+    ) -> Option<ResultMemberEntry> {
+        let row_key = (table, row_uuid);
+        let previous = self
+            .query
+            .settled_result_row_index
+            .get_mut(&binding_view_key)
+            .and_then(|index| index.remove(&row_key))?;
+        if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
+            members.remove(&previous);
+        }
+        Some(previous)
+    }
+
+    fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
+        self.query.settled_result_sets.remove(&binding_view_key);
+        self.query
+            .settled_result_row_index
+            .remove(&binding_view_key);
     }
 
     fn open_catalogue_stage(
@@ -2588,6 +2677,7 @@ where
             }
         }
         self.query.settled_result_sets.clear();
+        self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         Ok(())
     }
@@ -2692,6 +2782,7 @@ where
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
         self.query.settled_result_sets.clear();
+        self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[])? {
@@ -2740,6 +2831,7 @@ where
         let store = self
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
+        let mut recovered_members = Vec::new();
         for entry in store.prefix_entries(&[])? {
             if entry.key.len() != 4 {
                 return Err(Error::InvalidStoredValue(
@@ -2761,11 +2853,11 @@ where
             let member = postcard::from_bytes::<ResultMemberEntry>(member_bytes).map_err(|_| {
                 Error::InvalidStoredValue("settled result member payload must decode")
             })?;
-            self.query
-                .settled_result_sets
-                .entry(binding_view_key)
-                .or_default()
-                .insert(member);
+            recovered_members.push((binding_view_key, member));
+        }
+        drop(store);
+        for (binding_view_key, member) in recovered_members {
+            self.insert_settled_result_member_indexed(binding_view_key, member);
         }
 
         let store = self
