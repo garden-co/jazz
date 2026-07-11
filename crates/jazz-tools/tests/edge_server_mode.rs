@@ -73,7 +73,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
         .await;
 }
 
-fn pilot-app_policy_schema() -> Schema {
+fn policy_graph_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("resources")
@@ -392,7 +392,7 @@ async fn wait_edge_batch(client: &JazzClient, batch_id: jazz_tools::BatchId, lab
     .unwrap_or_else(|err| panic!("{label} failed waiting for edge batch: {err}"));
 }
 
-struct PilotAppSeedRows {
+struct PolicyGraphSeedRows {
     resource: ObjectId,
     data_entry: ObjectId,
     mapping_rule: ObjectId,
@@ -400,7 +400,7 @@ struct PilotAppSeedRows {
     mapping_rule_entry: ObjectId,
 }
 
-async fn seed_pilot-app_rows(admin: &JazzClient) -> PilotAppSeedRows {
+async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
     let (seed_team, _, seed_batch) = admin
         .insert(
             "teams",
@@ -466,7 +466,7 @@ async fn seed_pilot-app_rows(admin: &JazzClient) -> PilotAppSeedRows {
         .expect("insert mapping rule child");
     wait_edge_batch(admin, mapping_rule_entry_batch, "mapping rule child").await;
 
-    PilotAppSeedRows {
+    PolicyGraphSeedRows {
         resource,
         data_entry,
         mapping_rule,
@@ -475,7 +475,7 @@ async fn seed_pilot-app_rows(admin: &JazzClient) -> PilotAppSeedRows {
     }
 }
 
-async fn assert_pilot-app_member_rows(member: &JazzClient, rows: &PilotAppSeedRows) {
+async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraphSeedRows) {
     let member_rows = wait_for_query(
         member,
         QueryBuilder::new("resources").build(),
@@ -544,7 +544,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start().await;
-            let schema = pilot-app_policy_schema();
+            let schema = policy_graph_policy_schema();
             let app_id = server.app_id();
             let response = reqwest::Client::new()
                 .post(format!("{}/apps/{app_id}/admin/schemas", server.base_url()))
@@ -552,11 +552,11 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 .json(&json!({ "schema": schema }))
                 .send()
                 .await
-                .expect("publish the pilot customer-shaped schema");
+                .expect("publish policy graph-shaped schema");
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.expect("schema publish error body");
-                panic!("the pilot customer-shaped schema publish failed: {status} {body}");
+                panic!("policy graph-shaped schema publish failed: {status} {body}");
             }
 
             let admin = TestingClient::builder()
@@ -566,7 +566,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 .as_admin()
                 .connect()
                 .await;
-            let rows = seed_pilot-app_rows(&admin).await;
+            let rows = seed_policy_graph_rows(&admin).await;
 
             let member = TestingClient::builder()
                 .with_server(&server)
@@ -575,7 +575,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 .with_claims(json!({}))
                 .connect()
                 .await;
-            assert_pilot-app_member_rows(&member, &rows).await;
+            assert_policy_graph_member_rows(&member, &rows).await;
 
             let spy = TestingClient::builder()
                 .with_server(&server)
@@ -612,11 +612,11 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fixed_schema_data_dir_reopen_bootstraps_pilot-app_policy_serving_state() {
+async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_state() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let data_dir = TempDir::new().expect("server data dir");
-            let schema = pilot-app_policy_schema();
+            let schema = policy_graph_policy_schema();
             let rows = {
                 let server = JazzServer::builder()
                     .with_schema(schema.clone())
@@ -631,7 +631,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_pilot-app_policy_serving_state(
                     .as_admin()
                     .connect()
                     .await;
-                let rows = seed_pilot-app_rows(&admin).await;
+                let rows = seed_policy_graph_rows(&admin).await;
                 admin.shutdown().await.expect("shutdown seeding admin");
                 server.shutdown().await;
                 rows
@@ -650,7 +650,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_pilot-app_policy_serving_state(
                 .with_claims(json!({}))
                 .connect()
                 .await;
-            assert_pilot-app_member_rows(&member, &rows).await;
+            assert_policy_graph_member_rows(&member, &rows).await;
 
             member.shutdown().await.expect("shutdown member");
             reopened.shutdown().await;

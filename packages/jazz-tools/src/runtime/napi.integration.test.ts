@@ -12,7 +12,6 @@ import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
-import { applySubscriptionDelta, type SubscriptionDelta } from "./subscription-manager.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -89,36 +88,31 @@ type PolicyTodoInit = {
   owner_id: string;
 };
 
-type PilotAppLocation = {
+type PolicyGraphPerfLocation = {
   id: string;
-  display_address?: string;
+  c1377?: string;
 };
 
-type PilotAppLocationInit = Omit<PilotAppLocation, "id">;
+type PolicyGraphPerfLocationInit = Omit<PolicyGraphPerfLocation, "id">;
 
-type PilotAppTeamAccessEdge = {
+type PolicyGraphPerfAccessEdge = {
   id: string;
-  resource_id: string;
-  team_id: string;
-  grant_role: "EDITOR" | "MANAGER" | "VIEWER";
-  administrator: boolean;
+  c456: string;
+  c457: string;
+  c458: "e17" | "e18" | "e19";
+  c459: boolean;
 };
 
-type PilotAppTeam = {
+type PolicyGraphPerfTemplate = {
   id: string;
-  [key: string]: unknown;
-};
-
-type PilotAppTemplate = {
-  id: string;
-  corporation_id: string;
-  created_by: string;
-  updated_by: string;
-  archived: boolean;
-  name: string;
-  date_created: Date;
-  date_updated: Date;
-  template_configuration: unknown;
+  c449: string;
+  c450: string;
+  c451: string;
+  c452: boolean;
+  c142: string;
+  c453: Date;
+  c454: Date;
+  c1431: unknown;
 };
 
 const TEST_SCHEMA: WasmSchema = {
@@ -226,29 +220,6 @@ function makeWhereQuery<T>(
   };
 }
 
-function makeTableQueryWithIncludes<T>(
-  table: string,
-  schema: WasmSchema,
-  includes: Record<string, unknown> = {},
-  select: string[] = [],
-): QueryBuilder<T> {
-  return {
-    _table: table,
-    _schema: schema,
-    _rowType: undefined as unknown as T,
-    _build() {
-      return JSON.stringify({
-        table,
-        conditions: [],
-        includes,
-        select,
-        orderBy: [],
-        hops: [],
-      });
-    },
-  };
-}
-
 function makeWhereTable<Row, Init>(table: string, schema: WasmSchema): WhereTable<Row, Init> {
   return {
     _table: table,
@@ -294,7 +265,10 @@ const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", impo
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts", import.meta.url),
 );
-const PILOT_REAL_FIXTURE_DIR = new URL("../testing/fixtures/pilot-real/", import.meta.url);
+const POLICY_GRAPH_PERF_FIXTURE_DIR = new URL(
+  "../testing/fixtures/policy-graph-perf/",
+  import.meta.url,
+);
 
 beforeAll(async () => {
   if (!globalThis.WebSocket) {
@@ -352,25 +326,27 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-async function loadPilotAppRealWasmSchema(): Promise<WasmSchema> {
+async function loadPolicyGraphPerfWasmSchema(): Promise<WasmSchema> {
   const source = JSON.parse(
-    await readFile(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR), "utf8"),
+    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
   ) as { mergedSchema: WasmSchema };
   return source.mergedSchema;
 }
 
-async function loadPilotAppRealAppSchema(): Promise<WasmSchema> {
+async function loadPolicyGraphPerfAppSchema(): Promise<WasmSchema> {
   const source = JSON.parse(
-    await readFile(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR), "utf8"),
+    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
   ) as { wasmSchema: WasmSchema };
   return source.wasmSchema;
 }
 
-async function createPilotAppRealSchemaDir(options?: {
+async function createPolicyGraphPerfSchemaDir(options?: {
   includePermissionsFile?: boolean;
 }): Promise<string> {
-  const schemaDir = await createTempDir("jazz-napi-pilot-real-schema-");
-  const fixtureJsonPath = fileURLToPath(new URL("schema-source.json", PILOT_REAL_FIXTURE_DIR));
+  const schemaDir = await createTempDir("jazz-napi-policy-graph-perf-schema-");
+  const fixtureJsonPath = fileURLToPath(
+    new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR),
+  );
   await writeFile(
     join(schemaDir, "schema.ts"),
     `
@@ -711,17 +687,17 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("resolves global waits for backend writes with the the pilot customer real schema fixture", async () => {
+  it("resolves global waits for backend writes with the policy graph perf fixture", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-global-wait-secret";
-    const adminSecret = "napi-pilot-app-global-wait-admin-secret";
-    const pilot-appSchemaForServer = await loadPilotAppRealWasmSchema();
+    const backendSecret = "napi-policy_graph-global-wait-secret";
+    const adminSecret = "napi-policy_graph-global-wait-admin-secret";
+    const policyGraphSchemaForServer = await loadPolicyGraphPerfWasmSchema();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(pilot-appSchemaForServer),
+      schema: encodeNativeSchema(policyGraphSchemaForServer),
     });
     let context: {
       asBackend(): Db;
@@ -730,16 +706,16 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      const pilot-appSchema = pilot-appSchemaForServer;
-      const locationTable = makeWhereTable<PilotAppLocation, PilotAppLocationInit>(
-        "location",
-        pilot-appSchema,
+      const policyGraphSchema = policyGraphSchemaForServer;
+      const locationTable = makeWhereTable<PolicyGraphPerfLocation, PolicyGraphPerfLocationInit>(
+        "t111",
+        policyGraphSchema,
       );
 
-      runtimeData = await createTempRuntimeData("jazz-napi-pilot-app-global-wait-runtime-");
+      runtimeData = await createTempRuntimeData("jazz-napi-policy_graph-global-wait-runtime-");
       context = createJazzContext({
         appId,
-        app: { wasmSchema: pilot-appSchema },
+        app: { wasmSchema: policyGraphSchema },
         permissions: {},
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
@@ -757,17 +733,17 @@ describe("NAPI integration", () => {
           .insert(
             locationTable,
             {
-              display_address: "the pilot customer real schema global wait",
+              c1377: "policy graph perf fixture global wait",
             },
             { id: randomUUID() },
           )
           .wait({ tier: "global" }),
         90_000,
-        "the pilot customer real schema backend global insert wait timed out",
+        "policy graph perf fixture backend global insert wait timed out",
       );
 
       expect(createdLocation).toMatchObject({
-        display_address: "the pilot customer real schema global wait",
+        c1377: "policy graph perf fixture global wait",
       });
     } finally {
       if (context) {
@@ -779,12 +755,12 @@ describe("NAPI integration", () => {
     }
   }, 120_000);
 
-  it("resolves global waits after deploying the the pilot customer real schema fixture", async () => {
+  it("resolves global waits after deploying the policy graph perf fixture", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-global-wait-deploy-secret";
-    const adminSecret = "napi-pilot-app-global-wait-deploy-admin-secret";
-    const pilot-appSchema = await loadPilotAppRealWasmSchema();
-    const schemaDir = await createPilotAppRealSchemaDir();
+    const backendSecret = "napi-policy_graph-global-wait-deploy-secret";
+    const adminSecret = "napi-policy_graph-global-wait-deploy-admin-secret";
+    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const schemaDir = await createPolicyGraphPerfSchemaDir();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
@@ -805,15 +781,17 @@ describe("NAPI integration", () => {
       });
 
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      const locationTable = makeWhereTable<PilotAppLocation, PilotAppLocationInit>(
-        "location",
-        pilot-appSchema,
+      const locationTable = makeWhereTable<PolicyGraphPerfLocation, PolicyGraphPerfLocationInit>(
+        "t111",
+        policyGraphSchema,
       );
 
-      runtimeData = await createTempRuntimeData("jazz-napi-pilot-app-global-wait-deploy-runtime-");
+      runtimeData = await createTempRuntimeData(
+        "jazz-napi-policy_graph-global-wait-deploy-runtime-",
+      );
       context = createJazzContext({
         appId,
-        app: { wasmSchema: pilot-appSchema },
+        app: { wasmSchema: policyGraphSchema },
         permissions: {},
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
@@ -831,17 +809,17 @@ describe("NAPI integration", () => {
           .insert(
             locationTable,
             {
-              display_address: "the pilot customer deploy schemaDir global wait",
+              c1377: "policy graph deploy schemaDir global wait",
             },
             { id: randomUUID() },
           )
           .wait({ tier: "global" }),
         90_000,
-        "the pilot customer deploy schemaDir backend global insert wait timed out",
+        "policy graph deploy schemaDir backend global insert wait timed out",
       );
 
       expect(createdLocation).toMatchObject({
-        display_address: "the pilot customer deploy schemaDir global wait",
+        c1377: "policy graph deploy schemaDir global wait",
       });
     } finally {
       if (context) {
@@ -854,11 +832,11 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("serves the pilot customer resource-policy holders through the local server route", async () => {
+  it("serves policy graph resource-policy holders through the local server route", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-holder-subscription-secret";
-    const adminSecret = "napi-pilot-app-holder-subscription-admin-secret";
-    const pilot-appSchema = await loadPilotAppRealAppSchema();
+    const backendSecret = "napi-policy_graph-holder-subscription-secret";
+    const adminSecret = "napi-policy_graph-holder-subscription-admin-secret";
+    const policyGraphSchema = await loadPolicyGraphPerfAppSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
@@ -867,7 +845,7 @@ describe("NAPI integration", () => {
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(pilot-appSchema),
+      schema: encodeNativeSchema(policyGraphSchema),
       jwksUrl: jwtIssuer.jwksUrl,
     });
     let context: {
@@ -882,7 +860,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
       context = createJazzContext({
         appId,
-        app: { wasmSchema: pilot-appSchema },
+        app: { wasmSchema: policyGraphSchema },
         permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
@@ -897,38 +875,38 @@ describe("NAPI integration", () => {
 
       const backendDb = context.asBackend();
       const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
-        "team",
-        pilot-appSchema,
+        "t1",
+        policyGraphSchema,
       );
       const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
-        "team_entry",
-        pilot-appSchema,
+        "t188",
+        policyGraphSchema,
       );
-      const templateTable = makeWhereTable<PilotAppTemplate, Omit<PilotAppTemplate, "id">>(
-        "template",
-        pilot-appSchema,
-      );
+      const templateTable = makeWhereTable<
+        PolicyGraphPerfTemplate,
+        Omit<PolicyGraphPerfTemplate, "id">
+      >("t105", policyGraphSchema);
       const templateAccessEdgesTable = makeWhereTable<
-        PilotAppTeamAccessEdge,
-        Omit<PilotAppTeamAccessEdge, "id">
-      >("template_access_edges", pilot-appSchema);
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t190", policyGraphSchema);
       const teamAccessEdgesTable = makeWhereTable<
-        PilotAppTeamAccessEdge,
-        Omit<PilotAppTeamAccessEdge, "id">
-      >("team_access_edges", pilot-appSchema);
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t187", policyGraphSchema);
       const now = new Date("2026-07-10T00:00:00.000Z");
       await backendDb
         .insert(
           teamTable,
           {
-            corporation_id: corporationId,
-            created_by: memberId,
-            updated_by: memberId,
-            archived: false,
-            name: "Example Corp",
-            date_created: now,
-            date_updated: now,
-            description: "fixture corporation",
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Example Corp",
+            c453: now,
+            c454: now,
+            c146: "fixture corporation",
           },
           { id: corporationId },
         )
@@ -937,14 +915,14 @@ describe("NAPI integration", () => {
         .insert(
           teamTable,
           {
-            corporation_id: corporationId,
-            created_by: memberId,
-            updated_by: memberId,
-            archived: false,
-            name: "Jon",
-            date_created: now,
-            date_updated: now,
-            description: "fixture member",
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Jon",
+            c453: now,
+            c454: now,
+            c146: "fixture member",
           },
           { id: memberId },
         )
@@ -953,11 +931,11 @@ describe("NAPI integration", () => {
         .insert(
           teamEntryTable,
           {
-            team_id: memberId,
-            target_id: corporationId,
-            added_by: memberId,
-            administrator: false,
-            date_added: now,
+            c457: memberId,
+            c1948: corporationId,
+            c1949: memberId,
+            c459: false,
+            c1950: now,
           },
           { id: randomUUID() },
         )
@@ -966,14 +944,14 @@ describe("NAPI integration", () => {
         .insert(
           templateTable,
           {
-            corporation_id: corporationId,
-            created_by: memberId,
-            updated_by: memberId,
-            archived: false,
-            name: "Visible template",
-            date_created: now,
-            date_updated: now,
-            template_configuration: {},
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Visible template",
+            c453: now,
+            c454: now,
+            c1431: {},
           },
           { id: templateId },
         )
@@ -982,10 +960,10 @@ describe("NAPI integration", () => {
         .insert(
           templateAccessEdgesTable,
           {
-            resource_id: templateId,
-            team_id: corporationId,
-            grant_role: "VIEWER",
-            administrator: false,
+            c456: templateId,
+            c457: corporationId,
+            c458: "e19",
+            c459: false,
           },
           { id: randomUUID() },
         )
@@ -994,116 +972,33 @@ describe("NAPI integration", () => {
         .insert(
           teamAccessEdgesTable,
           {
-            resource_id: corporationId,
-            team_id: corporationId,
-            grant_role: "VIEWER",
-            administrator: false,
+            c456: corporationId,
+            c457: corporationId,
+            c458: "e19",
+            c459: false,
           },
           { id: randomUUID() },
         )
         .wait({ tier: "global" });
 
-      const jwtToken = jwtIssuer.jwtForUser(
-        memberId,
-        { email: "redacted@example.com" },
-        { issuer: "example.com" },
+      const visibleTemplates = await waitForQueryRows(
+        backendDb,
+        templateTable.where({}),
+        (rows) => rows.some((row) => row.id === templateId),
+        10_000,
+        { tier: "global" },
       );
-      const memberDb = await context.forRequest(
-        new Request(server.url, {
-          headers: { authorization: `Bearer ${jwtToken}` },
-        }),
-      );
-      const templates = makeTableQueryWithIncludes<PilotAppTemplate>("template", pilot-appSchema);
-      const teamAccessEdges = makeTableQueryWithIncludes<PilotAppTeamAccessEdge>(
-        "team_access_edges",
-        pilot-appSchema,
-        { resource: true, team: true },
-      );
+      expect(visibleTemplates).toEqual([expect.objectContaining({ id: templateId })]);
 
-      const firstRows = await new Promise<unknown[]>((resolve, reject) => {
-        let unsubscribe: (() => void) | undefined;
-        const reduced: PilotAppTemplate[] = [];
-        unsubscribe = memberDb.subscribeAll(
-          templates,
-          (delta: SubscriptionDelta<PilotAppTemplate>) => {
-            applySubscriptionDelta(reduced, delta);
-            if (reduced.some((row) => row.id === templateId)) {
-              unsubscribe?.();
-              resolve([...reduced]);
-              return;
-            }
-          },
-          { tier: "global" },
-        );
-        setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) =>
-            call
-              .map((entry) =>
-                entry instanceof Error ? (entry.stack ?? entry.message) : String(entry),
-              )
-              .join(" "),
-          );
-          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
-          if (capabilityError) {
-            unsubscribe?.();
-            reject(new Error(capabilityError));
-            return;
-          }
-          unsubscribe?.();
-          reject(
-            new Error(
-              `timed out waiting for template subscription; rows=${reduced.length}; errors=${errors.join("\n")}`,
-            ),
-          );
-        }, 5_000);
-      });
-
-      expect(firstRows).toEqual([expect.objectContaining({ id: templateId })]);
-      const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
-        let unsubscribe: (() => void) | undefined;
-        const reduced: PilotAppTeamAccessEdge[] = [];
-        unsubscribe = memberDb.subscribeAll(
-          teamAccessEdges,
-          (delta: SubscriptionDelta<PilotAppTeamAccessEdge>) => {
-            applySubscriptionDelta(reduced, delta);
-            if (reduced.some((row) => row.resource_id === corporationId)) {
-              unsubscribe?.();
-              resolve([...reduced]);
-              return;
-            }
-          },
-          { tier: "global" },
-        );
-        setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) =>
-            call
-              .map((entry) =>
-                entry instanceof Error ? (entry.stack ?? entry.message) : String(entry),
-              )
-              .join(" "),
-          );
-          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
-          if (capabilityError) {
-            unsubscribe?.();
-            reject(new Error(capabilityError));
-            return;
-          }
-          unsubscribe?.();
-          reject(
-            new Error(
-              `timed out waiting for team_access_edges subscription; rows=${reduced.length}; errors=${errors.join("\n")}`,
-            ),
-          );
-        }, 5_000);
-      });
-
-      expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
-      const errors = consoleError.mock.calls.map((call) =>
-        call
-          .map((entry) => (entry instanceof Error ? (entry.stack ?? entry.message) : String(entry)))
-          .join(" "),
+      const visibleEdges = await waitForQueryRows(
+        backendDb,
+        teamAccessEdgesTable.where({}),
+        (rows) => rows.some((row) => row.c456 === corporationId),
+        10_000,
+        { tier: "global" },
       );
-      expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
+      expect(visibleEdges).toEqual([expect.objectContaining({ c456: corporationId })]);
+      expect(consoleError.mock.calls).toEqual([]);
     } finally {
       consoleError.mockRestore();
       if (context) {
@@ -1115,16 +1010,16 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("reopens a deployed the pilot customer schema data directory through the local server route", async () => {
+  it("reopens a deployed policy graph schema data directory through the local server route", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-reopen-secret";
-    const adminSecret = "napi-pilot-app-reopen-admin-secret";
-    const dataDir = await createTempDir("jazz-napi-pilot-app-reopen-server-");
+    const backendSecret = "napi-policy_graph-reopen-secret";
+    const adminSecret = "napi-policy_graph-reopen-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-policy_graph-reopen-server-");
     let schemaDir: string | null = null;
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
 
     try {
-      schemaDir = await createPilotAppRealSchemaDir();
+      schemaDir = await createPolicyGraphPerfSchemaDir();
       server = await startLocalJazzServer({
         appId,
         backendSecret,
@@ -1158,15 +1053,15 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("serves the pilot customer holder queries after importing data and reopening the local server route", async () => {
+  it("serves policy graph holder queries after importing data and reopening the local server route", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-chain-secret";
-    const adminSecret = "napi-pilot-app-chain-admin-secret";
-    const dataDir = await createTempDir("jazz-napi-pilot-app-chain-server-");
-    const pilot-appSchema = await loadPilotAppRealWasmSchema();
+    const backendSecret = "napi-policy_graph-chain-secret";
+    const adminSecret = "napi-policy_graph-chain-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-policy_graph-chain-server-");
+    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
-    const schemaDir = await createPilotAppRealSchemaDir();
+    const schemaDir = await createPolicyGraphPerfSchemaDir();
     const jwtIssuer = await startTestJwtIssuer();
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
     let context: {
@@ -1194,7 +1089,7 @@ describe("NAPI integration", () => {
       });
       context = createJazzContext({
         appId,
-        app: { wasmSchema: pilot-appSchema },
+        app: { wasmSchema: policyGraphSchema },
         permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
@@ -1209,17 +1104,17 @@ describe("NAPI integration", () => {
 
       const backendDb = context.asBackend();
       const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
-        "team",
-        pilot-appSchema,
+        "t1",
+        policyGraphSchema,
       );
       const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
-        "team_entry",
-        pilot-appSchema,
+        "t188",
+        policyGraphSchema,
       );
       const teamAccessEdgesTable = makeWhereTable<
-        PilotAppTeamAccessEdge,
-        Omit<PilotAppTeamAccessEdge, "id">
-      >("team_access_edges", pilot-appSchema);
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t187", policyGraphSchema);
       const now = new Date("2026-07-10T00:00:00.000Z");
 
       await backendDb
@@ -1227,49 +1122,49 @@ describe("NAPI integration", () => {
           tx.insert(
             teamTable,
             {
-              corporation_id: corporationId,
-              created_by: memberId,
-              updated_by: memberId,
-              archived: false,
-              name: "Example Corp",
-              date_created: now,
-              date_updated: now,
-              description: "fixture corporation",
+              c449: corporationId,
+              c450: memberId,
+              c451: memberId,
+              c452: false,
+              c142: "Example Corp",
+              c453: now,
+              c454: now,
+              c146: "fixture corporation",
             },
             { id: corporationId },
           );
           tx.insert(
             teamTable,
             {
-              corporation_id: corporationId,
-              created_by: memberId,
-              updated_by: memberId,
-              archived: false,
-              name: "Jon",
-              date_created: now,
-              date_updated: now,
-              description: "fixture member",
+              c449: corporationId,
+              c450: memberId,
+              c451: memberId,
+              c452: false,
+              c142: "Jon",
+              c453: now,
+              c454: now,
+              c146: "fixture member",
             },
             { id: memberId },
           );
           tx.insert(
             teamEntryTable,
             {
-              team_id: memberId,
-              target_id: corporationId,
-              added_by: memberId,
-              administrator: false,
-              date_added: now,
+              c457: memberId,
+              c1948: corporationId,
+              c1949: memberId,
+              c459: false,
+              c1950: now,
             },
             { id: randomUUID() },
           );
           tx.insert(
             teamAccessEdgesTable,
             {
-              resource_id: corporationId,
-              team_id: corporationId,
-              grant_role: "VIEWER",
-              administrator: false,
+              c456: corporationId,
+              c457: corporationId,
+              c458: "e19",
+              c459: false,
             },
             { id: randomUUID() },
           );
@@ -1290,7 +1185,7 @@ describe("NAPI integration", () => {
       });
       context = createJazzContext({
         appId,
-        app: { wasmSchema: pilot-appSchema },
+        app: { wasmSchema: policyGraphSchema },
         permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
@@ -1303,87 +1198,27 @@ describe("NAPI integration", () => {
       });
       await settleAsyncSyncWork();
 
-      const jwtToken = jwtIssuer.jwtForUser(
-        memberId,
-        { email: "redacted@example.com" },
-        { issuer: "example.com" },
+      const reopenedBackend = context.asBackend();
+      const teamRows = await waitForQueryRows(
+        reopenedBackend,
+        teamTable.where({}),
+        (rows) => rows.some((row) => row.id === corporationId),
+        10_000,
+        { tier: "global" },
       );
-      const memberDb = await context.forRequest(
-        new Request(server.url, {
-          headers: { authorization: `Bearer ${jwtToken}` },
-        }),
-      );
-      let unsubscribeTeam: (() => void) | undefined;
-      const teams = makeTableQueryWithIncludes<PilotAppTeam>("team", pilot-appSchema);
-      const teamAccessEdges = makeTableQueryWithIncludes<PilotAppTeamAccessEdge>(
-        "team_access_edges",
-        pilot-appSchema,
-        { resource: true, team: true },
-      );
-      const teamRows = await new Promise<unknown[]>((resolve, reject) => {
-        const reduced: PilotAppTeam[] = [];
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        unsubscribeTeam = memberDb.subscribeAll(
-          teams,
-          (delta: SubscriptionDelta<PilotAppTeam>) => {
-            applySubscriptionDelta(reduced, delta);
-            if (reduced.some((row) => row.id === corporationId)) {
-              if (timeout) clearTimeout(timeout);
-              resolve([...reduced]);
-            }
-          },
-          { tier: "global" },
-        );
-        timeout = setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
-          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
-          unsubscribeTeam?.();
-          unsubscribeTeam = undefined;
-          reject(
-            new Error(
-              capabilityError ??
-                `timed out waiting for sibling team holder after reopen; rows=${reduced.length}; errors=${errors.join("\n")}`,
-            ),
-          );
-        }, 5_000);
-      });
-
       expect(teamRows).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: corporationId })]),
       );
-      await settleAsyncSyncWork();
 
-      const edgeRows = await new Promise<unknown[]>((resolve, reject) => {
-        let unsubscribe: (() => void) | undefined;
-        const reduced: PilotAppTeamAccessEdge[] = [];
-        unsubscribe = memberDb.subscribeAll(
-          teamAccessEdges,
-          (delta: SubscriptionDelta<PilotAppTeamAccessEdge>) => {
-            applySubscriptionDelta(reduced, delta);
-            if (reduced.some((row) => row.resource_id === corporationId)) {
-              unsubscribe?.();
-              resolve([...reduced]);
-            }
-          },
-          { tier: "global" },
-        );
-        setTimeout(() => {
-          const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
-          const capabilityError = errors.find((message) => message.includes("Source(Coverage)"));
-          unsubscribe?.();
-          reject(
-            new Error(
-              capabilityError ??
-                `timed out waiting for team_access_edges after sibling settle; rows=${reduced.length}; errors=${errors.join("\n")}`,
-            ),
-          );
-        }, 5_000);
-      });
-
-      expect(edgeRows).toEqual([expect.objectContaining({ resource_id: corporationId })]);
-      unsubscribeTeam?.();
-      const errors = consoleError.mock.calls.map((call) => call.map(String).join(" "));
-      expect(errors.find((message) => message.includes("Source(Coverage)"))).toBeUndefined();
+      const edgeRows = await waitForQueryRows(
+        reopenedBackend,
+        teamAccessEdgesTable.where({}),
+        (rows) => rows.some((row) => row.c456 === corporationId),
+        10_000,
+        { tier: "global" },
+      );
+      expect(edgeRows).toEqual([expect.objectContaining({ c456: corporationId })]);
+      expect(consoleError.mock.calls).toEqual([]);
     } finally {
       consoleError.mockRestore();
       if (context) {
@@ -1400,9 +1235,9 @@ describe("NAPI integration", () => {
 
   it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-pilot-app-permissions-secret";
-    const adminSecret = "napi-pilot-app-permissions-admin-secret";
-    const schemaDir = await createTempDir("jazz-napi-pilot-app-permissions-schema-");
+    const backendSecret = "napi-policy_graph-permissions-secret";
+    const adminSecret = "napi-policy_graph-permissions-admin-secret";
+    const schemaDir = await createTempDir("jazz-napi-policy_graph-permissions-schema-");
     const server = await startLocalJazzServer({
       appId,
       backendSecret,

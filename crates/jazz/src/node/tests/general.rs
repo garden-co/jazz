@@ -46,10 +46,10 @@ fn lowered_record_wrapper_field_indexes_match_open_descriptors() {
 }
 
 #[test]
-fn pilot-app_real_fixture_version_layouts_round_trip_all_storage_records() {
+fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
     fn fixture_schema() -> JazzSchema {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/jazz-tools/src/testing/fixtures/pilot-real/schema.native.bin");
+            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
         let bytes = std::fs::read(path).unwrap();
         postcard::from_bytes(&bytes).unwrap()
     }

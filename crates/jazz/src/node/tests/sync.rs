@@ -1556,80 +1556,80 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     );
 }
 
-fn pilot-app_real_schema_fixture() -> JazzSchema {
+fn policy_graph_perf_schema_fixture() -> JazzSchema {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../packages/jazz-tools/src/testing/fixtures/pilot-real/schema.native.bin");
+        .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
     let bytes = std::fs::read(path).unwrap();
     postcard::from_bytes(&bytes).unwrap()
 }
 
-fn pilot-app_uuid(kind: u8, idx: u32) -> uuid::Uuid {
+fn policy_graph_uuid(kind: u8, idx: u32) -> uuid::Uuid {
     let mut bytes = [kind; 16];
     bytes[12..].copy_from_slice(&idx.to_be_bytes());
     uuid::Uuid::from_bytes(bytes)
 }
 
-fn pilot-app_row(kind: u8, idx: u32) -> RowUuid {
-    RowUuid(pilot-app_uuid(kind, idx))
+fn policy_graph_row(kind: u8, idx: u32) -> RowUuid {
+    RowUuid(policy_graph_uuid(kind, idx))
 }
 
-fn pilot-app_author(kind: u8, idx: u32) -> AuthorId {
-    AuthorId(pilot-app_uuid(kind, idx))
+fn policy_graph_author(kind: u8, idx: u32) -> AuthorId {
+    AuthorId(policy_graph_uuid(kind, idx))
 }
 
 fn nullable(value: Option<Value>) -> Value {
     Value::Nullable(value.map(Box::new))
 }
 
-fn pilot-app_team_cells(
+fn policy_graph_team_cells(
     corporation_id: uuid::Uuid,
     created_by: uuid::Uuid,
     name: impl Into<String>,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("corporation_id".to_owned(), Value::Uuid(corporation_id)),
-        ("created_by".to_owned(), Value::Uuid(created_by)),
-        ("updated_by".to_owned(), Value::Uuid(created_by)),
-        ("archived".to_owned(), Value::Bool(false)),
-        ("name".to_owned(), Value::String(name.into())),
-        ("date_created".to_owned(), Value::U64(1)),
-        ("date_updated".to_owned(), Value::U64(1)),
-        ("description".to_owned(), nullable(None)),
+        ("c449".to_owned(), Value::Uuid(corporation_id)),
+        ("c450".to_owned(), Value::Uuid(created_by)),
+        ("c451".to_owned(), Value::Uuid(created_by)),
+        ("c452".to_owned(), Value::Bool(false)),
+        ("c142".to_owned(), Value::String(name.into())),
+        ("c453".to_owned(), Value::U64(1)),
+        ("c454".to_owned(), Value::U64(1)),
+        ("c146".to_owned(), nullable(None)),
     ])
 }
 
-fn pilot-app_dropdown_cells(
+fn policy_graph_dropdown_cells(
     corporation_id: uuid::Uuid,
     created_by: uuid::Uuid,
     name: impl Into<String>,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("corporation_id".to_owned(), Value::Uuid(corporation_id)),
-        ("created_by".to_owned(), Value::Uuid(created_by)),
-        ("updated_by".to_owned(), Value::Uuid(created_by)),
-        ("archived".to_owned(), Value::Bool(false)),
-        ("name".to_owned(), Value::String(name.into())),
-        ("date_created".to_owned(), Value::U64(1)),
-        ("date_updated".to_owned(), Value::U64(1)),
+        ("c449".to_owned(), Value::Uuid(corporation_id)),
+        ("c450".to_owned(), Value::Uuid(created_by)),
+        ("c451".to_owned(), Value::Uuid(created_by)),
+        ("c452".to_owned(), Value::Bool(false)),
+        ("c142".to_owned(), Value::String(name.into())),
+        ("c453".to_owned(), Value::U64(1)),
+        ("c454".to_owned(), Value::U64(1)),
         (
-            "soil_default_line_type".to_owned(),
+            "c734".to_owned(),
             nullable(Some(Value::String("solid".to_owned()))),
         ),
         (
-            "rock_default_line_type".to_owned(),
+            "c735".to_owned(),
             nullable(Some(Value::String("solid".to_owned()))),
         ),
-        ("tables_configs".to_owned(), Value::String("{}".to_owned())),
+        ("c736".to_owned(), Value::String("{}".to_owned())),
     ])
 }
 
-fn pilot-app_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<String, Value> {
+fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("dropdowns_id".to_owned(), Value::Uuid(dropdown.0)),
-        ("table".to_owned(), Value::String("data_entry".to_owned())),
-        ("field".to_owned(), Value::String(format!("field_{idx}"))),
+        ("c724".to_owned(), Value::Uuid(dropdown.0)),
+        ("c725".to_owned(), Value::String("data_entry".to_owned())),
+        ("c726".to_owned(), Value::String(format!("field_{idx}"))),
         (
-            "options".to_owned(),
+            "c727".to_owned(),
             Value::Array(vec![
                 Value::String(format!("option_{idx}_a")),
                 Value::String(format!("option_{idx}_b")),
@@ -1637,19 +1637,19 @@ fn pilot-app_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<Str
             ]),
         ),
         (
-            "allow_custom".to_owned(),
+            "c728".to_owned(),
             nullable(Some(Value::Bool(false))),
         ),
-        ("show_column".to_owned(), Value::Bool(true)),
-        ("order".to_owned(), nullable(Some(Value::U32(idx as u32)))),
-        ("required".to_owned(), Value::Bool(idx.is_multiple_of(3))),
-        ("min".to_owned(), nullable(None)),
-        ("max".to_owned(), nullable(None)),
-        ("precision".to_owned(), nullable(Some(Value::U32(0)))),
+        ("c729".to_owned(), Value::Bool(true)),
+        ("c488".to_owned(), nullable(Some(Value::U32(idx as u32)))),
+        ("c730".to_owned(), Value::Bool(idx.is_multiple_of(3))),
+        ("c731".to_owned(), nullable(None)),
+        ("c732".to_owned(), nullable(None)),
+        ("c733".to_owned(), nullable(Some(Value::U32(0)))),
     ])
 }
 
-fn pilot-app_version(
+fn policy_graph_version(
     schema: &JazzSchema,
     table: &str,
     row_uuid: RowUuid,
@@ -1675,7 +1675,7 @@ fn pilot-app_version(
     .unwrap()
 }
 
-fn seed_pilot-app_known_global(
+fn seed_policy_graph_known_global(
     core: &mut NodeState<RocksDbStorage>,
     schema: &JazzSchema,
     rows: Vec<(&str, RowUuid, BTreeMap<String, Value>)>,
@@ -1683,7 +1683,7 @@ fn seed_pilot-app_known_global(
     for (idx, (table, row_uuid, cells)) in rows.iter().enumerate() {
         let global_seq = GlobalSeq((idx + 1) as u64);
         let tx_id = TxId::new(TxTime((idx + 1) as u64), node(0x21));
-        let version = pilot-app_version(schema, table, *row_uuid, tx_id, cells);
+        let version = policy_graph_version(schema, table, *row_uuid, tx_id, cells);
         core.ingest_known_transaction(
             Transaction {
                 tx_id,
@@ -1708,13 +1708,13 @@ fn seed_pilot-app_known_global(
     }
 }
 
-fn open_pilot-app_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+fn open_policy_graph_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)).unwrap()
 }
 
-fn open_pilot-app_native_btree_node(
+fn open_policy_graph_native_btree_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
 ) -> (tempfile::TempDir, NodeState<NativeBtreeStorage>) {
@@ -1733,7 +1733,7 @@ fn open_pilot-app_native_btree_node(
     )
 }
 
-fn apply_pilot-app_reset_receipt<S>(
+fn apply_policy_graph_reset_receipt<S>(
     storage_label: &str,
     reader: &mut NodeState<S>,
     shape: &ValidatedQuery,
@@ -1761,7 +1761,7 @@ where
         .unwrap();
     assert_eq!(rows.len(), entry_count, "{storage_label}");
     println!(
-        "pilot-app_real_dropdown_entry_reset_ingest_apply storage={storage_label} apply_ms={:.3}",
+        "policy_graph_perf_dropdown_entry_reset_ingest_apply storage={storage_label} apply_ms={:.3}",
         apply_elapsed.as_secs_f64() * 1000.0
     );
     apply_elapsed
@@ -1769,14 +1769,14 @@ where
 
 #[ignore]
 #[test]
-fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
-    let schema = pilot-app_real_schema_fixture();
+fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
+    let schema = policy_graph_perf_schema_fixture();
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 
-    let member = pilot-app_author(0x31, 1);
-    let corp = pilot-app_row(0x32, 1);
+    let member = policy_graph_author(0x31, 1);
+    let corp = policy_graph_row(0x32, 1);
     let member_team = RowUuid(member.0);
-    let access_team = pilot-app_row(0x33, 1);
+    let access_team = policy_graph_row(0x33, 1);
     let dropdown_count = 30usize;
     let entry_count = 19_894usize;
     let mut seed_rows = Vec::new();
@@ -1789,85 +1789,85 @@ fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
     core.set_session_claims(member, member_claims.clone());
 
     seed_rows.push((
-        "team",
+        "t1",
         member_team,
-        pilot-app_team_cells(member_team.0, member_team.0, "member"),
+        policy_graph_team_cells(member_team.0, member_team.0, "member"),
     ));
     seed_rows.push((
-        "team",
+        "t1",
         access_team,
-        pilot-app_team_cells(member_team.0, member_team.0, "access"),
+        policy_graph_team_cells(member_team.0, member_team.0, "access"),
     ));
     seed_rows.push((
-        "corporation",
+        "t50",
         corp,
         BTreeMap::from([
-            ("team_id".to_owned(), Value::Uuid(member_team.0)),
-            ("login_time".to_owned(), Value::U32(0)),
+            ("c457".to_owned(), Value::Uuid(member_team.0)),
+            ("c632".to_owned(), Value::U32(0)),
         ]),
     ));
     seed_rows.push((
-        "team_entry",
-        pilot-app_row(0x34, 1),
+        "t188",
+        policy_graph_row(0x34, 1),
         BTreeMap::from([
-            ("team_id".to_owned(), Value::Uuid(member_team.0)),
-            ("target_id".to_owned(), Value::Uuid(access_team.0)),
+            ("c457".to_owned(), Value::Uuid(member_team.0)),
+            ("c1948".to_owned(), Value::Uuid(access_team.0)),
             (
-                "added_by".to_owned(),
+                "c1949".to_owned(),
                 nullable(Some(Value::Uuid(member_team.0))),
             ),
-            ("administrator".to_owned(), Value::Bool(false)),
-            ("date_added".to_owned(), Value::U64(1)),
+            ("c459".to_owned(), Value::Bool(false)),
+            ("c1950".to_owned(), Value::U64(1)),
         ]),
     ));
     seed_rows.push((
-        "team_entry",
-        pilot-app_row(0x34, 2),
+        "t188",
+        policy_graph_row(0x34, 2),
         BTreeMap::from([
-            ("team_id".to_owned(), Value::Uuid(access_team.0)),
-            ("target_id".to_owned(), Value::Uuid(access_team.0)),
+            ("c457".to_owned(), Value::Uuid(access_team.0)),
+            ("c1948".to_owned(), Value::Uuid(access_team.0)),
             (
-                "added_by".to_owned(),
+                "c1949".to_owned(),
                 nullable(Some(Value::Uuid(member_team.0))),
             ),
-            ("administrator".to_owned(), Value::Bool(false)),
-            ("date_added".to_owned(), Value::U64(1)),
+            ("c459".to_owned(), Value::Bool(false)),
+            ("c1950".to_owned(), Value::U64(1)),
         ]),
     ));
     for parent_idx in 0..dropdown_count {
-        let dropdown = pilot-app_row(0x40, parent_idx as u32);
+        let dropdown = policy_graph_row(0x40, parent_idx as u32);
         seed_rows.push((
-            "dropdowns",
+            "t68",
             dropdown,
-            pilot-app_dropdown_cells(
+            policy_graph_dropdown_cells(
                 member_team.0,
                 member_team.0,
                 format!("dropdown_{parent_idx}"),
             ),
         ));
         seed_rows.push((
-            "dropdowns_access_edges",
-            pilot-app_row(0x41, parent_idx as u32),
+            "t69",
+            policy_graph_row(0x41, parent_idx as u32),
             BTreeMap::from([
-                ("resource_id".to_owned(), Value::Uuid(dropdown.0)),
-                ("team_id".to_owned(), Value::Uuid(access_team.0)),
-                ("grant_role".to_owned(), Value::String("EDITOR".to_owned())),
-                ("administrator".to_owned(), Value::Bool(false)),
+                ("c456".to_owned(), Value::Uuid(dropdown.0)),
+                ("c457".to_owned(), Value::Uuid(access_team.0)),
+                ("c458".to_owned(), Value::String("EDITOR".to_owned())),
+                ("c459".to_owned(), Value::Bool(false)),
             ]),
         ));
     }
     for idx in 0..entry_count {
-        let parent = pilot-app_row(0x40, (idx % dropdown_count) as u32);
+        let parent = policy_graph_row(0x40, (idx % dropdown_count) as u32);
         seed_rows.push((
-            "dropdown_entry",
-            pilot-app_row(0x50, idx as u32),
-            pilot-app_dropdown_entry_cells(parent, idx),
+            "t67",
+            policy_graph_row(0x50, idx as u32),
+            policy_graph_dropdown_entry_cells(parent, idx),
         ));
     }
-    seed_pilot-app_known_global(&mut core, &schema, seed_rows);
+    seed_policy_graph_known_global(&mut core, &schema, seed_rows);
     let seed_elapsed = seed_start.elapsed();
 
-    let shape = Query::from("dropdown_entry").validate(&schema).unwrap();
+    let shape = Query::from("t67").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::new();
     let serve_start = std::time::Instant::now();
@@ -1885,8 +1885,8 @@ fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
     let version_bundle_count = version_bundles.len();
     assert!(result_member_count >= entry_count);
 
-    let mut memory_reader = open_pilot-app_memory_node(node(0x23), schema.clone());
-    let memory_elapsed = apply_pilot-app_reset_receipt(
+    let mut memory_reader = open_policy_graph_memory_node(node(0x23), schema.clone());
+    let memory_elapsed = apply_policy_graph_reset_receipt(
         "memory",
         &mut memory_reader,
         &shape,
@@ -1895,7 +1895,7 @@ fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
         entry_count,
     );
     let (_rocks_dir, mut rocks_reader) = open_node_with_schema(node(0x24), schema.clone());
-    let rocks_elapsed = apply_pilot-app_reset_receipt(
+    let rocks_elapsed = apply_policy_graph_reset_receipt(
         "rocksdb",
         &mut rocks_reader,
         &shape,
@@ -1903,8 +1903,8 @@ fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
         update.clone(),
         entry_count,
     );
-    let (_btree_dir, mut btree_reader) = open_pilot-app_native_btree_node(node(0x25), schema.clone());
-    let btree_elapsed = apply_pilot-app_reset_receipt(
+    let (_btree_dir, mut btree_reader) = open_policy_graph_native_btree_node(node(0x25), schema.clone());
+    let btree_elapsed = apply_policy_graph_reset_receipt(
         "native_btree_on_close",
         &mut btree_reader,
         &shape,
@@ -1913,7 +1913,7 @@ fn pilot-app_real_dropdown_entry_reset_ingest_timing_receipt() {
         entry_count,
     );
     println!(
-        "pilot-app_real_dropdown_entry_reset_ingest_timing child_rows={entry_count} result_members={result_member_count} version_bundles={version_bundle_count} parents={dropdown_count} seed_ms={:.3} serve_ms={:.3} memory_apply_ms={:.3} rocksdb_apply_ms={:.3} native_btree_on_close_apply_ms={:.3}",
+        "policy_graph_perf_dropdown_entry_reset_ingest_timing child_rows={entry_count} result_members={result_member_count} version_bundles={version_bundle_count} parents={dropdown_count} seed_ms={:.3} serve_ms={:.3} memory_apply_ms={:.3} rocksdb_apply_ms={:.3} native_btree_on_close_apply_ms={:.3}",
         seed_elapsed.as_secs_f64() * 1000.0,
         serve_elapsed.as_secs_f64() * 1000.0,
         memory_elapsed.as_secs_f64() * 1000.0,

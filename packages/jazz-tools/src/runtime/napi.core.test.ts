@@ -235,16 +235,18 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
-  it("decodes the the pilot customer real schema fixture through NAPI", async () => {
+  it("decodes the policy graph perf fixture through NAPI", async () => {
     const { NapiDb } = await loadNapiModule();
     const schema = new Uint8Array(
-      readFileSync(new URL("../testing/fixtures/pilot-real/schema.native.bin", import.meta.url)),
+      readFileSync(
+        new URL("../testing/fixtures/policy-graph-perf/schema.native.bin", import.meta.url),
+      ),
     );
     const db = NapiDb.openMemory(
       schema,
       openConfig(
-        deterministicBytes("jazz-napi-native-runtime:pilot-real-node"),
-        deterministicBytes("jazz-napi-native-runtime:pilot-real-author"),
+        deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-node"),
+        deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-author"),
         1,
         true,
       ),

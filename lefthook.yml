@@ -1,5 +1,7 @@
 pre-commit:
   commands:
+    no-sensitive-data:
+      run: dev/gates/no-sensitive-data.sh
     rustfmt:
       glob: "*.rs"
       run: cargo fmt

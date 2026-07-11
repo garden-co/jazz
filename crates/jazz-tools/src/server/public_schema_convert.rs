@@ -2036,31 +2036,32 @@ mod tests {
     use std::path::PathBuf;
     use uuid::Uuid;
 
-    fn pilot-app_real_fixture_dir() -> PathBuf {
+    fn policy_graph_perf_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/jazz-tools/src/testing/fixtures/pilot-real")
+            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf")
     }
 
-    fn pilot-app_real_fixture_schema() -> Schema {
-        let source = std::fs::read_to_string(pilot-app_real_fixture_dir().join("schema-source.json"))
-            .expect("read the pilot customer real schema fixture source");
+    fn policy_graph_perf_fixture_schema() -> Schema {
+        let source =
+            std::fs::read_to_string(policy_graph_perf_fixture_dir().join("schema-source.json"))
+                .expect("read policy graph perf fixture source");
         let source: serde_json::Value =
-            serde_json::from_str(&source).expect("parse the pilot customer real schema fixture source");
+            serde_json::from_str(&source).expect("parse policy graph perf fixture source");
         serde_json::from_value(source["mergedSchema"].clone())
-            .expect("decode the pilot customer real public schema fixture")
+            .expect("decode policy graph perf public schema fixture")
     }
 
-    fn pilot-app_real_fixture_native_schema() -> JazzSchema {
-        let bytes = std::fs::read(pilot-app_real_fixture_dir().join("schema.native.bin"))
-            .expect("read the pilot customer real native schema fixture");
-        postcard::from_bytes(&bytes).expect("decode the pilot customer real native schema fixture")
+    fn policy_graph_perf_fixture_native_schema() -> JazzSchema {
+        let bytes = std::fs::read(policy_graph_perf_fixture_dir().join("schema.native.bin"))
+            .expect("read policy graph perf native schema fixture");
+        postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
     }
 
     #[test]
-    fn converts_pilot-app_real_public_schema_to_native_fixture_byte_stably() {
-        let converted =
-            convert_public_schema(&pilot-app_real_fixture_schema()).expect("convert the pilot customer schema");
-        let expected = pilot-app_real_fixture_native_schema();
+    fn converts_policy_graph_perf_public_schema_to_native_fixture_byte_stably() {
+        let converted = convert_public_schema(&policy_graph_perf_fixture_schema())
+            .expect("convert policy graph schema");
+        let expected = policy_graph_perf_fixture_native_schema();
 
         for (index, (left, right)) in converted
             .tables

@@ -28,6 +28,8 @@ For ordinary Rust/core work, the full gate set is:
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
   enforces `INV-INC-1` for relation/include delivery.
+- `dev/gates/no-sensitive-data.sh` to keep customer-specific fixture names,
+  domains, and IDs out of the public repository.
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the

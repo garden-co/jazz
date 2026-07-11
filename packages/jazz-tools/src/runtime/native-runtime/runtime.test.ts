@@ -3736,8 +3736,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
   });
 
-  it("encodes the the pilot customer real schema fixture byte-stably", () => {
-    const fixtureDir = new URL("../../testing/fixtures/pilot-real/", import.meta.url);
+  it("encodes the policy graph perf fixture byte-stably", () => {
+    const fixtureDir = new URL("../../testing/fixtures/policy-graph-perf/", import.meta.url);
     const source = JSON.parse(readFileSync(new URL("schema-source.json", fixtureDir), "utf8")) as {
       mergedSchema: WasmSchema;
     };

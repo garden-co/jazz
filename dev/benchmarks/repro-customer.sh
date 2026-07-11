@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command repro of the customer-shape cold/warm numbers (2026-07-04 state).
-# Runs the anonymized the pilot customer-shaped benchmark at full scale (20.5k-row shape,
+# Runs the anonymized policy graph-shaped benchmark at full scale (20.5k-row shape,
 # full permission fidelity, real seeded-membership + inherited child policies)
 # across the identity matrix, and prints a summary table.
 #
