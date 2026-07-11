@@ -826,55 +826,58 @@ where
                 .is_some_and(|members| !members.is_empty());
         let reset_cleared_shared_state = reset_result_set && !preserve_existing_shared_state;
         if reset_cleared_shared_state {
-            self.query.settled_result_sets.remove(&binding_view_key);
+            self.clear_settled_result_view(binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .settled_through_by_binding_view
                 .remove(&binding_view_key);
         }
+        if reset_result_set {
+            self.query
+                .settled_result_sets
+                .entry(binding_view_key)
+                .or_default();
+        }
         let mut result_members_need_rewrite = false;
         let member_rewrite;
         let fact_rewrite;
         {
-            let row_result_set = self
-                .query
-                .settled_result_sets
-                .entry(binding_view_key)
-                .or_default();
             for member in result_member_removes {
-                if row_result_set.remove(&member) {
+                if self.remove_settled_result_member_indexed(binding_view_key, &member) {
                     continue;
                 }
-                if let Some((removed_table, removed_row_uuid, _)) = member.as_row() {
-                    let before_len = row_result_set.len();
-                    row_result_set.retain(|existing| {
-                        !matches!(
-                            existing.as_row(),
-                            Some((existing_table, existing_row_uuid, _))
-                                if existing_table == removed_table
-                                    && existing_row_uuid == removed_row_uuid
+                if let Some((removed_table, removed_row_uuid, _)) = member.as_row()
+                    && self
+                        .remove_settled_result_member_for_row_indexed(
+                            binding_view_key,
+                            removed_table,
+                            removed_row_uuid,
                         )
-                    });
-                    result_members_need_rewrite |= row_result_set.len() != before_len;
+                        .is_some()
+                {
+                    result_members_need_rewrite = true;
                 }
             }
             for member in result_member_adds {
                 if let Some((added_table, added_row_uuid, _)) = member.as_row() {
-                    let before_len = row_result_set.len();
-                    row_result_set.retain(|existing| {
-                        !matches!(
-                            existing.as_row(),
-                            Some((existing_table, existing_row_uuid, _))
-                                if existing_table == added_table
-                                    && existing_row_uuid == added_row_uuid
+                    result_members_need_rewrite |= self
+                        .remove_settled_result_member_for_row_indexed(
+                            binding_view_key,
+                            added_table,
+                            added_row_uuid,
                         )
-                    });
-                    result_members_need_rewrite |= row_result_set.len() != before_len;
+                        .is_some();
                 }
-                row_result_set.insert(member);
+                self.insert_settled_result_member_indexed(binding_view_key, member);
             }
             member_rewrite = if reset_cleared_shared_state || result_members_need_rewrite {
-                Some(row_result_set.clone())
+                Some(
+                    self.query
+                        .settled_result_sets
+                        .get(&binding_view_key)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
             } else {
                 None
             };
