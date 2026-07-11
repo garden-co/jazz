@@ -4,7 +4,7 @@ use groove::ivm::{MultisinkDeltas, RecordDeltas};
 use groove::records::{BorrowedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value, nullable_value,
+    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
     owned_record_from_storage_values_with_descriptor, register_values_from_parts,
     tx_ids_from_value, version_tx_id_from_aliases,
 };
@@ -38,8 +38,6 @@ struct VersionDecodePlan {
     created_at_idx: usize,
     updated_by_idx: usize,
     updated_at_idx: usize,
-    user_field_indices: Vec<usize>,
-    user_validation_descriptors: Vec<RecordDescriptor>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -809,7 +807,6 @@ fn decode_typed_version_witness(
         .get(&cache_key)
         .expect("version decode plan was just inserted");
     if layer == VersionLayer::Content {
-        validate_witness_content_cells(record, plan, table)?;
         let projector = plan
             .content_projector
             .as_ref()
@@ -860,24 +857,6 @@ fn build_version_decode_plan(
     } else {
         table.history_storage_table().record_schema()
     };
-    let user_field_indices = table
-        .columns
-        .iter()
-        .map(|column| {
-            schema
-                .user_fields
-                .get(&column.name)
-                .ok_or(super::Error::InvalidStoredValue(
-                    "maintained witness schema missing user field",
-                ))
-                .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let user_validation_descriptors = table
-        .columns
-        .iter()
-        .map(|column| RecordDescriptor::new([("cell", column.column_type.clone().value_type())]))
-        .collect();
     let content_projector = if layer == VersionLayer::Content {
         Some(build_content_witness_projector(
             terminal_descriptor,
@@ -903,8 +882,6 @@ fn build_version_decode_plan(
         created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
         updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
         updated_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
-        user_field_indices,
-        user_validation_descriptors,
     })
 }
 
@@ -965,29 +942,6 @@ fn build_content_witness_projector(
     RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
         super::Error::InvalidStoredValue("content witness projector construction failed")
     })
-}
-
-fn validate_witness_content_cells(
-    record: BorrowedRecord<'_>,
-    plan: &VersionDecodePlan,
-    table: &TableSchema,
-) -> Result<(), super::Error> {
-    for ((_, field_idx), descriptor) in table
-        .columns
-        .iter()
-        .zip(&plan.user_field_indices)
-        .zip(&plan.user_validation_descriptors)
-    {
-        let value = nullable_value(record.get_idx(*field_idx)?)?;
-        if let Some(value) = &value {
-            descriptor
-                .create(std::slice::from_ref(value))
-                .map_err(|_| {
-                    super::Error::InvalidStoredValue("maintained witness cell validation failed")
-                })?;
-        }
-    }
-    Ok(())
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {

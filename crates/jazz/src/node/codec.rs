@@ -1133,9 +1133,6 @@ pub(super) fn rejected_version_values(
         })),
     ];
     for column in &table_schema.columns {
-        if let Some(value) = cells.get(&column.name) {
-            validate_cell_value(column, value)?;
-        }
         values.push(Value::Nullable(
             cells.get(&column.name).cloned().map(Box::new),
         ));
@@ -1276,9 +1273,6 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.updated_at.0),
     ];
     for column in &table.columns {
-        if let Some(value) = version.cells.get(&column.name) {
-            validate_cell_value(column, value)?;
-        }
         values.push(Value::Nullable(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
