@@ -3018,14 +3018,14 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         .unwrap();
 }
 #[test]
-fn view_updates_reject_unknown_peer_payload_inventory_refs() {
+fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let missing = TxId {
         node: node(1),
         time: TxTime::from(99),
     };
 
-    let err = reader
+    reader
         .apply_view_update(ViewUpdateParts {
             subscription: reader.whole_table_subscription_key("todos").unwrap(),
             settled_through: GlobalSeq(0),
@@ -3038,10 +3038,13 @@ fn view_updates_reject_unknown_peer_payload_inventory_refs() {
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(err, Error::MissingTransaction(tx_id) if tx_id == missing));
-    assert_eq!(reader.sync_metrics().parked_orphans, 1);
+    assert_eq!(
+        reader.sync_metrics().peer_payload_inventory_missing_fallbacks,
+        1
+    );
+    assert_eq!(reader.sync_metrics().parked_orphans, 0);
 }
 #[test]
 fn wire_record_round_trips_through_history_bytes() {

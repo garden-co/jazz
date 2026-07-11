@@ -712,18 +712,24 @@ where
                 self.ingest_view_bundle(bundle)?;
             }
         }
-        for tx_id in peer_complete_tx_payload_refs
-            .iter()
-            .chain(row_result_adds.iter().map(|(_, _, tx_id)| tx_id))
-        {
+        let mut available_peer_complete_tx_payload_refs = Vec::new();
+        for tx_id in peer_complete_tx_payload_refs.iter() {
+            if bulk_loaded_tx_ids.contains(tx_id) {
+                available_peer_complete_tx_payload_refs.push(*tx_id);
+                continue;
+            }
+            if self.query_transaction(*tx_id)?.is_none() {
+                self.record_peer_payload_inventory_missing_fallback();
+                continue;
+            }
+            available_peer_complete_tx_payload_refs.push(*tx_id);
+        }
+        for tx_id in row_result_adds.iter().map(|(_, _, tx_id)| tx_id) {
             if bulk_loaded_tx_ids.contains(tx_id) {
                 continue;
             }
             if self.query_transaction(*tx_id)?.is_none() {
                 self.sync_metrics.parked_orphans += 1;
-                // M2 keeps peer state and receiver storage in memory only, and
-                // both are discarded on restart. Until either becomes durable,
-                // an unknown ref means the sender violated per-link ordering.
                 return Err(Error::MissingTransaction(*tx_id));
             }
         }
@@ -732,7 +738,7 @@ where
         // return nothing. The row ref in the removal is enough to clear local
         // believed membership and advance coverage.
         self.validate_result_member_adds_are_witnessed(
-            &peer_complete_tx_payload_refs,
+            &available_peer_complete_tx_payload_refs,
             &row_result_adds,
         )?;
         let empty_reset = reset_result_set

@@ -2251,6 +2251,10 @@ where
             .authoritative_reset_missing_payload_fallbacks += 1;
     }
 
+    pub(crate) fn record_peer_payload_inventory_missing_fallback(&mut self) {
+        self.sync_metrics.peer_payload_inventory_missing_fallbacks += 1;
+    }
+
     /// Deterministic counters for query-engine read authorization paths.
     pub fn query_engine_read_metrics(&self) -> &QueryEngineReadMetrics {
         &self.query_engine_read_metrics
@@ -4108,6 +4112,9 @@ pub struct SyncMetrics {
     /// Authoritative reset callback materialization fell back because the
     /// reset referenced a version not yet available in this receiver.
     pub authoritative_reset_missing_payload_fallbacks: u64,
+    /// Receiver ignored a peer complete-transaction inventory claim because the
+    /// transaction was not yet available on this link.
+    pub peer_payload_inventory_missing_fallbacks: u64,
     /// Rung-3 text strategies that degraded to the builtin char-walk merge.
     pub rung3_text_merge_fallbacks: u64,
 }
