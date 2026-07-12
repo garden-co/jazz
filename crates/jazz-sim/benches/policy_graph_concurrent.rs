@@ -45,6 +45,10 @@ fn main() {
     let seeded = seed_core(&schema, &config);
     let manifest = member_seed_manifest(&config.fixture);
     let expected = manifest.expected_counts();
+    if config.visibility_report {
+        emit_visibility_report(&seeded, &expected, config.identity);
+        return;
+    }
     assert_core_visibility(&seeded, &expected, config.identity);
 
     if config.runs_phase("cold") {
@@ -106,6 +110,60 @@ fn assert_core_visibility(
             );
         }
     }
+}
+
+fn emit_visibility_report(
+    seeded: &Seeded,
+    expected: &BTreeMap<String, usize>,
+    identity: BenchIdentity,
+) {
+    let author = identity.author(seeded);
+    let tables = seeded
+        .subscription_tables()
+        .into_iter()
+        .map(|table| {
+            let member_rows = visible_count(seeded, &table, author);
+            let system_rows = visible_count(seeded, &table, AuthorId::SYSTEM);
+            let expected = expected[&table];
+            json!({
+                "table": table,
+                "expected": expected,
+                "member_rows": member_rows,
+                "system_rows": system_rows,
+                "matches_expected": member_rows == expected,
+            })
+        })
+        .collect::<Vec<_>>();
+    let matched = tables
+        .iter()
+        .filter(|table| {
+            table
+                .get("matches_expected")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let access_edge_tables = tables
+        .iter()
+        .filter(|table| {
+            table
+                .get("table")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|name| name.ends_with("_access_edges") || name == "team_access_edges")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let report = json!({
+        "identity": identity.label(),
+        "matched_tables": matched,
+        "total_tables": tables.len(),
+        "tables": tables,
+        "access_edge_tables": access_edge_tables,
+    });
+    println!(
+        "POLICY_GRAPH_CONCURRENT_VISIBILITY {}",
+        serde_json::to_string(&report).expect("serialize visibility report")
+    );
 }
 
 fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
@@ -293,6 +351,7 @@ struct Config {
     fresh_seed: bool,
     identity: BenchIdentity,
     fixture: Fixture,
+    visibility_report: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +385,7 @@ impl Config {
                 ),
             },
             fixture,
+            visibility_report: std::env::var_os("JAZZ_POLICY_GRAPH_VISIBILITY_REPORT").is_some(),
         }
     }
 
