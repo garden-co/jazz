@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
@@ -22,9 +23,10 @@ use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
-const FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";
+const PUBLIC_FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";
+const FIXTURE_DIR_ENV: &str = "JAZZ_POLICY_GRAPH_FIXTURE_DIR";
 const MEMBER_SEED_ROWS: &str = "member-seed-rows.json";
-const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v13-row-dump";
+const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v14-env-fixture";
 const SEED_CACHE_READY: &str = ".jazz_policy_graph_seed_ready";
 
 fn main() {
@@ -34,9 +36,14 @@ fn main() {
     eprintln!("POLICY_GRAPH_CONCURRENT_SESSION_ID {session_id}");
 
     let config = Config::from_env();
-    let schema = policy_graph_schema_fixture();
+    eprintln!(
+        "POLICY_GRAPH_CONCURRENT_FIXTURE label={} dir={}",
+        config.fixture.label,
+        config.fixture.dir.display()
+    );
+    let schema = policy_graph_schema_fixture(&config.fixture);
     let seeded = seed_core(&schema, &config);
-    let manifest = member_seed_manifest();
+    let manifest = member_seed_manifest(&config.fixture);
     let expected = manifest.expected_counts();
     assert_core_visibility(&seeded, &expected, config.identity);
 
@@ -59,7 +66,7 @@ fn assert_core_visibility(
         tier: DurabilityTier::Global,
         ..ReadOpts::default()
     };
-    for table in subscription_tables() {
+    for table in seeded.subscription_tables() {
         let prepared = seeded
             .core
             .prepare_query(&Query::from(table.as_str()))
@@ -157,11 +164,7 @@ fn visible_count(seeded: &Seeded, table: &str, author: AuthorId) -> usize {
     visible_rows(seeded, table, author).len()
 }
 
-fn visible_rows(
-    seeded: &Seeded,
-    table: &str,
-    author: AuthorId,
-) -> Vec<CurrentRow> {
+fn visible_rows(seeded: &Seeded, table: &str, author: AuthorId) -> Vec<CurrentRow> {
     let prepared = seeded
         .core
         .prepare_query(&Query::from(table))
@@ -177,19 +180,31 @@ fn visible_rows(
     .unwrap_or_default()
 }
 
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(FIXTURE_DIR)
-        .join(name)
+fn public_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PUBLIC_FIXTURE_DIR)
 }
 
-fn member_seed_manifest() -> MemberSeedManifest {
-    member_seed_dump().manifest
+fn private_default_fixture_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("jazz-private")
+            .join("fixtures")
+            .join(format!("{}{}", "pilot", "-real")),
+    )
 }
 
-fn member_seed_dump() -> MemberSeedDump {
-    let bytes = fs::read(fixture_path(MEMBER_SEED_ROWS))
-        .expect("read policy graph perf member seed row dump");
+fn usable_fixture_dir(dir: &Path) -> bool {
+    dir.join("schema.native.bin").is_file() && dir.join(MEMBER_SEED_ROWS).is_file()
+}
+
+fn member_seed_manifest(fixture: &Fixture) -> MemberSeedManifest {
+    member_seed_dump(fixture).manifest
+}
+
+fn member_seed_dump(fixture: &Fixture) -> MemberSeedDump {
+    let bytes =
+        fs::read(fixture.member_seed_path()).expect("read policy graph member seed row dump");
     let value: JsonValue =
         serde_json::from_slice(&bytes).expect("decode policy graph perf member seed row dump");
     let identity = value
@@ -269,7 +284,6 @@ impl MemberSeedManifest {
             .map(|table| (table.name.clone(), table.expected))
             .collect()
     }
-
 }
 
 struct Config {
@@ -278,10 +292,18 @@ struct Config {
     phases: Vec<String>,
     fresh_seed: bool,
     identity: BenchIdentity,
+    fixture: Fixture,
+}
+
+#[derive(Clone, Debug)]
+struct Fixture {
+    dir: PathBuf,
+    label: &'static str,
 }
 
 impl Config {
     fn from_env() -> Self {
+        let fixture = Fixture::from_env_or_exit();
         Self {
             seed: env_u64("JAZZ_POLICY_GRAPH_SEED", 0xC039_0039),
             max_ticks: env_usize("JAZZ_POLICY_GRAPH_MAX_TICKS", 50_000),
@@ -303,11 +325,78 @@ impl Config {
                     "unsupported JAZZ_POLICY_GRAPH_IDENTITY {other:?}; expected system or member"
                 ),
             },
+            fixture,
         }
     }
 
     fn runs_phase(&self, phase: &str) -> bool {
         self.phases.iter().any(|candidate| candidate == phase)
+    }
+}
+
+impl Fixture {
+    fn from_env_or_exit() -> Self {
+        if let Some(path) = std::env::var_os(FIXTURE_DIR_ENV).map(PathBuf::from) {
+            return Self::require(path, "env");
+        }
+
+        if let Some(path) = private_default_fixture_dir().filter(|path| usable_fixture_dir(path)) {
+            return Self {
+                dir: path,
+                label: "private-real",
+            };
+        }
+
+        let public = public_fixture_dir();
+        if usable_fixture_dir(&public) {
+            return Self {
+                dir: public,
+                label: "anonymized",
+            };
+        }
+
+        eprintln!(
+            "POLICY_GRAPH_CONCURRENT_SKIP no usable fixture found; set {FIXTURE_DIR_ENV} to a directory containing schema.native.bin and {MEMBER_SEED_ROWS}"
+        );
+        std::process::exit(0);
+    }
+
+    fn require(dir: PathBuf, label: &'static str) -> Self {
+        if usable_fixture_dir(&dir) {
+            Self { dir, label }
+        } else {
+            eprintln!(
+                "POLICY_GRAPH_CONCURRENT_SKIP fixture directory is missing schema.native.bin or {MEMBER_SEED_ROWS}: {}",
+                dir.display()
+            );
+            std::process::exit(0);
+        }
+    }
+
+    fn schema_path(&self) -> PathBuf {
+        self.dir.join("schema.native.bin")
+    }
+
+    fn member_seed_path(&self) -> PathBuf {
+        self.dir.join(MEMBER_SEED_ROWS)
+    }
+
+    fn member_seed_manifest(&self) -> MemberSeedManifest {
+        member_seed_manifest(self)
+    }
+
+    fn cache_discriminator(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.dir.hash(&mut hasher);
+        if let Ok(metadata) = fs::metadata(self.schema_path()) {
+            metadata.len().hash(&mut hasher);
+            metadata.modified().ok().hash(&mut hasher);
+        }
+        if let Ok(metadata) = fs::metadata(self.member_seed_path()) {
+            metadata.len().hash(&mut hasher);
+            metadata.modified().ok().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 }
 
@@ -341,6 +430,13 @@ struct Seeded {
     claims: BTreeMap<String, Value>,
     seed_cache_hit: bool,
     seed_ms: u128,
+    subscription_tables: Vec<String>,
+}
+
+impl Seeded {
+    fn subscription_tables(&self) -> Vec<String> {
+        self.subscription_tables.clone()
+    }
 }
 
 struct DbNode {
@@ -354,6 +450,7 @@ struct OpenSubscription {
     stream: SubscriptionStream,
     rows: BTreeSet<RowUuid>,
     first_settled_ms: Option<u128>,
+    raw_expected_count_ms: Option<u128>,
     materialized_ms: Option<u128>,
 }
 
@@ -365,6 +462,7 @@ struct RunSummary {
     client_apply_tick_ms: u128,
     settled_first_callback_all_ms: u128,
     expected_count_all_ms: u128,
+    raw_expected_count_all_ms: u128,
     one_shot_validate_ms: u128,
     consolidated_windows: usize,
     consolidated_window_records: usize,
@@ -387,6 +485,7 @@ struct SubscriptionTimeline {
     rows: usize,
     expected: usize,
     first_settled_ms: u128,
+    raw_expected_count_ms: u128,
     materialized_ms: u128,
 }
 
@@ -481,16 +580,20 @@ fn duplex_counted() -> CountedDuplex {
     }
 }
 
-fn policy_graph_schema_fixture() -> JazzSchema {
-    let path = fixture_path("schema.native.bin");
-    let bytes = fs::read(path).expect("read policy graph perf native schema fixture");
-    postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
+fn policy_graph_schema_fixture(fixture: &Fixture) -> JazzSchema {
+    let bytes = fs::read(fixture.schema_path()).expect("read policy graph native schema fixture");
+    postcard::from_bytes(&bytes).expect("decode policy graph native schema fixture")
 }
 
 fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     let start = Instant::now();
-    let dump = member_seed_dump();
-    let cache_key = format!("{}-{:016x}", SEED_CACHE_VERSION, config.seed);
+    let dump = member_seed_dump(&config.fixture);
+    let cache_key = format!(
+        "{}-{:016x}-{:016x}",
+        SEED_CACHE_VERSION,
+        config.seed,
+        config.fixture.cache_discriminator()
+    );
     let cache_dir = seed_cache_root().join(cache_key);
     let cache_hit = !config.fresh_seed && cache_dir.join(SEED_CACHE_READY).is_file();
     if !cache_hit {
@@ -529,6 +632,13 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         claims,
         seed_cache_hit: cache_hit,
         seed_ms: start.elapsed().as_millis(),
+        subscription_tables: config
+            .fixture
+            .member_seed_manifest()
+            .tables
+            .into_iter()
+            .map(|table| table.name)
+            .collect(),
     }
 }
 
@@ -735,7 +845,7 @@ fn run_connect_and_subscribe(
         tier: DurabilityTier::Global,
         ..ReadOpts::default()
     };
-    for table in subscription_tables() {
+    for table in subscription_tables(&config.fixture) {
         let query = Query::from(table.as_str());
         let prepared = client
             .db
@@ -751,6 +861,7 @@ fn run_connect_and_subscribe(
             stream,
             rows: BTreeSet::new(),
             first_settled_ms: None,
+            raw_expected_count_ms: None,
             materialized_ms: None,
         });
     }
@@ -815,6 +926,11 @@ fn run_connect_and_subscribe(
         .map(|sub| sub.materialized_ms.unwrap_or_default())
         .max()
         .unwrap_or_default();
+    let raw_expected_count_all_ms = subscriptions
+        .iter()
+        .map(|sub| sub.raw_expected_count_ms.unwrap_or_default())
+        .max()
+        .unwrap_or_default();
 
     let one_shot_validate_start = Instant::now();
     for sub in &subscriptions {
@@ -844,6 +960,7 @@ fn run_connect_and_subscribe(
             rows: sub.rows.len(),
             expected: sub.expected,
             first_settled_ms: sub.first_settled_ms.unwrap_or_default(),
+            raw_expected_count_ms: sub.raw_expected_count_ms.unwrap_or_default(),
             materialized_ms: sub.materialized_ms.unwrap_or_default(),
         })
         .collect::<Vec<_>>();
@@ -859,6 +976,7 @@ fn run_connect_and_subscribe(
         client_apply_tick_ms,
         settled_first_callback_all_ms,
         expected_count_all_ms,
+        raw_expected_count_all_ms,
         one_shot_validate_ms,
         consolidated_windows,
         consolidated_window_records,
@@ -877,8 +995,9 @@ fn run_connect_and_subscribe(
     }
 }
 
-fn subscription_tables() -> Vec<String> {
-    let tables = member_seed_manifest()
+fn subscription_tables(fixture: &Fixture) -> Vec<String> {
+    let tables = fixture
+        .member_seed_manifest()
         .tables
         .into_iter()
         .map(|table| table.name)
@@ -892,10 +1011,13 @@ fn drain_subscriptions(start: Instant, subscriptions: &mut [OpenSubscription]) {
         while let Some(event) = sub.stream.try_next_event() {
             let settled = apply_event(&mut sub.rows, event);
             let elapsed = start.elapsed().as_millis();
-            if settled && sub.first_settled_ms.is_none() {
+            if sub.rows.len() == sub.expected && sub.raw_expected_count_ms.is_none() {
+                sub.raw_expected_count_ms = Some(elapsed);
+            }
+            if settled && sub.rows.len() == sub.expected && sub.first_settled_ms.is_none() {
                 sub.first_settled_ms = Some(elapsed);
             }
-            if sub.rows.len() == sub.expected && sub.materialized_ms.is_none() {
+            if settled && sub.rows.len() == sub.expected && sub.materialized_ms.is_none() {
                 sub.materialized_ms = Some(elapsed);
             }
         }
@@ -943,6 +1065,7 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     fields.insert("session_id".to_owned(), json!(session_id));
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("identity".to_owned(), json!(config.identity.label()));
+    fields.insert("fixture_label".to_owned(), json!(config.fixture.label));
     fields.insert("wall_ms".to_owned(), json!(summary.wall_ms));
     fields.insert(
         "settled_first_callback_all_ms".to_owned(),
@@ -951,6 +1074,10 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     fields.insert(
         "expected_count_all_ms".to_owned(),
         json!(summary.expected_count_all_ms),
+    );
+    fields.insert(
+        "raw_expected_count_all_ms".to_owned(),
+        json!(summary.raw_expected_count_all_ms),
     );
     fields.insert(
         "phase_breakdown".to_owned(),
@@ -1006,7 +1133,7 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     );
     fields.insert(
         "fixture_note".to_owned(),
-        json!("native schema fixture plus anonymized holder/access/inherits tokens; data is generated import-shaped rows with t67 as the 19894-row heavy child table"),
+        json!("native schema fixture plus holder/access/inherits rows loaded from the selected fixture directory; private real data is read in place and never copied into this repository"),
     );
     fields.insert(
         "seed_note".to_owned(),
@@ -1028,6 +1155,7 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
                         "rows": timeline.rows,
                         "expected": timeline.expected,
                         "first_settled_ms": timeline.first_settled_ms,
+                        "raw_expected_count_ms": timeline.raw_expected_count_ms,
                         "materialized_ms": timeline.materialized_ms,
                     })
                 })
