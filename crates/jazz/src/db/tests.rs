@@ -17,8 +17,8 @@ use crate::protocol_limits::{
     MAX_SHAPE_AST_BYTES, MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
-    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, ShapeId, all_of, any_of, claim,
-    col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
+    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate, ShapeId,
+    all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
@@ -7844,6 +7844,223 @@ fn group_access_test_cells(group: RowUuid, user: AuthorId) -> RowCells {
         ("user_id".to_owned(), Value::Uuid(user.0)),
         ("role".to_owned(), Value::String("viewer".to_owned())),
     ])
+}
+
+fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
+    let resource_policy = Policy::shape(
+        Query::from("docs")
+            .reachable_via_with_access_filters(
+                "doc_access_edges",
+                "resource_id",
+                "team_id",
+                lit("relation-seeded"),
+                [in_list(col("grant_role"), [lit(Value::Uuid(role))])],
+                "team_entry",
+                "member_id",
+                "target_id",
+                [],
+            )
+            .seeded_by("teams", "identity_key", "sub", "id"),
+    );
+    let access_branch = PolicyBranch::single_alternative_from_query(
+        Query::from("doc_access_edges")
+            .reachable_via(
+                "doc_access_edges",
+                "id",
+                "team_id",
+                lit("relation-seeded"),
+                "team_entry",
+                "member_id",
+                "target_id",
+                [],
+            )
+            .seeded_by("teams", "identity_key", "sub", "id"),
+    );
+    let mut access_query = Query::from("doc_access_edges");
+    access_query.filters = vec![Predicate::Any(Vec::new())];
+    access_query.policy_branches = vec![access_branch];
+    let access_policy = Policy::shape(access_query);
+
+    JazzSchema::new([
+        TableSchema::new(
+            "teams",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("identity_key", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_entry",
+            [
+                ColumnSchema::new("member_id", ColumnType::Uuid),
+                ColumnSchema::new("target_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("member_id", "teams")
+        .with_reference("target_id", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new("docs", [ColumnSchema::new("title", ColumnType::String)])
+            .with_read_policy(resource_policy)
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "doc_access_edges",
+            [
+                ColumnSchema::new("resource_id", ColumnType::Uuid),
+                ColumnSchema::new("team_id", ColumnType::Uuid),
+                ColumnSchema::new("grant_role", ColumnType::String),
+            ],
+        )
+        .with_reference("resource_id", "docs")
+        .with_reference("team_id", "teams")
+        .with_read_policy(access_policy)
+        .with_write_policy(Policy::public()),
+    ])
+}
+
+#[test]
+fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
+    let role = uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap();
+    let schema = uuid_string_grant_role_schema(role);
+    let server = open_core(0x6d, AuthorId::SYSTEM, &schema);
+    let member = AuthorId::from_bytes([0x6e; 16]);
+    let member_team = row(0x61);
+    let resource_team = row(0x62);
+    let doc = row(0x63);
+
+    server
+        .insert_with_id(
+            "teams",
+            member_team,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("member".to_owned())),
+                ("identity_key".to_owned(), Value::Uuid(member.0)),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "teams",
+            resource_team,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("resource".to_owned())),
+                ("identity_key".to_owned(), Value::Uuid(row(0x64).0)),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "team_entry",
+            row(0x65),
+            BTreeMap::from([
+                ("member_id".to_owned(), Value::Uuid(member_team.0)),
+                ("target_id".to_owned(), Value::Uuid(resource_team.0)),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "docs",
+            doc,
+            BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "doc_access_edges",
+            row(0x66),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(doc.0)),
+                ("team_id".to_owned(), Value::Uuid(resource_team.0)),
+                ("grant_role".to_owned(), Value::String(role.to_string())),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        served_subscription_rows_for_author(&schema, &server, member, "docs"),
+        vec![doc]
+    );
+
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x6f; 16]),
+            author: AuthorId::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    for (table, row_id, cells) in [
+        (
+            "teams",
+            member_team,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("member".to_owned())),
+                ("identity_key".to_owned(), Value::Uuid(member.0)),
+            ]),
+        ),
+        (
+            "teams",
+            resource_team,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("resource".to_owned())),
+                ("identity_key".to_owned(), Value::Uuid(row(0x64).0)),
+            ]),
+        ),
+        (
+            "team_entry",
+            row(0x65),
+            BTreeMap::from([
+                ("member_id".to_owned(), Value::Uuid(member_team.0)),
+                ("target_id".to_owned(), Value::Uuid(resource_team.0)),
+            ]),
+        ),
+        (
+            "docs",
+            doc,
+            BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+        ),
+        (
+            "doc_access_edges",
+            row(0x66),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(doc.0)),
+                ("team_id".to_owned(), Value::Uuid(resource_team.0)),
+                ("grant_role".to_owned(), Value::String(role.to_string())),
+            ]),
+        ),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorId::SYSTEM, cells)
+            .unwrap();
+    }
+    let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+    let one_shot = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        member,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&one_shot), vec![doc]);
+
+    let access = db.prepare_query(&Query::from("doc_access_edges")).unwrap();
+    let access_rows = block_on(db.all_for_identity(
+        &access,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+        member,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&access_rows), vec![row(0x66)]);
 }
 
 #[test]

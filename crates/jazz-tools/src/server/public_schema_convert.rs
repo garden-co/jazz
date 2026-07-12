@@ -52,13 +52,12 @@ impl std::error::Error for SchemaConversionError {}
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
-    let converted = tables
+    let mut converted = tables
         .into_iter()
         .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut validation_schema = converted.clone();
-    coerce_typed_literals(&mut validation_schema);
-    validate_converted_schema(&validation_schema)?;
+    coerce_typed_literals(&mut converted);
+    validate_converted_schema(&converted)?;
     Ok(JazzSchema {
         tables: converted,
         branch_read_policy: None,

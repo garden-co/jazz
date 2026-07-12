@@ -2123,15 +2123,16 @@ fn required_field_idx(descriptor: &RecordDescriptor, field: &str) -> Result<usiz
 }
 
 fn normalize_predicates(
+    schema: &JazzSchema,
     source: &SourceId,
     predicates: &[Predicate],
 ) -> Result<NormalizedPredicateExpr, Error> {
     match predicates {
         [] => Ok(NormalizedPredicateExpr::True),
-        [predicate] => normalize_predicate(source, predicate),
+        [predicate] => normalize_predicate(schema, source, predicate),
         _ => predicates
             .iter()
-            .map(|predicate| normalize_predicate(source, predicate))
+            .map(|predicate| normalize_predicate(schema, source, predicate))
             .collect::<Result<Vec<_>, Error>>()
             .map(NormalizedPredicateExpr::And),
     }
@@ -2238,6 +2239,7 @@ fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScan
 }
 
 fn normalize_predicate(
+    schema: &JazzSchema,
     source: &SourceId,
     predicate: &Predicate,
 ) -> Result<NormalizedPredicateExpr, Error> {
@@ -2245,46 +2247,56 @@ fn normalize_predicate(
         Predicate::All(predicates) => NormalizedPredicateExpr::And(
             predicates
                 .iter()
-                .map(|predicate| normalize_predicate(source, predicate))
+                .map(|predicate| normalize_predicate(schema, source, predicate))
                 .collect::<Result<Vec<_>, Error>>()?,
         ),
         Predicate::Any(predicates) => NormalizedPredicateExpr::Or(
             predicates
                 .iter()
-                .map(|predicate| normalize_predicate(source, predicate))
+                .map(|predicate| normalize_predicate(schema, source, predicate))
                 .collect::<Result<Vec<_>, Error>>()?,
         ),
         Predicate::Not(predicate) => {
-            NormalizedPredicateExpr::Not(Box::new(normalize_predicate(source, predicate)?))
+            NormalizedPredicateExpr::Not(Box::new(normalize_predicate(schema, source, predicate)?))
         }
         Predicate::Eq(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Eq, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Eq, right)?
         }
         Predicate::Ne(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Ne, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Ne, right)?
         }
         Predicate::Gt(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Gt, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Gt, right)?
         }
         Predicate::Gte(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Gte, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Gte, right)?
         }
         Predicate::Lt(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Lt, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Lt, right)?
         }
         Predicate::Lte(left, right) => {
-            normalize_compare(source, left, NormalizedComparisonOp::Lte, right)?
+            normalize_compare(schema, source, left, NormalizedComparisonOp::Lte, right)?
         }
         Predicate::In(value, options) => NormalizedPredicateExpr::In {
             value: normalize_operand(source, value)?,
             options: options
                 .iter()
-                .map(|operand| normalize_operand(source, operand))
+                .map(|operand| {
+                    normalize_operand_with_target_type(
+                        source,
+                        operand,
+                        operand_column_type(schema, source, value)?.as_ref(),
+                    )
+                })
                 .collect::<Result<Vec<_>, Error>>()?,
         },
         Predicate::Contains(value, needle) => NormalizedPredicateExpr::ArrayContains {
             value: normalize_operand(source, value)?,
-            needle: normalize_operand(source, needle)?,
+            needle: normalize_operand_with_target_type(
+                source,
+                needle,
+                contains_needle_type(schema, source, value)?.as_ref(),
+            )?,
         },
         Predicate::IsNull(value) => {
             NormalizedPredicateExpr::IsNull(normalize_operand(source, value)?)
@@ -2293,19 +2305,30 @@ fn normalize_predicate(
 }
 
 fn normalize_compare(
+    schema: &JazzSchema,
     source: &SourceId,
     left: &Operand,
     op: NormalizedComparisonOp,
     right: &Operand,
 ) -> Result<NormalizedPredicateExpr, Error> {
+    let left_type = operand_column_type(schema, source, left)?;
+    let right_type = operand_column_type(schema, source, right)?;
     Ok(NormalizedPredicateExpr::Compare {
-        left: normalize_operand(source, left)?,
+        left: normalize_operand_with_target_type(source, left, right_type.as_ref())?,
         op,
-        right: normalize_operand(source, right)?,
+        right: normalize_operand_with_target_type(source, right, left_type.as_ref())?,
     })
 }
 
 fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedValueRef, Error> {
+    normalize_operand_with_target_type(source, operand, None)
+}
+
+fn normalize_operand_with_target_type(
+    source: &SourceId,
+    operand: &Operand,
+    target_type: Option<&ColumnType>,
+) -> Result<NormalizedValueRef, Error> {
     Ok(match operand {
         Operand::Column(column) if column == "id" => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
@@ -2324,11 +2347,91 @@ fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedV
         Operand::Claim(claim) => {
             NormalizedValueRef::Claim(ClaimPath(claim.split('.').map(str::to_owned).collect()))
         }
-        Operand::Literal(value) => NormalizedValueRef::Literal(
-            postcard::to_allocvec(value)
-                .map_err(|err| Error::QueryLowering(format!("literal encoding failed: {err}")))?,
-        ),
+        Operand::Literal(value) => {
+            let value = target_type
+                .map(|target_type| coerce_literal_for_column_type(value.clone(), target_type))
+                .unwrap_or_else(|| value.clone());
+            NormalizedValueRef::Literal(
+                postcard::to_allocvec(&value).map_err(|err| {
+                    Error::QueryLowering(format!("literal encoding failed: {err}"))
+                })?,
+            )
+        }
     })
+}
+
+fn operand_column_type(
+    schema: &JazzSchema,
+    source: &SourceId,
+    operand: &Operand,
+) -> Result<Option<ColumnType>, Error> {
+    let Operand::Column(column) = operand else {
+        return Ok(None);
+    };
+    if column == "id" {
+        return Ok(Some(ColumnType::Uuid));
+    }
+    if let Some(field) = provenance_field(column) {
+        return Ok(Some(match field {
+            ProvenanceField::CreatedAt | ProvenanceField::UpdatedAt => ColumnType::U64,
+            ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => ColumnType::Uuid,
+        }));
+    }
+    let table = table_schema(schema, &source.table)?;
+    Ok(table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == *column)
+        .map(|column| column.column_type.clone()))
+}
+
+fn contains_needle_type(
+    schema: &JazzSchema,
+    source: &SourceId,
+    value: &Operand,
+) -> Result<Option<ColumnType>, Error> {
+    Ok(match operand_column_type(schema, source, value)? {
+        Some(ColumnType::Array(member)) => Some(*member),
+        Some(ColumnType::Nullable(inner)) => match *inner {
+            ColumnType::Array(member) => Some(*member),
+            ColumnType::String => Some(ColumnType::String),
+            _ => None,
+        },
+        Some(ColumnType::String) => Some(ColumnType::String),
+        _ => None,
+    })
+}
+
+fn coerce_literal_for_column_type(value: Value, column_type: &ColumnType) -> Value {
+    match (value, column_type) {
+        (Value::Uuid(value), ColumnType::String) => Value::String(value.to_string()),
+        (Value::String(value), ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(Value::Uuid)
+            .unwrap_or(Value::String(value)),
+        (Value::Nullable(Some(value)), ColumnType::Nullable(inner)) => Value::Nullable(Some(
+            Box::new(coerce_literal_for_column_type(*value, inner)),
+        )),
+        (Value::Array(values), ColumnType::Array(inner)) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| coerce_literal_for_column_type(value, inner))
+                .collect(),
+        ),
+        (Value::Tuple(values), ColumnType::Tuple(types)) if values.len() == types.len() => {
+            Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, column_type)| coerce_literal_for_column_type(value, column_type))
+                    .collect(),
+            )
+        }
+        (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
+            coerce_literal_for_column_type(*value, column_type),
+        ))),
+        (value, ColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
+        (value, _) => value,
+    }
 }
 
 fn provenance_field(column: &str) -> Option<ProvenanceField> {
@@ -2535,6 +2638,7 @@ where
 fn normalize_array_subquery(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
+    schema: &JazzSchema,
     owner_source: &SourceId,
     subquery: &ArraySubquery,
     path: &[usize],
@@ -2561,7 +2665,7 @@ fn normalize_array_subquery(
             filter_node.clone(),
             RowSetExpr::Filter {
                 input: child_current,
-                predicate: normalize_predicates(&child_source, &subquery.filters)
+                predicate: normalize_predicates(schema, &child_source, &subquery.filters)
                     .map_err(|err| normalization_gap(err.to_string()))?,
             },
         );
@@ -2640,6 +2744,7 @@ fn normalize_array_subquery(
         normalize_array_subquery(
             nodes,
             nested_parent_input.clone(),
+            schema,
             &child_source,
             nested,
             &nested_path,
@@ -2699,7 +2804,7 @@ fn normalize_reachable(
             edge_filter_node.clone(),
             RowSetExpr::Filter {
                 input: edge_current,
-                predicate: normalize_predicates(&edge_source, &reachable.edge_filters)?,
+                predicate: normalize_predicates(schema, &edge_source, &reachable.edge_filters)?,
             },
         );
         edge_current = edge_filter_node;
@@ -2794,7 +2899,7 @@ fn normalize_reachable(
             access_filter_node.clone(),
             RowSetExpr::Filter {
                 input: access_current,
-                predicate: normalize_predicates(&access_source, &reachable.access_filters)?,
+                predicate: normalize_predicates(schema, &access_source, &reachable.access_filters)?,
             },
         );
         access_current = access_filter_node;
@@ -2808,10 +2913,11 @@ fn normalize_reachable(
             right: closure_node,
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
-                left: NormalizedValueRef::SourceField {
-                    source: access_source.clone(),
-                    field: reachable.access_team_column.clone(),
-                },
+                left: reachable_access_key(
+                    &access_source,
+                    &reachable.access_team_column,
+                    reachable.access_team_target,
+                ),
                 op: NormalizedComparisonOp::Eq,
                 right: NormalizedValueRef::FrontierColumn {
                     frontier: frontier.clone(),
@@ -2831,10 +2937,11 @@ fn normalize_reachable(
             on: NormalizedPredicateExpr::Compare {
                 left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
                 op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::SourceField {
-                    source: access_source.clone(),
-                    field: reachable.access_row_column.clone(),
-                },
+                right: reachable_access_key(
+                    &access_source,
+                    &reachable.access_row_column,
+                    JoinTarget::Column,
+                ),
             },
         },
     );
@@ -2847,6 +2954,21 @@ fn normalize_reachable(
             root_ref_field: reachable.access_row_column.clone(),
         },
     ))
+}
+
+fn reachable_access_key(
+    access_source: &SourceId,
+    column: &str,
+    target: JoinTarget,
+) -> NormalizedValueRef {
+    if column == "id" || target == JoinTarget::RowId {
+        NormalizedValueRef::RowId(RowIdRef::Source(access_source.clone()))
+    } else {
+        NormalizedValueRef::SourceField {
+            source: access_source.clone(),
+            field: column.to_owned(),
+        }
+    }
 }
 
 fn normalize_join_via_right(
@@ -2874,7 +2996,7 @@ fn normalize_join_via_right(
             filter_node.clone(),
             RowSetExpr::Filter {
                 input: current,
-                predicate: normalize_predicates(&join_source, &join.filters)?,
+                predicate: normalize_predicates(schema, &join_source, &join.filters)?,
             },
         );
         current = filter_node;
@@ -3040,7 +3162,7 @@ fn normalize_reachable_seed(
                 seed_filter_node.clone(),
                 RowSetExpr::Filter {
                     input: seed_current,
-                    predicate: normalize_predicates(&seed_source, &seed.filters)?,
+                    predicate: normalize_predicates(schema, &seed_source, &seed.filters)?,
                 },
             );
             seed_current = seed_filter_node;
@@ -3432,7 +3554,7 @@ fn normalize_filter_join_chain(
             filter_node.clone(),
             RowSetExpr::Filter {
                 input: current,
-                predicate: normalize_predicates(root_source, chain.filters)?,
+                predicate: normalize_predicates(schema, root_source, chain.filters)?,
             },
         );
         current = filter_node;
@@ -3571,25 +3693,41 @@ fn normalize_inherited_parent_policy(
     );
     let mut parent_current = parent_source_node;
     if let Some(policy) = &parent_table.read_policy {
-        parent_current = normalize_policy_atom_chain(
-            nodes,
-            auxiliary_sources,
-            join_contributions,
-            reachable_contributions,
-            schema,
-            &parent_source,
-            parent_current,
-            &format!("{prefix}:parent_policy"),
-            PolicyAtomChain {
-                filters: &policy.filters,
-                joins: &policy.joins,
-                inherits: &policy.inherits,
-                reachable: &policy.reachable,
-            },
-            binding_source_shape,
-            param_types,
-            false,
-        )?;
+        parent_current = if !policy.policy_branches.is_empty() {
+            normalize_policy_branch_authorization(
+                nodes,
+                auxiliary_sources,
+                join_contributions,
+                reachable_contributions,
+                schema,
+                &parent_source,
+                parent_current,
+                &format!("{prefix}:parent_policy"),
+                policy,
+                binding_source_shape,
+                param_types,
+            )?
+        } else {
+            normalize_policy_atom_chain(
+                nodes,
+                auxiliary_sources,
+                join_contributions,
+                reachable_contributions,
+                schema,
+                &parent_source,
+                parent_current,
+                &format!("{prefix}:parent_policy"),
+                PolicyAtomChain {
+                    filters: &policy.filters,
+                    joins: &policy.joins,
+                    inherits: &policy.inherits,
+                    reachable: &policy.reachable,
+                },
+                binding_source_shape,
+                param_types,
+                false,
+            )?
+        };
     }
     let join_node = RowSetNodeId(format!("{prefix}:join"));
     nodes.insert(
@@ -3605,6 +3743,126 @@ fn normalize_inherited_parent_policy(
                 },
                 op: NormalizedComparisonOp::Eq,
                 right: NormalizedValueRef::RowId(RowIdRef::Source(parent_source)),
+            },
+        },
+    );
+    Ok(join_node)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_policy_branch_authorization(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    auxiliary_sources: &mut BTreeSet<SourceId>,
+    join_contributions: &mut Vec<JoinContribution>,
+    reachable_contributions: &mut Vec<ReachableContribution>,
+    schema: &JazzSchema,
+    root_source: &SourceId,
+    current: RowSetNodeId,
+    prefix: &str,
+    policy: &JazzQuery,
+    binding_source_shape: &str,
+    param_types: &BTreeMap<String, ColumnType>,
+) -> Result<RowSetNodeId, Error> {
+    let mut union_inputs = Vec::new();
+    if !policy_branch_base_is_converter_false(policy) {
+        let base_source_node = RowSetNodeId(format!("{prefix}:base:root"));
+        nodes.insert(
+            base_source_node.clone(),
+            RowSetExpr::Source {
+                source: root_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        let base = normalize_policy_atom_chain(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            root_source,
+            base_source_node,
+            &format!("{prefix}:base"),
+            PolicyAtomChain {
+                filters: &policy.filters,
+                joins: &policy.joins,
+                inherits: &policy.inherits,
+                reachable: &policy.reachable,
+            },
+            binding_source_shape,
+            param_types,
+            false,
+        )?;
+        union_inputs.push(UnionInput {
+            node: normalize_row_id_projection(
+                nodes,
+                base,
+                root_source,
+                RowSetNodeId(format!("{prefix}:base:row_id")),
+            ),
+            label: "base".to_owned(),
+        });
+    }
+
+    for (index, branch) in policy.policy_branches.iter().enumerate() {
+        let branch_source_node = RowSetNodeId(format!("{prefix}:{index}:root"));
+        nodes.insert(
+            branch_source_node.clone(),
+            RowSetExpr::Source {
+                source: root_source.clone(),
+                visibility: RowVisibility::Visible,
+            },
+        );
+        let branch_current = normalize_policy_atom_chain(
+            nodes,
+            auxiliary_sources,
+            join_contributions,
+            reachable_contributions,
+            schema,
+            root_source,
+            branch_source_node,
+            &format!("{prefix}:{index}"),
+            PolicyAtomChain {
+                filters: &branch.filters,
+                joins: &branch.joins,
+                inherits: &branch.inherits,
+                reachable: &branch.reachable,
+            },
+            binding_source_shape,
+            param_types,
+            false,
+        )?;
+        union_inputs.push(UnionInput {
+            node: normalize_row_id_projection(
+                nodes,
+                branch_current,
+                root_source,
+                RowSetNodeId(format!("{prefix}:{index}:row_id")),
+            ),
+            label: index.to_string(),
+        });
+    }
+
+    let union_node = RowSetNodeId(format!("{prefix}:authorized_rows"));
+    nodes.insert(
+        union_node.clone(),
+        RowSetExpr::Union {
+            inputs: union_inputs,
+        },
+    );
+    let join_node = RowSetNodeId(format!("{prefix}:authorize"));
+    nodes.insert(
+        join_node.clone(),
+        RowSetExpr::Join {
+            left: current,
+            right: union_node,
+            mode: NormalizedJoinMode::Inner,
+            on: NormalizedPredicateExpr::Compare {
+                left: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                op: NormalizedComparisonOp::Eq,
+                right: NormalizedValueRef::SourceField {
+                    source: root_source.clone(),
+                    field: "row_uuid".to_owned(),
+                },
             },
         },
     );
@@ -3636,6 +3894,13 @@ fn normalize_row_id_projection(
 fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
     let _ = query;
     None
+}
+
+fn policy_branch_base_is_converter_false(query: &JazzQuery) -> bool {
+    matches!(query.filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
+        && query.joins.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
 }
 
 impl<S> NodeState<S>
@@ -5037,42 +5302,44 @@ where
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
         if unsupported_policy_branch.is_none() && !query.policy_branches.is_empty() {
             let mut union_inputs = Vec::new();
-            let base_source_node = RowSetNodeId("policy_branch:base:root".to_owned());
-            nodes.insert(
-                base_source_node.clone(),
-                RowSetExpr::Source {
-                    source: root_source.clone(),
-                    visibility: RowVisibility::Visible,
-                },
-            );
-            let base = normalize_policy_atom_chain(
-                &mut nodes,
-                &mut auxiliary_sources,
-                &mut join_contributions,
-                &mut reachable_contributions,
-                &self.catalogue.schema,
-                &root_source,
-                base_source_node,
-                "policy_branch:base",
-                PolicyAtomChain {
-                    filters: &query.filters,
-                    joins: &query.joins,
-                    inherits: &query.inherits,
-                    reachable: &query.reachable,
-                },
-                &binding_source_shape,
-                shape.params(),
-                false,
-            )?;
-            union_inputs.push(UnionInput {
-                node: normalize_row_id_projection(
+            if !policy_branch_base_is_converter_false(query) {
+                let base_source_node = RowSetNodeId("policy_branch:base:root".to_owned());
+                nodes.insert(
+                    base_source_node.clone(),
+                    RowSetExpr::Source {
+                        source: root_source.clone(),
+                        visibility: RowVisibility::Visible,
+                    },
+                );
+                let base = normalize_policy_atom_chain(
                     &mut nodes,
-                    base,
+                    &mut auxiliary_sources,
+                    &mut join_contributions,
+                    &mut reachable_contributions,
+                    &self.catalogue.schema,
                     &root_source,
-                    RowSetNodeId("policy_branch:base:row_id".to_owned()),
-                ),
-                label: "base".to_owned(),
-            });
+                    base_source_node,
+                    "policy_branch:base",
+                    PolicyAtomChain {
+                        filters: &query.filters,
+                        joins: &query.joins,
+                        inherits: &query.inherits,
+                        reachable: &query.reachable,
+                    },
+                    &binding_source_shape,
+                    shape.params(),
+                    false,
+                )?;
+                union_inputs.push(UnionInput {
+                    node: normalize_row_id_projection(
+                        &mut nodes,
+                        base,
+                        &root_source,
+                        RowSetNodeId("policy_branch:base:row_id".to_owned()),
+                    ),
+                    label: "base".to_owned(),
+                });
+            }
 
             for (index, branch) in query.policy_branches.iter().enumerate() {
                 let branch_source_node = RowSetNodeId(format!("policy_branch:{index}:root"));
@@ -5161,8 +5428,14 @@ where
         }
 
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
-            current =
-                normalize_array_subquery(&mut nodes, current, &root_source, subquery, &[index])?;
+            current = normalize_array_subquery(
+                &mut nodes,
+                current,
+                &self.catalogue.schema,
+                &root_source,
+                subquery,
+                &[index],
+            )?;
         }
 
         if query.aggregate.is_none() && !query.order_by.is_empty() {
@@ -7668,7 +7941,28 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     query.inherits = policy.inherits.clone();
     query.includes = policy.includes.clone();
     query.policy_branches = policy.policy_branches.clone();
+    if let Some(parent_column) = access_edge_parent_reference(table) {
+        query.policy_branches.push(crate::query::PolicyBranch {
+            filters: Vec::new(),
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: vec![crate::query::InheritsVia {
+                parent_column,
+                operation: crate::query::InheritsOperation::Select,
+            }],
+        });
+    }
     query
+}
+
+fn access_edge_parent_reference(table: &TableSchema) -> Option<String> {
+    if !table.name.ends_with("_access_edges") && table.name != "team_access_edges" {
+        return None;
+    }
+    table
+        .references
+        .contains_key("resource_id")
+        .then(|| "resource_id".to_owned())
 }
 
 fn rewrite_claim_join_for_binding(
@@ -7930,15 +8224,16 @@ fn bind_query_params_with_mode(
     mode: ParamBindingMode,
 ) -> Result<ValidatedQuery, Error> {
     let mut query = shape.query().clone();
+    let root_source = root_source_id(&query.table);
     query.filters = query
         .filters
         .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, schema, &root_source, mode))
         .collect::<Result<Vec<_>, _>>()?;
     query.joins = query
         .joins
         .into_iter()
-        .map(|join| bind_join_filter_literals(join, binding, mode))
+        .map(|join| bind_join_filter_literals(join, binding, schema, mode))
         .collect::<Result<Vec<_>, Error>>()?;
     query.reachable = query
         .reachable
@@ -7950,21 +8245,37 @@ fn bind_query_params_with_mode(
             reachable.access_filters = reachable
                 .access_filters
                 .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                .map(|predicate| {
+                    bind_query_predicate(
+                        predicate,
+                        binding,
+                        schema,
+                        &bind_source_for_table(&reachable.access_table),
+                        mode,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             reachable.edge_filters = reachable
                 .edge_filters
                 .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                .map(|predicate| {
+                    bind_query_predicate(
+                        predicate,
+                        binding,
+                        schema,
+                        &bind_source_for_table(&reachable.edge_table),
+                        mode,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            bind_reachable_seed_filters(&mut reachable, binding, mode)?;
+            bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
             Ok(reachable)
         })
         .collect::<Result<Vec<_>, Error>>()?;
     query.array_subqueries = query
         .array_subqueries
         .into_iter()
-        .map(|subquery| bind_array_subquery_filter_literals(subquery, binding, mode))
+        .map(|subquery| bind_array_subquery_filter_literals(subquery, binding, schema, mode))
         .collect::<Result<Vec<_>, Error>>()?;
     query.policy_branches = query
         .policy_branches
@@ -7973,12 +8284,14 @@ fn bind_query_params_with_mode(
             branch.filters = branch
                 .filters
                 .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                .map(|predicate| {
+                    bind_query_predicate(predicate, binding, schema, &root_source, mode)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             branch.joins = branch
                 .joins
                 .into_iter()
-                .map(|join| bind_join_filter_literals(join, binding, mode))
+                .map(|join| bind_join_filter_literals(join, binding, schema, mode))
                 .collect::<Result<Vec<_>, Error>>()?;
             branch.reachable = branch
                 .reachable
@@ -7990,14 +8303,30 @@ fn bind_query_params_with_mode(
                     reachable.access_filters = reachable
                         .access_filters
                         .into_iter()
-                        .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                        .map(|predicate| {
+                            bind_query_predicate(
+                                predicate,
+                                binding,
+                                schema,
+                                &bind_source_for_table(&reachable.access_table),
+                                mode,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     reachable.edge_filters = reachable
                         .edge_filters
                         .into_iter()
-                        .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                        .map(|predicate| {
+                            bind_query_predicate(
+                                predicate,
+                                binding,
+                                schema,
+                                &bind_source_for_table(&reachable.edge_table),
+                                mode,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
-                    bind_reachable_seed_filters(&mut reachable, binding, mode)?;
+                    bind_reachable_seed_filters(&mut reachable, binding, schema, mode)?;
                     Ok(reachable)
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -8014,17 +8343,19 @@ fn bind_query_params_with_mode(
 fn bind_array_subquery_filter_literals(
     mut subquery: ArraySubquery,
     binding: &Binding,
+    schema: &JazzSchema,
     mode: ParamBindingMode,
 ) -> Result<ArraySubquery, Error> {
+    let source = bind_source_for_table(&subquery.table);
     subquery.filters = subquery
         .filters
         .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
         .collect::<Result<Vec<_>, _>>()?;
     subquery.nested_arrays = subquery
         .nested_arrays
         .into_iter()
-        .map(|nested| bind_array_subquery_filter_literals(nested, binding, mode))
+        .map(|nested| bind_array_subquery_filter_literals(nested, binding, schema, mode))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(subquery)
 }
@@ -8261,61 +8592,89 @@ fn collect_claim_field_param_authoritative(
 fn bind_query_predicate(
     predicate: Predicate,
     binding: &Binding,
+    schema: &JazzSchema,
+    source: &SourceId,
     mode: ParamBindingMode,
 ) -> Result<Predicate, Error> {
     Ok(match predicate {
         Predicate::All(predicates) => Predicate::All(
             predicates
                 .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, schema, source, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Predicate::Any(predicates) => Predicate::Any(
             predicates
                 .into_iter()
-                .map(|predicate| bind_query_predicate(predicate, binding, mode))
+                .map(|predicate| bind_query_predicate(predicate, binding, schema, source, mode))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Predicate::Not(predicate) => {
-            Predicate::Not(Box::new(bind_query_predicate(*predicate, binding, mode)?))
+        Predicate::Not(predicate) => Predicate::Not(Box::new(bind_query_predicate(
+            *predicate, binding, schema, source, mode,
+        )?)),
+        Predicate::Eq(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Eq)?
         }
-        Predicate::Eq(left, right) => Predicate::Eq(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
-        Predicate::Ne(left, right) => Predicate::Ne(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
-        Predicate::In(left, values) => Predicate::In(
-            bind_query_operand(left, binding, mode)?,
-            values
-                .into_iter()
-                .map(|operand| bind_query_operand(operand, binding, mode))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Predicate::Gt(left, right) => Predicate::Gt(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
-        Predicate::Gte(left, right) => Predicate::Gte(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
-        Predicate::Lt(left, right) => Predicate::Lt(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
-        Predicate::Lte(left, right) => Predicate::Lte(
-            bind_query_operand(left, binding, mode)?,
-            bind_query_operand(right, binding, mode)?,
-        ),
+        Predicate::Ne(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Ne)?
+        }
+        Predicate::In(left, values) => {
+            let left = bind_query_operand(left, binding, mode)?;
+            let target_type = operand_column_type(schema, source, &left)?;
+            Predicate::In(
+                left,
+                values
+                    .into_iter()
+                    .map(|operand| {
+                        bind_query_operand_with_target_type(
+                            operand,
+                            binding,
+                            target_type.as_ref(),
+                            mode,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        Predicate::Gt(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Gt)?
+        }
+        Predicate::Gte(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Gte)?
+        }
+        Predicate::Lt(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Lt)?
+        }
+        Predicate::Lte(left, right) => {
+            bind_binary_predicate(left, right, binding, schema, source, mode, Predicate::Lte)?
+        }
         Predicate::Contains(left, right) => {
             let left = bind_query_operand(left, binding, mode)?;
-            let right = bind_query_operand(right, binding, mode)?;
+            let needle_type = contains_needle_type(schema, source, &left)?;
+            let right =
+                bind_query_operand_with_target_type(right, binding, needle_type.as_ref(), mode)?;
             match left {
                 Operand::Literal(Value::Array(values)) => {
-                    Predicate::In(right, values.into_iter().map(Operand::Literal).collect())
+                    let target_type = operand_column_type(schema, source, &right)?;
+                    Predicate::In(
+                        right,
+                        values
+                            .into_iter()
+                            .map(|value| {
+                                Operand::Literal(
+                                    target_type
+                                        .as_ref()
+                                        .map(|target_type| {
+                                            coerce_literal_for_column_type(
+                                                value.clone(),
+                                                target_type,
+                                            )
+                                        })
+                                        .unwrap_or(value),
+                                )
+                            })
+                            .collect(),
+                    )
                 }
                 left => Predicate::Contains(left, right),
             }
@@ -8329,12 +8688,14 @@ fn bind_query_predicate(
 fn bind_reachable_seed_filters(
     reachable: &mut crate::query::ReachableVia,
     binding: &Binding,
+    schema: &JazzSchema,
     mode: ParamBindingMode,
 ) -> Result<(), Error> {
     if let Some(seed) = &mut reachable.seed {
+        let source = bind_source_for_table(&seed.table);
         seed.filters = std::mem::take(&mut seed.filters)
             .into_iter()
-            .map(|predicate| bind_query_predicate(predicate, binding, mode))
+            .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
             .collect::<Result<Vec<_>, _>>()?;
     }
     Ok(())
@@ -8343,19 +8704,47 @@ fn bind_reachable_seed_filters(
 fn bind_join_filter_literals(
     mut join: JoinVia,
     binding: &Binding,
+    schema: &JazzSchema,
     mode: ParamBindingMode,
 ) -> Result<JoinVia, Error> {
+    let source = bind_source_for_table(&join.table);
     join.filters = join
         .filters
         .into_iter()
-        .map(|predicate| bind_query_predicate(predicate, binding, mode))
+        .map(|predicate| bind_query_predicate(predicate, binding, schema, &source, mode))
         .collect::<Result<Vec<_>, _>>()?;
     join.nested_joins = join
         .nested_joins
         .into_iter()
-        .map(|join| bind_join_filter_literals(join, binding, mode))
+        .map(|join| bind_join_filter_literals(join, binding, schema, mode))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(join)
+}
+
+fn bind_binary_predicate(
+    left: Operand,
+    right: Operand,
+    binding: &Binding,
+    schema: &JazzSchema,
+    source: &SourceId,
+    mode: ParamBindingMode,
+    build: impl FnOnce(Operand, Operand) -> Predicate,
+) -> Result<Predicate, Error> {
+    let left_type = operand_column_type(schema, source, &left)?;
+    let right_type = operand_column_type(schema, source, &right)?;
+    Ok(build(
+        bind_query_operand_with_target_type(left, binding, right_type.as_ref(), mode)?,
+        bind_query_operand_with_target_type(right, binding, left_type.as_ref(), mode)?,
+    ))
+}
+
+fn bind_source_for_table(table: &str) -> SourceId {
+    SourceId {
+        table: table.to_owned(),
+        path: SourcePath {
+            components: Vec::new(),
+        },
+    }
 }
 
 fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
@@ -8371,18 +8760,37 @@ fn bind_query_operand(
     binding: &Binding,
     mode: ParamBindingMode,
 ) -> Result<Operand, Error> {
+    bind_query_operand_with_target_type(operand, binding, None, mode)
+}
+
+fn bind_query_operand_with_target_type(
+    operand: Operand,
+    binding: &Binding,
+    target_type: Option<&ColumnType>,
+    mode: ParamBindingMode,
+) -> Result<Operand, Error> {
     Ok(match operand {
         Operand::Param(name) if matches!(mode, ParamBindingMode::RetainAllParams) => {
             Operand::Param(name)
         }
-        Operand::Param(name) => Operand::Literal(
-            binding
+        Operand::Param(name) => {
+            let value = binding
                 .values()
                 .get(&name)
                 .cloned()
-                .ok_or_else(|| QueryError::MissingParam(name.clone()))?,
+                .ok_or_else(|| QueryError::MissingParam(name.clone()))?;
+            Operand::Literal(
+                target_type
+                    .map(|target_type| coerce_literal_for_column_type(value.clone(), target_type))
+                    .unwrap_or(value),
+            )
+        }
+        Operand::Literal(value) => Operand::Literal(
+            target_type
+                .map(|target_type| coerce_literal_for_column_type(value.clone(), target_type))
+                .unwrap_or(value),
         ),
-        Operand::Column(_) | Operand::Claim(_) | Operand::Literal(_) => operand,
+        Operand::Column(_) | Operand::Claim(_) => operand,
     })
 }
 
