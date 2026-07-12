@@ -156,8 +156,11 @@ struct CachedPeerQueryPlan {
 }
 
 impl CachedPeerQueryPlan {
-    fn tier_only(tier: DurabilityTier) -> Self {
-        Self { tier, plan: None }
+    fn with_plan(tier: DurabilityTier, plan: PreparedQueryPlanHandle) -> Self {
+        Self {
+            tier,
+            plan: Some(plan),
+        }
     }
 
     fn tier(&self) -> DurabilityTier {
@@ -369,7 +372,12 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none();
         if needs_prepare {
-            let cached = CachedPeerQueryPlan::tier_only(DurabilityTier::Global);
+            let plan = node.mark_peer_maintained_query_shape_cache(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+            );
+            let cached = CachedPeerQueryPlan::with_plan(DurabilityTier::Global, plan);
             let state = self.subscriptions.entry(subscription).or_default();
             state.prepared_query = Some(cached);
             state.groove_runtime_token = Some(node.groove_runtime_token());
@@ -538,8 +546,9 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none()
         {
+            let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
             let state = self.subscriptions.entry(subscription).or_default();
-            state.prepared_query = Some(CachedPeerQueryPlan::tier_only(opts.tier));
+            state.prepared_query = Some(CachedPeerQueryPlan::with_plan(opts.tier, plan));
             state.groove_runtime_token = Some(node.groove_runtime_token());
         }
         self.rehydrate_query_maintained_subscription_view(
@@ -1147,7 +1156,8 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
         self.forget_subscription_with_node(node, subscription);
-        let cached = CachedPeerQueryPlan::tier_only(opts.tier);
+        let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
+        let cached = CachedPeerQueryPlan::with_plan(opts.tier, plan);
         let state = self.subscriptions.entry(subscription).or_default();
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
