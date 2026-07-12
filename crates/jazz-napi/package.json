@@ -19,7 +19,9 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "build:debug": "node scripts/build.js --debug"
+    "build:debug": "node scripts/build.js --debug",
+    "build:perf": "node scripts/build.js --profile perf",
+    "build:perf:sccache": "RUSTC_WRAPPER=sccache node scripts/build.js --profile perf"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"

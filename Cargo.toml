@@ -34,6 +34,7 @@ rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0
 
 [profile.perf]
 inherits = "release"
-opt-level = 3
+opt-level = 2
 lto = false
 debug = 1
+codegen-units = 256
