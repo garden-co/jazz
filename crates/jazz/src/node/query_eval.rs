@@ -5685,6 +5685,11 @@ where
                         JAZZ_APP_ROWS_SINK,
                     )?
                 }
+                PreparedQueryPlan::PeerMaintainedMarker => {
+                    return Err(Error::InvalidStoredValue(
+                        "peer maintained marker cannot execute write policy plan",
+                    ));
+                }
             };
         Ok(deltas.iter().any(|(_, weight)| weight > 0))
     }
@@ -5794,6 +5799,8 @@ where
             .then(|| self.settled_binding_view_key_for_query(shape, binding))
             .transpose()?
             .flatten();
+        let prepared_plan = prepared_plan
+            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -5861,6 +5868,9 @@ where
                     .database
                     .query_graph(graph.clone())
                     .map_err(Error::Groove),
+                PreparedQueryPlan::PeerMaintainedMarker => {
+                    unreachable!("peer maintained markers are filtered before query execution")
+                }
             },
         };
         let deltas = deltas_result?;
@@ -7221,7 +7231,9 @@ where
             tier,
             query_binding_value_signature(binding),
         );
-        if let Some(plan) = self.query.query_shape_cache.get(&key) {
+        if let Some(plan) = self.query.query_shape_cache.get(&key)
+            && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        {
             return Ok(plan.clone());
         }
         let program = self.compile_current_query_program(
@@ -7235,6 +7247,24 @@ where
             std::sync::Arc::new(self.prepared_query_plan_from_program(&program, shape, binding)?);
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
+    }
+
+    pub(crate) fn mark_peer_maintained_query_shape_cache(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+    ) -> PreparedQueryPlanHandle {
+        let key = (
+            shape.shape_id(),
+            tier,
+            query_binding_value_signature(binding),
+        );
+        self.query
+            .query_shape_cache
+            .entry(key)
+            .or_insert_with(|| std::sync::Arc::new(PreparedQueryPlan::PeerMaintainedMarker))
+            .clone()
     }
 
     fn prepared_query_plan_from_program(

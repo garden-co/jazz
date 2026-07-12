@@ -4532,6 +4532,7 @@ pub(crate) enum PreparedQueryPlan {
         shape: PreparedShapeId,
         params: Vec<PreparedQueryParam>,
     },
+    PeerMaintainedMarker,
 }
 
 pub(crate) type PreparedQueryPlanHandle = Arc<PreparedQueryPlan>;
