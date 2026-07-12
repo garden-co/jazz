@@ -3277,24 +3277,6 @@ where
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
-                    let maintained_update =
-                        if let Some(maintained) = maintained_subscription.as_mut() {
-                            let mut node_ref = node.borrow_mut();
-                            match node_ref.drain_local_maintained_view_subscription(maintained) {
-                                Ok(update) => update,
-                                Err(crate::node::Error::MissingTransaction(_)) => {
-                                    node_ref.record_authoritative_reset_missing_payload_fallback();
-                                    node_ref.defer_authoritative_reset_for_binding_view(
-                                        authoritative_reset_binding_view,
-                                    );
-                                    retained.push(Rc::downgrade(&state));
-                                    continue;
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                        } else {
-                            None
-                        };
                     let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
@@ -3315,6 +3297,37 @@ where
                                 }
                                 Err(error) => return Err(error.into()),
                             }
+                        };
+                        let authoritative_snapshot_available = authoritative_snapshot.is_some();
+                        let maintained_update = if let Some(maintained) =
+                            maintained_subscription.as_mut()
+                        {
+                            let mut node_ref = node.borrow_mut();
+                            if authoritative_snapshot_available {
+                                match node_ref
+                                    .drain_local_maintained_view_subscription_state(maintained)
+                                {
+                                    Ok(_) => None,
+                                    Err(error) => return Err(error.into()),
+                                }
+                            } else {
+                                match node_ref.drain_local_maintained_view_subscription(maintained)
+                                {
+                                    Ok(update) => update,
+                                    Err(crate::node::Error::MissingTransaction(_)) => {
+                                        node_ref
+                                            .record_authoritative_reset_missing_payload_fallback();
+                                        node_ref.defer_authoritative_reset_for_binding_view(
+                                            authoritative_reset_binding_view,
+                                        );
+                                        retained.push(Rc::downgrade(&state));
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        } else {
+                            None
                         };
                         let (mut snapshot, force_reset_event) =
                             if let Some(snapshot) = authoritative_snapshot {
@@ -3365,35 +3378,55 @@ where
                             snapshot_tier,
                             force_reset_event,
                         )
-                    } else if let Some(update) = maintained_update {
-                        let mut event = apply_maintained_update_to_snapshot(
-                            &mut state_ref.snapshot,
-                            update,
-                            snapshot_tier,
-                            previous_settled,
-                        );
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                        );
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if let SubscriptionEvent::Delta {
-                            settled: event_settled,
-                            ..
-                        } = &mut event
-                        {
-                            *event_settled = settled;
-                        }
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
                     } else {
+                        let maintained_update = if let Some(maintained) =
+                            maintained_subscription.as_mut()
+                        {
+                            let mut node_ref = node.borrow_mut();
+                            match node_ref.drain_local_maintained_view_subscription(maintained) {
+                                Ok(update) => update,
+                                Err(crate::node::Error::MissingTransaction(_)) => {
+                                    node_ref.record_authoritative_reset_missing_payload_fallback();
+                                    node_ref.defer_authoritative_reset_for_binding_view(
+                                        authoritative_reset_binding_view,
+                                    );
+                                    retained.push(Rc::downgrade(&state));
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(update) = maintained_update {
+                            let mut event = apply_maintained_update_to_snapshot(
+                                &mut state_ref.snapshot,
+                                update,
+                                snapshot_tier,
+                                previous_settled,
+                            );
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view,
+                            );
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if let SubscriptionEvent::Delta {
+                                settled: event_settled,
+                                ..
+                            } = &mut event
+                            {
+                                *event_settled = settled;
+                            }
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
+                        }
                         let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
                             if previous.root_count == 0
