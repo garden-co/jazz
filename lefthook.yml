@@ -11,7 +11,8 @@ pre-commit:
       run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
-      run: pnpm format {staged_files}
+      exclude: "dev/benchmarks/SMOKE_LEDGER.md"
+      run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
