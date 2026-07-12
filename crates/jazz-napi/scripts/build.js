@@ -1,8 +1,12 @@
 const { spawnSync } = require("node:child_process");
 
 const release = !process.argv.includes("--debug") && process.env.JAZZ_NAPI_RELEASE !== "0";
+const profileIndex = process.argv.indexOf("--profile");
+const profile = profileIndex === -1 ? undefined : process.argv[profileIndex + 1];
 const args = ["build", "--platform"];
-if (release) {
+if (profile) {
+  args.push("--profile", profile);
+} else if (release) {
   args.push("--release");
 }
 
