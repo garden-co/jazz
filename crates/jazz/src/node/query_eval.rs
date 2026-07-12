@@ -6258,6 +6258,30 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
     ) -> Result<Option<LocalMaintainedViewSubscriptionUpdate>, Error> {
+        let Some(transitions) = self.drain_local_maintained_view_subscription_transitions(local)?
+        else {
+            return Ok(None);
+        };
+        let update = self.apply_local_maintained_view_transitions(local, transitions)?;
+        Ok(Some(update))
+    }
+
+    pub(crate) fn drain_local_maintained_view_subscription_state(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+    ) -> Result<bool, Error> {
+        let Some(transitions) = self.drain_local_maintained_view_subscription_transitions(local)?
+        else {
+            return Ok(false);
+        };
+        let _ = self.apply_local_maintained_view_transitions_inner(local, transitions, false)?;
+        Ok(true)
+    }
+
+    fn drain_local_maintained_view_subscription_transitions(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+    ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
         self.database.flush().map_err(Error::Groove)?;
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
@@ -6323,14 +6347,22 @@ where
                 _ => {}
             }
         }
-        let update = self.apply_local_maintained_view_transitions(local, transitions)?;
-        Ok(Some(update))
+        Ok(Some(transitions))
     }
 
     fn apply_local_maintained_view_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
+    ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
+        self.apply_local_maintained_view_transitions_inner(local, transitions, true)
+    }
+
+    fn apply_local_maintained_view_transitions_inner(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        transitions: super::maintained_subscription_view::ResultTransitions,
+        materialize_update: bool,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         let mut added = Vec::new();
         let mut removed = Vec::new();
@@ -6348,7 +6380,7 @@ where
             if member.table_name() != Some(local.result_table.as_str()) {
                 continue;
             }
-            if local.result_set.insert(member.clone()) {
+            if local.result_set.insert(member.clone()) && materialize_update {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
                 {
@@ -6361,14 +6393,14 @@ where
                 continue;
             }
             if local.result_set.remove(&member) {
-                if let Some((table, row_uuid, _)) = member.as_row() {
+                if materialize_update && let Some((table, row_uuid, _)) = member.as_row() {
                     removed.push((table.to_string(), row_uuid));
                 }
             }
         }
         for fact in transitions.program_fact_removes {
             if local.program_facts.remove(&fact) {
-                if let ProgramFactEntry::RelationEdge(edge) = fact {
+                if materialize_update && let ProgramFactEntry::RelationEdge(edge) = fact {
                     removed_edges.push(RelationEdge {
                         source_table: edge.source_table.to_string(),
                         source_row: edge.source_row,
@@ -6380,10 +6412,12 @@ where
             }
         }
         for fact in transitions.program_fact_adds {
-            let edge = match &fact {
-                ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
-                _ => None,
-            };
+            let edge = materialize_update
+                .then(|| match &fact {
+                    ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
+                    _ => None,
+                })
+                .flatten();
             if local.program_facts.insert(fact)
                 && let Some(edge) = edge
             {
