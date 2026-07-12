@@ -48,3 +48,11 @@ format boundaries should be named and tested separately:
 
 Each format may have different serialization concerns, but the executable
 feature subset must be shared.
+
+## Open Questions
+
+🔶 Open question: literal-vs-column-type coercion should be specified as a
+general query and authorization lowering rule, not case-by-case. For example,
+when a policy predicate compares a UUID literal against a `String` column, the
+runtime lowering contract should say whether and where that literal is coerced
+before evaluation.
