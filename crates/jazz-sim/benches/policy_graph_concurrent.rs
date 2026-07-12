@@ -769,7 +769,67 @@ fn json_u64(value: &JsonValue) -> u64 {
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok().or_else(|| parse_iso_ms(value)))
+        })
         .unwrap_or_else(|| panic!("expected unsigned integer cell, got {value:?}"))
+}
+
+fn parse_iso_ms(value: &str) -> Option<u64> {
+    let value = value.strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u32>().ok()?;
+    let minute = time_parts.next()?.parse::<u32>().ok()?;
+    let second_fraction = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let (second, millis) = match second_fraction.split_once('.') {
+        Some((second, fraction)) => {
+            let mut padded = fraction.chars().take(3).collect::<String>();
+            while padded.len() < 3 {
+                padded.push('0');
+            }
+            (second.parse::<u32>().ok()?, padded.parse::<u32>().ok()?)
+        }
+        None => (second_fraction.parse::<u32>().ok()?, 0),
+    };
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))?;
+    let ms = seconds.checked_mul(1_000)?.checked_add(i64::from(millis))?;
+    u64::try_from(ms).ok()
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn json_f64(value: &JsonValue) -> f64 {
