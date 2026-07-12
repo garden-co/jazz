@@ -4592,20 +4592,20 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<BindingViewKey, Error> {
-        if let Some(binding_view_key) = self.canonical_whole_table_binding_view_key(subscription)? {
-            return Ok(binding_view_key);
-        }
-        let Some(registered) = self
+        if let Some(registered) = self
             .query
             .registered_bindings
             .get(&subscription.shape_id)
             .and_then(|bindings| bindings.get(&subscription.binding_id))
-        else {
-            return Err(Error::InvalidStoredValue(
-                "subscription referenced unregistered binding",
-            ));
-        };
-        Ok(registered.binding_view_key)
+        {
+            return Ok(registered.binding_view_key);
+        }
+        if let Some(binding_view_key) = self.canonical_whole_table_binding_view_key(subscription)? {
+            return Ok(binding_view_key);
+        }
+        Err(Error::InvalidStoredValue(
+            "subscription referenced unregistered binding",
+        ))
     }
 
     fn canonical_whole_table_binding_view_key(
