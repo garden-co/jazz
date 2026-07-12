@@ -350,6 +350,7 @@ struct Config {
     phases: Vec<String>,
     fresh_seed: bool,
     identity: BenchIdentity,
+    topology: BenchTopology,
     fixture: Fixture,
     visibility_report: bool,
 }
@@ -384,6 +385,7 @@ impl Config {
                     "unsupported JAZZ_POLICY_GRAPH_IDENTITY {other:?}; expected system or member"
                 ),
             },
+            topology: BenchTopology::from_env(),
             fixture,
             visibility_report: std::env::var_os("JAZZ_POLICY_GRAPH_VISIBILITY_REPORT").is_some(),
         }
@@ -457,6 +459,34 @@ impl Fixture {
             metadata.modified().ok().hash(&mut hasher);
         }
         hasher.finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchTopology {
+    TwoNode,
+    ThreeHop,
+}
+
+impl BenchTopology {
+    fn from_env() -> Self {
+        match std::env::var("JAZZ_POLICY_GRAPH_TOPOLOGY")
+            .unwrap_or_else(|_| "2node".to_owned())
+            .as_str()
+        {
+            "2node" | "two-node" | "direct" => Self::TwoNode,
+            "3hop" | "three-hop" | "relay" => Self::ThreeHop,
+            other => {
+                panic!("unsupported JAZZ_POLICY_GRAPH_TOPOLOGY {other:?}; expected 2node or 3hop")
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TwoNode => "2node",
+            Self::ThreeHop => "3hop",
+        }
     }
 }
 
@@ -595,6 +625,11 @@ struct QueueTransport {
 struct CountedDuplex {
     left_transport: Box<dyn Transport>,
     right_transport: Box<dyn Transport>,
+    right_inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    right_to_left: Rc<TransportMetrics>,
+}
+
+struct ClientTransportCounters {
     right_inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     right_to_left: Rc<TransportMetrics>,
 }
@@ -904,9 +939,17 @@ fn run_cold(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
-    let relay = open_db(schema.clone(), node(2), AuthorId::SYSTEM);
-    let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
-    run_connect_and_subscribe(seeded, relay, client, expected, config)
+    match config.topology {
+        BenchTopology::TwoNode => {
+            let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, None, client, expected, config)
+        }
+        BenchTopology::ThreeHop => {
+            let relay = open_db(schema.clone(), node(2), AuthorId::SYSTEM);
+            let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+        }
+    }
 }
 
 fn run_warm(
@@ -915,13 +958,29 @@ fn run_warm(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
-    let relay = open_db(schema.clone(), node(4), AuthorId::SYSTEM);
-    let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
-    let first = run_connect_and_subscribe(seeded, relay, client, expected, config);
+    let first = match config.topology {
+        BenchTopology::TwoNode => {
+            let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, None, client, expected, config)
+        }
+        BenchTopology::ThreeHop => {
+            let relay = open_db(schema.clone(), node(4), AuthorId::SYSTEM);
+            let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+        }
+    };
 
-    let relay = open_db(schema.clone(), node(6), AuthorId::SYSTEM);
-    let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
-    let second = run_connect_and_subscribe(seeded, relay, client, expected, config);
+    let second = match config.topology {
+        BenchTopology::TwoNode => {
+            let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, None, client, expected, config)
+        }
+        BenchTopology::ThreeHop => {
+            let relay = open_db(schema.clone(), node(6), AuthorId::SYSTEM);
+            let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
+            run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
+        }
+    };
     assert!(
         second.wall_ms <= first.wall_ms.saturating_mul(3).max(1),
         "warm run unexpectedly slower than prime run: prime={}ms warm={}ms",
@@ -933,27 +992,60 @@ fn run_warm(
 
 fn run_connect_and_subscribe(
     seeded: &Seeded,
-    relay: DbNode,
+    relay_node: Option<DbNode>,
     client: DbNode,
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
     let start = Instant::now();
-    let relay_core = duplex_counted();
-    let client_relay = duplex_counted();
-    let _relay_upstream = relay.db.connect_upstream(relay_core.left_transport);
-    let _core_sub = seeded
-        .core
-        .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
-    let _client_upstream = client.db.connect_upstream(client_relay.left_transport);
-    let _relay_sub = relay.db.accept_edge_subscriber_with_claims(
-        client_relay.right_transport,
-        config.identity.author(seeded),
-        seeded.claims.clone(),
-    );
-    relay
-        .db
-        .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
+    let _relay_upstream;
+    let _core_sub;
+    let _client_upstream;
+    let _relay_sub;
+    let active_relay;
+    let client_counters;
+    match relay_node {
+        Some(relay_node) => {
+            let relay_core = duplex_counted();
+            let client_relay = duplex_counted();
+            let counters = ClientTransportCounters {
+                right_inbound: Rc::clone(&client_relay.right_inbound),
+                right_to_left: Rc::clone(&client_relay.right_to_left),
+            };
+            _relay_upstream = Some(relay_node.db.connect_upstream(relay_core.left_transport));
+            _core_sub = seeded
+                .core
+                .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
+            _client_upstream = client.db.connect_upstream(client_relay.left_transport);
+            _relay_sub = Some(relay_node.db.accept_edge_subscriber_with_claims(
+                client_relay.right_transport,
+                config.identity.author(seeded),
+                seeded.claims.clone(),
+            ));
+            relay_node
+                .db
+                .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
+            active_relay = Some(relay_node);
+            client_counters = counters;
+        }
+        None => {
+            let client_core = duplex_counted();
+            let counters = ClientTransportCounters {
+                right_inbound: Rc::clone(&client_core.right_inbound),
+                right_to_left: Rc::clone(&client_core.right_to_left),
+            };
+            _relay_upstream = None;
+            _client_upstream = client.db.connect_upstream(client_core.left_transport);
+            _core_sub = seeded.core.accept_edge_subscriber_with_claims(
+                client_core.right_transport,
+                config.identity.author(seeded),
+                seeded.claims.clone(),
+            );
+            _relay_sub = None;
+            active_relay = None;
+            client_counters = counters;
+        }
+    }
     client
         .db
         .set_identity_claims(config.identity.author(seeded), seeded.claims.clone());
@@ -1007,7 +1099,6 @@ fn run_connect_and_subscribe(
 
         let server_start = Instant::now();
         let core_tick = seeded.core.tick_stats().expect("core tick");
-        let relay_tick = relay.db.tick_stats().expect("relay tick");
         server_open_bundle_ms += server_start.elapsed().as_millis();
         accumulate_tick_stats(
             core_tick,
@@ -1015,14 +1106,19 @@ fn run_connect_and_subscribe(
             &mut consolidated_window_records,
             &mut history_window_consolidation_us,
         );
-        accumulate_tick_stats(
-            relay_tick,
-            &mut consolidated_windows,
-            &mut consolidated_window_records,
-            &mut history_window_consolidation_us,
-        );
+        if let Some(relay) = &active_relay {
+            let relay_start = Instant::now();
+            let relay_tick = relay.db.tick_stats().expect("relay tick");
+            server_open_bundle_ms += relay_start.elapsed().as_millis();
+            accumulate_tick_stats(
+                relay_tick,
+                &mut consolidated_windows,
+                &mut consolidated_window_records,
+                &mut history_window_consolidation_us,
+            );
+        }
 
-        let _queued_to_client = client_relay.right_inbound.borrow().len();
+        let _queued_to_client = client_counters.right_inbound.borrow().len();
         let client_start = Instant::now();
         let client_tick = client.db.tick_stats().expect("client tick");
         drain_subscriptions(start, &mut subscriptions);
@@ -1105,8 +1201,8 @@ fn run_connect_and_subscribe(
         subscriptions: timelines.len(),
         rows_materialized,
         expected_rows: expected.values().sum(),
-        server_to_client_messages: client_relay.right_to_left.messages.get(),
-        server_to_client_view_updates: client_relay.right_to_left.view_updates.get(),
+        server_to_client_messages: client_counters.right_to_left.messages.get(),
+        server_to_client_view_updates: client_counters.right_to_left.view_updates.get(),
         seed_cache_hit: seeded.seed_cache_hit,
         seed_ms: seeded.seed_ms,
         slowest_subscription: slowest.name.clone(),
@@ -1181,10 +1277,13 @@ fn accumulate_tick_stats(
 }
 
 fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSummary) {
+    emit_phase_receipt(config, session_id, phase, summary);
+
     let mut fields = metadata_fields("policy_graph_concurrent", "native", config.seed, "full");
     fields.insert("session_id".to_owned(), json!(session_id));
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("identity".to_owned(), json!(config.identity.label()));
+    fields.insert("topology".to_owned(), json!(config.topology.label()));
     fields.insert("fixture_label".to_owned(), json!(config.fixture.label));
     fields.insert("wall_ms".to_owned(), json!(summary.wall_ms));
     fields.insert(
@@ -1284,6 +1383,42 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
     );
     let line = serde_json::to_string(&fields).expect("serialize policy graph receipt");
     emit_json_line("policy_graph_concurrent", &line);
+}
+
+fn emit_phase_receipt(config: &Config, session_id: &str, phase: &str, summary: &RunSummary) {
+    let line = json!({
+        "session_id": session_id,
+        "phase": phase,
+        "identity": config.identity.label(),
+        "topology": config.topology.label(),
+        "fixture_label": config.fixture.label,
+        "expected_count_all_ms": summary.expected_count_all_ms,
+        "raw_expected_count_all_ms": summary.raw_expected_count_all_ms,
+        "settled_first_callback_all_ms": summary.settled_first_callback_all_ms,
+        "wall_ms": summary.wall_ms,
+        "phase_breakdown": {
+            "server_open_bundle_ms": summary.server_open_bundle_ms,
+            "subscribe_ms": summary.subscribe_ms,
+            "settle_loop_ms": summary.settle_loop_ms,
+            "client_apply_tick_ms": summary.client_apply_tick_ms,
+            "one_shot_validate_ms": summary.one_shot_validate_ms,
+            "history_window_consolidation_ms": summary.history_window_consolidation_us as f64 / 1000.0,
+        },
+        "rows_materialized": summary.rows_materialized,
+        "expected_rows": summary.expected_rows,
+        "subscriptions": summary.subscriptions,
+        "ticks": summary.ticks,
+        "server_to_client_messages": summary.server_to_client_messages,
+        "server_to_client_view_updates": summary.server_to_client_view_updates,
+        "seed_cache_hit": summary.seed_cache_hit,
+        "seed_ms": summary.seed_ms,
+        "slowest_subscription": summary.slowest_subscription,
+        "slowest_subscription_ms": summary.slowest_subscription_ms,
+    });
+    eprintln!(
+        "POLICY_GRAPH_CONCURRENT_PHASE {}",
+        serde_json::to_string(&line).expect("serialize compact policy graph phase receipt")
+    );
 }
 
 fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbNode {
