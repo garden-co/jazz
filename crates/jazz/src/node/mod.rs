@@ -2590,6 +2590,13 @@ where
                         value: vec![Value::U64(1)],
                     });
                 }
+            } else {
+                for member in adds {
+                    operations.push(DirectRecordStoreWrite::Set {
+                        key: settled_result_member_key(binding_view_key, member)?,
+                        value: vec![Value::U64(1)],
+                    });
+                }
             }
             store.write_many(&operations)?;
             return Ok(());
@@ -2637,6 +2644,13 @@ where
                 .collect::<Vec<_>>();
             if let Some(facts) = rewrite {
                 for fact in facts {
+                    operations.push(DirectRecordStoreWrite::Set {
+                        key: settled_program_fact_key(binding_view_key, fact)?,
+                        value: vec![Value::U64(1)],
+                    });
+                }
+            } else {
+                for fact in adds {
                     operations.push(DirectRecordStoreWrite::Set {
                         key: settled_program_fact_key(binding_view_key, fact)?,
                         value: vec![Value::U64(1)],

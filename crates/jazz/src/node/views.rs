@@ -870,7 +870,7 @@ where
                 }
                 self.insert_settled_result_member_indexed(binding_view_key, member);
             }
-            member_rewrite = if reset_cleared_shared_state || result_members_need_rewrite {
+            member_rewrite = if result_members_need_rewrite {
                 Some(
                     self.query
                         .settled_result_sets
@@ -891,11 +891,7 @@ where
                 program_facts.remove(&fact);
             }
             program_facts.extend(program_fact_adds);
-            fact_rewrite = if reset_cleared_shared_state {
-                Some(program_facts.clone())
-            } else {
-                None
-            };
+            fact_rewrite = None;
         }
         if !defer_settlement {
             self.query
