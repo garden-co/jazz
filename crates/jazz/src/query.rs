@@ -1045,6 +1045,14 @@ impl Query {
     pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
         validate_query(self, schema)
     }
+
+    pub(crate) fn validate_with_schema_version(
+        &self,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<ValidatedQuery, QueryError> {
+        validate_query_with_schema_version(self, schema, schema_version)
+    }
 }
 
 /// One policy-only alternative for authorizing a row.
@@ -1994,8 +2002,16 @@ pub enum QueryError {
 }
 
 fn validate_query(query: &Query, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
-    let (normalized, params, canonical) = validate_query_canonical_parts(query, schema)?;
     let schema_version = schema.version_id();
+    validate_query_with_schema_version(query, schema, schema_version)
+}
+
+fn validate_query_with_schema_version(
+    query: &Query,
+    schema: &JazzSchema,
+    schema_version: SchemaVersionId,
+) -> Result<ValidatedQuery, QueryError> {
+    let (normalized, params, canonical) = validate_query_canonical_parts(query, schema)?;
     let mut shape_identity = canonical.clone();
     shape_identity.extend_from_slice(schema_version.as_bytes());
     let shape_id = ShapeId(uuid::Uuid::new_v5(&QUERY_NAMESPACE, &shape_identity));

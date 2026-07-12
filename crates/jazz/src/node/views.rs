@@ -1112,19 +1112,27 @@ where
         &self,
         table: &str,
     ) -> Result<(ValidatedQuery, Binding), Error> {
-        let schema = if self.table(table).is_ok() {
-            &self.catalogue.schema
+        let (schema, schema_version) = if self.table(table).is_ok() {
+            (
+                &self.catalogue.schema,
+                self.catalogue.current_schema_version_id,
+            )
         } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&self.catalogue.current_write_schema.schema)
-                .ok_or(Error::InvalidStoredValue(
-                    "current write schema payload missing",
-                ))?
-                .schema
+            let schema_version = self.catalogue.current_write_schema.schema;
+            (
+                &self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&schema_version)
+                    .ok_or(Error::InvalidStoredValue(
+                        "current write schema payload missing",
+                    ))?
+                    .schema,
+                schema_version,
+            )
         };
-        let shape = crate::query::Query::from(table).validate(schema)?;
+        let shape = crate::query::Query::from(table)
+            .validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
         Ok((shape, binding))
     }

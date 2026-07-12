@@ -4017,10 +4017,11 @@ where
             return Ok(());
         };
         let shape = match &ast.body {
-            ShapeBody::Query(query) => query.validate(&schema.schema)?,
-            ShapeBody::Relation(relation) => {
-                relation_query_to_query(relation)?.validate(&schema.schema)?
+            ShapeBody::Query(query) => {
+                query.validate_with_schema_version(&schema.schema, ast.schema_version)?
             }
+            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
+                .validate_with_schema_version(&schema.schema, ast.schema_version)?,
         };
         if shape.shape_id() != shape_id {
             return Err(Error::InvalidStoredValue("shape id does not match AST"));
