@@ -3346,7 +3346,7 @@ where
                         if let Some(update) = maintained_update {
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
-                                &update,
+                                update,
                                 snapshot_tier,
                                 previous_settled,
                             );
@@ -3368,7 +3368,7 @@ where
                     } else if let Some(update) = maintained_update {
                         let mut event = apply_maintained_update_to_snapshot(
                             &mut state_ref.snapshot,
-                            &update,
+                            update,
                             snapshot_tier,
                             previous_settled,
                         );
@@ -6505,7 +6505,7 @@ fn subscription_delta_event_with_reset(
 
 fn apply_maintained_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
-    update: &LocalMaintainedViewSubscriptionUpdate,
+    update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
@@ -6513,22 +6513,46 @@ fn apply_maintained_update_to_snapshot(
         row.table() == table && row.row_uuid() == row_uuid
     }
 
+    let LocalMaintainedViewSubscriptionUpdate {
+        added: update_added,
+        removed: update_removed,
+        added_edges: update_added_edges,
+        removed_edges: update_removed_edges,
+    } = update;
+
     if snapshot.rows.is_empty()
         && snapshot.edges.is_empty()
         && snapshot.root_count == 0
-        && update.removed.is_empty()
-        && update.removed_edges.is_empty()
+        && update_removed.is_empty()
+        && update_removed_edges.is_empty()
     {
-        let mut added = Vec::with_capacity(update.added.len());
+        if update_added_edges.is_empty() {
+            snapshot.root_count = update_added.len();
+            snapshot.rows.reserve(update_added.len());
+            snapshot.rows.extend(update_added.iter().cloned());
+            return SubscriptionEvent::Delta {
+                reset: false,
+                added: update_added,
+                updated: Vec::new(),
+                removed: Vec::new(),
+                added_related: Vec::new(),
+                added_edges: Vec::new(),
+                removed_edges: Vec::new(),
+                settled,
+                tier,
+            };
+        }
+
+        let mut event_added = Vec::with_capacity(update_added.len());
         let mut added_related = Vec::new();
         let mut seen_rows = BTreeSet::new();
-        for row in &update.added {
+        for row in &update_added {
             seen_rows.insert((row.table().to_owned(), row.row_uuid()));
-            added.push(row.clone());
+            event_added.push(row.clone());
         }
 
         let mut seen_edges = BTreeSet::new();
-        for (edge, row) in &update.added_edges {
+        for (edge, row) in &update_added_edges {
             if seen_edges.insert(edge.clone()) {
                 snapshot.edges.push(edge.clone());
             }
@@ -6540,19 +6564,20 @@ fn apply_maintained_update_to_snapshot(
             }
         }
 
-        snapshot.root_count = added.len();
-        snapshot.rows.reserve(added.len() + added_related.len());
-        snapshot.rows.extend(added.iter().cloned());
+        snapshot.root_count = event_added.len();
+        snapshot
+            .rows
+            .reserve(event_added.len() + added_related.len());
+        snapshot.rows.extend(event_added.iter().cloned());
         snapshot.rows.extend(added_related.iter().cloned());
 
         return SubscriptionEvent::Delta {
             reset: false,
-            added,
+            added: event_added,
             updated: Vec::new(),
             removed: Vec::new(),
             added_related,
-            added_edges: update
-                .added_edges
+            added_edges: update_added_edges
                 .iter()
                 .map(|(edge, _)| edge.clone())
                 .collect(),
@@ -6567,7 +6592,7 @@ fn apply_maintained_update_to_snapshot(
     let mut removed = Vec::new();
     let mut added_related = Vec::new();
 
-    for row in &update.added {
+    for row in &update_added {
         let table = row.table();
         let row_uuid = row.row_uuid();
         if let Some(position) = snapshot
@@ -6589,8 +6614,7 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
-        if update
-            .removed
+        if update_removed
             .iter()
             .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
         {
@@ -6607,9 +6631,9 @@ fn apply_maintained_update_to_snapshot(
 
     snapshot
         .edges
-        .retain(|edge| !update.removed_edges.iter().any(|removed| removed == edge));
+        .retain(|edge| !update_removed_edges.iter().any(|removed| removed == edge));
 
-    for (edge, row) in &update.added_edges {
+    for (edge, row) in &update_added_edges {
         if !snapshot.edges.iter().any(|current| current == edge) {
             snapshot.edges.push(edge.clone());
         }
@@ -6640,7 +6664,7 @@ fn apply_maintained_update_to_snapshot(
         added_related.push(row.clone());
     }
 
-    for removed_edge in &update.removed_edges {
+    for removed_edge in &update_removed_edges {
         let still_referenced = snapshot.edges.iter().any(|edge| {
             edge.target_table == removed_edge.target_table
                 && edge.target_row == removed_edge.target_row
@@ -6669,12 +6693,11 @@ fn apply_maintained_update_to_snapshot(
         updated,
         removed,
         added_related,
-        added_edges: update
-            .added_edges
+        added_edges: update_added_edges
             .iter()
             .map(|(edge, _)| edge.clone())
             .collect(),
-        removed_edges: update.removed_edges.clone(),
+        removed_edges: update_removed_edges,
         settled,
         tier,
     }
