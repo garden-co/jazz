@@ -995,16 +995,21 @@ where
         if opts.propagation == Propagation::Full {
             let upstream_opts =
                 upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-            let (shape, binding, _) = self
-                .node
-                .node
-                .borrow_mut()
-                .prepare_query_binding_for_link_with_shared_claim_fragments(
-                    &prepared.shape,
-                    &prepared.binding,
-                    upstream_opts.tier,
-                    author,
-                )?;
+            let (shape, binding) = if upstream_opts.tier == read_tier {
+                (state_shape.clone(), state_binding.clone())
+            } else {
+                let (shape, binding, _) = self
+                    .node
+                    .node
+                    .borrow_mut()
+                    .prepare_query_binding_for_link_with_shared_claim_fragments(
+                        &prepared.shape,
+                        &prepared.binding,
+                        upstream_opts.tier,
+                        author,
+                    )?;
+                (shape, binding)
+            };
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
