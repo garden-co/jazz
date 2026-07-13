@@ -6903,17 +6903,121 @@ fn compare_record_field(
     value: &LiteralValue,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
 ) -> Result<bool, IvmRuntimeError> {
-    if let LiteralValue::Enum(expected) = value {
-        let field_idx = record
-            .descriptor()
-            .field_index(field)
-            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
-        let actual = record.get_enum(field_idx)?;
-        return Ok(actual.partial_cmp(expected).is_some_and(predicate));
+    let field_idx = record
+        .descriptor()
+        .field_index(field)
+        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.to_owned()))?;
+    match record_field_literal_ordering(record, field_idx, value)? {
+        FieldLiteralOrdering::Compared(ordering) => return Ok(predicate(ordering)),
+        FieldLiteralOrdering::SqlNull => return Ok(false),
+        FieldLiteralOrdering::Unsupported => {}
     }
     let value = value.to_value();
     let actual = record.get(field)?;
     Ok(compare_values_sql(&actual, &value).is_some_and(predicate))
+}
+
+enum FieldLiteralOrdering {
+    Compared(std::cmp::Ordering),
+    SqlNull,
+    Unsupported,
+}
+
+fn record_field_literal_ordering(
+    record: BorrowedRecord<'_>,
+    field_idx: usize,
+    value: &LiteralValue,
+) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
+    let field = record.field(field_idx)?;
+    match (&field.value_type, value) {
+        (ValueType::U8, LiteralValue::U8(expected)) => {
+            Ok(ordering(&record.get_u8(field_idx)?, expected))
+        }
+        (ValueType::U32, LiteralValue::U32(expected)) => {
+            Ok(ordering(&record.get_u32(field_idx)?, expected))
+        }
+        (ValueType::U64, LiteralValue::U64(expected)) => {
+            Ok(ordering(&record.get_u64(field_idx)?, expected))
+        }
+        (ValueType::F64, LiteralValue::F64(expected)) => {
+            let expected = f64::from_bits(*expected);
+            Ok(record
+                .get_f64(field_idx)?
+                .partial_cmp(&expected)
+                .map(FieldLiteralOrdering::Compared)
+                .unwrap_or(FieldLiteralOrdering::SqlNull))
+        }
+        (ValueType::Bool, LiteralValue::Bool(expected)) => {
+            Ok(ordering(&record.get_bool(field_idx)?, expected))
+        }
+        (ValueType::String, LiteralValue::String(expected)) => {
+            Ok(ordering(record.get_str(field_idx)?, expected.as_str()))
+        }
+        (ValueType::Bytes, LiteralValue::Bytes(expected)) => {
+            Ok(ordering(record.get_bytes(field_idx)?, expected.as_slice()))
+        }
+        (ValueType::Uuid, LiteralValue::Uuid(expected)) => Ok(record
+            .get_uuid(field_idx)?
+            .as_bytes()
+            .partial_cmp(expected.as_bytes())
+            .map(FieldLiteralOrdering::Compared)
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::Enum(_), LiteralValue::Enum(expected)) => {
+            Ok(ordering(&record.get_enum(field_idx)?, expected))
+        }
+        (ValueType::Nullable(inner), LiteralValue::Nullable(Some(expected))) => {
+            nullable_record_field_literal_ordering(record, field_idx, inner, expected)
+        }
+        (ValueType::Nullable(_), LiteralValue::Nullable(None)) => Ok(FieldLiteralOrdering::SqlNull),
+        _ => Ok(FieldLiteralOrdering::Unsupported),
+    }
+}
+
+fn nullable_record_field_literal_ordering(
+    record: BorrowedRecord<'_>,
+    field_idx: usize,
+    inner: &ValueType,
+    expected: &LiteralValue,
+) -> Result<FieldLiteralOrdering, IvmRuntimeError> {
+    match (inner, expected) {
+        (ValueType::U64, LiteralValue::U64(expected)) => Ok(record
+            .get_nullable_u64(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::F64, LiteralValue::F64(expected)) => {
+            let expected = f64::from_bits(*expected);
+            Ok(record
+                .get_nullable_f64(field_idx)?
+                .and_then(|actual| actual.partial_cmp(&expected))
+                .map(FieldLiteralOrdering::Compared)
+                .unwrap_or(FieldLiteralOrdering::SqlNull))
+        }
+        (ValueType::String, LiteralValue::String(expected)) => Ok(record
+            .get_nullable_string(field_idx)?
+            .map(|actual| ordering(actual, expected.as_str()))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::Bytes, LiteralValue::Bytes(expected)) => Ok(record
+            .get_nullable_bytes(field_idx)?
+            .map(|actual| ordering(actual, expected.as_slice()))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::Uuid, LiteralValue::Uuid(expected)) => Ok(record
+            .get_nullable_uuid(field_idx)?
+            .and_then(|actual| actual.as_bytes().partial_cmp(expected.as_bytes()))
+            .map(FieldLiteralOrdering::Compared)
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::Enum(_), LiteralValue::Enum(expected)) => Ok(record
+            .get_nullable_enum(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        _ => Ok(FieldLiteralOrdering::Unsupported),
+    }
+}
+
+fn ordering<T: PartialOrd + ?Sized>(actual: &T, expected: &T) -> FieldLiteralOrdering {
+    actual
+        .partial_cmp(expected)
+        .map(FieldLiteralOrdering::Compared)
+        .unwrap_or(FieldLiteralOrdering::SqlNull)
 }
 
 fn compare_record_fields(
