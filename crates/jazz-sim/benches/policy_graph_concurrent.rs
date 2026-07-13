@@ -20,12 +20,15 @@ use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
+use jazz_sim::policy_graph_fixture::{
+    MEMBER_SEED_ROWS_COMPACT_JSON, MEMBER_SEED_ROWS_JSON, MemberSeedDump, MemberSeedManifest,
+    SeedRow, member_seed_dump_from_path,
+};
 use jazz_sim::{emit_json_line, metadata_fields};
 use serde_json::{Value as JsonValue, json};
 
 const PUBLIC_FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";
 const FIXTURE_DIR_ENV: &str = "JAZZ_POLICY_GRAPH_FIXTURE_DIR";
-const MEMBER_SEED_ROWS: &str = "member-seed-rows.json";
 const SEED_CACHE_VERSION: &str = "policy-graph-concurrent-seed-v14-env-fixture";
 const SEED_CACHE_READY: &str = ".jazz_policy_graph_seed_ready";
 
@@ -253,7 +256,9 @@ fn private_default_fixture_dir() -> Option<PathBuf> {
 }
 
 fn usable_fixture_dir(dir: &Path) -> bool {
-    dir.join("schema.native.bin").is_file() && dir.join(MEMBER_SEED_ROWS).is_file()
+    dir.join("schema.native.bin").is_file()
+        && (dir.join(MEMBER_SEED_ROWS_JSON).is_file()
+            || dir.join(MEMBER_SEED_ROWS_COMPACT_JSON).is_file())
 }
 
 fn member_seed_manifest(fixture: &Fixture) -> MemberSeedManifest {
@@ -261,87 +266,7 @@ fn member_seed_manifest(fixture: &Fixture) -> MemberSeedManifest {
 }
 
 fn member_seed_dump(fixture: &Fixture) -> MemberSeedDump {
-    let bytes =
-        fs::read(fixture.member_seed_path()).expect("read policy graph member seed row dump");
-    let value: JsonValue =
-        serde_json::from_slice(&bytes).expect("decode policy graph perf member seed row dump");
-    let identity = value
-        .get("identity")
-        .expect("member seed row dump identity");
-    let member_row = identity
-        .get("member_row")
-        .and_then(JsonValue::as_str)
-        .expect("member seed row dump member_row")
-        .to_owned();
-    let claims = identity
-        .get("claims")
-        .and_then(JsonValue::as_object)
-        .expect("member seed row dump claims")
-        .iter()
-        .map(|(key, value)| (key.clone(), json_to_claim_value(value, &member_row)))
-        .collect::<BTreeMap<_, _>>();
-    let tables = value
-        .get("subscriptions")
-        .and_then(JsonValue::as_array)
-        .expect("member seed row dump subscriptions")
-        .iter()
-        .map(|table| {
-            let name = table
-                .get("name")
-                .and_then(JsonValue::as_str)
-                .expect("manifest table name")
-                .to_owned();
-            let expected = table
-                .get("expected")
-                .and_then(JsonValue::as_u64)
-                .expect("manifest table expected") as usize;
-            ManifestTable { name, expected }
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        tables.len(),
-        39,
-        "member seed row dump must cover all 39 subscriptions"
-    );
-    let rows = value
-        .get("rows")
-        .and_then(JsonValue::as_array)
-        .expect("member seed row dump rows")
-        .iter()
-        .map(|row| SeedRow {
-            table: row
-                .get("table")
-                .and_then(JsonValue::as_str)
-                .expect("seed row table")
-                .to_owned(),
-            id: row
-                .get("id")
-                .and_then(JsonValue::as_str)
-                .expect("seed row id")
-                .to_owned(),
-            cells: row
-                .get("cells")
-                .and_then(JsonValue::as_object)
-                .expect("seed row cells")
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    MemberSeedDump {
-        identity: MemberSeedIdentity { member_row, claims },
-        manifest: MemberSeedManifest { tables },
-        rows,
-    }
-}
-
-impl MemberSeedManifest {
-    fn expected_counts(&self) -> BTreeMap<String, usize> {
-        self.tables
-            .iter()
-            .map(|table| (table.name.clone(), table.expected))
-            .collect()
-    }
+    member_seed_dump_from_path(&fixture.member_seed_path())
 }
 
 struct Config {
@@ -418,7 +343,7 @@ impl Fixture {
         }
 
         eprintln!(
-            "POLICY_GRAPH_CONCURRENT_SKIP no usable fixture found; set {FIXTURE_DIR_ENV} to a directory containing schema.native.bin and {MEMBER_SEED_ROWS}"
+            "POLICY_GRAPH_CONCURRENT_SKIP no usable fixture found; set {FIXTURE_DIR_ENV} to a directory containing schema.native.bin and member seed rows"
         );
         std::process::exit(0);
     }
@@ -428,7 +353,7 @@ impl Fixture {
             Self { dir, label }
         } else {
             eprintln!(
-                "POLICY_GRAPH_CONCURRENT_SKIP fixture directory is missing schema.native.bin or {MEMBER_SEED_ROWS}: {}",
+                "POLICY_GRAPH_CONCURRENT_SKIP fixture directory is missing schema.native.bin or member seed rows: {}",
                 dir.display()
             );
             std::process::exit(0);
@@ -440,7 +365,12 @@ impl Fixture {
     }
 
     fn member_seed_path(&self) -> PathBuf {
-        self.dir.join(MEMBER_SEED_ROWS)
+        let legacy = self.dir.join(MEMBER_SEED_ROWS_JSON);
+        if legacy.is_file() {
+            legacy
+        } else {
+            self.dir.join(MEMBER_SEED_ROWS_COMPACT_JSON)
+        }
     }
 
     fn member_seed_manifest(&self) -> MemberSeedManifest {
@@ -577,37 +507,6 @@ struct SubscriptionTimeline {
     first_settled_ms: u128,
     raw_expected_count_ms: u128,
     materialized_ms: u128,
-}
-
-#[derive(Clone, Debug)]
-struct MemberSeedDump {
-    identity: MemberSeedIdentity,
-    manifest: MemberSeedManifest,
-    rows: Vec<SeedRow>,
-}
-
-#[derive(Clone, Debug)]
-struct MemberSeedIdentity {
-    member_row: String,
-    claims: BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Debug)]
-struct SeedRow {
-    table: String,
-    id: String,
-    cells: BTreeMap<String, JsonValue>,
-}
-
-#[derive(Clone, Debug)]
-struct MemberSeedManifest {
-    tables: Vec<ManifestTable>,
-}
-
-#[derive(Clone, Debug)]
-struct ManifestTable {
-    name: String,
-    expected: usize,
 }
 
 #[derive(Default)]
@@ -771,17 +670,6 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
         node.borrow_mut()
             .finalize_local_mergeable_commit(tx_id)
             .unwrap_or_else(|error| panic!("seed finalize row {}/{row_id:?}: {error}", row.table));
-    }
-}
-
-fn json_to_claim_value(value: &JsonValue, member_row: &str) -> Value {
-    match value {
-        JsonValue::Bool(value) => Value::Bool(*value),
-        JsonValue::String(value) if value == member_row => {
-            Value::Uuid(uuid::Uuid::parse_str(value).expect("claim member uuid"))
-        }
-        JsonValue::String(value) => Value::String(value.clone()),
-        other => panic!("unsupported identity claim value {other:?}"),
     }
 }
 
