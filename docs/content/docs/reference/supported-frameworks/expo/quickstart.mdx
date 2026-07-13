@@ -1,0 +1,128 @@
+---
+title: Quickstart
+description: Build a local-first to-do app with Jazz and Expo (React Native), step by step.
+reviewedAt: "3b151c2e4"
+---
+
+Build a local-first to-do app with Jazz and Expo. For bare React Native (no Expo), see the
+[Reference](/docs/reference/supported-frameworks/expo/reference). For the full set of options and
+the other frameworks, see [Install](/docs/install/client).
+
+## Create a project
+
+```bash title="Terminal"
+npx create-expo-app my-jazz-app --template blank-typescript
+cd my-jazz-app
+```
+
+## Install
+
+```bash title="Terminal"
+pnpm add jazz-tools@alpha jazz-rn@alpha expo
+pnpm add -D @babel/plugin-transform-flow-strip-types
+```
+
+`jazz-rn` is mandatory in Expo / React Native environments and must be installed alongside
+`jazz-tools`.
+
+### Configure the entry point, Babel, and Metro
+
+Create `index.js` at the project root, and set `"main": "./index.js"` in your `package.json`.
+Import polyfills as the very first line, before any other code:
+
+```js title="index.js"
+import "jazz-tools/expo/polyfills";
+import { registerRootComponent } from "expo";
+import { App } from "./App";
+registerRootComponent(App);
+```
+
+Keep this import first in the app entry point. It installs the `ReadableStream` polyfill that
+Jazz's chunked-file storage needs (Hermes doesn't provide one), before any Jazz code runs.
+
+Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
+
+```js title="babel.config.js"
+module.exports = function (api) {
+  api.cache(true);
+  return {
+    presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
+    plugins: [["@babel/plugin-transform-flow-strip-types", { allowDeclareFields: true }]],
+  };
+};
+```
+
+Replace `metro.config.js` with `metro.config.mjs` so Metro can top-level `await` the Jazz dev
+server (it injects `EXPO_PUBLIC_JAZZ_*` env vars that Metro inlines into your bundle):
+
+```js title="metro.config.mjs"
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { withJazz } from "jazz-tools/dev/expo";
+
+const require = createRequire(import.meta.url);
+const { getDefaultConfig } = require("expo/metro-config");
+
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+
+const config = getDefaultConfig(projectRoot);
+
+// pnpm uses symlinks for hoisted packages
+config.resolver.unstable_enableSymlinks = true;
+
+// Start the Jazz dev server and inject EXPO_PUBLIC_JAZZ_* env vars for Metro to inline.
+await withJazz({}, { schemaDir: projectRoot });
+
+export default config;
+```
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Generate one on
+[Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`).
+
+<GenerateAppId />
+
+## Define your schema
+
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
+</include>
+
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
+
+## Set up your app
+
+Create the basic structure for your app with Jazz and a to-do list.
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
+</include>
+
+## Add a to-do
+
+Use `db.insert` to create a new row.
+
+<include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/AddTodo.tsx
+</include>
+
+## Display and edit a to-do
+
+Display a to-do with toggle and delete controls.
+
+<include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/TodoItem.tsx
+</include>
+
+## List to-dos
+
+Subscribe to a query to get real-time updates as data changes, regardless of where the change
+originates.
+
+<include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
+  ../examples/docs/todo-client-localfirst-expo/src/quickstart-list.tsx
+</include>

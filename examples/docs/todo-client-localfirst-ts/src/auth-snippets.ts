@@ -7,7 +7,7 @@ export async function createLocalFirstDb() {
   const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
 
   return createDb({
-    appId: "my-app",
+    appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
     secret,
   });
 }
@@ -16,7 +16,7 @@ export async function createLocalFirstDb() {
 // #region auth-jwt-ts
 export async function createJwtDb() {
   return createDb({
-    appId: "my-app",
+    appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
     serverUrl: "http://127.0.0.1:4200",
     jwtToken: "<provider-jwt>",
   });

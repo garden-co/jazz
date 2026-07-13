@@ -1,0 +1,49 @@
+---
+title: Reference
+description: Solid binding reference — provider, query subscriptions, database access, and sessions.
+reviewedAt: "3b151c2e4"
+---
+
+The Solid bindings live in `jazz-tools/solid`. Inputs are accessors and outputs are stores, so
+`createSolidJazzClient` takes an `Accessor<DbConfig>` and `useAll` takes an accessor returning
+`{ query }`. See [Overview](/docs/reference/supported-frameworks/overview) for the cross-framework API table.
+
+## Provider setup
+
+Wrap your app in `JazzProvider` to make the database available to every component. See
+[Client setup](/docs/getting-started/client-setup).
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/ProviderExample.tsx
+</include>
+
+## Query subscriptions
+
+Subscribe to query results reactively with `useAll`, which returns a store of
+`{ data, isLoading, error }`. See [Reading Data](/docs/reading/queries) for loading states and
+fine-grained update behaviour.
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/QuerySubscriptionExample.tsx
+</include>
+
+## Accessing the database and session
+
+Get a handle to the database with `useDb()` for inserts, updates, and deletes, and read the
+current user's session with `useSession()`. See [Writing Data](/docs/writing/writing-data) and
+[Sessions](/docs/auth/sessions).
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-solid/src/DbSessionExamples.tsx
+</include>
+
+## Local-first auth
+
+`useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first
+run) and exposes `secret`, `isLoading`, `error`, and `login` / `signOut`. See
+[Local-first auth](/docs/auth/local-first-auth) for the full flows, including recovery passphrase
+and passkey backup.
+
+<include cwd lang="tsx" meta='title="App.tsx"'>
+  ../examples/docs/todo-client-localfirst-solid/src/AuthLocalfirst.tsx
+</include>

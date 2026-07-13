@@ -29,30 +29,17 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 
 </Callout>
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<OtherFrameworks />
+
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-jwt-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AuthJwt.vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/AuthJwt.svelte#auth-jwt-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/AuthJwt.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -98,12 +85,12 @@ if (!jwtToken && (isLoading || !secret)) return <p>Loading…</p>;
 
 const config = jwtToken
   ? {
-      appId: "my-app",
+      appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
       serverUrl: "https://sync.example.com",
       jwtToken,
     }
   : {
-      appId: "my-app",
+      appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
       serverUrl: "https://sync.example.com",
       secret: secret!,
     };
@@ -130,7 +117,7 @@ Use `cookieSession` only when your app authenticates sync with an HttpOnly cooki
 
 ```ts
 const db = await createDb({
-  appId: "my-app",
+  appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
   serverUrl: "https://sync.example.com",
   cookieSession: {
     user_id: "user_123",

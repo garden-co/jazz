@@ -23,30 +23,17 @@ See [Files & Blobs](/docs/writing/files-and-blobs) for more details.
 
 Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
 
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
-  persist
-  updateAnchor
->
+<OtherFrameworks />
+
+<Tabs groupId="jazz-framework" items={["React", "Svelte", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/GetDbExample.tsx#writing-get-db-react
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/GetDbExample.vue#writing-get-db-vue
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/GetDbExample.svelte#writing-get-db-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/GetDbExample.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

@@ -15,7 +15,7 @@ export function LocalFirstAuthApp() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
         secret,
       }}
     >
@@ -30,7 +30,7 @@ export function JwtAuthApp() {
   return (
     <JazzProvider
       config={{
-        appId: "my-app",
+        appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
         serverUrl: "http://127.0.0.1:4200",
         jwtToken: "<provider-jwt>",
       }}

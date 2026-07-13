@@ -1,0 +1,78 @@
+---
+title: Quickstart
+description: Build a local-first to-do app with Jazz and Svelte, step by step.
+reviewedAt: "3b151c2e4"
+---
+
+Build a local-first to-do app with Jazz and Svelte. For the full set of options, SvelteKit
+setup, and the other frameworks, see [Install](/docs/install/client).
+
+## Create a project
+
+```bash title="Terminal"
+pnpm create vite my-jazz-app --template svelte-ts
+cd my-jazz-app
+pnpm install
+```
+
+<Callout type="info">
+  This quickstart uses Svelte 5 features (`$state`, `$props`, `$derived`, snippets). Make sure
+  you're on Svelte 5 or later.
+</Callout>
+
+## Install
+
+```bash title="Terminal"
+pnpm add jazz-tools@alpha
+```
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Generate one on
+[Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`).
+
+<GenerateAppId />
+
+## Define your schema
+
+Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is
+the source of truth for your data model.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
+</include>
+
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
+
+## Set up your app
+
+Create the basic structure for your app with Jazz and a to-do list.
+
+<include cwd lang="svelte" meta='title="src/App.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
+</include>
+
+## Add a to-do
+
+Use `db.insert` to create a new row.
+
+<include cwd lang="svelte" meta='title="src/AddTodo.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/AddTodo.svelte
+</include>
+
+## Display and edit a to-do
+
+Display a to-do with toggle and delete controls.
+
+<include cwd lang="svelte" meta='title="src/TodoItem.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/TodoItem.svelte
+</include>
+
+## List to-dos
+
+Subscribe to a query to get real-time updates as data changes, regardless of where the change
+originates.
+
+<include cwd lang="svelte" meta='title="src/TodoList.svelte"'>
+  ../examples/docs/todo-client-localfirst-svelte/src/quickstart-list.svelte
+</include>

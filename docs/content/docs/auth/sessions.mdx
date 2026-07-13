@@ -8,12 +8,9 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
 
 ## Get the session and user ID
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<OtherFrameworks />
+
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-hook
@@ -22,25 +19,12 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
       ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user-id
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-hook
-    </include>
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user-id
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-hook
     </include>
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user-id
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -57,30 +41,15 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
 
 Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) to scope [queries](/docs/reading/queries) to the current user.
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-query
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-query
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-query
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -94,30 +63,15 @@ Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) t
 
 [Insert](/docs/writing/writing-data) a row with the session's user ID to associate it with the current user.
 
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
+<Tabs groupId="jazz-framework" persist updateAnchor items={["React", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-insert
     </include>
   </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-insert
-    </include>
-  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
       ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-insert
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/AuthSessionExamples.tsx
     </include>
   </Tab>
   <Tab value="TypeScript">

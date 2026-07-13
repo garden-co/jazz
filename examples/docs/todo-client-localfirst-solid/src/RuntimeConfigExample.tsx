@@ -3,7 +3,7 @@ import { JazzProvider, createSolidJazzClient } from "jazz-tools/solid";
 
 export function RuntimeConfigExample(props: ParentProps) {
   const client = createSolidJazzClient(() => ({
-    appId: "my-app",
+    appId: "my-app", // Register for an app ID free at v2.dashboard.jazz.tools
     serverUrl: "https://my-jazz-server.example.com",
     runtimeSources: { baseUrl: "/assets/jazz/" },
   }));
