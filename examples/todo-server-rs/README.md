@@ -36,7 +36,7 @@ Configurable via env vars (all optional):
 | ----------------- | --------------------------------------- |
 | `JAZZ_APP_ID`     | hard-coded fallback id (see `main.rs`)  |
 | `JAZZ_SERVER_URL` | `http://localhost:1625`                 |
-| `TODO_DATA_DIR`   | `./todo-data` (Fjall storage location)  |
+| `TODO_DATA_DIR`   | `./todo-data` (local data directory)    |
 | `TODO_PORT`       | `3000`                                  |
 | `JAZZ_TOOLS_BIN`  | `jazz-tools` (used for `schema export`) |
 

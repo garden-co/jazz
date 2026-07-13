@@ -1,5 +1,6 @@
 <!-- #region auth-external-svelte -->
 <script lang="ts">
+  import type { Db } from "jazz-tools";
   import {
     createJazzClient,
     JazzSvelteProvider,
@@ -25,7 +26,7 @@
 
 {#key jwtToken}
   <JazzSvelteProvider {client}>
-    {#snippet children({ db })}
+    {#snippet children({ db }: { db: Db })}
       <button onclick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
       <!-- Your app content here -->
     {/snippet}

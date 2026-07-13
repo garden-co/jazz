@@ -425,6 +425,14 @@ describe("packaged docs index", () => {
     expect(txt).toContain("### Managing JWT changes on a live client");
     expect(txt).toContain("### Reacting to expiry and unauthenticated responses");
 
+    expect(txt).toContain("JAZZ_AUTH_COOKIE_NAME");
+    expect(txt).toContain("### Subscriptions");
+    expect(txt).toContain("NAPI SQLite storage");
+    expect(txt).not.toContain("### Live Query");
+    expect(txt).not.toContain("DevTools panel");
+    expect(txt).not.toContain("attachDevTools");
+    expect(txt).not.toContain("NAPI Fjall");
+
     expect(txt).not.toContain("allowSelfSigned");
     expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");
   });
