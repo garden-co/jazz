@@ -282,6 +282,7 @@ where
             .insert(schema.id, schema.clone());
         self.query.version_storage_sources_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
         if schema.id == self.catalogue.current_schema_version_id {
             self.catalogue.schema = schema.schema.clone();
             self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
@@ -372,6 +373,7 @@ where
             self.persist_catalogue_pointer(pointer)?;
             self.query.version_storage_sources_cache.clear();
             self.query.read_policy_authorization_request_cache.clear();
+            self.query.policy_authorization_graph_cache.clear();
             let active_schema = self
                 .catalogue
                 .catalogue_schemas

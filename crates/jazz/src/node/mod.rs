@@ -298,6 +298,8 @@ struct QueryServing {
     /// Derived read-policy authorization requests keyed by policy context.
     read_policy_authorization_request_cache:
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
+    /// Lowered authorization row-id graphs keyed by their full query-engine request.
+    policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction.
@@ -579,6 +581,7 @@ where
                 current_row_graphs,
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
+                policy_authorization_graph_cache: BTreeMap::new(),
                 tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
@@ -682,6 +685,7 @@ where
     ) {
         self.session_claims.insert(identity, claims);
         self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
@@ -715,6 +719,7 @@ where
         self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
         self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
