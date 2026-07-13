@@ -22,7 +22,6 @@ pub mod rocksdb_storage;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use crate::records::{OwnedRecord, Record, RecordDescriptor, Value as RecordValue, ValueType};
@@ -54,10 +53,9 @@ pub type ScanVisitor<'visitor> =
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DecodedWindowCacheKey {
+    storage_token: usize,
     column_family: String,
     window_key: Vec<u8>,
-    value_fingerprint: u64,
-    value_len: usize,
 }
 
 #[derive(Default)]
@@ -74,8 +72,8 @@ impl DecodedWindowCache {
     // Window records are immutable in v1: consolidation writes each window once,
     // tail records stay plain, and no later maintenance rewrites window values.
     // Therefore decoded entries need no invalidation beyond LRU eviction. The
-    // value fingerprint is included only to keep separate test/store instances
-    // with the same logical CF and window key from colliding.
+    // storage token keeps separate test/store instances with the same logical CF
+    // and window key from colliding.
     fn get(&mut self, key: &DecodedWindowCacheKey) -> Option<Vec<KeyValue>> {
         let value = self.values.get(key)?.clone();
         self.touch(key);
@@ -118,12 +116,6 @@ impl DecodedWindowCache {
             self.lru.push_back(existing);
         }
     }
-}
-
-fn fingerprint_bytes(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Typed storage delta appended through backends that can durably merge without
@@ -285,6 +277,14 @@ pub trait OrderedKvStorage {
     /// shutdown boundary. Backends without close-time work may keep the default.
     fn close(&self) -> Result<(), Error> {
         Ok(())
+    }
+    /// Process-local identity for cache partitioning. Backends may override
+    /// this when cheap clones should share cache entries.
+    fn cache_token(&self) -> usize
+    where
+        Self: Sized,
+    {
+        self as *const Self as usize
     }
     /// Return approximate live bytes for one storage class/column family when
     /// the backend can expose them cheaply.
@@ -1198,10 +1198,9 @@ where
         let schema = self.window_schema()?;
         let key_record = self.key_record_from_bytes(key)?;
         let cache_key = DecodedWindowCacheKey {
+            storage_token: self.storage.cache_token(),
             column_family: self.column_family.to_owned(),
             window_key: window_key.to_vec(),
-            value_fingerprint: fingerprint_bytes(window),
-            value_len: window.len(),
         };
         let cache = DECODED_WINDOW_CACHE.get_or_init(|| Mutex::new(DecodedWindowCache::default()));
         if let Some(value) = cache
@@ -1243,10 +1242,9 @@ where
         window: &[u8],
     ) -> Result<Vec<KeyValue>, Error> {
         let key = DecodedWindowCacheKey {
+            storage_token: self.storage.cache_token(),
             column_family: self.column_family.to_owned(),
             window_key: window_key.to_vec(),
-            value_fingerprint: fingerprint_bytes(window),
-            value_len: window.len(),
         };
         let cache = DECODED_WINDOW_CACHE.get_or_init(|| Mutex::new(DecodedWindowCache::default()));
         if let Some(cached) = cache
