@@ -6272,12 +6272,7 @@ fn encode_projection_field_value(
         .fields()
         .get(field_idx)
         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
-    let name = field
-        .name
-        .clone()
-        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
-    let descriptor = RecordDescriptor::new([(name, field.value_type.clone())]);
-    descriptor.create(&[value]).map_err(Into::into)
+    records::encode_single_field_value(&value, &field.value_type).map_err(Into::into)
 }
 
 fn resolve_field_ref(

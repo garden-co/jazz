@@ -97,6 +97,13 @@ use values::{
     validate_schema_value_type, write_u32,
 };
 
+pub(crate) fn encode_single_field_value(
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<Vec<u8>, Error> {
+    encode_value(value, value_type)
+}
+
 /// Interned schema-side description needed to interpret compact record bytes.
 ///
 /// Equality and hashing are intern-handle based; deterministic code must not
