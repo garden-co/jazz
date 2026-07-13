@@ -282,9 +282,13 @@ fn fact_public_fields(
 }
 
 #[derive(Clone, Debug)]
-struct PolicyAuthorizationGraph {
+pub(super) struct PolicyAuthorizationGraph {
     graph: GraphBuilder,
     route_fields: BTreeSet<String>,
+}
+
+fn policy_authorization_graph_cache_key(request: &QueryProgramRequest) -> String {
+    format!("{request:?}")
 }
 
 fn output_routing_fields_for_query_eval(
@@ -5108,6 +5112,10 @@ where
         request: QueryProgramRequest,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
+        let cache_key = policy_authorization_graph_cache_key(&request);
+        if let Some(graph) = self.query.policy_authorization_graph_cache.get(&cache_key) {
+            return Ok(graph.clone());
+        }
         let program = self.compile_query_program_request(request)?;
         let graph = lowered_terminal_graph(&program, "policy.authorized_rows")?;
         let route_fields = program
@@ -5121,10 +5129,14 @@ where
                 })
             })
             .unwrap_or_default();
-        Ok(PolicyAuthorizationGraph {
+        let graph = PolicyAuthorizationGraph {
             graph,
             route_fields,
-        })
+        };
+        self.query
+            .policy_authorization_graph_cache
+            .insert(cache_key, graph.clone());
+        Ok(graph)
     }
 
     pub(super) fn branch_read_policy_authorized_branch_ids(
