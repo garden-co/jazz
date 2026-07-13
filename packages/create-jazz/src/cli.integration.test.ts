@@ -93,4 +93,58 @@ describe("create-jazz CLI end-to-end", () => {
     expect(result.stdout + result.stderr).toMatch(/Unknown starter/);
     expect(fs.existsSync(path.join(tmpDir, "will-not-be-scaffolded"))).toBe(false);
   });
+
+  it("prints the deferred setup command when --skills is used without installing dependencies", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-skills-"));
+
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      JAZZ_STARTER_PATH: path.join(repoRoot, "starters/next-localfirst"),
+    };
+    delete env.npm_config_user_agent;
+
+    const result = spawnSync(
+      tsxBin,
+      [cliEntry, "skills-app", "--starter", "next-localfirst", "--skills", "--no-git"],
+      {
+        cwd: tmpDir,
+        env,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout + result.stderr).toContain("npx @tanstack/intent@latest install");
+    expect(fs.existsSync(path.join(tmpDir, "skills-app", "package.json"))).toBe(true);
+  });
+
+  it("rejects contradictory skill setup flags before scaffolding", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-skills-flags-"));
+
+    const env = { ...process.env };
+    delete env.npm_config_user_agent;
+
+    const result = spawnSync(
+      tsxBin,
+      [
+        cliEntry,
+        "conflicting-skills-app",
+        "--starter",
+        "next-localfirst",
+        "--skills",
+        "--no-skills",
+      ],
+      {
+        cwd: tmpDir,
+        env,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("Choose either --skills or --no-skills");
+    expect(fs.existsSync(path.join(tmpDir, "conflicting-skills-app"))).toBe(false);
+  });
 });
