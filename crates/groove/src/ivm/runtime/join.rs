@@ -12,11 +12,11 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 use std::ops::Range;
 
-use crate::records::RecordDescriptor;
+use crate::records::{RecordDescriptor, ValueType};
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part,
+    encode_key_part, encode_record_field_key_part,
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -544,6 +544,21 @@ fn keyed_join_deltas<'a>(
     fields: &[String],
     deltas: &'a [RecordDelta],
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
+    if let Some(field_indices) = scalar_join_field_indices(descriptor, fields)? {
+        let mut keyed = Vec::with_capacity(deltas.len());
+        for delta in deltas {
+            let mut key = Vec::new();
+            for field_idx in &field_indices {
+                encode_record_field_key_part(&mut key, descriptor, delta.raw(), *field_idx)?;
+            }
+            keyed.push(KeyedRecordDelta {
+                delta,
+                key: JoinKey::from_vec(key),
+            });
+        }
+        return Ok(keyed);
+    }
+
     let mut keyed = Vec::new();
     for delta in deltas {
         for key in join_keys(descriptor, delta.raw(), fields)? {
@@ -551,6 +566,30 @@ fn keyed_join_deltas<'a>(
         }
     }
     Ok(keyed)
+}
+
+fn scalar_join_field_indices(
+    descriptor: &RecordDescriptor,
+    fields: &[String],
+) -> Result<Option<Vec<usize>>, IvmRuntimeError> {
+    let mut indices = Vec::with_capacity(fields.len());
+    for field in fields {
+        let field_idx = descriptor
+            .field_index(field)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?;
+        let descriptor_field = descriptor
+            .fields()
+            .get(field_idx)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+        match &descriptor_field.value_type {
+            ValueType::Array(_) => return Ok(None),
+            ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::Array(_)) => {
+                return Ok(None);
+            }
+            _ => indices.push(field_idx),
+        }
+    }
+    Ok(Some(indices))
 }
 
 fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sign: i64) {
