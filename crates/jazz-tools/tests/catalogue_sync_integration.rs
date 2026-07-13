@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::query_manager::types::policy_expr as pe;
+use jazz_tools::query_manager::types::{RowPolicyMode, SchemaHash, permissions};
 use jazz_tools::row_input;
 use jazz_tools::schema_manager::{Lens, LensOp, LensTransform, generate_lens};
 use jazz_tools::server::JazzServer;
@@ -25,8 +26,11 @@ use serde_json::json;
 use support::{
     PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added, has_removed,
     publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
-    wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
+    wait_for_edge_query_ready, wait_for_hidden_row, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
+
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
@@ -88,6 +92,124 @@ fn v1_to_v2_lens() -> Lens {
 
 fn v2_to_v3_lens() -> Lens {
     generate_lens(&schema_v2(), &schema_v3())
+}
+
+fn creator_owned_policies() -> TablePolicies {
+    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
+    permissions(|p| {
+        p.allow_read().always();
+        p.allow_insert().always();
+        p.allow_update()
+            .where_old(created_by_is_session.clone())
+            .where_new(created_by_is_session.clone());
+        p.allow_delete().where_(created_by_is_session);
+    })
+}
+
+fn explicit_delete_policies() -> TablePolicies {
+    permissions(|p| {
+        p.allow_read().always();
+        p.allow_insert().always();
+        p.allow_update().always();
+        p.allow_delete().always();
+    })
+}
+
+fn delete_denied_but_updateable_policies() -> TablePolicies {
+    permissions(|p| {
+        p.allow_read().always();
+        p.allow_insert().always();
+        p.allow_update().always();
+        p.allow_delete().never();
+    })
+}
+
+fn migrated_users_schema_v1(policies: TablePolicies) -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .policies(policies),
+        )
+        .build()
+}
+
+fn migrated_users_schema_v2(policies: TablePolicies) -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text)
+                .policies(policies),
+        )
+        .build()
+}
+
+fn creator_owned_schema_v2() -> jazz_tools::Schema {
+    migrated_users_schema_v2(creator_owned_policies())
+}
+
+/// Starts a real server and two clients around a v1-to-v2 migrated `users` row.
+/// The returned row is already visible through the v2 client.
+async fn start_migrated_user_scenario(
+    policies: TablePolicies,
+    user_id: &str,
+) -> (JazzServer, JazzClient, JazzClient, jazz_tools::ObjectId) {
+    let server = JazzServer::start().await;
+    let v1_schema = migrated_users_schema_v1(policies.clone());
+    let v2_schema = migrated_users_schema_v2(policies.clone());
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema.clone(), v2_schema.clone()],
+        &[generate_lens(&v1_schema, &v2_schema)],
+    )
+    .await
+    .expect("push migrated users catalogue");
+    publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v2_schema,
+        v2_schema.keys().map(|table| (*table, policies.clone())),
+        None,
+    )
+    .await;
+
+    let alice_v1 = JazzClient::connect(server.make_client_context_for_user(v1_schema, user_id))
+        .await
+        .expect("connect alice with schema v1");
+    wait_for_edge_query_ready(&alice_v1, "users", READY_TIMEOUT).await;
+
+    let (row_id, _, batch_id) = alice_v1
+        .insert(
+            "users",
+            user_values_v1(jazz_tools::ObjectId::new(), "Alice"),
+        )
+        .expect("alice creates v1 row");
+    alice_v1
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's v1 row reaches the edge");
+
+    let alice_v2 = JazzClient::connect(server.make_client_context_for_user(v2_schema, user_id))
+        .await
+        .expect("connect alice with schema v2");
+    wait_for_edge_query_ready(&alice_v2, "users", READY_TIMEOUT).await;
+    wait_for_rows(
+        &alice_v2,
+        QueryBuilder::new("users").build(),
+        "alice reads the migrated row",
+        |rows| rows.iter().any(|(id, _)| *id == row_id).then_some(rows),
+    )
+    .await;
+
+    (server, alice_v1, alice_v2, row_id)
 }
 
 fn draft_lens_schema_v1() -> jazz_tools::Schema {
@@ -2222,6 +2344,358 @@ async fn table_rename_update_and_delete_copy_on_write() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that a table-renamed row can be deleted from the new table without
+/// a preceding update that materializes a copy on the new schema branch.
+///
+/// Actors: `alice` writes `users` under schema v1; `bob` deletes the same row
+/// through `people` under schema v2.
+///
+/// ```text
+/// alice v1 users ──insert──► server ──rename lens──► bob v2 people
+/// bob v2 people ──delete──► server ──approve──► row removed
+/// ```
+#[tokio::test]
+async fn table_rename_delete_without_prior_update_copy_on_write() {
+    let server = JazzServer::start().await;
+    let v1_schema = table_rename_schema_v1();
+    let v2_schema = table_rename_schema_v2();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema.clone(), v2_schema.clone()],
+        &[table_rename_v1_to_v2_lens()],
+    )
+    .await
+    .expect("push table-rename catalogue");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, "alice-table-rename-bare-delete"),
+    )
+    .await
+    .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "users", READY_TIMEOUT).await;
+
+    let user_id = jazz_tools::ObjectId::new();
+    let (row_id, _, batch_id) = alice
+        .insert(
+            "users",
+            table_rename_values_v1(user_id, "alice@example.com"),
+        )
+        .expect("alice creates v1 user");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge");
+
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, "bob-table-rename-bare-delete"),
+    )
+    .await
+    .expect("connect bob");
+    wait_for_edge_query_ready(&bob, "people", READY_TIMEOUT).await;
+    wait_for_rows(
+        &bob,
+        QueryBuilder::new("people").build(),
+        "bob reads the table-renamed row before deleting",
+        |rows| rows.iter().any(|(id, _)| *id == row_id).then_some(rows),
+    )
+    .await;
+
+    let delete_batch_id = bob.delete(row_id).expect("bob deletes renamed row");
+    bob.wait_for_batch(delete_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("bob's bare table-renamed delete reaches the edge");
+    let rows_after_delete = wait_for_hidden_row(
+        &bob,
+        QueryBuilder::new("people").build(),
+        "bob sees the bare table-renamed delete",
+        row_id,
+    )
+    .await;
+    assert!(!rows_after_delete.iter().any(|(id, _)| *id == row_id));
+
+    bob.shutdown().await.expect("shutdown bob");
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
+/// Verifies that a bare delete also works across chained table/column lenses.
+///
+/// Actors: `alice` writes `users` under schema v1; `bob` deletes the row from
+/// `members` under schema v3 after v1→v2→v3 catalogue activation.
+///
+/// ```text
+/// alice v1 users ──insert──► server
+/// server ──v1→v2→v3 lenses──► bob v3 members
+/// bob v3 members ──delete──► server ──approve──► row removed
+/// ```
+#[tokio::test]
+async fn multi_hop_table_rename_delete_without_prior_update_copy_on_write() {
+    let server = JazzServer::start().await;
+    let v1_schema = multi_hop_table_rename_schema_v1();
+    let v2_schema = multi_hop_table_rename_schema_v2();
+    let v3_schema = multi_hop_table_rename_schema_v3();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
+        &[
+            multi_hop_table_rename_v1_to_v2_lens(),
+            multi_hop_table_rename_v2_to_v3_lens(),
+        ],
+    )
+    .await
+    .expect("push multi-hop table-rename catalogue");
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, "alice-multi-hop-bare-delete"),
+    )
+    .await
+    .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "users", READY_TIMEOUT).await;
+
+    let user_id = jazz_tools::ObjectId::new();
+    let (row_id, _, batch_id) = alice
+        .insert(
+            "users",
+            multi_hop_table_rename_values_v1(user_id, "alice@example.com"),
+        )
+        .expect("alice creates v1 user");
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice user reaches edge");
+
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v2_schema,
+    )
+    .await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v3_schema,
+    )
+    .await;
+
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v3_schema, "bob-multi-hop-bare-delete"),
+    )
+    .await
+    .expect("connect bob");
+    wait_for_edge_query_ready(&bob, "members", READY_TIMEOUT).await;
+    wait_for_rows(
+        &bob,
+        QueryBuilder::new("members").build(),
+        "bob reads the multi-hop renamed row before deleting",
+        |rows| rows.iter().any(|(id, _)| *id == row_id).then_some(rows),
+    )
+    .await;
+
+    let delete_batch_id = bob.delete(row_id).expect("bob deletes multi-hop row");
+    bob.wait_for_batch(delete_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("bob's bare multi-hop delete reaches the edge");
+    let rows_after_delete = wait_for_hidden_row(
+        &bob,
+        QueryBuilder::new("members").build(),
+        "bob sees the bare multi-hop delete",
+        row_id,
+    )
+    .await;
+    assert!(!rows_after_delete.iter().any(|(id, _)| *id == row_id));
+
+    bob.shutdown().await.expect("shutdown bob");
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
+/// Verifies that migrated rows can be deleted whenever the table has an
+/// explicit DELETE policy, even when that policy does not inspect row values.
+///
+/// Actors: `alice` writes under schema v1, then deletes the same row under
+/// schema v2.
+///
+/// ```text
+/// alice v1 ──insert──► server ──lens──► alice v2
+/// alice v2 ──delete──► server ──explicit allow──► row removed
+/// ```
+#[tokio::test]
+async fn migrated_row_can_be_deleted_with_an_explicit_delete_policy() {
+    let (server, alice_v1, alice_v2, row_id) =
+        start_migrated_user_scenario(explicit_delete_policies(), "alice-migrated-explicit-delete")
+            .await;
+
+    let delete_batch_id = alice_v2
+        .delete(row_id)
+        .expect("alice deletes optimistically");
+    alice_v2
+        .wait_for_batch(delete_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("server accepts the migrated delete with an explicit allow policy");
+
+    let rows_after_delete = wait_for_hidden_row(
+        &alice_v2,
+        QueryBuilder::new("users").build(),
+        "alice sees the explicitly allowed migrated row deleted",
+        row_id,
+    )
+    .await;
+    assert!(!rows_after_delete.iter().any(|(id, _)| *id == row_id));
+
+    alice_v2.shutdown().await.expect("shutdown alice v2");
+    alice_v1.shutdown().await.expect("shutdown alice v1");
+    server.shutdown().await;
+}
+
+/// Verifies that resolving old content for a migrated DELETE does not bypass
+/// the row policy for another user.
+///
+/// Actors: `alice` owns the v1 row; `bob` reads it through v2 and attempts a
+/// server-side delete with local policy checks permissive.
+///
+/// ```text
+/// alice v1 ──insert──► server ──lens──► bob v2
+/// bob v2 ──delete──► server ──✗ creator policy
+/// ```
+#[tokio::test]
+async fn migrated_row_delete_still_enforces_creator_policy() {
+    let (server, alice_v1, alice_v2, row_id) =
+        start_migrated_user_scenario(creator_owned_policies(), "alice-migrated-policy-check").await;
+    let bob = JazzClient::connect_with_row_policy_mode(
+        server.make_client_context_for_user(creator_owned_schema_v2(), "bob-migrated-policy-check"),
+        RowPolicyMode::PermissiveLocal,
+    )
+    .await
+    .expect("connect bob with schema v2");
+    wait_for_edge_query_ready(&bob, "users", READY_TIMEOUT).await;
+    wait_for_rows(
+        &bob,
+        QueryBuilder::new("users").build(),
+        "bob reads alice's migrated row",
+        |rows| rows.iter().any(|(id, _)| *id == row_id).then_some(rows),
+    )
+    .await;
+
+    let delete_batch_id = bob.delete(row_id).expect("bob deletes optimistically");
+    let delete_error = bob
+        .wait_for_batch(delete_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("server rejects bob's creator-policy delete");
+    let delete_error_text = delete_error.to_string();
+    assert!(
+        delete_error_text.contains("denied by policy"),
+        "expected creator-policy denial, got {delete_error_text:?}"
+    );
+    assert!(
+        !delete_error_text.contains("missing row content"),
+        "old-content lookup must not be the reason for an unauthorized delete: {delete_error_text:?}"
+    );
+
+    wait_for_rows(
+        &alice_v2,
+        QueryBuilder::new("users").build(),
+        "alice still sees her migrated row after bob's rejected delete",
+        |rows| rows.iter().any(|(id, _)| *id == row_id).then_some(rows),
+    )
+    .await;
+
+    bob.shutdown().await.expect("shutdown bob");
+    alice_v2.shutdown().await.expect("shutdown alice v2");
+    alice_v1.shutdown().await.expect("shutdown alice v1");
+    server.shutdown().await;
+}
+
+/// Verifies that a rejected migrated DELETE leaves enough state for a valid
+/// follow-up UPDATE from the same client.
+///
+/// Actors: `alice` owns a row whose DELETE policy rejects her, then updates it
+/// under the same migrated schema.
+///
+/// ```text
+/// alice v1 ──insert──► server ──lens──► alice v2
+/// alice v2 ──delete──► server ──✗ delete policy
+/// alice v2 ──update──► server ──approve──► updated row
+/// ```
+#[tokio::test]
+async fn rejected_migrated_delete_does_not_poison_followup_update() {
+    let (server, alice_v1, alice_v2, row_id) = start_migrated_user_scenario(
+        delete_denied_but_updateable_policies(),
+        "alice-migrated-recovery",
+    )
+    .await;
+
+    let delete_batch_id = alice_v2
+        .delete(row_id)
+        .expect("alice deletes optimistically");
+    let delete_error = alice_v2
+        .wait_for_batch(delete_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("server rejects the denied delete policy");
+    let delete_error_text = delete_error.to_string();
+    assert!(
+        delete_error_text.contains("denied by policy"),
+        "expected delete-policy denial, got {delete_error_text:?}"
+    );
+    assert!(
+        !delete_error_text.contains("missing row content"),
+        "rejected delete should reach policy evaluation: {delete_error_text:?}"
+    );
+
+    let update_batch_id = alice_v2
+        .update(row_id, vec![("name".to_string(), "Alice updated".into())])
+        .expect("alice updates the row after rejected delete");
+    alice_v2
+        .wait_for_batch(update_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("follow-up update reaches the edge");
+
+    let rows_after_update = wait_for_rows(
+        &alice_v2,
+        QueryBuilder::new("users").build(),
+        "alice sees the follow-up update after rejected delete",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == row_id
+                        && values.get(1) == Some(&Value::Text("Alice updated".to_string()))
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(rows_after_update.iter().any(|(id, values)| {
+        *id == row_id && values.get(1) == Some(&Value::Text("Alice updated".to_string()))
+    }));
+
+    alice_v2.shutdown().await.expect("shutdown alice v2");
+    alice_v1.shutdown().await.expect("shutdown alice v1");
     server.shutdown().await;
 }
 
