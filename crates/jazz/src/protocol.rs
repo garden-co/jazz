@@ -106,8 +106,8 @@ pub enum SyncMessage {
         reset_result_set: bool,
         /// General carrier stream for singleton bundles and packed runs.
         ///
-        /// L1 receivers normalize this stream into `version_bundles` before
-        /// apply. Existing emitters continue to use `version_bundles` only.
+        /// Receivers validate this stream and apply packed runs directly.
+        /// Legacy/test paths may still expand carriers into `version_bundles`.
         version_carriers: Vec<VersionCarrier>,
         /// Version bundles not previously shipped on the peer.
         ///
@@ -152,8 +152,8 @@ pub enum SyncMessage {
         final_chunk: bool,
         /// General carrier stream for singleton bundles and packed runs.
         ///
-        /// L1 receivers normalize this stream into `version_bundles` before
-        /// apply. Existing emitters continue to use `version_bundles` only.
+        /// Receivers validate this stream and apply packed runs directly.
+        /// Legacy/test paths may still expand carriers into `version_bundles`.
         version_carriers: Vec<VersionCarrier>,
         /// Version bundles not previously shipped on the peer.
         version_bundles: Vec<VersionBundle>,
@@ -214,7 +214,7 @@ impl SyncMessage {
         }
     }
 
-    /// Expand packed view-update carriers into `version_bundles` for L1 apply.
+    /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
     pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
         match &mut self {
             Self::ViewUpdate {
@@ -623,6 +623,47 @@ pub struct VersionBundle {
     pub durability: DurabilityTier,
 }
 
+/// Borrowed view of one version-bundle carrier body.
+#[derive(Clone, Copy, Debug)]
+pub struct VersionBundleRef<'a> {
+    /// Transaction payload for the versions.
+    pub tx: &'a Transaction,
+    /// Row versions carried by the transaction.
+    pub versions: &'a [VersionRecord],
+    /// Fate known when the bundle was shipped.
+    pub fate: &'a Fate,
+    /// Global sequence known when shipped.
+    pub global_seq: Option<GlobalSeq>,
+    /// Durability known when shipped.
+    pub durability: DurabilityTier,
+}
+
+impl<'a> VersionBundleRef<'a> {
+    /// Materialize this borrowed view into the legacy owned bundle shape.
+    pub fn to_owned_bundle(self) -> VersionBundle {
+        VersionBundle {
+            tx: self.tx.clone(),
+            versions: self.versions.to_vec(),
+            fate: self.fate.clone(),
+            global_seq: self.global_seq,
+            durability: self.durability,
+        }
+    }
+}
+
+impl VersionBundle {
+    /// Borrow this singleton bundle as a carrier body.
+    pub fn as_ref(&self) -> VersionBundleRef<'_> {
+        VersionBundleRef {
+            tx: &self.tx,
+            versions: &self.versions,
+            fate: &self.fate,
+            global_seq: self.global_seq,
+            durability: self.durability,
+        }
+    }
+}
+
 /// One row-version carrier in a view-update stream.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum VersionCarrier {
@@ -638,6 +679,14 @@ impl VersionCarrier {
         match self {
             Self::Bundle(bundle) => Ok(vec![bundle.clone()]),
             Self::Run(run) => run.expand(),
+        }
+    }
+
+    /// Borrow this carrier as one or more bundle bodies without expanding.
+    pub fn bundle_refs(&self) -> Result<Vec<VersionBundleRef<'_>>, VersionBundleRunError> {
+        match self {
+            Self::Bundle(bundle) => Ok(vec![bundle.as_ref()]),
+            Self::Run(run) => run.bundle_refs(),
         }
     }
 }
@@ -763,6 +812,39 @@ impl VersionBundleRun {
                     fate: override_
                         .and_then(|override_| override_.fate.clone())
                         .unwrap_or_else(|| self.header.fate.clone()),
+                    global_seq: override_
+                        .and_then(|override_| override_.global_seq)
+                        .unwrap_or(self.header.global_seq),
+                    durability: override_
+                        .and_then(|override_| override_.durability)
+                        .unwrap_or(self.header.durability),
+                }
+            })
+            .collect())
+    }
+
+    /// Borrow the run bodies with header defaults and body overrides applied.
+    pub fn bundle_refs(&self) -> Result<Vec<VersionBundleRef<'_>>, VersionBundleRunError> {
+        self.validate()?;
+        let mut overrides = BTreeMap::new();
+        for override_ in &self.overrides {
+            overrides.insert(override_.body_index as usize, override_);
+        }
+
+        Ok(self
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let override_ = overrides.get(&index).copied();
+                VersionBundleRef {
+                    tx: override_
+                        .and_then(|override_| override_.tx.as_ref())
+                        .unwrap_or(&self.header.tx),
+                    versions: &body.versions,
+                    fate: override_
+                        .and_then(|override_| override_.fate.as_ref())
+                        .unwrap_or(&self.header.fate),
                     global_seq: override_
                         .and_then(|override_| override_.global_seq)
                         .unwrap_or(self.header.global_seq),

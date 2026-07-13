@@ -3229,6 +3229,7 @@ where
                 } => {
                     let shape = shape.clone();
                     let binding = binding.clone();
+                    let has_maintained_subscription = maintained_subscription.is_some();
                     let remote_settled_tier = remote_read_tier.filter(|tier| {
                         node.borrow().has_settled_result_set(BindingViewKey {
                             shape_id: shape.shape_id(),
@@ -3283,7 +3284,6 @@ where
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
-                    let has_maintained_subscription = maintained_subscription.is_some();
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
                     if authoritative_reset {
@@ -3313,7 +3313,14 @@ where
                                 match node_ref
                                     .drain_local_maintained_view_subscription_state(maintained)
                                 {
-                                    Ok(_) => None,
+                                    Ok(_) => {
+                                        node_ref
+                                            .reset_local_maintained_view_subscription_from_binding_view(
+                                                maintained,
+                                                authoritative_reset_binding_view,
+                                            );
+                                        None
+                                    }
                                     Err(error) => return Err(error.into()),
                                 }
                             } else {
@@ -4724,54 +4731,50 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             settled_through,
             reset_result_set,
             version_carriers,
-            mut version_bundles,
+            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-        } => {
-            version_bundles.extend(expand_version_carriers(&version_carriers).unwrap_or_default());
-            ViewUpdateParts {
-                subscription,
-                settled_through,
-                defer_settlement: false,
-                reset_result_set,
-                version_bundles,
-                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-            }
-        }
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: false,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
         SyncMessage::ViewUpdateChunk {
             subscription,
             settled_through,
             reset_result_set,
             final_chunk,
             version_carriers,
-            mut version_bundles,
+            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-        } => {
-            version_bundles.extend(expand_version_carriers(&version_carriers).unwrap_or_default());
-            ViewUpdateParts {
-                subscription,
-                settled_through,
-                defer_settlement: !final_chunk,
-                reset_result_set,
-                version_bundles,
-                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-            }
-        }
+        } => ViewUpdateParts {
+            subscription,
+            settled_through,
+            defer_settlement: !final_chunk,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+        },
         _ => unreachable!("expected view update message"),
     }
 }
@@ -4828,6 +4831,9 @@ fn merge_view_update_chunk_parts(
     accumulated.settled_through = accumulated.settled_through.max(next.settled_through);
     accumulated.defer_settlement = next.defer_settlement;
     accumulated.reset_result_set |= next.reset_result_set;
+    accumulated
+        .version_carriers
+        .append(&mut next.version_carriers);
     accumulated
         .version_bundles
         .append(&mut next.version_bundles);

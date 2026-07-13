@@ -2836,6 +2836,28 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(run_rows, singleton_rows);
         assert_eq!(run_rows.len(), 4);
+        for idx in 0..4 {
+            let row = row_from_u64(idx);
+            assert_eq!(
+                run_reader.row_history("todos", row).unwrap(),
+                singleton_reader.row_history("todos", row).unwrap(),
+                "run receiver apply should store the same row history as singleton apply"
+            );
+            let run_tx = run_reader
+                .local_content_winner_tx_id("todos", row)
+                .unwrap()
+                .expect("run reader should have content winner");
+            let singleton_tx = singleton_reader
+                .local_content_winner_tx_id("todos", row)
+                .unwrap()
+                .expect("singleton reader should have content winner");
+            assert_eq!(run_tx, singleton_tx);
+            assert_eq!(
+                run_reader.transaction_state(run_tx),
+                singleton_reader.transaction_state(singleton_tx),
+                "run receiver apply should preserve transaction state"
+            );
+        }
     }
 
     #[test]

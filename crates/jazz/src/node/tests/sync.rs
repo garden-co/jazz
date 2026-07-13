@@ -488,6 +488,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             result_member_adds,
@@ -551,6 +552,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 settled_through: global_seq,
                 defer_settlement: false,
                 reset_result_set: true,
+                version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_complete_tx_payload_refs: Vec::new(),
                 result_member_adds: vec![ResultMemberEntry::row((
@@ -567,6 +569,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 settled_through: global_seq,
                 defer_settlement: false,
                 reset_result_set: false,
+                version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
                     tx,
                     versions,
@@ -626,6 +629,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 settled_through: GlobalSeq(1),
                 defer_settlement: false,
                 reset_result_set: true,
+                version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
                     tx: tx.clone(),
                     versions: vec![first],
@@ -648,6 +652,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 settled_through: GlobalSeq(1),
                 defer_settlement: false,
                 reset_result_set: true,
+                version_carriers: Vec::new(),
                 version_bundles: vec![VersionBundle {
                     tx,
                     versions: vec![second],
@@ -751,6 +756,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             settled_through: new_seq,
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles: vec![
                 VersionBundle {
                     tx: new,
@@ -3152,6 +3158,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             result_member_adds,
@@ -3211,6 +3218,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             result_member_adds,
@@ -3257,6 +3265,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             settled_through,
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             result_member_adds,
@@ -3280,6 +3289,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             settled_through: GlobalSeq(0),
             defer_settlement: false,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
             result_member_adds: Vec::new(),

@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::merge_strategy::{MergeSide, MergeStrategyInput, materialize_strategy_output};
-use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundle};
+use crate::protocol::{CatalogueAck, ContentExtent, LensOp, VersionBundleRef};
 use crate::protocol_limits::{
     commit_unit_limit_violation, validate_content_extents, validate_known_state_declaration,
     validate_shape_ast_size,
@@ -164,7 +164,7 @@ where
                 subscription,
                 settled_through,
                 reset_result_set,
-                version_carriers: _,
+                version_carriers,
                 version_bundles,
                 peer_payload_inventory,
                 result_member_adds,
@@ -177,6 +177,7 @@ where
                     settled_through,
                     defer_settlement: false,
                     reset_result_set,
+                    version_carriers,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                     result_member_adds,
@@ -191,7 +192,7 @@ where
                 settled_through,
                 reset_result_set,
                 final_chunk,
-                version_carriers: _,
+                version_carriers,
                 version_bundles,
                 peer_payload_inventory,
                 result_member_adds,
@@ -204,6 +205,7 @@ where
                     settled_through,
                     defer_settlement: !final_chunk,
                     reset_result_set,
+                    version_carriers,
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                     result_member_adds,
@@ -1340,29 +1342,92 @@ where
         )
     }
 
-    pub(super) fn ingest_reset_view_bundles_in_bulk(
+    pub(super) fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
-        bundles: &[VersionBundle],
+        bundles: &[VersionBundleRef<'_>],
     ) -> Result<BTreeSet<TxId>, Error> {
+        let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
+        for bundle in bundles {
+            bundles_by_tx
+                .entry(bundle.tx.tx_id)
+                .or_default()
+                .push(*bundle);
+        }
         let mut eligible = Vec::new();
         let mut loaded_tx_ids = BTreeSet::new();
-        for bundle in bundles {
-            if bundle.fate != Fate::Accepted || bundle.global_seq.is_none() {
+        for (tx_id, tx_bundles) in bundles_by_tx {
+            let first = tx_bundles[0];
+            if tx_bundles.iter().any(|bundle| {
+                bundle.tx != first.tx
+                    || bundle.fate != first.fate
+                    || bundle.global_seq != first.global_seq
+                    || bundle.durability != first.durability
+            }) {
                 continue;
             }
-            if bundle.tx.kind != TxKind::Mergeable && bundle.tx.kind != TxKind::Exclusive {
+            if *first.fate != Fate::Accepted {
                 continue;
             }
-            if bundle.tx.kind == TxKind::Exclusive
-                && usize::try_from(bundle.tx.n_total_writes).ok() != Some(bundle.versions.len())
+            if first.global_seq.is_none() {
+                continue;
+            }
+            if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Exclusive {
+                continue;
+            }
+            let mut unique_versions = BTreeMap::<
+                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                &VersionRecord,
+            >::new();
+            let mut duplicate_conflict = false;
+            for bundle in &tx_bundles {
+                for version in bundle.versions {
+                    let key = (
+                        version.table().to_owned(),
+                        version.row_uuid(),
+                        version.schema_version(),
+                        version.deletion().is_some(),
+                    );
+                    match unique_versions.get(&key) {
+                        Some(existing) if existing.record().raw() != version.record().raw() => {
+                            duplicate_conflict = true;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => {
+                            unique_versions.insert(key, version);
+                        }
+                    }
+                }
+                if duplicate_conflict {
+                    break;
+                }
+            }
+            if duplicate_conflict {
+                continue;
+            }
+            let version_count = unique_versions.len();
+            if first.tx.kind == TxKind::Exclusive
+                && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
             {
                 continue;
             }
-            if self.query_transaction(bundle.tx.tx_id)?.is_some() {
+            if self.query_transaction(tx_id)?.is_some() {
                 continue;
             }
-            if loaded_tx_ids.insert(bundle.tx.tx_id) {
-                eligible.push(bundle);
+            let mut missing_refs = false;
+            for bundle in &tx_bundles {
+                if !self.missing_parent_refs(bundle.versions)?.is_empty()
+                    || !self.missing_content_refs(bundle.versions)?.is_empty()
+                {
+                    missing_refs = true;
+                    break;
+                }
+            }
+            if missing_refs {
+                continue;
+            }
+            if loaded_tx_ids.insert(tx_id) {
+                eligible.push(tx_bundles);
             }
         }
         if eligible.is_empty() {
@@ -1374,6 +1439,7 @@ where
         let mut batch = self.database.open_batch();
         let version_count = eligible
             .iter()
+            .flatten()
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
@@ -1384,23 +1450,40 @@ where
         let mut content_rows = BTreeSet::<(String, RowUuid)>::new();
         let mut applied_global_seqs = Vec::with_capacity(eligible.len());
 
-        for bundle in eligible {
-            let tx = &bundle.tx;
+        for tx_bundles in eligible {
+            let first = tx_bundles[0];
+            let tx = first.tx;
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
-            let global_seq = bundle.global_seq.expect("checked above");
+            let global_seq = first.global_seq.expect("checked above");
             applied_global_seqs.push(global_seq);
             batch.insert(
                 "jazz_transactions",
                 transaction_values(
                     tx_node_alias,
                     tx,
-                    bundle.fate.clone(),
-                    bundle.global_seq,
-                    bundle.durability,
+                    (*first.fate).clone(),
+                    first.global_seq,
+                    first.durability,
                 ),
             );
 
-            let mut versions = bundle.versions.iter().collect::<Vec<_>>();
+            let mut unique_versions = BTreeMap::<
+                (String, RowUuid, crate::ids::SchemaVersionId, bool),
+                &VersionRecord,
+            >::new();
+            for bundle in &tx_bundles {
+                for version in bundle.versions {
+                    unique_versions
+                        .entry((
+                            version.table().to_owned(),
+                            version.row_uuid(),
+                            version.schema_version(),
+                            version.deletion().is_some(),
+                        ))
+                        .or_insert(version);
+                }
+            }
+            let mut versions = unique_versions.into_values().collect::<Vec<_>>();
             versions.sort();
             for version in versions {
                 let author_schema = version.schema_version();
@@ -1519,11 +1602,8 @@ where
                 )?;
             }
         }
-        for bundle in bundles {
-            if !loaded_tx_ids.contains(&bundle.tx.tx_id) {
-                continue;
-            }
-            self.invalidate_tx_version_tables_cache(bundle.tx.tx_id);
+        for tx_id in &loaded_tx_ids {
+            self.invalidate_tx_version_tables_cache(*tx_id);
         }
         for global_seq in applied_global_seqs {
             self.record_applied_global_seq(global_seq);
