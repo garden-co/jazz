@@ -52,10 +52,25 @@ export function applySubscriptionDelta<T extends { id: string }>(
   delta: SubscriptionDelta<T>,
 ): T[] {
   if (delta.reset) {
-    current.length = 0;
+    current.length = delta.all.length;
+    for (let index = 0; index < delta.all.length; index++) {
+      current[index] = delta.all[index]!;
+    }
+    return current;
   }
 
-  for (const change of delta.delta) {
+  if (shouldApplyDeltaInBulk(delta.delta)) {
+    return applyBulkSubscriptionDelta(current, delta.delta);
+  }
+
+  return applySubscriptionDeltaSequentially(current, delta.delta);
+}
+
+function applySubscriptionDeltaSequentially<T extends { id: string }>(
+  current: T[],
+  delta: RowDelta<T>[],
+): T[] {
+  for (const change of delta) {
     switch (change.kind) {
       case RowChangeKind.Added:
         removeById(current, change.id);
@@ -79,6 +94,79 @@ export function applySubscriptionDelta<T extends { id: string }>(
   return current;
 }
 
+function applyBulkSubscriptionDelta<T extends { id: string }>(
+  current: T[],
+  delta: RowDelta<T>[],
+): T[] {
+  const changedIds = new Set(delta.map((change) => change.id));
+  const existingById = new Map(current.map((item) => [item.id, item]));
+  const base = current.filter((item) => !changedIds.has(item.id));
+  const placements: Array<{ id: string; index: number; item: T }> = [];
+
+  for (const change of delta) {
+    switch (change.kind) {
+      case RowChangeKind.Added:
+        placements.push({ id: change.id, index: change.index, item: change.item });
+        break;
+      case RowChangeKind.Removed:
+        break;
+      case RowChangeKind.Updated: {
+        const item = change.item ?? existingById.get(change.id);
+        if (item) placements.push({ id: change.id, index: change.index, item });
+        break;
+      }
+    }
+  }
+
+  const ordered = mergeIndexedPlacements(base, placements);
+  current.length = ordered.length;
+  for (let index = 0; index < ordered.length; index++) {
+    current[index] = ordered[index]!;
+  }
+  return current;
+}
+
+function shouldApplyDeltaInBulk<T extends { id: string }>(delta: RowDelta<T>[]): boolean {
+  if (delta.length < 32) return false;
+  const ids = new Set<string>();
+  const indexes = new Set<number>();
+  let previousIndex = -Infinity;
+  for (const change of delta) {
+    if (ids.has(change.id) || indexes.has(change.index) || change.index < previousIndex) {
+      return false;
+    }
+    ids.add(change.id);
+    indexes.add(change.index);
+    previousIndex = change.index;
+  }
+  return true;
+}
+
+function mergeIndexedPlacements<T>(base: T[], placements: Array<{ index: number; item: T }>): T[] {
+  if (placements.length === 0) return base;
+  const byIndex = new Map<number, T>();
+  let inserted = 0;
+  for (const placement of placements) {
+    const index = Math.max(0, Math.min(placement.index, base.length + inserted));
+    byIndex.set(index, placement.item);
+    inserted += 1;
+  }
+
+  const next: T[] = [];
+  next.length = base.length + placements.length;
+  let baseIndex = 0;
+  let nextIndex = 0;
+  while (nextIndex < next.length) {
+    const placed = byIndex.get(nextIndex);
+    if (placed !== undefined) {
+      next[nextIndex++] = placed;
+    } else {
+      next[nextIndex++] = base[baseIndex++]!;
+    }
+  }
+  return next;
+}
+
 function removeById<T extends { id: string }>(current: T[], id: string): void {
   const index = current.findIndex((item) => item.id === id);
   if (index !== -1) current.splice(index, 1);
@@ -95,17 +183,26 @@ function removeById<T extends { id: string }>(current: T[], id: string): void {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
   private orderedIds: string[] = [];
+  private orderedIdIndex = new Map<string, number>();
 
   private removeId(id: string): void {
-    const index = this.orderedIds.indexOf(id);
-    if (index !== -1) {
-      this.orderedIds.splice(index, 1);
-    }
+    const index = this.orderedIdIndex.get(id);
+    if (index === undefined) return;
+    this.orderedIds.splice(index, 1);
+    this.orderedIdIndex.delete(id);
+    this.reindexOrderedIds(index);
   }
 
   private insertIdAt(id: string, index: number): void {
     const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
     this.orderedIds.splice(clamped, 0, id);
+    this.reindexOrderedIds(clamped);
+  }
+
+  private reindexOrderedIds(start = 0): void {
+    for (let index = start; index < this.orderedIds.length; index++) {
+      this.orderedIdIndex.set(this.orderedIds[index]!, index);
+    }
   }
 
   /**
@@ -178,6 +275,15 @@ export class SubscriptionManager<T extends { id: string }> {
   private handleTypedDelta(delta: RowDelta<T>[], reset = false): SubscriptionDelta<T> {
     delta.sort((a, b) => a.index - b.index);
 
+    if (reset) {
+      return this.replaceWithResetDelta(delta);
+    }
+
+    if (shouldApplyDeltaInBulk(delta)) {
+      this.applyBulkTypedDelta(delta);
+      return { delta } as SubscriptionDelta<T>;
+    }
+
     for (const change of delta) {
       switch (change.kind) {
         case RowChangeKind.Added:
@@ -202,13 +308,68 @@ export class SubscriptionManager<T extends { id: string }> {
       }
     }
 
+    return {
+      delta,
+    } as SubscriptionDelta<T>;
+  }
+
+  private replaceWithResetDelta(delta: RowDelta<T>[]): SubscriptionDelta<T> {
+    this.currentResults = new Map();
+    const placements: Array<{ id: string; index: number; item: T }> = [];
+    for (const change of delta) {
+      if (change.kind === RowChangeKind.Removed) continue;
+      const item =
+        change.kind === RowChangeKind.Added || change.item !== undefined
+          ? change.item
+          : this.currentResults.get(change.id);
+      if (!item) continue;
+      this.currentResults.set(change.id, item);
+      placements.push({ id: change.id, index: change.index, item });
+    }
+
+    this.orderedIds = mergeIndexedPlacements(
+      [],
+      placements.map((placement) => ({ index: placement.index, item: placement.id })),
+    );
+    this.orderedIdIndex = new Map();
+    this.reindexOrderedIds();
     const all = this.orderedIds
       .map((id) => this.currentResults.get(id))
       .filter((item): item is T => item !== undefined);
-    return {
-      delta,
-      ...(reset ? { reset: true as const, all } : {}),
-    } as SubscriptionDelta<T>;
+    return { delta, reset: true as const, all };
+  }
+
+  private applyBulkTypedDelta(delta: RowDelta<T>[]): void {
+    const changedIds = new Set(delta.map((change) => change.id));
+    const baseIds = this.orderedIds.filter((id) => !changedIds.has(id));
+    const placements: Array<{ id: string; index: number }> = [];
+
+    for (const change of delta) {
+      switch (change.kind) {
+        case RowChangeKind.Added:
+          this.currentResults.set(change.id, change.item);
+          placements.push({ id: change.id, index: change.index });
+          break;
+        case RowChangeKind.Removed:
+          this.currentResults.delete(change.id);
+          break;
+        case RowChangeKind.Updated:
+          if (change.item !== undefined) {
+            this.currentResults.set(change.id, change.item);
+          }
+          if (this.currentResults.has(change.id)) {
+            placements.push({ id: change.id, index: change.index });
+          }
+          break;
+      }
+    }
+
+    this.orderedIds = mergeIndexedPlacements(
+      baseIds,
+      placements.map((placement) => ({ index: placement.index, item: placement.id })),
+    );
+    this.orderedIdIndex = new Map();
+    this.reindexOrderedIds();
   }
 
   /**
@@ -219,6 +380,7 @@ export class SubscriptionManager<T extends { id: string }> {
   clear(): void {
     this.currentResults.clear();
     this.orderedIds = [];
+    this.orderedIdIndex.clear();
   }
 
   /**
