@@ -32,12 +32,15 @@ import {
   type QueryOrder,
   type QueryPredicate,
   type QueryPredicateOp,
-  type DescriptorField,
   type ValueType,
 } from "./native-codec.js";
 import { columnTypeToValueType, columnValueType, encodeSchema } from "./schema-codec.js";
 import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
-import { createRecord, decodeRecordValue, encodeNativeRowValues } from "./native-row-codec.js";
+import {
+  createNativeRowValueEncoder,
+  createRecord,
+  createRecordValueDecoder,
+} from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
@@ -291,6 +294,13 @@ type RowState = {
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
+};
+
+type NativeRowFieldPlan = {
+  name: string;
+  index: number;
+  type?: ColumnType;
+  includeInValues: boolean;
 };
 
 const textEncoder = new TextEncoder();
@@ -3237,28 +3247,60 @@ function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSn
 }
 
 function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowState[] {
-  return batches.flatMap((batch) =>
-    batch.rows.map((row) => {
-      const decoded = batch.descriptor
-        .map((field, index) => ({ field, index, name: publicFieldName(field.name ?? "") }))
-        .filter(({ field }) => field.name && !isInternalField(field.name))
-        .map(({ field, index, name }) => ({
-          name,
-          value: decodeField(batch.table, field, batch.descriptor, row.raw, index, schema),
-        }));
-      const valuesByColumn = new Map(decoded.map(({ name, value }) => [name, value]));
-      return withValuesByColumn(
-        {
-          table: batch.table,
-          id: formatUuid(row.rowId),
-          values: decoded
-            .filter(({ name }) => !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name))
-            .map(({ value }) => value),
-        },
-        valuesByColumn,
+  const rows: RowState[] = [];
+  for (const batch of batches) {
+    const fieldPlans = nativeRowFieldPlans(batch, schema);
+    const decodeRecord = createRecordValueDecoder(batch.descriptor);
+    for (const row of batch.rows) {
+      const values: Value[] = [];
+      const valuesByColumn = new Map<string, Value>();
+
+      for (const field of fieldPlans) {
+        const value = decodePlannedField(field, decodeRecord, row.raw);
+        valuesByColumn.set(field.name, value);
+        if (field.includeInValues) {
+          values.push(value);
+        }
+      }
+
+      rows.push(
+        withValuesByColumn(
+          {
+            table: batch.table,
+            id: formatUuid(row.rowId),
+            values,
+          },
+          valuesByColumn,
+        ),
       );
-    }),
-  );
+    }
+  }
+  return rows;
+}
+
+function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeRowFieldPlan[] {
+  const columns = schema[batch.table]?.columns ?? [];
+  const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const plans: NativeRowFieldPlan[] = [];
+
+  for (let index = 0; index < batch.descriptor.length; index += 1) {
+    const fieldName = batch.descriptor[index]?.name;
+    if (!fieldName || isInternalField(fieldName)) continue;
+
+    const name = publicFieldName(fieldName);
+    const type =
+      name === "$createdBy" || name === "$updatedBy"
+        ? ({ type: "Uuid" } as const)
+        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+    plans.push({
+      name,
+      index,
+      type,
+      includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
+    });
+  }
+
+  return plans;
 }
 
 function rowsFromRelationSnapshot(
@@ -3597,24 +3639,15 @@ function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
   return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
 }
 
-function decodeField(
-  table: string,
-  field: DescriptorField,
-  descriptor: DescriptorField[],
+function decodePlannedField(
+  field: NativeRowFieldPlan,
+  decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
-  index: number,
-  schema: WasmSchema,
 ): Value {
-  const fieldName = publicFieldName(field.name ?? "");
-  const column = schema[table]?.columns.find((candidate) => candidate.name === fieldName);
-  const type =
-    fieldName === "$createdBy" || fieldName === "$updatedBy"
-      ? ({ type: "Uuid" } as const)
-      : (magicColumnType(fieldName) ?? column?.column_type);
-  const bytes = decodeRecordValue(descriptor, raw, index);
+  const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
-  if (!type) return { type: "Bytea", value: bytes };
-  return decodeBytes(type, bytes, fieldName);
+  if (!field.type) return { type: "Bytea", value: bytes };
+  return decodeBytes(field.type, bytes, field.name);
 }
 
 function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): Value {
@@ -3837,6 +3870,10 @@ function encodeNativeRows(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): Uint8Array {
   const chunks: Uint8Array[] = [];
+  const encodersByColumns = new Map<
+    readonly ColumnDescriptor[],
+    (values: readonly Value[]) => Uint8Array
+  >();
   for (const row of rows) {
     const columns =
       outputColumns && row.table === outputColumns.rootTable
@@ -3845,7 +3882,12 @@ function encodeNativeRows(
     if (!columns) {
       throw new Error(`missing schema for subscription row table ${row.table}`);
     }
-    const raw = encodeNativeRowValues(columns, valuesForNativeFrame(row, columns));
+    let encodeRow = encodersByColumns.get(columns);
+    if (!encodeRow) {
+      encodeRow = createNativeRowValueEncoder(columns);
+      encodersByColumns.set(columns, encodeRow);
+    }
+    const raw = encodeRow(valuesForNativeFrame(row, columns));
     chunks.push(
       requiredUuidBytes(row.id),
       u32Le(rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0),
@@ -3860,11 +3902,15 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
   if (!row.valuesByColumn) {
     return row.values.slice(0, columns.length);
   }
-  return columns.map(
-    (column) =>
-      row.valuesByColumn?.get(column.name) ??
-      (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" }),
-  );
+  const values: Value[] = [];
+  values.length = columns.length;
+  for (let index = 0; index < columns.length; index += 1) {
+    const column = columns[index]!;
+    values[index] =
+      row.valuesByColumn.get(column.name) ??
+      (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
+  }
+  return values;
 }
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
