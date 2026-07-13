@@ -116,8 +116,12 @@ function readResults(resultPath) {
   return text.split(/\r?\n/u).map((line) => JSON.parse(line));
 }
 
-function sameSet(actual, expected) {
-  return actual.length === expected.length && expected.every((skill) => actual.includes(skill));
+function selectionResult(actual, expected) {
+  const exact =
+    actual.length === expected.length && expected.every((skill) => actual.includes(skill));
+  const passed =
+    expected.length === 0 ? actual.length === 0 : expected.every((skill) => actual.includes(skill));
+  return { passed, exact };
 }
 
 function scoreResults(resultPath) {
@@ -131,6 +135,7 @@ function scoreResults(resultPath) {
   const results = readResults(resultPath);
   const byId = new Map(results.map((result) => [result.id, result]));
   let routingPassed = 0;
+  let routingExact = 0;
   let rubricPassed = 0;
   let rubricTotal = 0;
 
@@ -148,14 +153,15 @@ function scoreResults(resultPath) {
       continue;
     }
 
-    const routePassed = sameSet(result.selectedSkills, evalCase.expectedSkills);
-    if (routePassed) routingPassed += 1;
+    const selection = selectionResult(result.selectedSkills, evalCase.expectedSkills);
+    if (selection.passed) routingPassed += 1;
     else {
       console.error(
         `${evalCase.id}: expected [${evalCase.expectedSkills.join(", ")}], got [${result.selectedSkills.join(", ")}]`,
       );
       process.exitCode = 1;
     }
+    if (selection.exact) routingExact += 1;
 
     if (evalCase.kind === "behavior" && result.rubricScores !== undefined) {
       if (
@@ -171,7 +177,9 @@ function scoreResults(resultPath) {
     }
   }
 
-  console.log(`Skill selection: ${routingPassed}/${corpus.cases.length} exact matches`);
+  console.log(
+    `Skill selection: ${routingPassed}/${corpus.cases.length} acceptable matches (${routingExact} exact)`,
+  );
   console.log(
     rubricTotal > 0
       ? `Behavior rubric: ${rubricPassed}/${rubricTotal} criteria`

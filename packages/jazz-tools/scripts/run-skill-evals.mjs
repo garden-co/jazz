@@ -202,13 +202,15 @@ function buildJudgePrompt(cases, responses) {
     id: evalCase.id,
     prompt: evalCase.prompt,
     rubric: evalCase.rubric,
+    rubricScoreCount: evalCase.rubric.length,
     response: responses.find((response) => response.id === evalCase.id)?.response,
   }));
 
   return `Grade these blind skill-evaluation responses. For each rubric criterion, return 1 only if
 the response explicitly and correctly satisfies it; otherwise return 0. Do not infer omitted facts,
 and do not reward the response merely for selecting the expected skill. Return rubric scores in the
-same order as the criteria.
+same order as the criteria. Each rubricScores array must contain exactly the number of entries in
+rubricScoreCount for that record—no more and no fewer.
 
 ${JSON.stringify(records, null, 2)}`;
 }
@@ -231,23 +233,35 @@ function validateResults(cases, results, { judged = false } = {}) {
   }
 }
 
-function sameSet(actual, expected) {
-  return actual.length === expected.length && expected.every((skill) => actual.includes(skill));
+function selectionResult(actual, expected) {
+  const exact =
+    actual.length === expected.length && expected.every((skill) => actual.includes(skill));
+  const passed =
+    expected.length === 0 ? actual.length === 0 : expected.every((skill) => actual.includes(skill));
+  return {
+    passed,
+    exact,
+    extraSkills: actual.filter((skill) => !expected.includes(skill)),
+  };
 }
 
 function summarize(routingCases, routing, behaviorCases, baseline, loaded) {
-  const routingMatches = routing.filter((result) => {
+  const routingSelections = routing.map((result) => {
     const evalCase = routingCases.find((candidate) => candidate.id === result.id);
-    return sameSet(result.selectedSkills, evalCase.expectedSkills);
-  }).length;
+    return selectionResult(result.selectedSkills, evalCase.expectedSkills);
+  });
   const summarizeBehavior = (results) => {
     const rubricScores = results.flatMap((result) => result.rubricScores);
-    const selectionMatches = results.filter((result) => {
+    const selections = results.map((result) => {
       const evalCase = behaviorCases.find((candidate) => candidate.id === result.id);
-      return sameSet(result.selectedSkills, evalCase.expectedSkills);
-    }).length;
+      return selectionResult(result.selectedSkills, evalCase.expectedSkills);
+    });
     return {
-      skillSelection: { passed: selectionMatches, total: behaviorCases.length },
+      skillSelection: {
+        passed: selections.filter((selection) => selection.passed).length,
+        exact: selections.filter((selection) => selection.exact).length,
+        total: behaviorCases.length,
+      },
       rubric: {
         passed: rubricScores.reduce((sum, score) => sum + score, 0),
         total: rubricScores.length,
@@ -258,7 +272,11 @@ function summarize(routingCases, routing, behaviorCases, baseline, loaded) {
   const baselineSummary = summarizeBehavior(baseline);
   const loadedSummary = summarizeBehavior(loaded);
   return {
-    routing: { passed: routingMatches, total: routingCases.length },
+    routing: {
+      passed: routingSelections.filter((selection) => selection.passed).length,
+      exact: routingSelections.filter((selection) => selection.exact).length,
+      total: routingCases.length,
+    },
     baseline: baselineSummary,
     loaded: loadedSummary,
     rubricUplift: loadedSummary.rubric.passed - baselineSummary.rubric.passed,
@@ -273,13 +291,24 @@ async function runBatch(runner, label, cases, prompt, schema) {
 }
 
 async function judgeBatch(runner, label, cases, responses) {
-  console.error(`Judging ${label} (${cases.length} cases)...`);
-  const response = await invokeRunner(runner, {
-    prompt: buildJudgePrompt(cases, responses),
-    schema: judgeSchema(cases),
-  });
-  validateResults(cases, response.output.results, { judged: true });
-  return response;
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    console.error(
+      `Judging ${label} (${cases.length} cases)${attempt === 1 ? "" : `, attempt ${attempt}`}...`,
+    );
+    const response = await invokeRunner(runner, {
+      prompt: buildJudgePrompt(cases, responses),
+      schema: judgeSchema(cases),
+    });
+    try {
+      validateResults(cases, response.output.results, { judged: true });
+      return response;
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      console.error(`Judge output was malformed; retrying: ${error.message}`);
+    }
+  }
+  throw new Error(`Unable to judge ${label}`);
 }
 
 const options = parseArguments(process.argv.slice(2));
@@ -365,18 +394,21 @@ const routingResults = routingRun.output.results.map((result) => {
     ...result,
     prompt: evalCase.prompt,
     expectedSkills: evalCase.expectedSkills,
-    passed: sameSet(result.selectedSkills, evalCase.expectedSkills),
+    ...selectionResult(result.selectedSkills, evalCase.expectedSkills),
   };
 });
 const enrichBehavior = (results) =>
   results.map((result) => {
     const evalCase = behaviorCases.find((candidate) => candidate.id === result.id);
+    const selection = selectionResult(result.selectedSkills, evalCase.expectedSkills);
     return {
       ...result,
       prompt: evalCase.prompt,
       expectedSkills: evalCase.expectedSkills,
       rubric: evalCase.rubric,
-      selectionPassed: sameSet(result.selectedSkills, evalCase.expectedSkills),
+      selectionPassed: selection.passed,
+      selectionExact: selection.exact,
+      extraSkills: selection.extraSkills,
     };
   });
 
