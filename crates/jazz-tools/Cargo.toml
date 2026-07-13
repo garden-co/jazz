@@ -171,10 +171,6 @@ harness = false
 name = "server_authorization_scope_benchmark"
 harness = false
 
-[[bench]]
-name = "migrated_delete_benchmark"
-harness = false
-
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
