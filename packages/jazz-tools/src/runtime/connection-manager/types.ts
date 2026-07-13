@@ -56,6 +56,7 @@ export interface DbForConnection {
 
 export abstract class ConnectionManager {
   private client: JazzClient | null = null;
+  private readonly pendingQueryBundles: Uint8Array[] = [];
   private disposeWasmTelemetry: (() => void) | null = null;
   /**
    * Db schema, cached for performance.
@@ -108,6 +109,15 @@ export abstract class ConnectionManager {
 
     this.client = client;
     this.clientSchema = runtimeSchema;
+
+    // SSR hydration can queue bundles before the first query creates the live
+    // client. Apply them before the connection-specific hook starts transport
+    // or worker activity, so the first subscription sees the hydrated store.
+    for (const bytes of this.pendingQueryBundles) {
+      client.applyQueryBundle(bytes);
+    }
+    this.pendingQueryBundles.length = 0;
+
     this.onClientCreated({
       schemaKey: key,
       schema: runtimeSchema,
@@ -125,6 +135,14 @@ export abstract class ConnectionManager {
    */
   getRuntimeSchema(): WasmSchema | null {
     return this.client ? this.client.getSchema() : null;
+  }
+
+  applyQueryBundle(bytes: Uint8Array): void {
+    if (this.client) {
+      this.client.applyQueryBundle(bytes);
+      return;
+    }
+    this.pendingQueryBundles.push(bytes);
   }
 
   protected get clientEntry(): ConnectionManagerClientInput | null {
@@ -190,6 +208,7 @@ export abstract class ConnectionManager {
 
   async shutdown(): Promise<void> {
     this.disposeMainThreadWasmTelemetry();
+    this.pendingQueryBundles.length = 0;
     await this.shutdownClient();
   }
 }

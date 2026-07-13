@@ -1570,15 +1570,11 @@ export class Db {
 
   /**
    * Seed the live store from a sync bundle's wire bytes (SSR hydration), before
-   * sync connects. `clients` is keyed by schema for memoisation and schema reset,
-   * but an app runs one schema (like the server) so in practice this is the one
-   * client — and `applySnapshot`'s fingerprint guard already gates the bundle to
-   * the live query's schema before it reaches here.
+   * sync connects. The connection manager owns the live client and queues this
+   * until that client is created by the first subscription.
    */
   applyQueryBundle(bytes: Uint8Array): void {
-    for (const client of this.clients.values()) {
-      client.applyQueryBundle(bytes);
-    }
+    this.connection.applyQueryBundle(bytes);
   }
 
   /**
