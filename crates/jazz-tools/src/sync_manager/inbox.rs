@@ -317,7 +317,11 @@ impl SyncManager {
             .into_iter()
             .filter(|candidate| candidate.batch_id != row.batch_id && candidate.state.is_visible())
             .collect::<Vec<_>>();
-        let pre_batch_rows = Self::history_rows_visible_before_batch(row, visible_rows);
+        let only_incoming_branch = visible_rows
+            .iter()
+            .all(|candidate| candidate.branch.as_str() == row.branch.as_str());
+        let pre_batch_rows =
+            Self::history_rows_visible_before_batch(row, visible_rows, !only_incoming_branch)?;
 
         crate::row_histories::visible_row_preview_from_history_rows(
             context.user_descriptor().as_ref(),
@@ -331,9 +335,10 @@ impl SyncManager {
     fn history_rows_visible_before_batch(
         row: &StoredRowBatch,
         visible_rows: Vec<StoredRowBatch>,
-    ) -> Vec<StoredRowBatch> {
+        allow_unresolved_fallback: bool,
+    ) -> Option<Vec<StoredRowBatch>> {
         if row.parents.is_empty() {
-            return visible_rows;
+            return allow_unresolved_fallback.then_some(visible_rows);
         }
 
         let visible_rows_by_batch = visible_rows
@@ -362,9 +367,9 @@ impl SyncManager {
         if parent_rows.is_empty() {
             // A migrated branch may not carry parents from the old schema
             // branch, so its first write must still consider all visible rows.
-            visible_rows
+            allow_unresolved_fallback.then_some(visible_rows)
         } else {
-            parent_rows
+            Some(parent_rows)
         }
     }
 
