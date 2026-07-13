@@ -408,67 +408,68 @@ where
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
-        for raw in self.database.primary_key_scan_raw(
+        let Some(raw) = self.database.primary_key_get_raw(
             "jazz_transactions",
             &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
-        )? {
-            let record = raw.record();
-            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
-            let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
-            if node_alias != expected_alias || time != tx_id.time {
-                continue;
-            }
-            let tx = Transaction {
-                tx_id,
-                kind: tx_kind_from_discriminant(
-                    record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
-                )?,
-                n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-                made_by: AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
-                permission_subject: record
-                    .get_nullable_uuid(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
-                    .map(AuthorId),
-                base_snapshot: None,
-                row_read_set: None,
-                absent_read_set: None,
-                predicate_read_set: None,
-                user_metadata_json: record
-                    .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
-                    .map(str::to_owned),
-                source_branch: record
-                    .get_nullable_uuid(TransactionRowRecord::FIELD_SOURCE_BRANCH_IDX)?
-                    .map(BranchId),
-                merge_strategy: record
-                    .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
-                    .and_then(decode_merge_strategy_tag),
-            };
-            let fate = fate_from_encoded_fields(record)?;
-            return Ok(Some(StoredTransaction {
-                tx,
-                node_alias,
-                fate,
-                global_seq: record
-                    .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
-                    .map(GlobalSeq),
-                durability: durability_from_discriminant(
-                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
-                )?,
-            }));
+        )?
+        else {
+            return Ok(None);
+        };
+        let record = raw.record();
+        let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+        let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
+        if node_alias != expected_alias || time != tx_id.time {
+            return Ok(None);
         }
-        Ok(None)
+        let tx = Transaction {
+            tx_id,
+            kind: tx_kind_from_discriminant(
+                record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
+            )?,
+            n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
+            made_by: AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
+            permission_subject: record
+                .get_nullable_uuid(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
+                .map(AuthorId),
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: record
+                .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
+                .map(str::to_owned),
+            source_branch: record
+                .get_nullable_uuid(TransactionRowRecord::FIELD_SOURCE_BRANCH_IDX)?
+                .map(BranchId),
+            merge_strategy: record
+                .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
+                .and_then(decode_merge_strategy_tag),
+        };
+        let fate = fate_from_encoded_fields(record)?;
+        Ok(Some(StoredTransaction {
+            tx,
+            node_alias,
+            fate,
+            global_seq: record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
+                .map(GlobalSeq),
+            durability: durability_from_discriminant(
+                record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+            )?,
+        }))
     }
 
     pub(super) fn transaction_exists(&self, tx_id: TxId) -> Result<bool, Error> {
         let Some(expected_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Ok(false);
         };
-        Ok(!self
+        Ok(self
             .database
-            .primary_key_scan_raw(
+            .primary_key_get_raw(
                 "jazz_transactions",
                 &[Value::U64(tx_id.time.0), Value::U64(expected_alias.0)],
             )?
-            .is_empty())
+            .is_some())
     }
 
     pub(super) fn transaction_exists_memo(
