@@ -22,7 +22,7 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 2;
+pub const WIRE_PROTOCOL_VERSION: u16 = 3;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -255,7 +255,19 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     if validate_sync_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
-    from_bytes(bytes)
+    let message: SyncMessage = from_bytes(bytes)?;
+    message
+        .validate_version_carriers()
+        .map_err(|_| postcard::Error::DeserializeBadOption)?;
+    Ok(message)
+}
+
+/// Decode a semantic sync message and expand packed view-update carriers for
+/// the current L1 receiver apply path.
+pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    decode_sync_message(bytes)?
+        .expand_version_carriers_for_receive()
+        .map_err(|_| postcard::Error::DeserializeBadOption)
 }
 
 /// Optional transport compression features enabled for this process.
@@ -769,7 +781,10 @@ pub fn negotiate_wire(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use groove::Intern;
+    use groove::schema::ColumnType;
     use serde_json::json;
 
     use super::*;
@@ -777,10 +792,12 @@ mod tests {
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
         RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
-        SubscriptionKey,
+        SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
+        VersionRecord, build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
+    use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 
@@ -795,8 +812,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                    "min_protocol_version": 2,
-                    "max_protocol_version": 2,
+                "min_protocol_version": 3,
+                "max_protocol_version": 3,
                     "features": 5,
                     "role": "client"
                 }
@@ -869,6 +886,186 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn view_update_mixed_version_carrier_runs_round_trip_and_expand_for_receive() {
+        let bundles = version_bundles(4);
+        let singleton_run = VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[..1])
+                .unwrap()
+                .remove(0),
+        );
+        let multi_run = VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[1..])
+                .unwrap()
+                .remove(0),
+        );
+        let message = view_update_with_carriers(vec![singleton_run, multi_run]);
+
+        let encoded = encode_sync_message(&message).unwrap();
+        assert_eq!(decode_sync_message(&encoded).unwrap(), message);
+
+        let decoded = decode_sync_message_for_receive(&encoded).unwrap();
+        let SyncMessage::ViewUpdate {
+            version_carriers,
+            version_bundles,
+            ..
+        } = decoded
+        else {
+            panic!("expected view update");
+        };
+        assert!(version_carriers.is_empty());
+        assert_eq!(version_bundles, bundles);
+    }
+
+    #[test]
+    fn large_version_carrier_run_round_trips() {
+        let bundles = version_bundles(128);
+        let run = build_version_bundle_runs_from_singletons(&bundles)
+            .unwrap()
+            .remove(0);
+        let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
+        let encoded = encode_sync_message(&message).unwrap();
+
+        let decoded = decode_sync_message_for_receive(&encoded).unwrap();
+        let SyncMessage::ViewUpdate {
+            version_bundles, ..
+        } = decoded
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(version_bundles, bundles);
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_body_count_is_rejected() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.header.body_count = 3;
+
+        assert_eq!(
+            run.validate(),
+            Err(VersionBundleRunError::BodyCountMismatch {
+                declared: 3,
+                actual: 2
+            })
+        );
+        assert!(encode_then_decode_run(run).is_err());
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_override_index_is_rejected() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.overrides
+            .push(crate::protocol::VersionBundleRunOverride {
+                body_index: 2,
+                tx: None,
+                fate: Some(Fate::Pending),
+                global_seq: None,
+                durability: None,
+            });
+
+        assert_eq!(
+            run.validate(),
+            Err(VersionBundleRunError::OverrideIndexOutOfRange {
+                index: 2,
+                body_count: 2
+            })
+        );
+        assert!(encode_then_decode_run(run).is_err());
+    }
+
+    #[test]
+    fn build_expand_version_carrier_run_preserves_singletons() {
+        let bundles = version_bundles(6);
+        let run = build_version_bundle_runs_from_singletons(&bundles)
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(run.expand().unwrap(), bundles);
+        assert_eq!(
+            VersionCarrier::Run(run).expand().unwrap(),
+            bundles,
+            "expanded run applies the same singleton carrier sequence at the type level"
+        );
+    }
+
+    fn encode_then_decode_run(run: VersionBundleRun) -> Result<SyncMessage, postcard::Error> {
+        let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
+        decode_sync_message(&encode_sync_message(&message).unwrap())
+    }
+
+    fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
+        SyncMessage::ViewUpdate {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+                read_view: Default::default(),
+            },
+            settled_through: GlobalSeq(500),
+            reset_result_set: false,
+            version_carriers,
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        }
+    }
+
+    fn version_bundles(count: usize) -> Vec<VersionBundle> {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+        let node = NodeUuid::from_bytes([0x11; 16]);
+        let author = AuthorId::from_bytes([0x55; 16]);
+        (0..count)
+            .map(|index| {
+                let tx_id = TxId::new(TxTime(1_000 + index as u64), node);
+                VersionBundle {
+                    tx: Transaction {
+                        tx_id,
+                        kind: TxKind::Mergeable,
+                        n_total_writes: 1,
+                        made_by: author,
+                        permission_subject: None,
+                        base_snapshot: None,
+                        row_read_set: None,
+                        absent_read_set: None,
+                        predicate_read_set: None,
+                        user_metadata_json: None,
+                        source_branch: None,
+                        merge_strategy: None,
+                    },
+                    versions: vec![
+                        VersionRecord::from_cells(
+                            &table,
+                            schema_version,
+                            RowUuid::from_bytes([index as u8; 16]),
+                            Vec::new(),
+                            author,
+                            TxTime(1_000 + index as u64),
+                            author,
+                            TxTime(1_000 + index as u64),
+                            &BTreeMap::from([("title".to_owned(), format!("todo-{index}"))]),
+                            None,
+                        )
+                        .unwrap(),
+                    ],
+                    fate: Fate::Accepted,
+                    global_seq: Some(GlobalSeq(10_000 + index as u64)),
+                    durability: if index % 3 == 0 {
+                        DurabilityTier::Edge
+                    } else {
+                        DurabilityTier::Global
+                    },
+                }
+            })
+            .collect()
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"))]
@@ -992,6 +1189,7 @@ mod tests {
                     subscription,
                     settled_through: GlobalSeq(10_000 + i),
                     reset_result_set: false,
+                    version_carriers: Vec::new(),
                     version_bundles: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                     result_member_adds: vec![member],
@@ -1072,6 +1270,7 @@ mod tests {
                 subscription,
                 settled_through: GlobalSeq(7),
                 reset_result_set: true,
+                version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
@@ -1086,6 +1285,7 @@ mod tests {
                 settled_through: GlobalSeq(7),
                 reset_result_set: true,
                 final_chunk: true,
+                version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
@@ -1160,6 +1360,7 @@ mod tests {
             },
             settled_through: GlobalSeq(7),
             reset_result_set: true,
+            version_carriers: Vec::new(),
             version_bundles: Vec::new(),
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],

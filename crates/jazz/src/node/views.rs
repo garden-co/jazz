@@ -587,6 +587,7 @@ where
             subscription,
             settled_through: self.clock.applied_global_watermark,
             reset_result_set: false,
+            version_carriers: Vec::new(),
             version_bundles,
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
