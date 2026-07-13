@@ -4281,6 +4281,7 @@ struct NodeRuntimeMeta {
     depends_on_context: Option<bool>,
     input_signature: Option<Arc<NodeInputSignature>>,
     input_generation: u64,
+    raw_projection_fields: Option<Option<Arc<[RawProjectionField]>>>,
     join_left_fields: Option<Arc<[String]>>,
     join_right_fields: Option<Arc<[String]>>,
     join_output_mapping: Option<Arc<[(usize, usize)]>>,
@@ -4446,6 +4447,7 @@ impl NodeState {
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
+        raw_projection: Option<&[RawProjectionField]>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let estimated_output_bytes = input
             .deltas
@@ -4454,10 +4456,9 @@ impl NodeState {
             .sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
         let mut spans = Vec::with_capacity(input.deltas.len());
-        let raw_projection = raw_projection_fields(project, &input.descriptor, output_desc)?;
         let mut raw_projection_scratch = RawProjectionScratch::default();
         for delta in &input.deltas {
-            let span = if let Some(fields) = raw_projection.as_deref() {
+            let span = if let Some(fields) = raw_projection {
                 output_desc
                     .project_raw_fields_into(
                         &input.descriptor,
@@ -5018,7 +5019,14 @@ where
             }
             OpType::MapProject(project) => {
                 let input = self.update_unary_input(graph_node, node)?;
-                NodeState::update_map_project(project, output_desc, &input)
+                let raw_projection =
+                    self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
+                NodeState::update_map_project(
+                    project,
+                    output_desc,
+                    &input,
+                    raw_projection.as_deref(),
+                )
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -5325,6 +5333,29 @@ where
         meta.depends_on_context = Some(depends_on_context);
         meta.input_signature = Some(Arc::clone(&signature));
         Ok(signature)
+    }
+
+    fn raw_projection_fields(
+        &mut self,
+        node: NodeId,
+        project: &MapProjectOp,
+        input_desc: &RecordDescriptor,
+        output_desc: RecordDescriptor,
+    ) -> Result<Option<Arc<[RawProjectionField]>>, IvmRuntimeError> {
+        if let Some(cached) = self
+            .node_meta
+            .get(&node)
+            .and_then(|meta| meta.raw_projection_fields.clone())
+        {
+            return Ok(cached);
+        }
+
+        let resolved = raw_projection_fields(project, input_desc, output_desc)?.map(Arc::from);
+        self.node_meta
+            .entry(node)
+            .or_default()
+            .raw_projection_fields = Some(resolved.clone());
+        Ok(resolved)
     }
 
     fn frontier_source(
