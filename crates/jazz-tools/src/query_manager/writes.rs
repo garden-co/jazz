@@ -670,12 +670,7 @@ impl QueryManager {
             return entry.branch_frontier;
         }
 
-        let history_table = storage
-            .load_row_locator(row_id)
-            .ok()
-            .flatten()
-            .map(|locator| locator.table.to_string())
-            .unwrap_or_else(|| table.to_string());
+        let history_table = crate::storage::history_table_for_row(storage, row_id, table);
         if let Ok(history_rows) = storage.scan_history_row_batches(&history_table, row_id) {
             let visible_rows = history_rows
                 .iter()

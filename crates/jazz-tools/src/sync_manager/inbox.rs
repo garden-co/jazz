@@ -308,21 +308,34 @@ impl SyncManager {
         table: &str,
         row: &StoredRowBatch,
     ) -> Option<StoredRowBatch> {
-        let history_table = storage
-            .load_row_locator(row.row_id)
-            .ok()
-            .flatten()
-            .map(|locator| locator.table.to_string())
-            .unwrap_or_else(|| table.to_string());
+        let history_table = crate::storage::history_table_for_row(storage, row.row_id, table);
         let context =
             crate::storage::resolve_history_row_write_context(storage, &history_table, row).ok()?;
-        let history_rows = storage
+        let visible_rows = storage
             .scan_history_row_batches(&history_table, row.row_id)
-            .ok()?;
-        let visible_rows = history_rows
+            .ok()?
             .into_iter()
             .filter(|candidate| candidate.batch_id != row.batch_id && candidate.state.is_visible())
             .collect::<Vec<_>>();
+        let pre_batch_rows = Self::history_rows_visible_before_batch(row, visible_rows);
+
+        crate::row_histories::visible_row_preview_from_history_rows(
+            context.user_descriptor().as_ref(),
+            &pre_batch_rows,
+            None,
+        )
+        .ok()
+        .flatten()
+    }
+
+    fn history_rows_visible_before_batch(
+        row: &StoredRowBatch,
+        visible_rows: Vec<StoredRowBatch>,
+    ) -> Vec<StoredRowBatch> {
+        if row.parents.is_empty() {
+            return visible_rows;
+        }
+
         let visible_rows_by_batch = visible_rows
             .iter()
             .cloned()
@@ -345,18 +358,14 @@ impl SyncManager {
             .filter(|candidate| included_batch_ids.contains(&candidate.batch_id()))
             .cloned()
             .collect::<Vec<_>>();
-        let pre_batch_rows = if row.parents.is_empty() || parent_rows.is_empty() {
+
+        if parent_rows.is_empty() {
+            // A migrated branch may not carry parents from the old schema
+            // branch, so its first write must still consider all visible rows.
             visible_rows
         } else {
             parent_rows
-        };
-        crate::row_histories::visible_row_preview_from_history_rows(
-            context.user_descriptor().as_ref(),
-            &pre_batch_rows,
-            None,
-        )
-        .ok()
-        .flatten()
+        }
     }
 
     fn apply_row_updated<H: Storage>(
