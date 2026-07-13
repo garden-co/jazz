@@ -27,6 +27,10 @@ use wasm_bindgen_futures::future_to_promise;
 
 mod identity;
 
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+#[global_allocator]
+static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
+
 /// Initialize the WASM module.
 ///
 /// Sets up panic hook for better error messages in the browser console.
