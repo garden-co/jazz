@@ -675,7 +675,7 @@ where
             }
             OpType::MapProject(project) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_map_project(project, output_desc, &input)
+                NodeState::update_map_project(project, output_desc, &input, None)
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.eval_unary_input(graph_node, node)?;
