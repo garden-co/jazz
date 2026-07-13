@@ -180,6 +180,7 @@ where
     S: OrderedKvStorage,
 {
     schema: JazzSchema,
+    schema_version_id: SchemaVersionId,
     identity: DbIdentity,
     node: Node<S>,
     row_id_source: RefCell<Box<dyn RowIdSource>>,
@@ -342,6 +343,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
+        let schema_version_id = config.schema.version_id();
         let node = NodeState::new_with_large_value_checkpoint_op_interval(
             config.identity.node,
             config.schema.clone(),
@@ -351,6 +353,7 @@ where
         )?;
         Ok(Self {
             schema: config.schema,
+            schema_version_id,
             identity: config.identity,
             node: Node::new(node),
             row_id_source: RefCell::new(
@@ -367,6 +370,7 @@ where
     /// This mode is intended for server shells and tests that own authoritative
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+        let schema_version_id = config.schema.version_id();
         let node = NodeState::new_history_complete(
             config.identity.node,
             config.schema.clone(),
@@ -374,6 +378,7 @@ where
         )?;
         Ok(Self {
             schema: config.schema,
+            schema_version_id,
             identity: config.identity,
             node: Node::new(node),
             row_id_source: RefCell::new(
@@ -492,8 +497,8 @@ where
         query: &Query,
         params: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
-        let schema = self.current_write_schema_for_query()?;
-        let shape = query.validate(&schema)?;
+        let (schema, schema_version) = self.current_write_schema_for_query()?;
+        let shape = query.validate_with_schema_version(&schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
             && !self
@@ -2401,15 +2406,15 @@ where
         Ok(DurabilityTier::Local)
     }
 
-    fn current_write_schema_for_query(&self) -> Result<JazzSchema, Error> {
+    fn current_write_schema_for_query(&self) -> Result<(JazzSchema, SchemaVersionId), Error> {
         let node = self.node.node.borrow();
         let current = node.current_write_schema();
-        if current.schema == self.schema.version_id() {
-            return Ok(self.schema.clone());
+        if current.schema == self.schema_version_id {
+            return Ok((self.schema.clone(), self.schema_version_id));
         }
         node.catalogue_schemas()
             .get(&current.schema)
-            .map(|schema| schema.schema.clone())
+            .map(|schema| (schema.schema.clone(), current.schema))
             .ok_or_else(|| {
                 Error::new(
                     ErrorCode::Schema,
