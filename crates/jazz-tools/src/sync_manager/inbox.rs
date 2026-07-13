@@ -308,7 +308,15 @@ impl SyncManager {
         table: &str,
         row: &StoredRowBatch,
     ) -> Option<StoredRowBatch> {
-        let history_table = crate::storage::history_table_for_row(storage, row.row_id, table);
+        let row_locator = storage.load_row_locator(row.row_id).ok().flatten();
+        if row.parents.is_empty() && row_locator.is_none() {
+            return None;
+        }
+
+        let history_table = row_locator
+            .as_ref()
+            .map(|locator| locator.table.to_string())
+            .unwrap_or_else(|| table.to_string());
         let context =
             crate::storage::resolve_history_row_write_context(storage, &history_table, row).ok()?;
         let visible_rows = storage
