@@ -6289,6 +6289,37 @@ where
         Ok(true)
     }
 
+    pub(crate) fn reset_local_maintained_view_subscription_from_binding_view(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+        binding_view_key: BindingViewKey,
+    ) {
+        local.result_set = self
+            .query
+            .settled_result_sets
+            .get(&binding_view_key)
+            .cloned()
+            .unwrap_or_default();
+        local.program_facts = self
+            .query
+            .settled_program_facts
+            .get(&binding_view_key)
+            .cloned()
+            .unwrap_or_default();
+        local.result_payloads = local
+            .program_facts
+            .iter()
+            .filter_map(|fact| match fact {
+                ProgramFactEntry::ResultPayload(payload)
+                    if payload.member.table_name() == Some(local.result_table.as_str()) =>
+                {
+                    Some((payload.member.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+    }
+
     fn drain_local_maintained_view_subscription_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,

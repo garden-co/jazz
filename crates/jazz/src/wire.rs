@@ -262,12 +262,9 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     Ok(message)
 }
 
-/// Decode a semantic sync message and expand packed view-update carriers for
-/// the current L1 receiver apply path.
+/// Decode a semantic sync message for receiver apply.
 pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    decode_sync_message(bytes)?
-        .expand_version_carriers_for_receive()
-        .map_err(|_| postcard::Error::DeserializeBadOption)
+    decode_sync_message(bytes)
 }
 
 /// Optional transport compression features enabled for this process.
@@ -889,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn view_update_mixed_version_carrier_runs_round_trip_and_expand_for_receive() {
+    fn view_update_mixed_version_carrier_runs_round_trip_and_survive_receive_decode() {
         let bundles = version_bundles(4);
         let singleton_run = VersionCarrier::Run(
             build_version_bundle_runs_from_singletons(&bundles[..1])
@@ -906,12 +903,13 @@ mod tests {
         let encoded = encode_sync_message(&message).unwrap();
         assert_eq!(decode_sync_message(&encoded).unwrap(), message);
 
-        let decoded = decode_sync_message_for_receive(&encoded).unwrap();
+        assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
+        let expanded = message.expand_version_carriers_for_receive().unwrap();
         let SyncMessage::ViewUpdate {
             version_carriers,
             version_bundles,
             ..
-        } = decoded
+        } = expanded
         else {
             panic!("expected view update");
         };
@@ -928,10 +926,11 @@ mod tests {
         let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
         let encoded = encode_sync_message(&message).unwrap();
 
-        let decoded = decode_sync_message_for_receive(&encoded).unwrap();
+        assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
+        let expanded = message.expand_version_carriers_for_receive().unwrap();
         let SyncMessage::ViewUpdate {
             version_bundles, ..
-        } = decoded
+        } = expanded
         else {
             panic!("expected view update");
         };

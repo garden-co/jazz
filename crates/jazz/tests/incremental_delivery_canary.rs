@@ -1,16 +1,24 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent, Transport,
+};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{MemoryStorage, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::protocol::SyncMessage;
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::tx::DurabilityTier;
+use jazz::wire::TransportError;
 
 struct CountingAllocator;
 
@@ -105,6 +113,59 @@ fn write_schema() -> JazzSchema {
     ])
 }
 
+fn reset_batch_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("label", ColumnType::String),
+            ColumnSchema::new("ordinal", ColumnType::U32),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
+}
+
+fn global_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+struct DuplexTransport {
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for DuplexTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&left),
+            inbound: Rc::clone(&right),
+        }),
+        Box::new(DuplexTransport {
+            outbound: right,
+            inbound: left,
+        }),
+    )
+}
+
 fn open_db(scale: usize) -> Db<MemoryStorage> {
     open_db_with_schema(scale, relation_schema())
 }
@@ -124,6 +185,23 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
         .with_id_source(SeededRowIdSource::new(scale as u64 + 1)),
     ))
     .expect("open canary db")
+}
+
+fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<MemoryStorage> {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([(scale as u8).wrapping_add(0x40); 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(scale as u64 + 10_000)),
+    ))
+    .expect("open history-complete canary db")
 }
 
 fn open_rocks_db_with_schema(
@@ -191,6 +269,55 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     }
 
     parent
+}
+
+fn seed_reset_batch_fixture(db: &Db<MemoryStorage>, rows: usize) {
+    for index in 0..rows {
+        db.seed_settled_mergeable_for_bootstrap(
+            "items",
+            row(30_000_000 + index as u64),
+            AuthorId::SYSTEM,
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(format!("item-{index}"))),
+                ("ordinal".to_owned(), Value::U32(index as u32)),
+            ]),
+        )
+        .unwrap_or_else(|err| panic!("seed reset-batch item {index}: {err}"));
+    }
+}
+
+fn drive_until_covered(
+    server: &Db<MemoryStorage>,
+    client: &Db<MemoryStorage>,
+    attachment: &jazz::db::QueryAttachment,
+) {
+    for _ in 0..100 {
+        client.tick().expect("tick client");
+        server.tick().expect("tick server");
+        client.tick().expect("tick client after server");
+        if client.query_attachment_is_covered(attachment) {
+            return;
+        }
+    }
+    panic!("timed out waiting for query coverage");
+}
+
+fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
+    for _ in 0..1_000 {
+        let client_before = client.tick_stats().expect("drain client");
+        let server_stats = server.tick_stats().expect("drain server");
+        let client_after = client.tick_stats().expect("drain client after server");
+        if client_before.remote_sync_applied == 0
+            && client_before.consolidated_windows == 0
+            && server_stats.remote_sync_applied == 0
+            && server_stats.consolidated_windows == 0
+            && client_after.remote_sync_applied == 0
+            && client_after.consolidated_windows == 0
+        {
+            return;
+        }
+    }
+    panic!("timed out draining reset-batch sync and consolidation work");
 }
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {
@@ -264,6 +391,67 @@ fn maintained_relation_include_single_row_changes_are_scale_independent() {
     assert!(
         alloc_ratio <= 3.0 && byte_ratio <= 3.0,
         "INV-INC-1 violation: per-change relation/include allocation scaled with accumulated state: \
+         small={small:?}, large={large:?}, alloc_ratio={alloc_ratio:.2}, byte_ratio={byte_ratio:.2}"
+    );
+}
+
+fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
+    let schema = reset_batch_schema();
+    let server = open_history_complete_db_with_schema(existing_rows, schema.clone());
+    let client = open_db_with_schema(existing_rows + 1, schema);
+    seed_reset_batch_fixture(&server, existing_rows);
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
+
+    let prepared = client
+        .prepare_query(&Query::from("items"))
+        .expect("prepare reset-batch query");
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_read_opts())
+        .expect("attach reset-batch query");
+    drive_until_covered(&server, &client, &attachment);
+    let reset_rows = block_on(client.all(&prepared, global_read_opts()))
+        .expect("read reset-batch rows after reset");
+    assert_eq!(reset_rows.len(), existing_rows);
+    drain_until_idle(&server, &client);
+
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "items",
+            row(90_000_000 + existing_rows as u64),
+            AuthorId::SYSTEM,
+            BTreeMap::from([
+                (
+                    "label".to_owned(),
+                    Value::String(format!("post-reset-{existing_rows}")),
+                ),
+                ("ordinal".to_owned(), Value::U32(existing_rows as u32)),
+            ]),
+        )
+        .expect("seed post-reset item");
+    server.tick().expect("queue post-reset update");
+
+    reset_alloc_counter();
+    client.tick().expect("apply post-reset update");
+    let snapshot = stop_alloc_counter();
+    let updated_rows = block_on(client.all(&prepared, global_read_opts()))
+        .expect("read reset-batch rows after post-reset update");
+    assert_eq!(updated_rows.len(), existing_rows + 1);
+    snapshot
+}
+
+#[test]
+fn reset_batch_post_reset_single_row_changes_are_scale_independent() {
+    let small = measure_post_reset_single_insert(500);
+    let large = measure_post_reset_single_insert(2_000);
+
+    let alloc_ratio = large.allocs as f64 / small.allocs.max(1) as f64;
+    let byte_ratio = large.bytes as f64 / small.bytes.max(1) as f64;
+    assert!(
+        alloc_ratio <= 3.0 && byte_ratio <= 3.0,
+        "INV-INC-1 reset-batch violation: one-row post-reset update allocation scaled with applied reset size: \
          small={small:?}, large={large:?}, alloc_ratio={alloc_ratio:.2}, byte_ratio={byte_ratio:.2}"
     );
 }

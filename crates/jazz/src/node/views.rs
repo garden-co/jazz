@@ -12,7 +12,8 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
     KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
-    RowVersionRef, VersionBundle, VersionRecord, build_version_carriers_from_singletons,
+    RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
+    build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -39,16 +40,16 @@ fn maintained_view_find_content_witness<'a>(
     })
 }
 
-fn merge_receiver_version_bundle(
+fn merge_receiver_version_bundle_ref(
     bundles: &mut BTreeMap<TxId, VersionBundle>,
-    bundle: &VersionBundle,
+    bundle: VersionBundleRef<'_>,
 ) -> Result<(), Error> {
     let Some(existing) = bundles.get_mut(&bundle.tx.tx_id) else {
-        bundles.insert(bundle.tx.tx_id, bundle.clone());
+        bundles.insert(bundle.tx.tx_id, bundle.to_owned_bundle());
         return Ok(());
     };
-    if existing.tx != bundle.tx
-        || existing.fate != bundle.fate
+    if existing.tx != *bundle.tx
+        || existing.fate != *bundle.fate
         || existing.global_seq != bundle.global_seq
         || existing.durability != bundle.durability
     {
@@ -64,7 +65,7 @@ fn merge_receiver_version_bundle(
             )
         })
         .collect::<BTreeMap<_, Vec<u8>>>();
-    for version in &bundle.versions {
+    for version in bundle.versions {
         let key = version_bundle_record_key(version);
         match seen.get(&key) {
             Some(raw) if raw.as_slice() == version.record().raw() => {}
@@ -76,6 +77,22 @@ fn merge_receiver_version_bundle(
         }
     }
     Ok(())
+}
+
+fn version_bundle_refs_for_carriers<'a>(
+    version_bundles: &'a [VersionBundle],
+    version_carriers: &'a [VersionCarrier],
+) -> Result<Vec<VersionBundleRef<'a>>, Error> {
+    let mut refs = Vec::with_capacity(version_bundles.len() + version_carriers.len());
+    refs.extend(version_bundles.iter().map(VersionBundle::as_ref));
+    for carrier in version_carriers {
+        refs.extend(
+            carrier
+                .bundle_refs()
+                .map_err(|_| Error::MalformedViewUpdate("malformed version-bundle run"))?,
+        );
+    }
+    Ok(refs)
 }
 
 fn version_bundle_record_key(version: &VersionRecord) -> (String, RowUuid, SchemaVersionId, bool) {
@@ -614,12 +631,6 @@ where
         if updates.is_empty() {
             return Ok(());
         }
-        let mut bundle_counts_by_tx = BTreeMap::<TxId, usize>::new();
-        for update in &updates {
-            for bundle in &update.version_bundles {
-                *bundle_counts_by_tx.entry(bundle.tx.tx_id).or_default() += 1;
-            }
-        }
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -631,33 +642,34 @@ where
             if update.reset_result_set {
                 initial_hydration_binding_views.insert(binding_view_key);
             }
+            let version_bundle_refs = version_bundle_refs_for_carriers(
+                &update.version_bundles,
+                &update.version_carriers,
+            )?;
             let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
                 && update.result_member_removes.is_empty()
-                && update.version_bundles.iter().all(|bundle| {
-                    bundle_counts_by_tx
-                        .get(&bundle.tx.tx_id)
-                        .is_some_and(|count| *count == 1)
-                })
             {
-                bulk_candidates.extend(update.version_bundles.iter().cloned());
+                bulk_candidates.extend(version_bundle_refs.iter().copied());
             }
             if in_initial_hydration
-                && update.version_bundles.is_empty()
+                && version_bundle_refs.is_empty()
                 && (!update.reset_result_set || update.peer_complete_tx_payload_refs.is_empty())
             {
                 initial_hydration_binding_views.remove(&binding_view_key);
             }
         }
-        let bulk_loaded_tx_ids = self.ingest_reset_view_bundles_in_bulk(&bulk_candidates)?;
+        let bulk_loaded_tx_ids = self.ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)?;
         let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
         for update in &updates {
-            for bundle in &update.version_bundles {
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+            {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
-                merge_receiver_version_bundle(&mut receiver_candidates, bundle)?;
+                merge_receiver_version_bundle_ref(&mut receiver_candidates, bundle)?;
             }
         }
         let mut receiver_batch = self.database.open_batch();
@@ -711,6 +723,7 @@ where
             settled_through,
             defer_settlement,
             reset_result_set,
+            version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs,
             result_member_adds,
@@ -718,6 +731,8 @@ where
             program_fact_adds,
             program_fact_removes,
         } = update;
+        let version_bundle_refs =
+            version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
             Ok(binding_view_key) => binding_view_key,
             Err(Error::InvalidStoredValue(
@@ -759,7 +774,7 @@ where
             // Empty reset stamps stay orthogonal below: with no bundles there
             // is no payload to bulk ingest and the stamp must not clear shared
             // state that is already more settled.
-            self.ingest_reset_view_bundles_in_bulk(&version_bundles)?
+            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)?
         } else {
             BTreeSet::new()
         };
@@ -767,14 +782,14 @@ where
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
-        let version_bundles_is_empty = version_bundles.is_empty();
-        if bulk_loaded_tx_ids.len() != version_bundles.len() {
-            for bundle in version_bundles {
+        let version_bundles_is_empty = version_bundle_refs.is_empty();
+        if bulk_loaded_tx_ids.len() != version_bundle_refs.len() {
+            for bundle in &version_bundle_refs {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
                 self.sync_metrics.receiver_per_bundle_ingests += 1;
-                self.ingest_view_bundle(bundle)?;
+                self.ingest_view_bundle_ref(*bundle)?;
             }
         }
         let mut available_peer_complete_tx_payload_refs = Vec::new();
@@ -1065,6 +1080,10 @@ where
             bundle.global_seq,
             bundle.durability,
         )
+    }
+
+    fn ingest_view_bundle_ref(&mut self, bundle: VersionBundleRef<'_>) -> Result<(), Error> {
+        self.ingest_view_bundle(bundle.to_owned_bundle())
     }
 
     fn stage_view_bundle(

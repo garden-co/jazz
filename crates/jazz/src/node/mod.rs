@@ -33,7 +33,7 @@ use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrateg
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
     ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe,
-    SubscriptionKey, SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord, ViewFactEntry,
     expand_version_carriers,
 };
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
@@ -4471,6 +4471,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) settled_through: GlobalSeq,
     pub(crate) defer_settlement: bool,
     pub(crate) reset_result_set: bool,
+    pub(crate) version_carriers: Vec<VersionCarrier>,
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
