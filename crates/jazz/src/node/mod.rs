@@ -34,6 +34,7 @@ use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
     ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaVersion, ShapeAst, Subscribe,
     SubscriptionKey, SyncMessage, VersionBundle, VersionRecord, ViewFactEntry,
+    expand_version_carriers,
 };
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
@@ -3623,22 +3624,35 @@ where
         &mut self,
         message: &SyncMessage,
     ) -> Result<Vec<RowVersionRef>, Error> {
-        let (result_member_adds, version_bundles, program_fact_adds) = match message {
-            SyncMessage::ViewUpdate {
-                result_member_adds,
-                version_bundles,
-                program_fact_adds,
-                ..
-            }
-            | SyncMessage::ViewUpdateChunk {
-                result_member_adds,
-                version_bundles,
-                program_fact_adds,
-                ..
-            } => (result_member_adds, version_bundles, program_fact_adds),
-            _ => return Ok(Vec::new()),
-        };
-        let incoming = version_bundles
+        let (result_member_adds, version_carriers, version_bundles, program_fact_adds) =
+            match message {
+                SyncMessage::ViewUpdate {
+                    result_member_adds,
+                    version_carriers,
+                    version_bundles,
+                    program_fact_adds,
+                    ..
+                }
+                | SyncMessage::ViewUpdateChunk {
+                    result_member_adds,
+                    version_carriers,
+                    version_bundles,
+                    program_fact_adds,
+                    ..
+                } => (
+                    result_member_adds,
+                    version_carriers,
+                    version_bundles,
+                    program_fact_adds,
+                ),
+                _ => return Ok(Vec::new()),
+            };
+        let mut normalized_bundles = version_bundles.clone();
+        normalized_bundles.extend(
+            expand_version_carriers(version_carriers)
+                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?,
+        );
+        let incoming = normalized_bundles
             .iter()
             .flat_map(|bundle| {
                 bundle.versions.iter().map(|version| {
@@ -3652,7 +3666,7 @@ where
             .collect::<BTreeSet<_>>();
         let mut missing = BTreeSet::new();
         let mut visited_text_ancestors = BTreeSet::new();
-        for bundle in version_bundles {
+        for bundle in &normalized_bundles {
             for version in &bundle.versions {
                 self.collect_missing_text_ancestor_refs(
                     version,

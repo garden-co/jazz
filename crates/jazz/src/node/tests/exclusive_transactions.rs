@@ -987,10 +987,10 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
 
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let mut version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         subscription,
         settled_through,
-        mut version_bundles,
         result_member_adds,
         ..
     } = update
@@ -1067,10 +1067,10 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
 
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         subscription,
         settled_through,
-        version_bundles,
         ..
     } = update
     else {
@@ -1145,8 +1145,8 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     let first = peer
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = first
@@ -1162,8 +1162,8 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     let second = peer
         .rehydrate_query(&mut core, &second_shape, &second_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = second
@@ -1205,8 +1205,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
 
     let mut link_a = PeerState::for_author(author_a);
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
+    let version_bundles = version_bundles_for_update(&update_a);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = &update_a

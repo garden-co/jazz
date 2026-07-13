@@ -403,6 +403,69 @@ where
         Ok(None)
     }
 
+    pub(super) fn preload_transaction_memo(
+        &mut self,
+        tx_ids: impl IntoIterator<Item = TxId>,
+        context: &mut super::policy::ViewEvaluationContext,
+    ) -> Result<(), Error> {
+        let mut by_alias = BTreeMap::<(NodeUuid, NodeAlias), BTreeSet<TxTime>>::new();
+        for tx_id in tx_ids {
+            if context.tx_rows.contains_key(&tx_id) {
+                continue;
+            }
+            if let Some(alias) = self.node_aliases.get(&tx_id.node).copied() {
+                by_alias
+                    .entry((tx_id.node, alias))
+                    .or_default()
+                    .insert(tx_id.time);
+            } else {
+                let tx = self.query_transaction(tx_id)?;
+                context.tx_rows.insert(tx_id, tx);
+            }
+        }
+
+        for ((node, alias), times) in by_alias {
+            if times.len() == 1 {
+                let time = *times.iter().next().expect("non-empty time set");
+                let tx_id = TxId::new(time, node);
+                let tx = self.query_transaction_by_alias(tx_id, alias)?;
+                context.tx_rows.insert(tx_id, tx);
+                continue;
+            }
+
+            let min_time = times.iter().next().expect("non-empty time set");
+            let max_time = times.iter().next_back().expect("non-empty time set");
+            let Some(end_time) = max_time.0.checked_add(1) else {
+                for time in times {
+                    let tx_id = TxId::new(time, node);
+                    let tx = self.query_transaction_by_alias(tx_id, alias)?;
+                    context.tx_rows.insert(tx_id, tx);
+                }
+                continue;
+            };
+
+            for time in &times {
+                context.tx_rows.insert(TxId::new(*time, node), None);
+            }
+            for raw in self.database.primary_key_scan_range_raw(
+                "jazz_transactions",
+                &[Value::U64(min_time.0), Value::U64(0)],
+                &[Value::U64(end_time), Value::U64(0)],
+            )? {
+                let record = raw.record();
+                let row_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+                let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
+                if row_alias != alias || !times.contains(&time) {
+                    continue;
+                }
+                let tx_id = TxId::new(time, node);
+                let tx = self.stored_transaction_from_record(tx_id, alias, record)?;
+                context.tx_rows.insert(tx_id, Some(tx));
+            }
+        }
+        Ok(())
+    }
+
     fn query_transaction_by_alias(
         &self,
         tx_id: TxId,
@@ -421,6 +484,16 @@ where
         if node_alias != expected_alias || time != tx_id.time {
             return Ok(None);
         }
+        self.stored_transaction_from_record(tx_id, expected_alias, record)
+            .map(Some)
+    }
+
+    fn stored_transaction_from_record(
+        &self,
+        tx_id: TxId,
+        expected_alias: NodeAlias,
+        record: BorrowedRecord<'_>,
+    ) -> Result<StoredTransaction, Error> {
         let tx = Transaction {
             tx_id,
             kind: tx_kind_from_discriminant(
@@ -446,9 +519,9 @@ where
                 .and_then(decode_merge_strategy_tag),
         };
         let fate = fate_from_encoded_fields(record)?;
-        Ok(Some(StoredTransaction {
+        Ok(StoredTransaction {
             tx,
-            node_alias,
+            node_alias: expected_alias,
             fate,
             global_seq: record
                 .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
@@ -456,7 +529,7 @@ where
             durability: durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?,
-        }))
+        })
     }
 
     pub(super) fn transaction_exists(&self, tx_id: TxId) -> Result<bool, Error> {

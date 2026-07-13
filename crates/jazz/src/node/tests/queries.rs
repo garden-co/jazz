@@ -1786,8 +1786,8 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     let first = peer
         .rehydrate_query(&mut core, &all_shape, &all_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = first
@@ -1801,8 +1801,8 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
     let second = peer
         .rehydrate_query(&mut core, &filtered_shape, &filtered_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = second
@@ -1847,8 +1847,8 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
     let first = peer
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = first
@@ -1863,8 +1863,8 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
     let second = peer
         .rehydrate_query(&mut core, &second_shape, &second_binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = second

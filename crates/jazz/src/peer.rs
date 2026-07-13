@@ -25,7 +25,8 @@ use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
     ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionRecord,
+    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
+    VersionRecord, expand_version_carriers,
 };
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
@@ -734,8 +735,10 @@ impl PeerState {
         if trace_rehydrate {
             let bundle_count = match &update {
                 SyncMessage::ViewUpdate {
-                    version_bundles, ..
-                } => version_bundles.len(),
+                    version_carriers,
+                    version_bundles,
+                    ..
+                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let drain_reads = drain_reads.expect("trace reads captured");
@@ -1045,8 +1048,10 @@ impl PeerState {
         if trace_rehydrate {
             let bundle_count = match &update {
                 SyncMessage::ViewUpdate {
-                    version_bundles, ..
-                } => version_bundles.len(),
+                    version_carriers,
+                    version_bundles,
+                    ..
+                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let open_reads = open_reads.expect("trace reads captured");
@@ -1687,6 +1692,7 @@ impl PeerState {
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
         let SyncMessage::ViewUpdate {
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -1697,14 +1703,15 @@ impl PeerState {
             return;
         };
 
+        let singleton_bundles = view_update_singleton_bundles(version_carriers, version_bundles);
         self.metrics.view_updates_out += 1;
-        self.metrics.version_bundles_out += version_bundles.len() as u64;
+        self.metrics.version_bundles_out += singleton_bundles.len() as u64;
         self.metrics.complete_tx_payload_refs_out +=
             peer_payload_inventory.complete_tx_payloads.len() as u64;
         self.metrics.result_adds_out += result_member_adds.len() as u64;
         self.metrics.result_removes_out += result_member_removes.len() as u64;
 
-        self.metrics.duplicate_version_bundles_out += version_bundles
+        self.metrics.duplicate_version_bundles_out += singleton_bundles
             .iter()
             .filter(|bundle| bundle_contains_complete_tx_payload(bundle))
             .filter(|bundle| self.shipped_complete_tx_payloads.contains(&bundle.tx.tx_id))
@@ -2034,6 +2041,17 @@ fn duplicate_row_result_set(
 
 fn bundle_contains_complete_tx_payload(bundle: &VersionBundle) -> bool {
     usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len())
+}
+
+fn view_update_singleton_bundles(
+    version_carriers: &[VersionCarrier],
+    version_bundles: &[VersionBundle],
+) -> Vec<VersionBundle> {
+    let mut bundles = version_bundles.to_vec();
+    if let Ok(mut expanded) = expand_version_carriers(version_carriers) {
+        bundles.append(&mut expanded);
+    }
+    bundles
 }
 
 fn split_row_version_payloads(
@@ -2544,6 +2562,29 @@ mod tests {
         .unwrap();
     }
 
+    fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
+        match update {
+            SyncMessage::ViewUpdate {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | SyncMessage::ViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
+            } => {
+                let mut bundles = version_bundles.clone();
+                bundles.extend(
+                    crate::protocol::expand_version_carriers(version_carriers)
+                        .expect("test update carriers should expand"),
+                );
+                bundles
+            }
+            _ => Vec::new(),
+        }
+    }
+
     #[test]
     fn non_global_peer_query_subscriptions_use_maintained_path() {
         let (_dir, mut core) = open_node_with_uuid(node(0x44));
@@ -2721,6 +2762,83 @@ mod tests {
     }
 
     #[test]
+    fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results() {
+        struct ForceSingletonGuard;
+        impl Drop for ForceSingletonGuard {
+            fn drop(&mut self) {
+                crate::protocol::set_force_singleton_version_carriers_for_tests(false);
+            }
+        }
+
+        let (_core_dir, mut core) = open_node_with_uuid(node(0x91));
+        for idx in 0..4 {
+            let tx_id = core
+                .commit_mergeable(
+                    MergeableCommit::new("todos", row_from_u64(idx), 1_000 + idx)
+                        .cells(title_cells("match")),
+                )
+                .unwrap();
+            accept_global(&mut core, tx_id, idx + 1);
+        }
+        let ignored = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", row_from_u64(100), 2_000).cells(title_cells("other")),
+            )
+            .unwrap();
+        accept_global(&mut core, ignored, 10);
+        let (shape, binding) = title_shape_binding("match");
+        let mut singleton_peer = PeerState::new();
+        let mut run_peer = PeerState::new();
+
+        crate::protocol::set_force_singleton_version_carriers_for_tests(true);
+        let _guard = ForceSingletonGuard;
+        let singleton_update = singleton_peer
+            .rehydrate_query(&mut core, &shape, &binding)
+            .unwrap();
+        crate::protocol::set_force_singleton_version_carriers_for_tests(false);
+        let run_update = run_peer
+            .rehydrate_query(&mut core, &shape, &binding)
+            .unwrap();
+
+        let SyncMessage::ViewUpdate {
+            version_carriers, ..
+        } = &run_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(
+            version_carriers
+                .iter()
+                .any(|carrier| matches!(carrier, VersionCarrier::Run(run) if run.bodies.len() > 1)),
+            "multi-carrier maintained rehydrate should emit a run"
+        );
+
+        let (_singleton_dir, mut singleton_reader) = open_node_with_uuid(node(0x92));
+        let (_run_dir, mut run_reader) = open_node_with_uuid(node(0x93));
+        register_shape_binding_for_receiver(&mut singleton_reader, &shape, &binding);
+        register_shape_binding_for_receiver(&mut run_reader, &shape, &binding);
+        singleton_reader
+            .apply_sync_message(singleton_update)
+            .unwrap();
+        run_reader.apply_sync_message(run_update).unwrap();
+
+        let singleton_rows = singleton_reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>();
+        let run_rows = run_reader
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(run_rows, singleton_rows);
+        assert_eq!(run_rows.len(), 4);
+    }
+
+    #[test]
     fn maintained_subscription_view_limit_one_installs_subscription() {
         let (_dir, mut core) = open_node_with_uuid(node(0x90));
         let higher_tx = core
@@ -2805,13 +2923,12 @@ mod tests {
         let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
         let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
+            result_member_adds, ..
         } = &update
         else {
             panic!("expected view update");
         };
+        let version_bundles = version_bundles_for_update(&update);
         assert_eq!(
             result_member_adds,
             &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
@@ -2899,13 +3016,12 @@ mod tests {
             .unwrap();
 
         let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
+            result_member_adds, ..
         } = &update
         else {
             panic!("expected view update");
         };
+        let version_bundles = version_bundles_for_update(&update);
         assert_eq!(
             result_member_adds,
             &vec![("todos".to_owned().into(), row_uuid, restored_content_tx)]
@@ -2977,13 +3093,12 @@ mod tests {
             .unwrap();
 
         let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
+            result_member_adds, ..
         } = &update
         else {
             panic!("expected view update");
         };
+        let version_bundles = version_bundles_for_update(&update);
         assert_eq!(
             result_member_adds,
             &vec![("todos".to_owned().into(), row_uuid, restore_tx)]
@@ -4411,8 +4526,8 @@ mod tests {
         accept_global(&mut core, tx_id, 1);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             result_member_adds,
             result_member_removes,
             ..
@@ -4447,8 +4562,8 @@ mod tests {
         accept_global(&mut core, tx_id, 1);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4493,8 +4608,8 @@ mod tests {
         accept_global(&mut core, tx_id, 1);
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4588,10 +4703,9 @@ mod tests {
 
         let mut peer = PeerState::new();
         let update = peer.current_rows_update(&mut core, "orderLines").unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
+            result_member_adds, ..
         } = update
         else {
             panic!("expected view update");
@@ -4639,8 +4753,8 @@ mod tests {
         peer.set_ship_complete_exclusive_payloads(true);
         core.reset_query_engine_read_metrics();
         let update = peer.current_rows_update(&mut core, "docs").unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4786,8 +4900,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         let first = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&first);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4808,8 +4922,8 @@ mod tests {
         assert!(result_member_removes.is_empty());
 
         let second = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&second);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4917,8 +5031,8 @@ mod tests {
 
         let mut peer = PeerState::for_author(user);
         let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
+        let version_bundles = version_bundles_for_update(&first_update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -4959,8 +5073,8 @@ mod tests {
         accept_global(&mut core, second_grant, 3);
 
         let grant_update = peer.current_rows_update(&mut core, "docs").unwrap();
+        let version_bundles = version_bundles_for_update(&grant_update);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5007,10 +5121,9 @@ mod tests {
         let mut peer = PeerState::new();
 
         let empty = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&empty);
         let SyncMessage::ViewUpdate {
-            result_member_adds,
-            version_bundles,
-            ..
+            result_member_adds, ..
         } = empty
         else {
             panic!("expected view update");
@@ -5027,9 +5140,9 @@ mod tests {
         accept_global(&mut core, tx_id, 1);
 
         let update = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&update);
         let SyncMessage::ViewUpdate {
             result_member_adds,
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5072,8 +5185,8 @@ mod tests {
         peer.forget_subscription(subscription);
         assert!(peer.subscription_result_sets(subscription).is_none());
         let rehydrated = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&rehydrated);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5147,9 +5260,9 @@ mod tests {
         );
 
         let rehydrated = peer.reset_current_rows(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&rehydrated);
         let SyncMessage::ViewUpdate {
             reset_result_set,
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,
@@ -5277,8 +5390,8 @@ mod tests {
             .unwrap();
         accept_global(&mut core, restore_tx, 3);
         let restored = peer.current_rows_update(&mut core, "todos").unwrap();
+        let version_bundles = version_bundles_for_update(&restored);
         let SyncMessage::ViewUpdate {
-            version_bundles,
             peer_payload_inventory:
                 crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: complete_tx_payload_refs,

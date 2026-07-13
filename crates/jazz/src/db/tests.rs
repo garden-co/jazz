@@ -5214,9 +5214,12 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
     let chunks = split_oversized_view_update(update).unwrap();
     assert!(chunks.len() > 1);
     let mut total_adds = 0;
+    let mut saw_version_carrier = false;
+    let mut saw_run_carrier = false;
     for chunk in chunks {
         assert!(serialized_uncompressed_wire_message_len(&chunk) <= MAX_WIRE_FRAME_BYTES);
         let SyncMessage::ViewUpdateChunk {
+            version_carriers,
             version_bundles,
             result_member_adds,
             ..
@@ -5224,7 +5227,17 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
         else {
             panic!("expected chunked view update");
         };
-        let incoming = version_bundles
+        assert!(
+            version_bundles.is_empty(),
+            "chunked version payloads should be emitted as carriers"
+        );
+        saw_version_carrier |= !version_carriers.is_empty();
+        saw_run_carrier |= version_carriers
+            .iter()
+            .any(|carrier| matches!(carrier, crate::protocol::VersionCarrier::Run(_)));
+        let expanded_bundles = crate::protocol::expand_version_carriers(&version_carriers)
+            .expect("chunk carriers should expand");
+        let incoming = expanded_bundles
             .iter()
             .flat_map(|bundle| {
                 bundle.versions.iter().map(|version| {
@@ -5247,6 +5260,8 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
             );
         }
     }
+    assert!(saw_version_carrier);
+    assert!(saw_run_carrier);
     assert_eq!(total_adds, 900);
 }
 

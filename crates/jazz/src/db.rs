@@ -46,6 +46,7 @@ use crate::protocol::{
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
     Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
+    build_version_carriers_from_singletons, expand_version_carriers,
 };
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
@@ -4722,49 +4723,55 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             subscription,
             settled_through,
             reset_result_set,
-            version_carriers: _,
-            version_bundles,
+            version_carriers,
+            mut version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-        } => ViewUpdateParts {
-            subscription,
-            settled_through,
-            defer_settlement: false,
-            reset_result_set,
-            version_bundles,
-            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        },
+        } => {
+            version_bundles.extend(expand_version_carriers(&version_carriers).unwrap_or_default());
+            ViewUpdateParts {
+                subscription,
+                settled_through,
+                defer_settlement: false,
+                reset_result_set,
+                version_bundles,
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+            }
+        }
         SyncMessage::ViewUpdateChunk {
             subscription,
             settled_through,
             reset_result_set,
             final_chunk,
-            version_carriers: _,
-            version_bundles,
+            version_carriers,
+            mut version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
-        } => ViewUpdateParts {
-            subscription,
-            settled_through,
-            defer_settlement: !final_chunk,
-            reset_result_set,
-            version_bundles,
-            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        },
+        } => {
+            version_bundles.extend(expand_version_carriers(&version_carriers).unwrap_or_default());
+            ViewUpdateParts {
+                subscription,
+                settled_through,
+                defer_settlement: !final_chunk,
+                reset_result_set,
+                version_bundles,
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                result_member_adds,
+                result_member_removes,
+                program_fact_adds,
+                program_fact_removes,
+            }
+        }
         _ => unreachable!("expected view update message"),
     }
 }
@@ -4933,7 +4940,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             subscription,
             settled_through,
             reset_result_set,
-            version_carriers: _,
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -4945,7 +4952,10 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
-            version_bundles.len(),
+            version_bundles.len()
+                + expand_version_carriers(version_carriers)
+                    .map(|bundles| bundles.len())
+                    .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
             result_member_adds.len(),
             result_member_removes.len(),
@@ -4957,7 +4967,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through,
             reset_result_set,
             final_chunk,
-            version_carriers: _,
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -4970,7 +4980,10 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through.0,
             reset_result_set,
             final_chunk,
-            version_bundles.len(),
+            version_bundles.len()
+                + expand_version_carriers(version_carriers)
+                    .map(|bundles| bundles.len())
+                    .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
             result_member_adds.len(),
             result_member_removes.len(),
@@ -5072,8 +5085,8 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         subscription,
         settled_through,
         reset_result_set,
-        version_carriers: _,
-        version_bundles,
+        version_carriers,
+        mut version_bundles,
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
@@ -5083,6 +5096,10 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
     else {
         return Ok(vec![message]);
     };
+    version_bundles.extend(
+        expand_version_carriers(&version_carriers)
+            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
+    );
 
     let units = view_update_chunk_units(
         version_bundles,
@@ -5249,7 +5266,7 @@ fn view_update_chunk_from_units(
             chunk = push_view_update_chunk_item(chunk, item.clone());
         }
     }
-    chunk
+    pack_view_update_chunk_version_bundles(chunk)
 }
 
 fn push_view_update_chunk_item(mut message: SyncMessage, item: ViewUpdateChunkItem) -> SyncMessage {
@@ -5274,6 +5291,24 @@ fn push_view_update_chunk_item(mut message: SyncMessage, item: ViewUpdateChunkIt
         ViewUpdateChunkItem::ResultMemberRemove(item) => result_member_removes.push(item),
         ViewUpdateChunkItem::ProgramFactAdd(item) => program_fact_adds.push(item),
         ViewUpdateChunkItem::ProgramFactRemove(item) => program_fact_removes.push(item),
+    }
+    message
+}
+
+fn pack_view_update_chunk_version_bundles(mut message: SyncMessage) -> SyncMessage {
+    let SyncMessage::ViewUpdateChunk {
+        version_carriers,
+        version_bundles,
+        ..
+    } = &mut message
+    else {
+        unreachable!("view update chunk packing only applies to chunk messages")
+    };
+    if version_bundles.is_empty() {
+        return message;
+    }
+    if let Ok(carriers) = build_version_carriers_from_singletons(std::mem::take(version_bundles)) {
+        *version_carriers = carriers;
     }
     message
 }
@@ -5374,6 +5409,7 @@ fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate {
             reset_result_set,
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -5384,6 +5420,7 @@ fn view_update_is_empty(message: &SyncMessage) -> bool {
         }
         | SyncMessage::ViewUpdateChunk {
             reset_result_set,
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -5393,6 +5430,7 @@ fn view_update_is_empty(message: &SyncMessage) -> bool {
             ..
         } => {
             !reset_result_set
+                && version_carriers.is_empty()
                 && version_bundles.is_empty()
                 && peer_payload_inventory.complete_tx_payloads.is_empty()
                 && result_member_adds.is_empty()

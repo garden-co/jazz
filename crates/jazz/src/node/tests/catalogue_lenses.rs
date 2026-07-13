@@ -447,11 +447,12 @@ fn current_write_pointer_flip_rebuilds_live_database_without_storage_reopen() {
         peer.identity(),
     )
     .unwrap();
+    let update = peer.current_rows_update(&mut core, "notes").unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,
-        version_bundles,
         ..
-    } = peer.current_rows_update(&mut core, "notes").unwrap()
+    } = update
     else {
         panic!("current-row subscription should produce a view update");
     };
