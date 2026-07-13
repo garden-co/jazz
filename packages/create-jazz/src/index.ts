@@ -200,7 +200,7 @@ async function main() {
     if (!skillsOptIn && !skillsOptOut) {
       const pickedAgentSkills = await confirm({
         message: "Set up Jazz coding skills for your AI agent?",
-        initialValue: false,
+        initialValue: true,
       });
       if (isCancel(pickedAgentSkills)) process.exit(0);
       enableAgentSkills = pickedAgentSkills;
