@@ -670,6 +670,35 @@ impl QueryManager {
             return entry.branch_frontier;
         }
 
+        let history_table = storage
+            .load_row_locator(row_id)
+            .ok()
+            .flatten()
+            .map(|locator| locator.table.to_string())
+            .unwrap_or_else(|| table.to_string());
+        if let Ok(history_rows) = storage.scan_history_row_batches(&history_table, row_id) {
+            let visible_rows = history_rows
+                .iter()
+                .filter(|row| {
+                    row.branch.as_str() == branch
+                        && row.state.is_visible()
+                        && row.delete_kind.is_none()
+                })
+                .collect::<Vec<_>>();
+            let mut non_tips = HashSet::new();
+            for row in &visible_rows {
+                non_tips.extend(row.parents.iter().copied());
+            }
+            let mut tips = visible_rows
+                .into_iter()
+                .filter(|row| !non_tips.contains(&row.batch_id()))
+                .map(StoredRowBatch::batch_id)
+                .collect::<Vec<_>>();
+            tips.sort();
+            tips.dedup();
+            return tips;
+        }
+
         storage
             .scan_row_branch_tip_ids(table, branch, row_id)
             .unwrap_or_default()

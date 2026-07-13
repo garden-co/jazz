@@ -584,11 +584,7 @@ impl QueryManager {
         if let Ok(history_rows) = storage.scan_history_row_batches(table, row_id)
             && let Some(mut restored_row) = history_rows
                 .into_iter()
-                .filter(|row| {
-                    row.branch.as_str() == branch
-                        && !matches!(row.state, RowState::Rejected)
-                        && row.delete_kind.is_none()
-                })
+                .filter(|row| !matches!(row.state, RowState::Rejected) && row.delete_kind.is_none())
                 .max_by_key(|row| row.updated_at)
         {
             restored_row.state = RowState::VisibleDirect;

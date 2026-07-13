@@ -308,20 +308,20 @@ impl SyncManager {
         table: &str,
         row: &StoredRowBatch,
     ) -> Option<StoredRowBatch> {
-        if row.parents.is_empty() {
-            return None;
-        }
-
+        let history_table = storage
+            .load_row_locator(row.row_id)
+            .ok()
+            .flatten()
+            .map(|locator| locator.table.to_string())
+            .unwrap_or_else(|| table.to_string());
         let context =
-            crate::storage::resolve_history_row_write_context(storage, table, row).ok()?;
-        let history_rows = storage.scan_history_row_batches(table, row.row_id).ok()?;
+            crate::storage::resolve_history_row_write_context(storage, &history_table, row).ok()?;
+        let history_rows = storage
+            .scan_history_row_batches(&history_table, row.row_id)
+            .ok()?;
         let visible_rows = history_rows
             .into_iter()
-            .filter(|candidate| {
-                candidate.branch.as_str() == row.branch.as_str()
-                    && candidate.batch_id != row.batch_id
-                    && candidate.state.is_visible()
-            })
+            .filter(|candidate| candidate.batch_id != row.batch_id && candidate.state.is_visible())
             .collect::<Vec<_>>();
         let visible_rows_by_batch = visible_rows
             .iter()
@@ -340,10 +340,16 @@ impl SyncManager {
             }
         }
 
-        let pre_batch_rows = visible_rows
-            .into_iter()
+        let parent_rows = visible_rows
+            .iter()
             .filter(|candidate| included_batch_ids.contains(&candidate.batch_id()))
+            .cloned()
             .collect::<Vec<_>>();
+        let pre_batch_rows = if row.parents.is_empty() || parent_rows.is_empty() {
+            visible_rows
+        } else {
+            parent_rows
+        };
         crate::row_histories::visible_row_preview_from_history_rows(
             context.user_descriptor().as_ref(),
             &pre_batch_rows,

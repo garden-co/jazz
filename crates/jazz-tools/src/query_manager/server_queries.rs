@@ -118,7 +118,7 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
+        let row_provenance = Self::load_best_visible_row_batch_with_hint_or_locator(
             storage,
             object_id,
             table_hint.map(TableName::as_str),
@@ -126,8 +126,19 @@ impl QueryManager {
             None,
             &self.schema_context,
             &branch_schema_map,
-        )?;
-        Some(row.row_provenance())
+        )
+        .map(|(_, row)| row.row_provenance())
+        .or_else(|| {
+            let table = storage.load_row_locator(object_id).ok().flatten()?.table;
+            storage
+                .scan_history_row_batches(table.as_str(), object_id)
+                .ok()?
+                .into_iter()
+                .filter(|row| row.state.is_visible() && row.delete_kind.is_none())
+                .max_by_key(|row| (row.updated_at, row.batch_id()))
+                .map(|row| row.row_provenance())
+        })?;
+        Some(row_provenance)
     }
 
     fn payload_row_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
