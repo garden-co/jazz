@@ -295,6 +295,9 @@ struct QueryServing {
     /// descriptor signature.
     query_shape_cache:
         BTreeMap<(crate::query::ShapeId, DurabilityTier, String), PreparedQueryPlanHandle>,
+    /// Derived read-policy authorization requests keyed by policy context.
+    read_policy_authorization_request_cache:
+        BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction.
@@ -361,6 +364,24 @@ struct PhysicalTableNameKey {
     class: PhysicalTableClass,
     schema_version: SchemaVersionId,
     base_schema_version: SchemaVersionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ParamBindingModeCacheKey {
+    InlineAllReachableSeeds,
+    RetainAllParams,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ReadPolicyAuthorizationRequestCacheKey {
+    policy_schema_version: SchemaVersionId,
+    table_name: String,
+    identity: AuthorId,
+    param_binding_mode: ParamBindingModeCacheKey,
+    tier: DurabilityTier,
+    binding_source_shape: Option<String>,
+    binding_user_params: String,
+    include_deleted_root: bool,
 }
 
 /// One usage-site query binding registration.
@@ -557,6 +578,7 @@ where
             query: QueryServing {
                 current_row_graphs,
                 query_shape_cache: BTreeMap::new(),
+                read_policy_authorization_request_cache: BTreeMap::new(),
                 tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
@@ -659,6 +681,7 @@ where
         claims: BTreeMap<String, Value>,
     ) {
         self.session_claims.insert(identity, claims);
+        self.query.read_policy_authorization_request_cache.clear();
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
@@ -691,6 +714,7 @@ where
         self.branches.branches.clear();
         self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
         self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
