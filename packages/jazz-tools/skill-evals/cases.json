@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "route-core-react-query",
+      "kind": "routing",
+      "prompt": "Build a React todo list that subscribes to incomplete Jazz rows and marks a row complete when clicked.",
+      "expectedSkills": ["jazz-core"]
+    },
+    {
+      "id": "route-core-optimistic-rejection",
+      "kind": "routing",
+      "prompt": "A Jazz item appears immediately and then silently disappears after sync. Troubleshoot the existing application code.",
+      "expectedSkills": ["jazz-core"]
+    },
+    {
+      "id": "route-core-solid-reactivity",
+      "kind": "routing",
+      "prompt": "Fix a Solid component whose Jazz query does not react when the selected project changes.",
+      "expectedSkills": ["jazz-core"]
+    },
+    {
+      "id": "route-core-existing-tests",
+      "kind": "routing",
+      "prompt": "Add a Jazz-backed search view and make sure the existing test suite still passes.",
+      "expectedSkills": ["jazz-core"]
+    },
+    {
+      "id": "route-schema-required-column",
+      "kind": "routing",
+      "prompt": "Add a required status column to a deployed Jazz app while keeping older clients working.",
+      "expectedSkills": ["jazz-schema-evolution"]
+    },
+    {
+      "id": "route-schema-permissions",
+      "kind": "routing",
+      "prompt": "Write permissions.ts so creators can manage their own rows and published rows are readable by everyone.",
+      "expectedSkills": ["jazz-schema-evolution"]
+    },
+    {
+      "id": "route-schema-first-policy-publish",
+      "kind": "routing",
+      "prompt": "Review the risks of publishing this app's first Jazz permissions bundle, including access to historical data.",
+      "expectedSkills": ["jazz-schema-evolution"]
+    },
+    {
+      "id": "route-testing-cross-client",
+      "kind": "routing",
+      "prompt": "Write a black-box test proving that a Jazz write from Alice eventually becomes visible to Bob.",
+      "expectedSkills": ["jazz-testing"]
+    },
+    {
+      "id": "route-testing-permission-denial",
+      "kind": "routing",
+      "prompt": "Add tests for allowed and denied Jazz reads and ownership-sensitive updates as two users.",
+      "expectedSkills": ["jazz-testing"]
+    },
+    {
+      "id": "route-schema-and-testing",
+      "kind": "routing",
+      "prompt": "Rename a column in a deployed Jazz schema and add old/new client compatibility tests for the migration.",
+      "expectedSkills": ["jazz-schema-evolution", "jazz-testing"]
+    },
+    {
+      "id": "route-core-and-testing",
+      "kind": "routing",
+      "prompt": "Implement an offline optimistic todo edit and add a reconnect-and-convergence integration test.",
+      "expectedSkills": ["jazz-core", "jazz-testing"]
+    },
+    {
+      "id": "route-core-and-schema",
+      "kind": "routing",
+      "prompt": "Add a project relation to an established Jazz schema and update the React view to include each todo's project.",
+      "expectedSkills": ["jazz-core", "jazz-schema-evolution"]
+    },
+    {
+      "id": "route-all-three",
+      "kind": "routing",
+      "prompt": "Add a share table and relation-aware permissions, expose shared rows in the Svelte UI, and write multi-user server tests.",
+      "expectedSkills": ["jazz-core", "jazz-schema-evolution", "jazz-testing"]
+    },
+    {
+      "id": "route-none-rust-core",
+      "kind": "routing",
+      "prompt": "Optimize the Rust query planner's index selection algorithm without changing the TypeScript API.",
+      "expectedSkills": []
+    },
+    {
+      "id": "route-none-doc-copy",
+      "kind": "routing",
+      "prompt": "Fix a typo in the package README release instructions.",
+      "expectedSkills": []
+    },
+    {
+      "id": "behavior-nullable-update",
+      "kind": "behavior",
+      "prompt": "Change this Jazz update so it clears an optional projectId instead of leaving it unchanged.",
+      "expectedSkills": ["jazz-core"],
+      "rubric": [
+        "Uses null to clear the optional column.",
+        "Does not use undefined to clear the column."
+      ]
+    },
+    {
+      "id": "behavior-reactive-accessors",
+      "kind": "behavior",
+      "prompt": "Show the correct reactive-query shape when query inputs change in both Svelte and Solid.",
+      "expectedSkills": ["jazz-core"],
+      "rubric": [
+        "Uses an accessor for Svelte QuerySubscription when inputs are reactive.",
+        "Uses a function or accessor for Solid useAll when inputs are reactive."
+      ]
+    },
+    {
+      "id": "behavior-batch-transaction",
+      "kind": "behavior",
+      "prompt": "Choose between a Jazz batch and transaction for two optimistic UI writes versus two writes that must wait for authority and become globally visible together.",
+      "expectedSkills": ["jazz-core"],
+      "rubric": [
+        "Chooses batch for writes that should become optimistically visible together.",
+        "Chooses transaction for authority-accepted globally atomic visibility.",
+        "Does not await individual writes inside the open batch or transaction."
+      ]
+    },
+    {
+      "id": "behavior-permission-defaults",
+      "kind": "behavior",
+      "prompt": "Explain what changes when an app publishes its first permissions bundle and how later permissions affect historical rows.",
+      "expectedSkills": ["jazz-schema-evolution"],
+      "rubric": [
+        "States that before the first bundle all actors are allowed by the row-policy layer.",
+        "States that after the first bundle operations without grants are denied.",
+        "States that current permissions govern historical rows."
+      ]
+    },
+    {
+      "id": "behavior-permission-composition",
+      "kind": "behavior",
+      "prompt": "Explain whether allowInsert.never() overrides another insert grant and whether source order matters.",
+      "expectedSkills": ["jazz-schema-evolution"],
+      "rubric": [
+        "States that grants for the same operation are OR-combined.",
+        "States that never() does not override another grant.",
+        "States that source order does not matter."
+      ]
+    },
+    {
+      "id": "behavior-migration-generation",
+      "kind": "behavior",
+      "prompt": "Generate a named migration and explain what the name and generated from/to schema witnesses represent.",
+      "expectedSkills": ["jazz-schema-evolution"],
+      "rubric": [
+        "Uses migrations create --name with a descriptive label.",
+        "Explains that the name affects the filename rather than migration metadata.",
+        "Keeps generated minimal from/to witness objects instead of importing the mutable current schema."
+      ]
+    },
+    {
+      "id": "behavior-deterministic-sync-test",
+      "kind": "behavior",
+      "prompt": "Sketch a stable black-box test for two clients syncing several rows whose order is not itself under test.",
+      "expectedSkills": ["jazz-testing"],
+      "rubric": [
+        "Waits for edge or global durability before asserting peer or server visibility.",
+        "Uses a retrying assertion for eventual delivery instead of a fixed sleep.",
+        "Orders the query explicitly or normalizes rows by a stable key.",
+        "Shuts down clients, server, and subscriptions."
+      ]
+    },
+    {
+      "id": "behavior-denied-read-write",
+      "kind": "behavior",
+      "prompt": "Test a policy that denies Bob access to Alice's row, covering both reads and writes.",
+      "expectedSkills": ["jazz-testing"],
+      "rubric": [
+        "Asserts a denied read as an absent or filtered row rather than an exception.",
+        "Asserts the denied write as rejected or expectDenied.",
+        "Uses separate actor sessions through public testing APIs."
+      ]
+    }
+  ]
+}
