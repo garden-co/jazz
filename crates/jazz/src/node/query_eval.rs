@@ -7357,7 +7357,6 @@ where
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
-        self.database.flush().map_err(Error::Groove)?;
         let subscription = self.subscribe_lowered_program(
             &program,
             &binding,
