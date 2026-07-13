@@ -8,8 +8,8 @@
 //! [`super`].
 
 use bytes::{Bytes, BytesMut};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::records::RecordDescriptor;
@@ -162,9 +162,9 @@ impl AntiJoinState {
 
         let keyed_left_delta = keyed_join_deltas(&left_descriptor, left_on, left_delta)?;
         let keyed_right_delta = keyed_join_deltas(&right_descriptor, right_on, right_delta)?;
-        let mut affected_keys = HashSet::<JoinKey>::new();
-        let mut old_right_counts = HashMap::<JoinKey, i64>::new();
-        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::new();
+        let mut affected_keys = HashSet::<JoinKey>::default();
+        let mut old_right_counts = HashMap::<JoinKey, i64>::default();
+        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
             for delta in &keyed_left_delta {
                 let key = &delta.key;
@@ -231,7 +231,7 @@ impl AntiJoinState {
                 }
             }
             ArrangementUpdateMode::Replace => {
-                let mut left_keys = HashSet::<JoinKey>::new();
+                let mut left_keys = HashSet::<JoinKey>::default();
                 for delta in &keyed_left_delta {
                     let key = &delta.key;
                     if left_keys.insert(key.clone()) && right_arrangement.value().key_count(key) > 0
@@ -270,9 +270,9 @@ impl AntiJoinState {
 
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
         let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
-        let mut affected_keys = HashSet::<JoinKey>::new();
-        let mut old_right_counts = HashMap::<JoinKey, i64>::new();
-        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::new();
+        let mut affected_keys = HashSet::<JoinKey>::default();
+        let mut old_right_counts = HashMap::<JoinKey, i64>::default();
+        let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
             for delta in &keyed_left_delta {
                 let key = &delta.key;
@@ -336,7 +336,7 @@ impl AntiJoinState {
                 }
             }
             ArrangementUpdateMode::Replace => {
-                let mut left_keys = HashSet::<JoinKey>::new();
+                let mut left_keys = HashSet::<JoinKey>::default();
                 for delta in &keyed_left_delta {
                     let key = &delta.key;
                     if left_keys.insert(key.clone())
@@ -534,7 +534,7 @@ fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'
 }
 
 fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
-    let mut index = HashMap::new();
+    let mut index = HashMap::default();
     apply_join_delta_to_index(&mut index, deltas);
     index
 }
@@ -599,7 +599,7 @@ pub(super) fn join_keys(
             return Ok(vec![JoinKey::from_vec(key)]);
         }
         let mut keys = Vec::with_capacity(parts.len());
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for value in &parts {
             let mut key = Vec::new();
             encode_key_part(&mut key, value)?;
@@ -612,7 +612,7 @@ pub(super) fn join_keys(
     }
 
     let mut keys = vec![Vec::new()];
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
 
     for field in fields {
         let values = descriptor.get(record, field)?;
