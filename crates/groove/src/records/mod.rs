@@ -572,6 +572,26 @@ pub struct RecordProjector {
     target_to_source: Vec<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RawProjectionField {
+    Copy { source_idx: usize },
+    WrapNullable { source_idx: usize },
+    FlattenNullable { source_idx: usize },
+    Encoded { bytes: Vec<u8> },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RawProjectionScratch {
+    variable_fields: Vec<RawProjectedBytes>,
+    generated: BytesMut,
+}
+
+#[derive(Debug)]
+enum RawProjectedBytes {
+    Source(std::ops::Range<usize>),
+    Generated(std::ops::Range<usize>),
+}
+
 impl RecordProjector {
     /// Build a projector from source field indices to target field indices.
     pub fn new(
@@ -674,6 +694,372 @@ impl RecordProjector {
         }
 
         Ok(OwnedRecord::new(raw, self.target))
+    }
+}
+
+impl RecordDescriptor {
+    pub(crate) fn project_raw_fields_into(
+        &self,
+        source: &RecordDescriptor,
+        source_record: &[u8],
+        fields: &[RawProjectionField],
+        output: &mut BytesMut,
+        scratch: &mut RawProjectionScratch,
+    ) -> Result<std::ops::Range<usize>, Error> {
+        if self.fields.len() != fields.len() {
+            return Err(Error::ArityMismatch {
+                expected: self.fields.len(),
+                actual: fields.len(),
+            });
+        }
+
+        scratch.variable_fields.clear();
+        scratch.generated.clear();
+        let start = output.len();
+        let fixed_size = self.fixed_size();
+        let variable_count = self.variable_count();
+        let offset_table_size = variable_count.saturating_sub(1) * 4;
+        output.reserve(fixed_size + offset_table_size);
+
+        for target_idx in &self.layout.logical_by_physical {
+            let layout = self.layout.fields[*target_idx];
+            if matches!(layout, FieldLayout::Variable { .. }) {
+                let bytes = self.raw_projected_field_bytes(
+                    source,
+                    source_record,
+                    *target_idx,
+                    fields[*target_idx].clone(),
+                    scratch,
+                )?;
+                scratch.variable_fields.push(bytes);
+                continue;
+            }
+
+            let bytes = self.raw_projected_field_bytes(
+                source,
+                source_record,
+                *target_idx,
+                fields[*target_idx].clone(),
+                scratch,
+            )?;
+            match bytes {
+                RawProjectedBytes::Source(span) => output.extend_from_slice(&source_record[span]),
+                RawProjectedBytes::Generated(span) => {
+                    output.extend_from_slice(&scratch.generated[span])
+                }
+            }
+        }
+
+        let variable_start = fixed_size + offset_table_size;
+        let mut next_offset = variable_start;
+        for bytes in scratch
+            .variable_fields
+            .iter()
+            .take(scratch.variable_fields.len().saturating_sub(1))
+        {
+            next_offset = checked_add(next_offset, bytes.len())?;
+            output.extend_from_slice(&usize_to_u32(next_offset)?.to_le_bytes());
+        }
+        for bytes in &scratch.variable_fields {
+            match bytes {
+                RawProjectedBytes::Source(span) => {
+                    output.extend_from_slice(&source_record[span.clone()])
+                }
+                RawProjectedBytes::Generated(span) => {
+                    output.extend_from_slice(&scratch.generated[span.clone()])
+                }
+            }
+        }
+
+        Ok(start..output.len())
+    }
+
+    pub(crate) fn unwrap_nullable_field_into(
+        &self,
+        source: &RecordDescriptor,
+        source_record: &[u8],
+        field_idx: usize,
+        output: &mut BytesMut,
+        scratch: &mut RawProjectionScratch,
+    ) -> Result<Option<std::ops::Range<usize>>, Error> {
+        if self.fields.len() != source.fields.len() {
+            return Err(Error::ArityMismatch {
+                expected: self.fields.len(),
+                actual: source.fields.len(),
+            });
+        }
+        let source_field = source
+            .fields
+            .get(field_idx)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index: field_idx,
+                len: source.fields.len(),
+            })?;
+        let target_field = self
+            .fields
+            .get(field_idx)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index: field_idx,
+                len: self.fields.len(),
+            })?;
+        let unwrap_inner = match &source_field.value_type {
+            ValueType::Nullable(inner) => {
+                if inner.as_ref() != &target_field.value_type {
+                    return Err(Error::TypeMismatch {
+                        expected: target_field.value_type.clone(),
+                    });
+                }
+                Some(inner.as_ref())
+            }
+            value_type => {
+                if value_type != &target_field.value_type {
+                    return Err(Error::TypeMismatch {
+                        expected: target_field.value_type.clone(),
+                    });
+                }
+                None
+            }
+        };
+
+        scratch.variable_fields.clear();
+        scratch.generated.clear();
+        let start = output.len();
+        let fixed_size = self.fixed_size();
+        let variable_count = self.variable_count();
+        let offset_table_size = variable_count.saturating_sub(1) * 4;
+        output.reserve(fixed_size + offset_table_size);
+
+        for target_idx in &self.layout.logical_by_physical {
+            let bytes = if *target_idx == field_idx {
+                match unwrap_inner {
+                    Some(inner) => {
+                        let span = source.field_span(source_record, field_idx)?;
+                        match nullable_present_payload(source_record, span, inner)? {
+                            Some(payload) => RawProjectedBytes::Source(payload),
+                            None => {
+                                output.truncate(start);
+                                scratch.variable_fields.clear();
+                                scratch.generated.clear();
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    None => source
+                        .field_span(source_record, field_idx)
+                        .map(RawProjectedBytes::Source)?,
+                }
+            } else {
+                let source_field =
+                    source
+                        .fields
+                        .get(*target_idx)
+                        .ok_or(Error::FieldIndexOutOfBounds {
+                            index: *target_idx,
+                            len: source.fields.len(),
+                        })?;
+                let target_field =
+                    self.fields
+                        .get(*target_idx)
+                        .ok_or(Error::FieldIndexOutOfBounds {
+                            index: *target_idx,
+                            len: self.fields.len(),
+                        })?;
+                if source_field.value_type != target_field.value_type {
+                    return Err(Error::TypeMismatch {
+                        expected: target_field.value_type.clone(),
+                    });
+                }
+                source
+                    .field_span(source_record, *target_idx)
+                    .map(RawProjectedBytes::Source)?
+            };
+
+            if matches!(
+                self.layout.fields[*target_idx],
+                FieldLayout::Variable { .. }
+            ) {
+                scratch.variable_fields.push(bytes);
+            } else {
+                match bytes {
+                    RawProjectedBytes::Source(span) => {
+                        output.extend_from_slice(&source_record[span])
+                    }
+                    RawProjectedBytes::Generated(span) => {
+                        output.extend_from_slice(&scratch.generated[span])
+                    }
+                }
+            }
+        }
+
+        let variable_start = fixed_size + offset_table_size;
+        let mut next_offset = variable_start;
+        for bytes in scratch
+            .variable_fields
+            .iter()
+            .take(scratch.variable_fields.len().saturating_sub(1))
+        {
+            next_offset = checked_add(next_offset, bytes.len())?;
+            output.extend_from_slice(&usize_to_u32(next_offset)?.to_le_bytes());
+        }
+        for bytes in &scratch.variable_fields {
+            match bytes {
+                RawProjectedBytes::Source(span) => {
+                    output.extend_from_slice(&source_record[span.clone()])
+                }
+                RawProjectedBytes::Generated(span) => {
+                    output.extend_from_slice(&scratch.generated[span.clone()])
+                }
+            }
+        }
+
+        Ok(Some(start..output.len()))
+    }
+
+    fn raw_projected_field_bytes(
+        &self,
+        source: &RecordDescriptor,
+        source_record: &[u8],
+        target_idx: usize,
+        field: RawProjectionField,
+        scratch: &mut RawProjectionScratch,
+    ) -> Result<RawProjectedBytes, Error> {
+        let target_field = self
+            .fields
+            .get(target_idx)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index: target_idx,
+                len: self.fields.len(),
+            })?;
+        match field {
+            RawProjectionField::Copy { source_idx } => {
+                let source_field =
+                    source
+                        .fields
+                        .get(source_idx)
+                        .ok_or(Error::FieldIndexOutOfBounds {
+                            index: source_idx,
+                            len: source.fields.len(),
+                        })?;
+                if source_field.value_type != target_field.value_type {
+                    return Err(Error::TypeMismatch {
+                        expected: target_field.value_type.clone(),
+                    });
+                }
+                source
+                    .field_span(source_record, source_idx)
+                    .map(RawProjectedBytes::Source)
+            }
+            RawProjectionField::WrapNullable { source_idx } => self.wrap_nullable_field_bytes(
+                source,
+                source_record,
+                source_idx,
+                target_idx,
+                scratch,
+            ),
+            RawProjectionField::FlattenNullable { source_idx } => {
+                let source_field =
+                    source
+                        .fields
+                        .get(source_idx)
+                        .ok_or(Error::FieldIndexOutOfBounds {
+                            index: source_idx,
+                            len: source.fields.len(),
+                        })?;
+                if source_field.value_type == target_field.value_type
+                    && matches!(source_field.value_type, ValueType::Nullable(_))
+                {
+                    return source
+                        .field_span(source_record, source_idx)
+                        .map(RawProjectedBytes::Source);
+                }
+                self.wrap_nullable_field_bytes(
+                    source,
+                    source_record,
+                    source_idx,
+                    target_idx,
+                    scratch,
+                )
+            }
+            RawProjectionField::Encoded { bytes } => {
+                let start = scratch.generated.len();
+                scratch.generated.extend_from_slice(&bytes);
+                Ok(RawProjectedBytes::Generated(start..scratch.generated.len()))
+            }
+        }
+    }
+
+    fn wrap_nullable_field_bytes(
+        &self,
+        source: &RecordDescriptor,
+        source_record: &[u8],
+        source_idx: usize,
+        target_idx: usize,
+        scratch: &mut RawProjectionScratch,
+    ) -> Result<RawProjectedBytes, Error> {
+        let source_field = source
+            .fields
+            .get(source_idx)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index: source_idx,
+                len: source.fields.len(),
+            })?;
+        let target_field = self
+            .fields
+            .get(target_idx)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index: target_idx,
+                len: self.fields.len(),
+            })?;
+        let ValueType::Nullable(inner) = &target_field.value_type else {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::Nullable(Box::new(source_field.value_type.clone())),
+            });
+        };
+        if inner.as_ref() != &source_field.value_type {
+            return Err(Error::TypeMismatch {
+                expected: target_field.value_type.clone(),
+            });
+        }
+        let source_span = source.field_span(source_record, source_idx)?;
+        let start = scratch.generated.len();
+        scratch.generated.extend_from_slice(&[1]);
+        scratch
+            .generated
+            .extend_from_slice(&source_record[source_span]);
+        Ok(RawProjectedBytes::Generated(start..scratch.generated.len()))
+    }
+}
+
+impl RawProjectedBytes {
+    fn len(&self) -> usize {
+        match self {
+            Self::Source(span) | Self::Generated(span) => span.end - span.start,
+        }
+    }
+}
+
+fn nullable_present_payload(
+    record: &[u8],
+    span: std::ops::Range<usize>,
+    inner: &ValueType,
+) -> Result<Option<std::ops::Range<usize>>, Error> {
+    let bytes = &record[span.clone()];
+    let Some((&flag, payload)) = bytes.split_first() else {
+        return Err(Error::UnexpectedEof);
+    };
+    match flag {
+        0 => {
+            if inner.fixed_size().is_some() {
+                if payload.iter().any(|byte| *byte != 0) {
+                    return Err(Error::InvalidOffset);
+                }
+            } else if !payload.is_empty() {
+                return Err(Error::InvalidOffset);
+            }
+            Ok(None)
+        }
+        1 => Ok(Some(span.start + 1..span.end)),
+        value => Err(Error::InvalidNullFlag(value)),
     }
 }
 

@@ -29,7 +29,10 @@ use crate::ivm::{
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
     TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
 };
-use crate::records::{self, BorrowedRecord, RecordDescriptor, Value, ValueType};
+use crate::records::{
+    self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
+    ValueType,
+};
 use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
 use crate::storage::{
     OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
@@ -4451,21 +4454,17 @@ impl NodeState {
             .sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
         let mut spans = Vec::with_capacity(input.deltas.len());
-        let mut variable_scratch = Vec::new();
-        let can_raw_copy = project.expressions.len() == project.mapping.len()
-            && project
-                .expressions
-                .iter()
-                .all(|expr| matches!(expr.expression, PlanExpr::Field(_)));
+        let raw_projection = raw_projection_fields(project, &input.descriptor, output_desc)?;
+        let mut raw_projection_scratch = RawProjectionScratch::default();
         for delta in &input.deltas {
-            let span = if can_raw_copy {
+            let span = if let Some(fields) = raw_projection.as_deref() {
                 output_desc
-                    .project_record_raw_into(
-                        &[input.descriptor],
-                        &[delta.raw()],
-                        &project.mapping,
+                    .project_raw_fields_into(
+                        &input.descriptor,
+                        delta.raw(),
+                        fields,
                         &mut output,
-                        &mut variable_scratch,
+                        &mut raw_projection_scratch,
                     )
                     .map_err(IvmRuntimeError::RecordEncoding)?
             } else {
@@ -4501,33 +4500,36 @@ impl NodeState {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let mut deltas = Vec::new();
+        let estimated_output_bytes = input
+            .deltas
+            .iter()
+            .map(|delta| delta.record.len())
+            .sum::<usize>();
+        let mut output = BytesMut::with_capacity(estimated_output_bytes);
+        let mut spans = Vec::new();
+        let mut scratch = RawProjectionScratch::default();
         for delta in &input.deltas {
-            let values = delta
-                .borrowed(&input.descriptor)
-                .to_values()
-                .map_err(IvmRuntimeError::RecordEncoding)?;
-            let Some(value) = values.get(unwrap.field_idx) else {
-                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(
+            if let Some(span) = output_desc
+                .unwrap_nullable_field_into(
+                    &input.descriptor,
+                    delta.raw(),
                     unwrap.field_idx,
-                ));
-            };
-            let unwrapped = match value {
-                Value::Nullable(value) => {
-                    let Some(inner) = value.as_ref().map(|value| (**value).clone()) else {
-                        continue;
-                    };
-                    inner
-                }
-                value => value.clone(),
-            };
-            let mut output_values = values;
-            output_values[unwrap.field_idx] = unwrapped;
-            deltas.push(RecordDelta {
-                record: output_desc.create(&output_values)?.into(),
-                weight: delta.weight,
-            });
+                    &mut output,
+                    &mut scratch,
+                )
+                .map_err(IvmRuntimeError::RecordEncoding)?
+            {
+                spans.push((span, delta.weight));
+            }
         }
+        let output = output.freeze();
+        let deltas = spans
+            .into_iter()
+            .map(|(span, weight)| RecordDelta {
+                record: output.slice(span),
+                weight,
+            })
+            .collect();
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -6209,6 +6211,73 @@ fn projection_uses_raw_copy(
         && expressions
             .iter()
             .all(|expr| matches!(expr.expression, PlanExpr::Field(_)))
+}
+
+fn raw_projection_fields(
+    project: &MapProjectOp,
+    input_desc: &RecordDescriptor,
+    output_desc: RecordDescriptor,
+) -> Result<Option<Vec<RawProjectionField>>, IvmRuntimeError> {
+    if project.expressions.is_empty() || project.expressions.len() != output_desc.fields().len() {
+        return Ok(None);
+    }
+
+    let fields = project
+        .expressions
+        .iter()
+        .map(|expr| match &expr.expression {
+            PlanExpr::Field(field) => input_desc
+                .field_index(field)
+                .map(|source_idx| RawProjectionField::Copy { source_idx }),
+            PlanExpr::Nullable(field) => input_desc
+                .field_index(field)
+                .map(|source_idx| RawProjectionField::WrapNullable { source_idx }),
+            PlanExpr::NullableFlat(field) => input_desc
+                .field_index(field)
+                .map(|source_idx| RawProjectionField::FlattenNullable { source_idx }),
+            PlanExpr::Null(_) => Some(RawProjectionField::Encoded {
+                bytes: encode_projection_field_value(
+                    output_desc,
+                    expr.output_name.as_deref(),
+                    Value::Nullable(None),
+                )
+                .ok()?,
+            }),
+            PlanExpr::Literal(value) => Some(RawProjectionField::Encoded {
+                bytes: encode_projection_field_value(
+                    output_desc,
+                    expr.output_name.as_deref(),
+                    value.to_value(),
+                )
+                .ok()?,
+            }),
+        })
+        .collect::<Option<Vec<_>>>();
+    Ok(fields)
+}
+
+fn encode_projection_field_value(
+    output_desc: RecordDescriptor,
+    output_name: Option<&str>,
+    value: Value,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let field_idx = if let Some(output_name) = output_name {
+        output_desc
+            .field_index(output_name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(output_name.to_owned()))?
+    } else {
+        return Err(IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()));
+    };
+    let field = output_desc
+        .fields()
+        .get(field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field_idx))?;
+    let name = field
+        .name
+        .clone()
+        .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+    let descriptor = RecordDescriptor::new([(name, field.value_type.clone())]);
+    descriptor.create(&[value]).map_err(Into::into)
 }
 
 fn resolve_field_ref(
