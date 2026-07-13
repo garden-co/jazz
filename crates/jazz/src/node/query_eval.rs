@@ -7570,7 +7570,7 @@ where
     }
 
     fn table_read_policy_authorization_request(
-        &self,
+        &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
         identity: AuthorId,
@@ -7689,7 +7689,7 @@ where
     }
 
     fn table_read_policy_authorization_request_for_include_deleted(
-        &self,
+        &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
         identity: AuthorId,
@@ -7710,7 +7710,7 @@ where
     }
 
     fn table_read_policy_authorization_request_with_root_visibility(
-        &self,
+        &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
         identity: AuthorId,
@@ -7720,6 +7720,23 @@ where
         binding_user_params: BTreeMap<String, ColumnType>,
         include_deleted_root: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        let cache_key = ReadPolicyAuthorizationRequestCacheKey {
+            policy_schema_version,
+            table_name: table_name.to_owned(),
+            identity,
+            param_binding_mode: param_binding_mode.cache_key(),
+            tier,
+            binding_source_shape: binding_source_shape.clone(),
+            binding_user_params: binding_user_params_cache_key(&binding_user_params),
+            include_deleted_root,
+        };
+        if let Some(request) = self
+            .query
+            .read_policy_authorization_request_cache
+            .get(&cache_key)
+        {
+            return Ok(request.clone());
+        }
         let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
         } else {
@@ -7800,7 +7817,7 @@ where
             )?,
             shape: input_shape,
         };
-        Ok(QueryProgramRequest {
+        let request = QueryProgramRequest {
             reads: current_query_read_set(
                 &input.shape,
                 policy_schema_version,
@@ -7814,7 +7831,11 @@ where
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
             ),
-        })
+        };
+        self.query
+            .read_policy_authorization_request_cache
+            .insert(cache_key, request.clone());
+        Ok(request)
     }
 
     fn branch_table_read_policy_authorization_request(
@@ -8313,6 +8334,19 @@ fn operand_contains_unbound_claim(
 pub(crate) enum ParamBindingMode {
     InlineAllReachableSeeds,
     RetainAllParams,
+}
+
+impl ParamBindingMode {
+    fn cache_key(self) -> ParamBindingModeCacheKey {
+        match self {
+            Self::InlineAllReachableSeeds => ParamBindingModeCacheKey::InlineAllReachableSeeds,
+            Self::RetainAllParams => ParamBindingModeCacheKey::RetainAllParams,
+        }
+    }
+}
+
+fn binding_user_params_cache_key(params: &BTreeMap<String, ColumnType>) -> String {
+    format!("{params:?}")
 }
 
 fn bind_query_params_with_mode(
