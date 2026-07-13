@@ -254,14 +254,14 @@ where
                 tree.delete(&key)?;
             }
         }
-        Ok(tree.checkpoint()?)
+        Ok(tree.flush_wal()?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opfs_btree::MemoryFile;
+    use opfs_btree::{BTreeOptions, MemoryFile};
 
     fn memory_storage(column_families: &[&str]) -> BtreeStorage<MemoryFile> {
         BtreeStorage::from_file(MemoryFile::new(), column_families).unwrap()
@@ -293,6 +293,38 @@ mod tests {
     fn memory_file_conforms_to_delta_append_contract() {
         let storage = memory_storage(&["records"]);
         super::super::conformance::delta_append_current_winner_observes_merged_state(storage);
+    }
+
+    #[test]
+    fn write_many_flushes_replayable_wal_without_eager_checkpoint() {
+        // This is intentionally a storage-level test: public database APIs can
+        // observe persistence, but not whether browser-fidelity BTree batches
+        // use the WAL path instead of rewriting checkpoint pages per batch.
+        let file = MemoryFile::new();
+        let storage = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
+
+        storage
+            .write_many(&[WriteOperation::set("records", b"1", b"record")])
+            .unwrap();
+
+        let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
+            * BTreeOptions::default().page_size as u64;
+        assert!(
+            file.len().unwrap() > checkpoint_len,
+            "write_many should append a WAL tail rather than checkpoint eagerly",
+        );
+
+        let reopened = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
+        assert_eq!(
+            reopened.get("records", b"1").unwrap(),
+            Some(b"record".to_vec())
+        );
+        drop(reopened);
+
+        storage.close().unwrap();
+        let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
+            * BTreeOptions::default().page_size as u64;
+        assert_eq!(file.len().unwrap(), checkpoint_len);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
