@@ -23,6 +23,7 @@ use crate::query::{
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tx::TxId;
+use crate::wire::decode_sync_message;
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireStreamDecoder,
     current_wire_features,
@@ -1214,6 +1215,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         subscription,
         settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,
+        version_carriers: Vec::new(),
         version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
@@ -1227,6 +1229,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         subscription,
         settled_through: crate::time::GlobalSeq(0),
         reset_result_set: false,
+        version_carriers: Vec::new(),
         version_bundles: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
@@ -5024,6 +5027,7 @@ fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
         subscription,
         settled_through: GlobalSeq(42),
         reset_result_set: true,
+        version_carriers: Vec::new(),
         version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: Vec::new(),
@@ -5197,6 +5201,7 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
         subscription,
         settled_through: GlobalSeq(900),
         reset_result_set: true,
+        version_carriers: Vec::new(),
         version_bundles,
         peer_payload_inventory: Default::default(),
         result_member_adds,
@@ -5302,6 +5307,7 @@ fn view_update_with_facts(
         subscription,
         settled_through: GlobalSeq(42),
         reset_result_set: true,
+        version_carriers: Vec::new(),
         version_bundles: Vec::new(),
         peer_payload_inventory: Default::default(),
         result_member_adds: Vec::new(),

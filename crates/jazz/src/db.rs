@@ -67,7 +67,7 @@ use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
     WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
     WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message, encode_frame, encode_sync_message,
+    decode_sync_message_for_receive, encode_frame, encode_sync_message,
 };
 
 /// How urgently a runtime should service pending peer-connection work.
@@ -3805,7 +3805,7 @@ where
                         continue;
                     }
                     let payload_len = payload.len();
-                    match decode_sync_message(&payload) {
+                    match decode_sync_message_for_receive(&payload) {
                         Ok(message) => {
                             return Some(ReceivedSyncMessage::with_encoded_len(
                                 message,
@@ -4722,6 +4722,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             subscription,
             settled_through,
             reset_result_set,
+            version_carriers: _,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -4745,6 +4746,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             settled_through,
             reset_result_set,
             final_chunk,
+            version_carriers: _,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -4931,6 +4933,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             subscription,
             settled_through,
             reset_result_set,
+            version_carriers: _,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -4954,6 +4957,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             settled_through,
             reset_result_set,
             final_chunk,
+            version_carriers: _,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
@@ -5068,6 +5072,7 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         subscription,
         settled_through,
         reset_result_set,
+        version_carriers: _,
         version_bundles,
         peer_payload_inventory,
         result_member_adds,
@@ -5222,6 +5227,7 @@ fn empty_view_update_chunk(
         settled_through,
         reset_result_set,
         final_chunk: false,
+        version_carriers: Vec::new(),
         version_bundles: Vec::new(),
         peer_payload_inventory: PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),

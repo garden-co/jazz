@@ -6,7 +6,7 @@
 //! tests, and the `Db` facade without owning validation or persistence.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use groove::records::{OwnedRecord, Value};
 
@@ -102,6 +102,11 @@ pub enum SyncMessage {
         settled_through: GlobalSeq,
         /// Whether receiver result_set should be reset first.
         reset_result_set: bool,
+        /// General carrier stream for singleton bundles and packed runs.
+        ///
+        /// L1 receivers normalize this stream into `version_bundles` before
+        /// apply. Existing emitters continue to use `version_bundles` only.
+        version_carriers: Vec<VersionCarrier>,
         /// Version bundles not previously shipped on the peer.
         ///
         /// Partial bundles may contain only the versions that contribute to this
@@ -143,6 +148,11 @@ pub enum SyncMessage {
         reset_result_set: bool,
         /// Whether this chunk completes the logical view update.
         final_chunk: bool,
+        /// General carrier stream for singleton bundles and packed runs.
+        ///
+        /// L1 receivers normalize this stream into `version_bundles` before
+        /// apply. Existing emitters continue to use `version_bundles` only.
+        version_carriers: Vec<VersionCarrier>,
         /// Version bundles not previously shipped on the peer.
         version_bundles: Vec<VersionBundle>,
         /// Peer-scoped payload coverage that may be referenced instead of
@@ -179,6 +189,49 @@ pub enum SyncMessage {
         /// Version bundles visible to the requesting link identity.
         version_bundles: Vec<VersionBundle>,
     },
+}
+
+impl SyncMessage {
+    /// Validate any packed view-update carrier runs in this message.
+    pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
+        match self {
+            Self::ViewUpdate {
+                version_carriers, ..
+            }
+            | Self::ViewUpdateChunk {
+                version_carriers, ..
+            } => {
+                for carrier in version_carriers {
+                    if let VersionCarrier::Run(run) = carrier {
+                        run.validate()?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Expand packed view-update carriers into `version_bundles` for L1 apply.
+    pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
+        match &mut self {
+            Self::ViewUpdate {
+                version_carriers,
+                version_bundles,
+                ..
+            }
+            | Self::ViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
+            } => {
+                version_bundles.extend(expand_version_carriers(version_carriers)?);
+                version_carriers.clear();
+            }
+            _ => {}
+        }
+        Ok(self)
+    }
 }
 
 /// Exact row-version identity used by known-state repair requests.
@@ -566,6 +619,300 @@ pub struct VersionBundle {
     pub global_seq: Option<GlobalSeq>,
     /// Durability known when shipped.
     pub durability: DurabilityTier,
+}
+
+/// One row-version carrier in a view-update stream.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum VersionCarrier {
+    /// Existing singleton carrier. This is semantically a run of length 1.
+    Bundle(VersionBundle),
+    /// Packed run of adjacent row-version bodies with shared defaults.
+    Run(VersionBundleRun),
+}
+
+impl VersionCarrier {
+    /// Expand this carrier to the singleton bundle form used by L1 apply paths.
+    pub fn expand(&self) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+        match self {
+            Self::Bundle(bundle) => Ok(vec![bundle.clone()]),
+            Self::Run(run) => run.expand(),
+        }
+    }
+}
+
+/// Shared header plus row-version bodies for adjacent view-update carriers.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRun {
+    /// Shared/default metadata for the run.
+    pub header: VersionBundleRunHeader,
+    /// Packed row-version bodies. Each body expands to one `VersionBundle`.
+    pub bodies: Vec<VersionBundleRunBody>,
+    /// Per-body metadata overrides for rows that deviate from the header.
+    pub overrides: Vec<VersionBundleRunOverride>,
+}
+
+impl VersionBundleRun {
+    /// Build one run from adjacent singleton bundles.
+    pub fn from_adjacent_singletons(
+        bundles: &[VersionBundle],
+    ) -> Result<Self, VersionBundleRunError> {
+        let Some(first) = bundles.first() else {
+            return Err(VersionBundleRunError::EmptyRun);
+        };
+        let table = common_run_table(bundles);
+        let bodies = bundles
+            .iter()
+            .map(|bundle| VersionBundleRunBody {
+                versions: bundle.versions.clone(),
+            })
+            .collect::<Vec<_>>();
+        let overrides = bundles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bundle)| {
+                let override_ = VersionBundleRunOverride {
+                    body_index: index as u32,
+                    tx: (bundle.tx != first.tx).then(|| bundle.tx.clone()),
+                    fate: (bundle.fate != first.fate).then(|| bundle.fate.clone()),
+                    global_seq: (bundle.global_seq != first.global_seq)
+                        .then_some(bundle.global_seq),
+                    durability: (bundle.durability != first.durability)
+                        .then_some(bundle.durability),
+                };
+                override_.has_overrides().then_some(override_)
+            })
+            .collect::<Vec<_>>();
+        let run = Self {
+            header: VersionBundleRunHeader {
+                table,
+                tx: first.tx.clone(),
+                body_count: bodies.len() as u32,
+                fate: first.fate.clone(),
+                global_seq: first.global_seq,
+                durability: first.durability,
+            },
+            bodies,
+            overrides,
+        };
+        run.validate()?;
+        Ok(run)
+    }
+
+    /// Validate metadata that cannot be enforced by postcard shape decoding.
+    pub fn validate(&self) -> Result<(), VersionBundleRunError> {
+        let declared = self.header.body_count as usize;
+        let actual = self.bodies.len();
+        if declared == 0 {
+            return Err(VersionBundleRunError::EmptyRun);
+        }
+        if declared != actual {
+            return Err(VersionBundleRunError::BodyCountMismatch { declared, actual });
+        }
+
+        let mut seen = BTreeSet::new();
+        for override_ in &self.overrides {
+            let index = override_.body_index as usize;
+            if index >= declared {
+                return Err(VersionBundleRunError::OverrideIndexOutOfRange {
+                    index,
+                    body_count: declared,
+                });
+            }
+            if !seen.insert(index) {
+                return Err(VersionBundleRunError::DuplicateOverride { index });
+            }
+        }
+
+        if let Some(table) = &self.header.table {
+            for body in &self.bodies {
+                for version in &body.versions {
+                    if version.table() != table.as_str() {
+                        return Err(VersionBundleRunError::TableMismatch {
+                            expected: table.to_string(),
+                            actual: version.table().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Expand the run into today's singleton `VersionBundle` carriers.
+    pub fn expand(&self) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+        self.validate()?;
+        let mut overrides = BTreeMap::new();
+        for override_ in &self.overrides {
+            overrides.insert(override_.body_index as usize, override_);
+        }
+
+        Ok(self
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let override_ = overrides.get(&index).copied();
+                VersionBundle {
+                    tx: override_
+                        .and_then(|override_| override_.tx.clone())
+                        .unwrap_or_else(|| self.header.tx.clone()),
+                    versions: body.versions.clone(),
+                    fate: override_
+                        .and_then(|override_| override_.fate.clone())
+                        .unwrap_or_else(|| self.header.fate.clone()),
+                    global_seq: override_
+                        .and_then(|override_| override_.global_seq)
+                        .unwrap_or(self.header.global_seq),
+                    durability: override_
+                        .and_then(|override_| override_.durability)
+                        .unwrap_or(self.header.durability),
+                }
+            })
+            .collect())
+    }
+}
+
+/// Shared/default metadata for a packed version-bundle run.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunHeader {
+    /// Shared table context when every carried row-version belongs to one table.
+    pub table: Option<groove::Intern<String>>,
+    /// Default transaction payload for each body.
+    pub tx: Transaction,
+    /// Declared number of bodies; must match `VersionBundleRun::bodies`.
+    pub body_count: u32,
+    /// Default fate for each body.
+    pub fate: Fate,
+    /// Default global sequence for each body.
+    pub global_seq: Option<GlobalSeq>,
+    /// Default durability tier for each body.
+    pub durability: DurabilityTier,
+}
+
+/// Row-version payload body inside a packed run.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunBody {
+    /// Row versions carried by this body.
+    pub versions: Vec<VersionRecord>,
+}
+
+/// Per-body override for metadata that differs from the run header.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunOverride {
+    /// Zero-based index into `VersionBundleRun::bodies`.
+    pub body_index: u32,
+    /// Transaction override for this body.
+    pub tx: Option<Transaction>,
+    /// Fate override for this body.
+    pub fate: Option<Fate>,
+    /// Global sequence override for this body. `Some(None)` overrides to absent.
+    pub global_seq: Option<Option<GlobalSeq>>,
+    /// Durability override for this body.
+    pub durability: Option<DurabilityTier>,
+}
+
+impl VersionBundleRunOverride {
+    fn has_overrides(&self) -> bool {
+        self.tx.is_some()
+            || self.fate.is_some()
+            || self.global_seq.is_some()
+            || self.durability.is_some()
+    }
+}
+
+/// Validation failures for malformed packed version-bundle runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionBundleRunError {
+    /// Runs must carry at least one body.
+    EmptyRun,
+    /// The declared body count did not match the actual body vector length.
+    BodyCountMismatch {
+        /// Header-declared body count.
+        declared: usize,
+        /// Actual number of run bodies.
+        actual: usize,
+    },
+    /// An override referenced a body that does not exist.
+    OverrideIndexOutOfRange {
+        /// Referenced body index.
+        index: usize,
+        /// Number of bodies in the run.
+        body_count: usize,
+    },
+    /// More than one override referenced the same body.
+    DuplicateOverride {
+        /// Duplicated body index.
+        index: usize,
+    },
+    /// A run declared shared table context but carried a different table.
+    TableMismatch {
+        /// Header table context.
+        expected: String,
+        /// Table found in a body version.
+        actual: String,
+    },
+}
+
+impl std::fmt::Display for VersionBundleRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRun => write!(f, "version-bundle run has no bodies"),
+            Self::BodyCountMismatch { declared, actual } => write!(
+                f,
+                "version-bundle run body_count {declared} did not match {actual} bodies"
+            ),
+            Self::OverrideIndexOutOfRange { index, body_count } => write!(
+                f,
+                "version-bundle run override index {index} out of range for {body_count} bodies"
+            ),
+            Self::DuplicateOverride { index } => {
+                write!(
+                    f,
+                    "version-bundle run has duplicate override for body {index}"
+                )
+            }
+            Self::TableMismatch { expected, actual } => write!(
+                f,
+                "version-bundle run table context {expected} did not match body table {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VersionBundleRunError {}
+
+/// Build packed runs from adjacent singleton bundles.
+pub fn build_version_bundle_runs_from_singletons(
+    bundles: &[VersionBundle],
+) -> Result<Vec<VersionBundleRun>, VersionBundleRunError> {
+    if bundles.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![VersionBundleRun::from_adjacent_singletons(bundles)?])
+}
+
+/// Expand a carrier stream into singleton bundles.
+pub fn expand_version_carriers(
+    carriers: &[VersionCarrier],
+) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+    let mut bundles = Vec::new();
+    for carrier in carriers {
+        bundles.extend(carrier.expand()?);
+    }
+    Ok(bundles)
+}
+
+fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>> {
+    let mut table = None::<&str>;
+    for version in bundles.iter().flat_map(|bundle| &bundle.versions) {
+        match table {
+            None => table = Some(version.table()),
+            Some(current) if current == version.table() => {}
+            Some(_) => return None,
+        }
+    }
+    table.map(|table| groove::Intern::new(table.to_owned()))
 }
 
 /// Bytes for one immutable content extent.

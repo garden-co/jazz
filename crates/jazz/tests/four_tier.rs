@@ -1169,6 +1169,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         },
         settled_through: jazz::time::GlobalSeq(0),
         reset_result_set: false,
+        version_carriers: Vec::new(),
         version_bundles: vec![VersionBundle {
             tx,
             versions,

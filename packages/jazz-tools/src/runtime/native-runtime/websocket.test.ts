@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_SYNC_MESSAGE_PAYLOAD,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
+  WIRE_PROTOCOL_VERSION,
   WebSocketCarrier,
   decodeWireError,
   decodeWebSocketFrameBatch,
@@ -101,7 +104,59 @@ describe("websocket frame carrier", () => {
     expect(frames).toEqual([]);
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
   });
+
+  it("round-trips run-bearing Rust wire fixtures through the TS websocket frame codec", () => {
+    const manifest = rustWireFixtureManifest();
+    const fixture = manifest.fixtures.find(
+      (candidate) => candidate.name === "view_update_mixed_version_carrier_runs",
+    );
+
+    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    expect(fixture?.message_family).toBe("ViewUpdate");
+    expect(fixture?.decoded_debug).toContain("VersionBundleRun");
+
+    const frame = hexToBytes(fixture!.frame_hex);
+    expect(isWireMessage(frame)).toBe(true);
+    expect([...decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([frame]))[0]!]).toEqual([
+      ...frame,
+    ]);
+
+    const reader = new PostcardReader(frame);
+    expect(reader.u64()).toBe(1);
+    expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
+    expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
+    expect(reader.option(() => "session")).toBeUndefined();
+    const payload = reader.bytes();
+    expect(payload[0]).toBe(11);
+  });
 });
+
+type RustWireFixtureManifest = {
+  protocol_version: number;
+  fixtures: Array<{
+    name: string;
+    message_family: string;
+    frame_hex: string;
+    decoded_debug: string;
+  }>;
+};
+
+function rustWireFixtureManifest(): RustWireFixtureManifest {
+  return JSON.parse(
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/wire_message_frames.json", import.meta.url),
+      "utf8",
+    ),
+  ) as RustWireFixtureManifest;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();

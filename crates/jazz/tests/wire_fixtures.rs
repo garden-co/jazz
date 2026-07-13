@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use groove::records::Value;
 use groove::schema::ColumnType;
 use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
@@ -6,6 +8,7 @@ use jazz::protocol::{
     CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
     ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, TableLens,
+    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -110,6 +113,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 subscription,
                 settled_through: GlobalSeq(7),
                 reset_result_set: true,
+                version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
@@ -128,11 +132,28 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 settled_through: GlobalSeq(7),
                 reset_result_set: true,
                 final_chunk: true,
+                version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ),
+        (
+            "view_update_mixed_version_carrier_runs",
+            "ViewUpdate",
+            SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(8),
+                reset_result_set: false,
+                version_carriers: mixed_version_carriers(schema_version, author),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory::default(),
+                result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
@@ -263,6 +284,65 @@ fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
     )
 }
 
+fn mixed_version_carriers(
+    schema_version: SchemaVersionId,
+    author: AuthorId,
+) -> Vec<VersionCarrier> {
+    let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+    let node = NodeUuid::from_bytes([0x88; 16]);
+    let bundles = (0..4)
+        .map(|index| {
+            let tx_id = TxId::new(TxTime(100 + index), node);
+            VersionBundle {
+                tx: Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 1,
+                    made_by: author,
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    source_branch: None,
+                    merge_strategy: None,
+                },
+                versions: vec![
+                    VersionRecord::from_cells(
+                        &table,
+                        schema_version,
+                        RowUuid::from_bytes([0x90 + index as u8; 16]),
+                        Vec::new(),
+                        author,
+                        TxTime(100 + index),
+                        author,
+                        TxTime(100 + index),
+                        &BTreeMap::from([("title".to_owned(), format!("run-{index}"))]),
+                        None,
+                    )
+                    .expect("fixture row encodes"),
+                ],
+                fate: Fate::Accepted,
+                global_seq: Some(GlobalSeq(100 + index)),
+                durability: DurabilityTier::Global,
+            }
+        })
+        .collect::<Vec<_>>();
+    vec![
+        VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[..1])
+                .expect("length-one run builds")
+                .remove(0),
+        ),
+        VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[1..])
+                .expect("multi-row run builds")
+                .remove(0),
+        ),
+    ]
+}
+
 fn fixture_manifest() -> Manifest {
     let fixtures = wire_fixture_messages()
         .into_iter()
@@ -288,7 +368,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v2",
+        fixture_set: "jazz-wire-message-frames-v3",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

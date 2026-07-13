@@ -132,6 +132,9 @@ where
     where
         S: ReopenableStorage,
     {
+        let message = message
+            .expand_version_carriers_for_receive()
+            .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
@@ -161,6 +164,7 @@ where
                 subscription,
                 settled_through,
                 reset_result_set,
+                version_carriers: _,
                 version_bundles,
                 peer_payload_inventory,
                 result_member_adds,
@@ -187,6 +191,7 @@ where
                 settled_through,
                 reset_result_set,
                 final_chunk,
+                version_carriers: _,
                 version_bundles,
                 peer_payload_inventory,
                 result_member_adds,

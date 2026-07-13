@@ -34,7 +34,7 @@ export type BrowserWebSocket = {
   addEventListener(type: "close", listener: () => void): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 2;
+export const WIRE_PROTOCOL_VERSION = 3;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
