@@ -1,8 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use jazz::block_on;
@@ -22,16 +21,23 @@ use jazz::wire::TransportError;
 
 struct CountingAllocator;
 
-static ACTIVE: AtomicBool = AtomicBool::new(false);
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static BYTES: AtomicU64 = AtomicU64::new(0);
+// Counters are thread-local so concurrently running tests in this binary
+// cannot pollute each other's measurement windows; the test harness runs
+// each test on its own thread. try_with guards against TLS teardown.
+thread_local! {
+    static T_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static T_ALLOCS: Cell<u64> = const { Cell::new(0) };
+    static T_BYTES: Cell<u64> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ACTIVE.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        }
+        let _ = T_ACTIVE.try_with(|active| {
+            if active.get() {
+                let _ = T_ALLOCS.try_with(|allocs| allocs.set(allocs.get() + 1));
+                let _ = T_BYTES.try_with(|bytes| bytes.set(bytes.get() + layout.size() as u64));
+            }
+        });
         unsafe { System.alloc(layout) }
     }
 
@@ -50,16 +56,16 @@ struct AllocSnapshot {
 }
 
 fn reset_alloc_counter() {
-    ALLOCS.store(0, Ordering::Relaxed);
-    BYTES.store(0, Ordering::Relaxed);
-    ACTIVE.store(true, Ordering::Relaxed);
+    T_ALLOCS.with(|allocs| allocs.set(0));
+    T_BYTES.with(|bytes| bytes.set(0));
+    T_ACTIVE.with(|active| active.set(true));
 }
 
 fn stop_alloc_counter() -> AllocSnapshot {
-    ACTIVE.store(false, Ordering::Relaxed);
+    T_ACTIVE.with(|active| active.set(false));
     AllocSnapshot {
-        allocs: ALLOCS.load(Ordering::Relaxed),
-        bytes: BYTES.load(Ordering::Relaxed),
+        allocs: T_ALLOCS.with(Cell::get),
+        bytes: T_BYTES.with(Cell::get),
     }
 }
 
