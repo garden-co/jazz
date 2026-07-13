@@ -672,19 +672,15 @@ impl QueryManager {
 
         let history_table = crate::storage::history_table_for_row(storage, row_id, table);
         if let Ok(history_rows) = storage.scan_history_row_batches(&history_table, row_id) {
-            let visible_rows = history_rows
+            let branch_rows = history_rows
                 .iter()
-                .filter(|row| {
-                    row.branch.as_str() == branch
-                        && row.state.is_visible()
-                        && row.delete_kind.is_none()
-                })
+                .filter(|row| row.branch.as_str() == branch && row.state.is_visible())
                 .collect::<Vec<_>>();
             let mut non_tips = HashSet::new();
-            for row in &visible_rows {
+            for row in &branch_rows {
                 non_tips.extend(row.parents.iter().copied());
             }
-            let mut tips = visible_rows
+            let mut tips = branch_rows
                 .into_iter()
                 .filter(|row| !non_tips.contains(&row.batch_id()))
                 .map(StoredRowBatch::batch_id)
