@@ -7,8 +7,9 @@
 //! [`super::op_types`]; lowering from queries lives in [`super::planner`]; the
 //! tick loop that evaluates the graph lives in [`super::runtime`].
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::records::{RecordDescriptor, Value, ValueType};
 use thiserror::Error;
@@ -639,7 +640,10 @@ impl IvmGraph {
         &self.nodes
     }
 
-    pub fn mark_ancestors(&self, id: NodeId, retained: &mut HashSet<NodeId>) {
+    pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
+    where
+        S: BuildHasher,
+    {
         if !retained.insert(id) {
             return;
         }
@@ -683,7 +687,7 @@ impl GraphNode {
             id: descriptor.node_id(),
             descriptor,
             durability,
-            children: HashSet::new(),
+            children: HashSet::default(),
         }
     }
 
