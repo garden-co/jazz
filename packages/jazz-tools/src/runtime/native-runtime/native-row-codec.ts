@@ -163,6 +163,18 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
 
 export function createRecord(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
   const layout = recordLayout(descriptor);
+  return createRecordWithLayout(layout, values);
+}
+
+function createRecordWithLayout(
+  layout: {
+    fields: FieldLayout[];
+    fixed: Extract<FieldLayout, { kind: "fixed" }>[];
+    variable: Extract<FieldLayout, { kind: "variable" }>[];
+    fixedSize: number;
+  },
+  values: Uint8Array[],
+): Uint8Array {
   const staticChunks = layout.fixed.map((field) => values[field.logicalIndex]);
   const variableChunks = layout.variable.map((field) => values[field.logicalIndex]);
   const fixed = concatBytes(staticChunks);
@@ -268,11 +280,22 @@ export function encodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   values: readonly Value[],
 ): Uint8Array {
+  return createNativeRowValueEncoder(columns)(values);
+}
+
+export function createNativeRowValueEncoder(
+  columns: readonly ColumnDescriptor[],
+): (values: readonly Value[]) => Uint8Array {
   const descriptor = descriptorFromColumns(columns);
-  return createRecord(
-    descriptor,
-    columns.map((column, index) => encodeValueForColumn(column, values[index])),
-  );
+  const layout = recordLayout(descriptor);
+  return (values) => {
+    const encoded: Uint8Array[] = [];
+    encoded.length = columns.length;
+    for (let index = 0; index < columns.length; index += 1) {
+      encoded[index] = encodeValueForColumn(columns[index], values[index]);
+    }
+    return createRecordWithLayout(layout, encoded);
+  };
 }
 
 export function decodeNativeRowObject(
@@ -303,6 +326,27 @@ export function decodeRecordValue(
   logicalIndex: number,
 ): Uint8Array | null {
   const layout = recordLayout(descriptor);
+  return decodeRecordValueWithLayout(descriptor, layout, raw, logicalIndex);
+}
+
+export function createRecordValueDecoder(
+  descriptor: DescriptorField[],
+): (raw: Uint8Array, logicalIndex: number) => Uint8Array | null {
+  const layout = recordLayout(descriptor);
+  return (raw, logicalIndex) => decodeRecordValueWithLayout(descriptor, layout, raw, logicalIndex);
+}
+
+function decodeRecordValueWithLayout(
+  descriptor: DescriptorField[],
+  layout: {
+    fields: FieldLayout[];
+    fixed: Extract<FieldLayout, { kind: "fixed" }>[];
+    variable: Extract<FieldLayout, { kind: "variable" }>[];
+    fixedSize: number;
+  },
+  raw: Uint8Array,
+  logicalIndex: number,
+): Uint8Array | null {
   const target = layout.fields[logicalIndex];
   if (!target) throw new Error("field is not present");
   const valueType = descriptor[logicalIndex].valueType;
