@@ -7357,21 +7357,19 @@ where
         )?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
-        let subscription = self.subscribe_lowered_program(
-            &program,
-            &binding,
-            program
-                .request
-                .input
-                .binding
-                .source_shape
-                .clone()
-                .unwrap_or_else(|| {
-                    query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
-                        &program.lowered.parameters,
-                    ))
-                }),
-        )?;
+        let binding_source_shape = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .unwrap_or_else(|| {
+                query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
+                    &program.lowered.parameters,
+                ))
+            });
+        let subscription =
+            self.subscribe_lowered_program(program, &binding, binding_source_shape)?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription.recv().map_err(|_| {
@@ -7440,14 +7438,19 @@ where
 
     fn subscribe_lowered_program(
         &mut self,
-        program: &QueryProgram,
+        program: QueryProgram,
         binding: &Binding,
         binding_source_shape: String,
     ) -> Result<MultisinkSubscription, Error> {
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
         if params.is_empty() {
-            let sinks = lowered_program_sinks(program);
+            let sinks: Vec<(String, GraphBuilder)> = program
+                .lowered
+                .terminals
+                .into_iter()
+                .map(|terminal| (terminal.sink, terminal.graph))
+                .collect();
             return self.database.subscribe(sinks).map_err(Error::Groove);
         }
         let param_names = params
@@ -7460,10 +7463,11 @@ where
                 .cloned()
                 .zip(params.iter().map(|param| param.ty.value_type())),
         );
+        let values = binding_values_for_plan(binding, &params, &program.request.policy)?;
         let terminals = program
             .lowered
             .terminals
-            .iter()
+            .into_iter()
             .map(|terminal| {
                 let public_fields = terminal_public_fields(&terminal.output)?;
                 let route_fields = terminal_route_fields(
@@ -7471,8 +7475,8 @@ where
                     &terminal_route_eligible_fields(&terminal.output)?,
                 );
                 Ok(RoutedMultisinkTerminal::new(
-                    terminal.sink.clone(),
-                    terminal.graph.clone(),
+                    terminal.sink,
+                    terminal.graph,
                     route_fields,
                     public_fields,
                 ))
@@ -7481,7 +7485,6 @@ where
         let prepared =
             self.database
                 .prepare(terminals, binding_source_shape, binding_descriptor)?;
-        let values = binding_values_for_plan(binding, &params, &program.request.policy)?;
         self.database
             .bind_shape(prepared.id(), &values)
             .map_err(Error::Groove)
