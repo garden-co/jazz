@@ -21,7 +21,7 @@ use jazz::node::content_store::Extent;
 use jazz::node::text_oplog::{self, Content as TextContent};
 use jazz::node::{LargeValueEditCommit, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::SyncMessage;
+use jazz::protocol::{SyncMessage, expand_version_carriers};
 use jazz::query::Query;
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
@@ -1748,12 +1748,17 @@ fn content_extents_in_message(message: &SyncMessage) -> Vec<Extent> {
             collect_extents_from_versions(versions.iter(), &mut extents);
         }
         SyncMessage::ViewUpdate {
-            version_bundles, ..
+            version_carriers,
+            version_bundles,
+            ..
         } => {
+            let mut bundles = version_bundles.clone();
+            bundles.extend(
+                expand_version_carriers(version_carriers)
+                    .expect("bench view update carriers should expand"),
+            );
             collect_extents_from_versions(
-                version_bundles
-                    .iter()
-                    .flat_map(|bundle| bundle.versions.iter()),
+                bundles.iter().flat_map(|bundle| bundle.versions.iter()),
                 &mut extents,
             );
         }
@@ -1794,13 +1799,19 @@ fn collect_extents_from_versions<'a>(
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
         SyncMessage::ViewUpdate {
+            version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
         } => {
-            version_bundles
+            let mut bundles = version_bundles.clone();
+            bundles.extend(
+                expand_version_carriers(version_carriers)
+                    .expect("bench view update carriers should expand"),
+            );
+            bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
                 .map(|version| version.record().raw().len() as u64 + 64)

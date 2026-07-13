@@ -503,7 +503,8 @@ fn evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate() {
     edge.apply_content_extents(extents).unwrap();
 
     let update = peer.reset_current_rows(&mut core, "docs").unwrap();
-    let SyncMessage::ViewUpdate { version_bundles, .. } = &update else {
+    let version_bundles = version_bundles_for_update(&update);
+    let SyncMessage::ViewUpdate { .. } = &update else {
         panic!("expected view update");
     };
     assert_eq!(version_bundles.len(), 1);

@@ -2313,9 +2313,27 @@ where
                 self.content_refs_in_version_records(versions)
             }
             SyncMessage::ViewUpdate {
-                version_bundles, ..
+                version_carriers,
+                version_bundles,
+                ..
             }
-            | SyncMessage::RowVersionPayloads {
+            | SyncMessage::ViewUpdateChunk {
+                version_carriers,
+                version_bundles,
+                ..
+            } => {
+                let mut refs = BTreeSet::new();
+                for bundle in version_bundles {
+                    refs.extend(self.content_refs_in_version_records(&bundle.versions)?);
+                }
+                for bundle in expand_version_carriers(version_carriers)
+                    .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?
+                {
+                    refs.extend(self.content_refs_in_version_records(&bundle.versions)?);
+                }
+                Ok(refs)
+            }
+            SyncMessage::RowVersionPayloads {
                 version_bundles, ..
             } => {
                 let mut refs = BTreeSet::new();

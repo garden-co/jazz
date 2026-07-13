@@ -27,8 +27,8 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     core.apply_sync_message(left_message).unwrap();
 
     let update = core.view_update_for_current_rows("todos").unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         result_member_removes,
         ..

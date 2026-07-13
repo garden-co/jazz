@@ -7,6 +7,8 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::records::{OwnedRecord, Value};
 
@@ -890,6 +892,34 @@ pub fn build_version_bundle_runs_from_singletons(
         return Ok(Vec::new());
     }
     Ok(vec![VersionBundleRun::from_adjacent_singletons(bundles)?])
+}
+
+/// Build the outbound carrier stream for adjacent singleton bundles.
+pub fn build_version_carriers_from_singletons(
+    bundles: Vec<VersionBundle>,
+) -> Result<Vec<VersionCarrier>, VersionBundleRunError> {
+    if force_singleton_version_carriers() || bundles.len() <= 1 {
+        return Ok(bundles.into_iter().map(VersionCarrier::Bundle).collect());
+    }
+    Ok(vec![VersionCarrier::Run(
+        VersionBundleRun::from_adjacent_singletons(&bundles)?,
+    )])
+}
+
+fn force_singleton_version_carriers() -> bool {
+    #[cfg(test)]
+    if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
+        return true;
+    }
+    std::env::var_os("JAZZ_FORCE_SINGLETON_VERSION_CARRIERS").is_some()
+}
+
+#[cfg(test)]
+static FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn set_force_singleton_version_carriers_for_tests(enabled: bool) {
+    FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.store(enabled, AtomicOrdering::Relaxed);
 }
 
 /// Expand a carrier stream into singleton bundles.

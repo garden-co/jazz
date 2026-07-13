@@ -69,10 +69,10 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
 }
 
 fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
+    let normalized_version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         subscription,
         reset_result_set,
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory {
             complete_tx_payloads: complete_tx_payload_refs,
         },
@@ -84,7 +84,7 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         panic!("expected view update");
     };
 
-    let mut version_bundles = version_bundles
+    let mut version_bundles = normalized_version_bundles
         .into_iter()
         .map(canonical_version_bundle)
         .collect::<Vec<_>>();
@@ -252,13 +252,13 @@ fn apply_capture_delivery_state(
 ) {
     apply_capture_result_delta(result_set, update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs },
         ..
     } = update
     else {
         panic!("expected view update");
     };
+    let version_bundles = version_bundles_for_update(update);
     peer_complete_tx_payloads.extend(
         version_bundles
             .iter()
@@ -269,10 +269,10 @@ fn apply_capture_delivery_state(
 }
 
 fn view_update_full_bundle_count(update: &SyncMessage) -> usize {
-    let SyncMessage::ViewUpdate { version_bundles, .. } = update else {
+    let SyncMessage::ViewUpdate { .. } = update else {
         panic!("expected view update");
     };
-    version_bundles.len()
+    version_bundles_for_update(update).len()
 }
 
 struct MaintainedSubscriptionViewSubscription {
@@ -477,9 +477,10 @@ fn assert_shipped_content_rows(
     expected_rows: &[RowUuid],
     absent_rows: &[RowUuid],
 ) {
-    let SyncMessage::ViewUpdate { version_bundles, .. } = update else {
+    let SyncMessage::ViewUpdate { .. } = update else {
         panic!("expected view update");
     };
+    let version_bundles = version_bundles_for_update(update);
     let bundle = version_bundles
         .iter()
         .find(|bundle| bundle.tx.tx_id == tx_id)

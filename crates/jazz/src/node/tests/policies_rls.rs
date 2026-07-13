@@ -246,8 +246,8 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     let update = bob_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads,

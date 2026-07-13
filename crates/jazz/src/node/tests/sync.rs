@@ -465,10 +465,10 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     );
 
     let update = core.view_update_for_current_rows("todos").unwrap();
+    let mut version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         subscription,
         settled_through,
-        mut version_bundles,
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
@@ -1476,6 +1476,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
 
     let mut update = core.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate {
+        version_carriers,
         version_bundles,
         result_member_adds,
         ..
@@ -1483,6 +1484,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     else {
         panic!("expected view update");
     };
+    version_carriers.clear();
     version_bundles.clear();
     assert_eq!(
         result_member_adds,
@@ -2294,8 +2296,8 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let control_version_bundles = version_bundles_for_update(&control_update);
     let SyncMessage::ViewUpdate {
-        version_bundles: control_version_bundles,
         result_member_adds: control_result_member_adds,
         ..
     } = &control_update
@@ -2323,10 +2325,10 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         settled_through,
         reset_result_set,
-        version_bundles,
         result_member_adds,
         ..
     } = &update
@@ -2403,10 +2405,10 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         settled_through,
         reset_result_set,
-        version_bundles,
         result_member_adds,
         result_member_removes,
         ..
@@ -2487,8 +2489,8 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = &update
@@ -2540,11 +2542,11 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         result_member_removes,
-        version_bundles,
         ..
     } = &update
     else {
@@ -2629,11 +2631,11 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         reset_result_set,
         result_member_adds,
         result_member_removes,
-        version_bundles,
         ..
     } = &update
     else {
@@ -2823,8 +2825,8 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let control_bundles = version_bundles_for_update(&control_update);
     let SyncMessage::ViewUpdate {
-        version_bundles: control_bundles,
         result_member_adds: control_members,
         ..
     } = &control_update
@@ -2845,8 +2847,8 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = &update
@@ -2918,8 +2920,8 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
             RegisterShapeOptions::default(),
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = update
@@ -3075,8 +3077,8 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     let update = peer
         .rehydrate_query_for_subscription_with_opts(&mut edge, subscription, &shape, &binding, opts)
         .unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = update
@@ -3118,11 +3120,11 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         .unwrap();
 
     let update = core.view_update_for_current_rows("todos").unwrap();
+    let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set,
-        version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
@@ -3186,11 +3188,11 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         .unwrap();
 
     let initial = core.view_update_for_current_rows("todos").unwrap();
+    let version_bundles = version_bundles_for_update(&initial);
     let SyncMessage::ViewUpdate {
         subscription,
         settled_through,
         reset_result_set,
-        version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
@@ -3228,9 +3230,9 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             AuthorId::SYSTEM,
         )
         .unwrap();
+    let version_bundles = version_bundles_for_update(&deduped);
     let SyncMessage::ViewUpdate {
         settled_through,
-        version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,

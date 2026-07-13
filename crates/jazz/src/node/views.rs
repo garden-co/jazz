@@ -12,7 +12,7 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
     KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
-    RowVersionRef, VersionBundle, VersionRecord,
+    RowVersionRef, VersionBundle, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -404,6 +404,7 @@ where
                     by_tx
                 },
             );
+        self.preload_transaction_memo(wanted_add_rows_by_tx.keys().copied(), &mut context)?;
         let mut version_bundles = Vec::with_capacity(row_result_adds.len());
         let mut peer_payload_inventory_refs = Vec::new();
         let mut emitted_versions = BTreeSet::new();
@@ -583,12 +584,14 @@ where
                     || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
             });
         }
+        let version_carriers = build_version_carriers_from_singletons(version_bundles)
+            .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
         Ok(SyncMessage::ViewUpdate {
             subscription,
             settled_through: self.clock.applied_global_watermark,
             reset_result_set: false,
-            version_carriers: Vec::new(),
-            version_bundles,
+            version_carriers,
+            version_bundles: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
             },

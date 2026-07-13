@@ -7,6 +7,28 @@ fn row(byte: u8) -> RowUuid {
 fn branch(byte: u8) -> BranchId {
     BranchId::from_bytes([byte; 16])
 }
+fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
+    match update {
+        SyncMessage::ViewUpdate {
+            version_carriers,
+            version_bundles,
+            ..
+        }
+        | SyncMessage::ViewUpdateChunk {
+            version_carriers,
+            version_bundles,
+            ..
+        } => {
+            let mut bundles = version_bundles.clone();
+            bundles.extend(
+                crate::protocol::expand_version_carriers(version_carriers)
+                    .expect("test update carriers should expand"),
+            );
+            bundles
+        }
+        _ => Vec::new(),
+    }
+}
 fn assert_currency_tables_match_storage<S>(node: &mut NodeState<S>, table: &str)
 where
     S: OrderedKvStorage,
@@ -735,8 +757,9 @@ impl PerNodeKnowledge {
 
     fn record_view_delivery(&mut self, message: &SyncMessage) {
         let SyncMessage::ViewUpdate {
-            version_bundles,
             reset_result_set,
+            version_carriers,
+            version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
@@ -747,11 +770,13 @@ impl PerNodeKnowledge {
         else {
             return;
         };
+        let normalized_bundles = version_bundles_for_update(message);
         // Keep this condition in sync with NodeState::apply_view_update in
         // node/views.rs: empty resets against non-empty shared state are
         // coverage stamps, not replacement snapshots. Sanctioned by reviewer
         // instruction for the Plan 5 close-out seed 2210401 diagnosis.
         let empty_reset = *reset_result_set
+            && version_carriers.is_empty()
             && version_bundles.is_empty()
             && peer_payload_inventory.complete_tx_payloads.is_empty()
             && result_member_adds.is_empty()
@@ -769,7 +794,7 @@ impl PerNodeKnowledge {
             .map(|(_, row_uuid, tx_id)| (tx_id, row_uuid))
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
-        for bundle in version_bundles {
+        for bundle in &normalized_bundles {
             for version in &bundle.versions {
                 let row_uuid = version.row_uuid();
                 if version.deletion().is_none() {
@@ -792,7 +817,7 @@ impl PerNodeKnowledge {
         {
             self.subscription_entries.remove(&(tx_id, row_uuid));
         }
-        for bundle in version_bundles {
+        for bundle in &normalized_bundles {
             if usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len()) {
                 self.tx_ids.insert(bundle.tx.tx_id);
             } else {
@@ -1209,13 +1234,13 @@ fn commit_core_owner_fixture(
 }
 fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
     let SyncMessage::ViewUpdate {
-        version_bundles,
         result_member_adds,
         ..
     } = update
     else {
         panic!("expected view update");
     };
+    let version_bundles = version_bundles_for_update(update);
     let result_txs = result_member_adds
         .iter()
         .filter_map(crate::protocol::ResultMemberEntry::as_row)
@@ -1229,12 +1254,10 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     assert_eq!(referenced_rows, expected_rows);
 }
 fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTreeSet<RowUuid>) {
-    let SyncMessage::ViewUpdate {
-        version_bundles, ..
-    } = update
-    else {
+    if !matches!(update, SyncMessage::ViewUpdate { .. }) {
         panic!("expected view update");
-    };
+    }
+    let version_bundles = version_bundles_for_update(update);
     let shipped_rows = version_bundles
         .iter()
         .flat_map(|bundle| bundle.versions.iter().map(|version| version.row_uuid()))
@@ -1266,9 +1289,10 @@ fn enqueue_rehydrate_with_dedup_assertion(
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     peer.forget_subscription(subscription);
     let update = peer.reset_current_rows(core, "todos").unwrap();
-    let SyncMessage::ViewUpdate { version_bundles, .. } = &update else {
+    let SyncMessage::ViewUpdate { .. } = &update else {
         panic!("expected view update");
     };
+    let version_bundles = version_bundles_for_update(&update);
     let newly_shipped = version_bundles
         .iter()
         .filter(|bundle| !shipped_before.contains(&bundle.tx.tx_id))
