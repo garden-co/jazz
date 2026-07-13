@@ -15,7 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     mpsc::{self, Receiver, RecvError, Sender, TryRecvError},
 };
 
@@ -2627,7 +2627,8 @@ pub(super) struct ScopeId(crate::Intern<ScopePath>);
 
 impl ScopeId {
     fn root() -> Self {
-        Self(crate::Intern::new(ScopePath::root()))
+        static ROOT: OnceLock<ScopeId> = OnceLock::new();
+        *ROOT.get_or_init(|| Self(crate::Intern::new(ScopePath::root())))
     }
 
     pub(super) fn child(self, recursive_node: NodeId) -> Self {
