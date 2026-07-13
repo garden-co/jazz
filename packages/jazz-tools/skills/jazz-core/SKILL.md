@@ -1,6 +1,6 @@
 ---
 name: jazz-core
-description: Build, modify, and troubleshoot ordinary TypeScript application features using Jazz. Use for defining an initial app schema, querying or subscribing to rows, making optimistic local-first writes, waiting for sync confirmation, integrating React, Vue, Svelte, Solid, Expo, or plain TypeScript clients, and investigating Jazz application code that is not behaving as intended. For changes to an existing schema, permissions, or migrations, use jazz-schema-evolution instead.
+description: Build, modify, and troubleshoot ordinary TypeScript application features using Jazz. Use for defining an initial app schema, querying or subscribing to rows, making optimistic local-first writes, waiting for sync confirmation, integrating React, Vue, Svelte, Solid, or plain TypeScript clients, and investigating Jazz application code that is not behaving as intended. Use jazz-auth for identity, jazz-backend for TypeScript servers, jazz-expo for Expo or React Native, jazz-files for chunked storage, jazz-rust for Rust, jazz-sync for convergence or offline conflict design, and jazz-schema-evolution for changes to an existing schema, permissions, or migrations.
 ---
 
 # Jazz Core
@@ -71,6 +71,16 @@ If the feature changes a table, column, relation, merge strategy, or permission,
 permissions inside `schema.ts`. When `jazz-schema-evolution` already owns the task, do not load this
 skill solely because the edit uses the schema DSL; load both only when application reads, writes, or
 framework code also changes.
+
+Use the dedicated skill when the feature's main difficulty is authentication (`jazz-auth`),
+server-side context and authority (`jazz-backend`), or chunked file/blob storage (`jazz-files`). Load
+`jazz-core` alongside one of them only when ordinary application queries, writes, or framework UI
+also change.
+
+Use `jazz-expo` for native setup, storage, networking, and lifecycle; `jazz-rust` for the Rust crate;
+and `jazz-sync` for merge strategies, offline conflict behavior, reconnect correctness, or
+convergence testing. Load `jazz-core` alongside them only when the task also changes ordinary
+TypeScript application code.
 
 ## Verify the change
 

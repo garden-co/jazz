@@ -52,7 +52,8 @@ database or local sync server over mocks of runtime internals.
 
 - Use in-memory servers when persistence is not under test.
 - Give persistent browser clients unique `dbName` and auth storage keys.
-- Shut down every `Db`, stop every server and JWT issuer, and dispose every subscription.
+- Shut down every `Db`, stop every server and JWT issuer, and dispose every subscription the test
+  creates.
 - Prefer `beforeEach`/`afterEach` for per-test resources and global setup only when the suite
   deliberately shares one server.
 - Keep test data explicit and local to the test.
