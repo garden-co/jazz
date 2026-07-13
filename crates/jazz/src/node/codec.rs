@@ -728,8 +728,14 @@ impl VersionRow {
 
     pub(super) fn cells(&self, table: &TableSchema) -> Result<BTreeMap<String, Value>, Error> {
         let mut cells = BTreeMap::new();
-        for column in &table.columns {
-            if let Some(value) = self.cell(table, &column.name)? {
+        if self.is_register_record() {
+            return Ok(cells);
+        }
+        let borrowed = self.record.borrowed();
+        for (idx, column) in table.columns.iter().enumerate() {
+            if let Some(value) =
+                nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?
+            {
                 cells.insert(column.name.clone(), value);
             }
         }
@@ -1658,7 +1664,14 @@ pub(super) fn current_row_from_version_projection(
     table: &TableSchema,
     version: &VersionRow,
 ) -> Result<CurrentRow, Error> {
-    current_row_from_materialized_cells(table, version, &version.cells(table)?)
+    let descriptor = current_row_descriptor(table);
+    let mut values = current_row_prefix_and_cells_from_version(table, version)?;
+    append_current_row_provenance(&mut values, version);
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.name.clone(),
+        OwnedRecord::new(raw, descriptor),
+    ))
 }
 
 pub(super) fn current_row_from_materialized_cells(
@@ -1675,7 +1688,85 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
     provenance: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
-    let descriptor = records::RecordDescriptor::new(
+    let descriptor = current_row_descriptor(table);
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
+    values.push(Value::Uuid(content.row_uuid().0));
+    for column in &table.columns {
+        values.push(Value::Nullable(
+            cells.get(&column.name).cloned().map(Box::new),
+        ));
+    }
+    append_current_row_provenance(&mut values, provenance);
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.name.clone(),
+        OwnedRecord::new(raw, descriptor),
+    ))
+}
+
+fn current_row_prefix_and_cells_from_version(
+    table: &TableSchema,
+    version: &VersionRow,
+) -> Result<Vec<Value>, Error> {
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
+    values.push(Value::Uuid(version.row_uuid().0));
+    if version.is_register_record() {
+        values.extend(table.columns.iter().map(|_| Value::Nullable(None)));
+        return Ok(values);
+    }
+    let borrowed = version.record.borrowed();
+    for (idx, _) in table.columns.iter().enumerate() {
+        values.push(Value::Nullable(
+            nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?.map(Box::new),
+        ));
+    }
+    Ok(values)
+}
+
+fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
+    values.push(Value::Uuid(provenance.created_by().0));
+    values.push(Value::U64(provenance.created_at().0));
+    values.push(Value::Uuid(provenance.updated_by().0));
+    values.push(Value::U64(provenance.updated_at().0));
+    values.push(Value::U64(provenance.tx_time().0));
+    values.push(Value::U64(provenance.tx_node_alias().0));
+}
+
+fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<String, records::RecordDescriptor>>,
+    > = std::sync::OnceLock::new();
+    let key = current_row_descriptor_cache_key(table);
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+    if let Some(descriptor) = cache
+        .lock()
+        .expect("current row descriptor cache poisoned")
+        .get(&key)
+        .copied()
+    {
+        return descriptor;
+    }
+    let descriptor = build_current_row_descriptor(table);
+    cache
+        .lock()
+        .expect("current row descriptor cache poisoned")
+        .insert(key, descriptor);
+    descriptor
+}
+
+fn current_row_descriptor_cache_key(table: &TableSchema) -> String {
+    let mut key = table.name.clone();
+    for column in &table.columns {
+        key.push('\0');
+        key.push_str(&column.name);
+        key.push(':');
+        key.push_str(&format!("{:?}", column.column_type));
+    }
+    key
+}
+
+fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    records::RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), records::ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
                 (
@@ -1691,24 +1782,7 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),
             ]),
-    );
-    let mut values = vec![Value::Uuid(content.row_uuid().0)];
-    for column in &table.columns {
-        values.push(Value::Nullable(
-            cells.get(&column.name).cloned().map(Box::new),
-        ));
-    }
-    values.push(Value::Uuid(provenance.created_by().0));
-    values.push(Value::U64(provenance.created_at().0));
-    values.push(Value::Uuid(provenance.updated_by().0));
-    values.push(Value::U64(provenance.updated_at().0));
-    values.push(Value::U64(provenance.tx_time().0));
-    values.push(Value::U64(provenance.tx_node_alias().0));
-    let raw = descriptor.create(&values)?;
-    Ok(CurrentRow::new(
-        table.name.clone(),
-        OwnedRecord::new(raw, descriptor),
-    ))
+    )
 }
 
 pub(super) fn current_row_from_positional_cells(
