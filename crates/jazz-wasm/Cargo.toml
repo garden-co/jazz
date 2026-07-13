@@ -28,6 +28,7 @@ web-time = "1.1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+talc = "5.0.4"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
