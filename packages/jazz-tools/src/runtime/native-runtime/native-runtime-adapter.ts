@@ -3465,7 +3465,7 @@ function applySubscriptionDeltaWithWireDelta(
     rows,
     rowIndexByKey,
     wireDelta: {
-      ...wireDeltaFromNativeBatches(delta, rowIndexByKey, removedEntries, schema),
+      ...nativeDeltaFromChanges(addedRows, updatedRows, removedEntries, rowIndexByKey, schema),
       ...(reset ? { reset: true } : {}),
     },
   };
@@ -3583,23 +3583,6 @@ function indexRowsByKey(rows: RowState[]): Map<string, number> {
     index.set(rowKey(row.table, row.id), rowIndex);
   });
   return index;
-}
-
-function wireDeltaFromNativeBatches(
-  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
-  rowIndexByKey: Map<string, number>,
-  removedEntries: Array<{ id: string; index: number }>,
-  schema: WasmSchema,
-): NativeRowDelta {
-  const added: RowState[] = [];
-  for (const row of rowsFromBatches(delta.added, schema)) {
-    added.push(row);
-  }
-  const updated: RowState[] = [];
-  for (const row of rowsFromBatches(delta.updated, schema)) {
-    updated.push(row);
-  }
-  return nativeDeltaFromChanges(added, updated, removedEntries, rowIndexByKey, schema);
 }
 
 function rowKey(table: string, id: string): string {
