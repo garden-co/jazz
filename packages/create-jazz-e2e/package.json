@@ -8,7 +8,8 @@
   "scripts": {
     "check": "tsc --noEmit",
     "e2e": "tsx src/cli.ts",
-    "e2e:all": "tsx src/cli.ts --all"
+    "e2e:all": "tsx src/cli.ts --all",
+    "e2e:agent-skills": "tsx src/agent-skills-e2e.ts"
   },
   "dependencies": {
     "create-jazz": "workspace:*",

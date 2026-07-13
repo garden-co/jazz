@@ -159,7 +159,7 @@ function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
   }
 }
 
-function discoverPrebuiltTarballs(dir: string): Record<string, string> {
+export function discoverPrebuiltTarballs(dir: string): Record<string, string> {
   if (!fs.existsSync(dir)) {
     throw new Error(`--tarball-dir ${dir} does not exist`);
   }
@@ -175,7 +175,7 @@ function discoverPrebuiltTarballs(dir: string): Record<string, string> {
   return tarballs;
 }
 
-async function packWorkspaceTarballs(
+export async function packWorkspaceTarballs(
   repoRoot: string,
   destDir: string,
   verbose: boolean,
@@ -233,7 +233,7 @@ const UPSTREAM_PINS: Record<string, string> = {
  * the e2e harness — the few packages affected ship working binaries via
  * optionalDependencies.
  */
-function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, string>): void {
+export function writeScaffoldedPnpmConfig(appDir: string, tarballs: Record<string, string>): void {
   const overrideLines = [
     ...Object.entries(tarballs).map(([pkg, tgz]) => `  "${pkg}": "file:${tgz}"`),
     ...Object.entries(UPSTREAM_PINS).map(([pkg, v]) => `  "${pkg}": "${v}"`),

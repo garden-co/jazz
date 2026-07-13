@@ -14,6 +14,8 @@ name: Starters E2E
 # skipping the ~10-minute `build:core` step entirely. Playwright browsers
 # and the pnpm store are cached between jobs so the matrix doesn't repeat
 # the 280 MB chromium download or the lockfile resolution per runner.
+# A focused third job reuses the tarballs to exercise interactive agent-skill
+# setup once, including a real pnpm install and TanStack Intent invocation.
 
 on:
   pull_request:
@@ -180,3 +182,27 @@ jobs:
           path: /tmp/cje2e-${{ matrix.starter }}-*/test-app/test-results/**
           if-no-files-found: ignore
           retention-days: 7
+
+  agent-skills-e2e:
+    needs: prepare
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Restore prebuilt artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: starters-e2e-build-state
+          path: .
+
+      - name: Test interactive Jazz agent skill setup
+        run: pnpm --filter create-jazz-e2e e2e:agent-skills -- --tarball-dir "$GITHUB_WORKSPACE/_e2e-state/tarballs" --verbose
