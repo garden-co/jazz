@@ -161,7 +161,7 @@ export async function startApp(
       done: false,
       owner_id: sessionUserId,
       ...(selectedParentId ? { parentId: selectedParentId } : {}),
-    });
+    }).wait({ tier: "local" });
     input.value = "";
     parentSelect.value = "";
   });
