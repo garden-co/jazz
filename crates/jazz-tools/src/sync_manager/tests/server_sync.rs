@@ -228,6 +228,57 @@ fn add_server_with_storage_skips_rows_confirmed_by_authoritative_batch_fate() {
 }
 
 #[test]
+fn add_server_with_storage_skips_rows_with_rejected_batch_fate() {
+    let mut io = MemoryStorage::new();
+    seed_users_schema(&mut io);
+
+    let row_id = ObjectId::new();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"rejected"),
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    io.put_row_locator(
+        row_id,
+        Some(
+            &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                .expect("row metadata should produce a row locator"),
+        ),
+    )
+    .unwrap();
+    io.append_history_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+    io.upsert_authoritative_batch_fate(&BatchFate::Rejected {
+        batch_id: row.batch_id(),
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    })
+    .unwrap();
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    let row_syncs = sm
+        .take_outbox()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(id),
+                    payload: SyncPayload::RowBatchCreated { row: sent, .. },
+                } if *id == server_id && sent.batch_id() == row.batch_id()
+            )
+        })
+        .count();
+    assert_eq!(
+        row_syncs, 0,
+        "a terminally rejected row must not be replayed as a client write"
+    );
+}
+
+#[test]
 fn add_server_with_storage_sends_skipped_parent_before_child() {
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
