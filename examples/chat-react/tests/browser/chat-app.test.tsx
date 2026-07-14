@@ -305,7 +305,7 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("does not duplicate a reaction when the same preset is picked twice", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("react-dupe") });
+    const el = await mountApp();
 
     await waitFor(
       () => el.textContent?.includes("Hello world") ?? false,
