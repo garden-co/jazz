@@ -72,6 +72,11 @@ pub(crate) struct LocalMaintainedViewSubscription {
     program_facts: BTreeSet<ProgramFactEntry>,
 }
 
+#[derive(Default)]
+struct LocalMaintainedMaterializationCache {
+    tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[cfg(feature = "testing")]
 pub(crate) struct LocalMaintainedViewSubscriptionFootprint {
@@ -6592,18 +6597,19 @@ where
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<RelationSnapshot, Error> {
-        let mut rows = Vec::new();
+        let mut cache = self.preload_local_maintained_materialization_cache(local)?;
+        let mut rows = Vec::with_capacity(local.result_set.len());
         let mut row_keys = BTreeSet::new();
         for member in &local.result_set {
-            if let Some(row) =
-                self.materialize_local_maintained_view_result_member(local, member)?
-            {
+            if let Some(row) = self.materialize_local_maintained_view_result_member_with_cache(
+                local, member, &mut cache,
+            )? {
                 row_keys.insert((row.table().to_owned(), row.row_uuid()));
                 rows.push(row);
             }
         }
         let root_count = rows.len();
-        let mut edges = Vec::new();
+        let mut edges = Vec::with_capacity(local.program_facts.len());
         for fact in &local.program_facts {
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
@@ -6617,12 +6623,14 @@ where
             });
             if row_keys.insert((edge.target_table.to_string(), edge.target_row))
                 && let Some(version) = &edge.target_version
-                && let Some(row) = self.materialize_local_maintained_view_relation_edge_row(
-                    local,
-                    edge.target_table.as_str(),
-                    edge.target_row,
-                    version.tx,
-                )?
+                && let Some(row) = self
+                    .materialize_local_maintained_view_relation_edge_row_with_cache(
+                        local,
+                        edge.target_table.as_str(),
+                        edge.target_row,
+                        version.tx,
+                        &mut cache,
+                    )?
             {
                 rows.push(row);
             }
@@ -6632,6 +6640,39 @@ where
             rows,
             edges,
         })
+    }
+
+    fn preload_local_maintained_materialization_cache(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> Result<LocalMaintainedMaterializationCache, Error> {
+        let mut cache = LocalMaintainedMaterializationCache::default();
+        let mut tx_ids = BTreeSet::new();
+        for member in &local.result_set {
+            let Some((_, _, tx_id)) = member.as_row() else {
+                continue;
+            };
+            tx_ids.insert(tx_id);
+            cache
+                .tx_versions
+                .entry(tx_id)
+                .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
+        }
+        for fact in &local.program_facts {
+            let ProgramFactEntry::RelationEdge(edge) = fact else {
+                continue;
+            };
+            let Some(version) = &edge.target_version else {
+                continue;
+            };
+            tx_ids.insert(version.tx);
+            cache
+                .tx_versions
+                .entry(version.tx)
+                .or_insert_with(|| local.maintained.versions_by_tx(version.tx));
+        }
+        self.preload_tx_versions_for_materialization(tx_ids, &mut cache.tx_versions)?;
+        Ok(cache)
     }
 
     fn materialize_local_maintained_view_relation_edge_row(
@@ -6650,6 +6691,28 @@ where
         };
         self.current_row_from_materialized_version(&table, version)
             .map(Some)
+    }
+
+    fn materialize_local_maintained_view_relation_edge_row_with_cache(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        table_name: &str,
+        row_uuid: RowUuid,
+        tx_id: TxId,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let table = self.table(table_name)?.clone();
+        let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
+        let Some(version) =
+            local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
+        else {
+            return Ok(None);
+        };
+        let version = version.clone();
+        self.current_row_from_materialized_version_with_materialization_cache(
+            &table, &version, cache,
+        )
+        .map(Some)
     }
 
     fn materialize_local_maintained_view_result_member(
@@ -6696,6 +6759,356 @@ where
             row = row.project(&table, columns)?;
         }
         Ok(Some(row))
+    }
+
+    fn materialize_local_maintained_view_result_member_with_cache(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        member: &ResultMemberEntry,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let Some(entry) = member.as_row() else {
+            return Err(Error::InvalidStoredValue(
+                "local maintained subscription cannot materialize non-row result member yet",
+            ));
+        };
+        let table = self.table(entry.0.as_str())?.clone();
+        if local.result_select.is_some()
+            && let Some(payload) = local.result_payloads.get(member)
+        {
+            let mut row = self.current_row_from_result_payload(&table, payload)?;
+            if let Some(columns) = &local.result_select {
+                row = row.project(&table, columns)?;
+            }
+            return Ok(Some(row));
+        }
+        let tx_versions = self.local_maintained_tx_versions(local, entry.2, cache);
+        let version = if let Some(version) =
+            local_maintained_view_content_witness(tx_versions, entry.0.as_str(), entry.1)
+        {
+            version.clone()
+        } else {
+            let (content_winner, _) = local.maintained.replacement_for(entry.0.as_str(), entry.1);
+            let Some(content_winner) = content_winner else {
+                return Ok(None);
+            };
+            if self.version_tx_id(&content_winner)? != entry.2 {
+                return Ok(None);
+            }
+            let tx_versions = cache.tx_versions.entry(entry.2).or_default();
+            tx_versions.push(content_winner);
+            tx_versions
+                .last()
+                .ok_or(Error::MissingTransaction(entry.2))?
+                .clone()
+        };
+        let mut row = self.current_row_from_materialized_version_with_materialization_cache(
+            &table, &version, cache,
+        )?;
+        if let Some(columns) = &local.result_select {
+            row = row.project(&table, columns)?;
+        }
+        Ok(Some(row))
+    }
+
+    fn local_maintained_tx_versions<'a>(
+        &'a mut self,
+        local: &LocalMaintainedViewSubscription,
+        tx_id: TxId,
+        cache: &'a mut LocalMaintainedMaterializationCache,
+    ) -> &'a [VersionRow] {
+        cache
+            .tx_versions
+            .entry(tx_id)
+            .or_insert_with(|| local.maintained.versions_by_tx(tx_id))
+            .as_slice()
+    }
+
+    fn preload_tx_versions_for_materialization(
+        &mut self,
+        tx_ids: impl IntoIterator<Item = TxId>,
+        cache: &mut BTreeMap<TxId, Vec<VersionRow>>,
+    ) -> Result<(), Error> {
+        let mut by_alias = BTreeMap::<(NodeUuid, NodeAlias), BTreeSet<TxTime>>::new();
+        for tx_id in tx_ids {
+            if cache
+                .get(&tx_id)
+                .is_some_and(|versions| !versions.is_empty())
+            {
+                continue;
+            }
+            if let Some(versions) = self.cached_tx_versions(tx_id) {
+                cache.insert(tx_id, versions);
+                continue;
+            }
+            if let Some(alias) = self.node_aliases.get(&tx_id.node).copied() {
+                by_alias
+                    .entry((tx_id.node, alias))
+                    .or_default()
+                    .insert(tx_id.time);
+                cache.entry(tx_id).or_default();
+            }
+        }
+
+        if by_alias.is_empty() {
+            return Ok(());
+        }
+
+        let tables = self.tx_version_scan_tables();
+        for ((node, alias), times) in by_alias {
+            for (start, end) in contiguous_tx_time_spans(&times) {
+                let Some(end) = end else {
+                    let tx_id = TxId::new(start, node);
+                    let versions = self.query_versions_for_tx(tx_id)?;
+                    cache.insert(tx_id, versions);
+                    continue;
+                };
+                for table in &tables {
+                    for (storage_table, descriptor) in self.version_storage_sources(table)? {
+                        let raws = self
+                            .database
+                            .index_scan_range_raw(
+                                &storage_table,
+                                "by_tx",
+                                &[Value::U64(start.0), Value::U64(alias.0)],
+                                &[Value::U64(end.0), Value::U64(0)],
+                            )?
+                            .into_iter()
+                            .map(|raw| raw.raw().to_vec())
+                            .collect::<Vec<_>>();
+                        for raw in raws {
+                            let version = self.decode_history_record(
+                                table,
+                                BorrowedRecord::new(&raw, &descriptor),
+                            )?;
+                            if version.tx_node_alias() != alias
+                                || !times.contains(&version.tx_time())
+                            {
+                                continue;
+                            }
+                            let tx_id = TxId::new(version.tx_time(), node);
+                            cache.entry(tx_id).or_default().push(version);
+                        }
+                    }
+                }
+            }
+        }
+
+        for versions in cache.values_mut() {
+            versions.sort_by(|left, right| {
+                left.table()
+                    .cmp(right.table())
+                    .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+                    .then_with(|| left.layer().cmp(&right.layer()))
+            });
+        }
+        Ok(())
+    }
+
+    fn tx_versions_for_materialization<'a>(
+        &'a mut self,
+        tx_id: TxId,
+        cache: &'a mut LocalMaintainedMaterializationCache,
+    ) -> Result<&'a [VersionRow], Error> {
+        if let std::collections::btree_map::Entry::Vacant(entry) = cache.tx_versions.entry(tx_id) {
+            let versions = self.query_versions_for_tx(tx_id)?;
+            entry.insert(versions);
+        }
+        Ok(cache
+            .tx_versions
+            .get(&tx_id)
+            .expect("tx version cache was just populated")
+            .as_slice())
+    }
+
+    fn current_row_from_materialized_version_with_materialization_cache(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<CurrentRow, Error> {
+        if !table
+            .columns
+            .iter()
+            .any(|column| column.large_value.is_some())
+        {
+            return current_row_from_version_projection(table, version);
+        }
+        let cells =
+            self.materialized_cells_for_version_with_materialization_cache(table, version, cache)?;
+        current_row_from_materialized_cells(table, version, &cells)
+    }
+
+    fn materialized_cells_for_version_with_materialization_cache(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<BTreeMap<String, Value>, Error> {
+        let mut cells = BTreeMap::new();
+        for column in &table.columns {
+            let value = if let Some(kind) = column.large_value {
+                Some(Value::Bytes(
+                    self.large_value_handle_for_version_with_materialization_cache(
+                        table,
+                        version,
+                        &column.name,
+                        kind,
+                        cache,
+                    )?,
+                ))
+            } else {
+                version.cell(table, &column.name)?
+            };
+            if let Some(value) = value {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+        Ok(cells)
+    }
+
+    fn large_value_handle_for_version_with_materialization_cache(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+        column: &str,
+        kind: LargeValueKind,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<Vec<u8>, Error> {
+        let len =
+            self.large_value_column_len_with_materialization_cache(table, version, column, cache)?;
+        let refs = self.large_value_extent_refs_for_version_with_materialization_cache(
+            table, version, column, kind, cache,
+        )?;
+        let tx_id = self.version_tx_id(version)?;
+        encode_large_value_handle(table, version.row_uuid(), column, tx_id, kind, len, refs)
+    }
+
+    fn large_value_column_len_with_materialization_cache(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<usize, Error> {
+        let mut suffix = Vec::new();
+        let mut current = self.version_tx_id(winner)?;
+        let mut checkpoint_len = None;
+        loop {
+            let version = self
+                .tx_versions_for_materialization(current, cache)?
+                .iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .cloned()
+                .ok_or(Error::MissingTransaction(current))?;
+            if let Some(value) =
+                self.large_value_checkpoint(table, version.row_uuid(), column, current)?
+            {
+                checkpoint_len = Some(value.len());
+                break;
+            }
+            let parents = version.parents();
+            suffix.push(version);
+            match parents.as_slice() {
+                [] => break,
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+        suffix.reverse();
+
+        let mut value_len = checkpoint_len.unwrap_or_default();
+        for version in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+                continue;
+            };
+            match column_large_value_kind(table, column)? {
+                LargeValueKind::Text => {
+                    let op = self.decode_text_storage_op(&payload)?;
+                    let value = vec![0; value_len];
+                    value_len = op
+                        .apply(&value)
+                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?
+                        .len();
+                }
+                LargeValueKind::Blob => {
+                    for op in text_oplog::decode(&payload)? {
+                        match op {
+                            TextOp::Insert { content, .. } => {
+                                value_len =
+                                    value_len.checked_add(text_content_len(&content)?).ok_or(
+                                        Error::InvalidStoredValue("large value length overflow"),
+                                    )?;
+                            }
+                            TextOp::Delete { len, .. } => {
+                                value_len = value_len.checked_sub(len).ok_or(
+                                    Error::InvalidStoredValue("large value length underflow"),
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(value_len)
+    }
+
+    fn large_value_extent_refs_for_version_with_materialization_cache(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+        kind: LargeValueKind,
+        cache: &mut LocalMaintainedMaterializationCache,
+    ) -> Result<Vec<content_store::Extent>, Error> {
+        let mut suffix = Vec::new();
+        let mut current = self.version_tx_id(winner)?;
+        loop {
+            let version = self
+                .tx_versions_for_materialization(current, cache)?
+                .iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .cloned()
+                .ok_or(Error::MissingTransaction(current))?;
+            let parents = version.parents();
+            suffix.push(version);
+            match parents.as_slice() {
+                [] => break,
+                [parent] => current = *parent,
+                _ => current = self.large_value_primary_parent(&parents)?,
+            }
+        }
+        suffix.reverse();
+
+        let mut refs = Vec::new();
+        for version in &suffix {
+            let Some(Value::Bytes(payload)) = version.cell(table, column)? else {
+                continue;
+            };
+            match kind {
+                LargeValueKind::Text => {
+                    if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
+                        refs.extend(content_refs_in_text_ops(text_oplog::decode(
+                            extent_payload,
+                        )?));
+                    }
+                }
+                LargeValueKind::Blob => {
+                    refs.extend(content_refs_in_text_ops(text_oplog::decode(&payload)?));
+                }
+            }
+        }
+        refs.sort();
+        refs.dedup();
+        Ok(refs)
     }
 
     fn current_row_from_result_payload(
@@ -9242,6 +9655,26 @@ fn local_maintained_view_content_witness<'a>(
         .iter()
         .find(|version| version.table() == table && version.row_uuid() == row_uuid)
         .filter(|version| version.deletion().is_none())
+}
+
+fn contiguous_tx_time_spans(times: &BTreeSet<TxTime>) -> Vec<(TxTime, Option<TxTime>)> {
+    let mut spans = Vec::new();
+    let mut iter = times.iter().copied();
+    let Some(mut start) = iter.next() else {
+        return spans;
+    };
+    let mut last = start;
+    for time in iter {
+        if last.0.checked_add(1) == Some(time.0) {
+            last = time;
+            continue;
+        }
+        spans.push((start, last.0.checked_add(1).map(TxTime)));
+        start = time;
+        last = time;
+    }
+    spans.push((start, last.0.checked_add(1).map(TxTime)));
+    spans
 }
 
 fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
