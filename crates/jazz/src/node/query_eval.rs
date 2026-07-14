@@ -8477,7 +8477,7 @@ fn bind_query_params_with_mode(
             Ok(branch)
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    let rebound = query.validate(schema)?;
+    let rebound = query.validate_with_schema_version(schema, shape.schema_version())?;
     if rebound.schema_version() != shape.schema_version() {
         return Err(Error::InvalidStoredValue("bound query schema changed"));
     }

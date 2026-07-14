@@ -1733,36 +1733,52 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
 }
 
 fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<BTreeMap<String, records::RecordDescriptor>>,
-    > = std::sync::OnceLock::new();
-    let key = current_row_descriptor_cache_key(table);
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<CurrentRowDescriptorCacheEntry>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut cache = cache.lock().expect("current row descriptor cache poisoned");
     if let Some(descriptor) = cache
-        .lock()
-        .expect("current row descriptor cache poisoned")
-        .get(&key)
-        .copied()
+        .iter()
+        .find(|entry| entry.matches(table))
+        .map(|entry| entry.descriptor)
     {
         return descriptor;
     }
     let descriptor = build_current_row_descriptor(table);
-    cache
-        .lock()
-        .expect("current row descriptor cache poisoned")
-        .insert(key, descriptor);
+    cache.push(CurrentRowDescriptorCacheEntry::new(table, descriptor));
     descriptor
 }
 
-fn current_row_descriptor_cache_key(table: &TableSchema) -> String {
-    let mut key = table.name.clone();
-    for column in &table.columns {
-        key.push('\0');
-        key.push_str(&column.name);
-        key.push(':');
-        key.push_str(&format!("{:?}", column.column_type));
+struct CurrentRowDescriptorCacheEntry {
+    table_name: String,
+    columns: Vec<(String, groove::schema::ColumnType)>,
+    descriptor: records::RecordDescriptor,
+}
+
+impl CurrentRowDescriptorCacheEntry {
+    fn new(table: &TableSchema, descriptor: records::RecordDescriptor) -> Self {
+        Self {
+            table_name: table.name.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .collect(),
+            descriptor,
+        }
     }
-    key
+
+    fn matches(&self, table: &TableSchema) -> bool {
+        self.table_name == table.name
+            && self.columns.len() == table.columns.len()
+            && self
+                .columns
+                .iter()
+                .zip(&table.columns)
+                .all(|((name, column_type), column)| {
+                    name == &column.name && column_type == &column.column_type
+                })
+    }
 }
 
 fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
