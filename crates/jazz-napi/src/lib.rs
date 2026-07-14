@@ -367,6 +367,14 @@ impl Transport {
         self.queues.inbound.borrow_mut().push_back(frame.to_vec());
     }
 
+    #[napi(js_name = "sendWireFrames")]
+    pub fn send_wire_frames(&self, frames: Vec<Uint8Array>) {
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            inbound.push_back(frame.to_vec());
+        }
+    }
+
     #[napi(js_name = "recvWireFrames")]
     pub fn recv_wire_frames(&self) -> Vec<Uint8Array> {
         let mut frames = Vec::new();

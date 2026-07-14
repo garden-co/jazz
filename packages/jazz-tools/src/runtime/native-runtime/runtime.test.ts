@@ -145,6 +145,48 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(dbTicks).toBe(1);
   });
 
+  it("stages an already-arrived websocket frame group before one native transport tick", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await Promise.resolve();
+    transport.tickCount = 0;
+
+    const frames = [Uint8Array.from([1]), Uint8Array.from([1, 42]), Uint8Array.from([1, 43])];
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch(frames));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(transport.receivedBatches).toEqual([frames]);
+    expect(transport.received).toEqual(frames);
+    expect(transport.tickCount).toBe(1);
+  });
+
   it("encodes binary large value columns in native schemas", () => {
     const schemaBytes = encodeSchema({
       files: {
@@ -4963,6 +5005,7 @@ const binaryLargeValueSchema = {
 class FakeTransport implements Transport {
   closed = false;
   readonly received: Uint8Array[] = [];
+  readonly receivedBatches: Uint8Array[][] = [];
   tickCount = 0;
 
   constructor(private readonly outgoing: Uint8Array[]) {}
@@ -4978,6 +5021,12 @@ class FakeTransport implements Transport {
 
   sendWireFrame(frame: Uint8Array): void {
     this.received.push(frame);
+  }
+
+  sendWireFrames(frames: readonly Uint8Array[]): void {
+    const batch = [...frames];
+    this.receivedBatches.push(batch);
+    this.received.push(...batch);
   }
 
   tick(): number {

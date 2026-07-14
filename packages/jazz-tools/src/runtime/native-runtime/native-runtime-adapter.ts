@@ -221,6 +221,7 @@ export type Transport = {
   close(): boolean;
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
+  sendWireFrames?(frames: readonly Uint8Array[]): void;
   tick(): number;
 };
 
@@ -1693,9 +1694,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private drainPendingInboundServerFrames(transport: Transport): void {
     if (this.pendingInboundServerFrames.length === 0) return;
     const frames = this.pendingInboundServerFrames.splice(0);
-    for (const frame of frames) {
-      transport.sendWireFrame(frame);
+    if (transport.sendWireFrames) {
+      transport.sendWireFrames(frames);
+      return;
     }
+    for (const frame of frames) transport.sendWireFrame(frame);
   }
 
   private sendServerFrames(frames: Uint8Array[]): void {

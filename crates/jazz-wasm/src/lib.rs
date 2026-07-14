@@ -1704,6 +1704,14 @@ impl WasmTransport {
         self.queues.inbound.borrow_mut().push_back(frame);
     }
 
+    #[wasm_bindgen(js_name = sendWireFrames)]
+    pub fn send_wire_frames(&self, frames: js_sys::Array) {
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames.iter() {
+            inbound.push_back(js_sys::Uint8Array::new(&frame).to_vec());
+        }
+    }
+
     #[wasm_bindgen(js_name = recvWireFrames)]
     pub fn recv_wire_frames(&self) -> js_sys::Array {
         let frames = js_sys::Array::new();

@@ -13,6 +13,7 @@ const outFile = resolve(
 );
 const maxWaitMs = Number(process.env.JAZZ_WASM_INGEST_WAIT_MS ?? "120000");
 const microtaskRounds = Number(process.env.JAZZ_WASM_INGEST_MICROTASK_ROUNDS ?? "4");
+const feedMode = process.env.JAZZ_WASM_INGEST_FEED_MODE ?? "coalesced";
 
 const [{ encodeSchema }, { openConfig }, websocketCodec, adapterModule, wasmModule] =
   await Promise.all([
@@ -115,11 +116,32 @@ replayStart = performance.now();
 const frameTimings = [];
 let fedFrames = 0;
 
-for (let index = 0; index < decodedFrames.length; index += 1) {
-  const frame = decodedFrames[index];
+if (feedMode === "single") {
+  for (let index = 0; index < decodedFrames.length; index += 1) {
+    const frame = decodedFrames[index];
+    const before = performance.now();
+    adapter.pendingInboundServerFrames.push(frame);
+    fedFrames += 1;
+    const pumpStart = performance.now();
+    adapter.pumpServerTransport();
+    const pumpMs = performance.now() - pumpStart;
+    const drainStart = performance.now();
+    await drainMicrotasks(adapter);
+    const drainMs = performance.now() - drainStart;
+    frameTimings.push({
+      index,
+      frames: 1,
+      bytes: frame.byteLength,
+      elapsedMs: performance.now() - before,
+      pumpMs,
+      drainMs,
+      callbacks: readySubscriptionCount(subscriptionCallbacks),
+    });
+  }
+} else {
   const before = performance.now();
-  adapter.pendingInboundServerFrames.push(frame);
-  fedFrames += 1;
+  adapter.pendingInboundServerFrames.push(...decodedFrames);
+  fedFrames = decodedFrames.length;
   const pumpStart = performance.now();
   adapter.pumpServerTransport();
   const pumpMs = performance.now() - pumpStart;
@@ -127,8 +149,9 @@ for (let index = 0; index < decodedFrames.length; index += 1) {
   await drainMicrotasks(adapter);
   const drainMs = performance.now() - drainStart;
   frameTimings.push({
-    index,
-    bytes: frame.byteLength,
+    index: 0,
+    frames: decodedFrames.length,
+    bytes: decodedFrames.reduce((sum, frame) => sum + frame.byteLength, 0),
     elapsedMs: performance.now() - before,
     pumpMs,
     drainMs,
@@ -144,6 +167,7 @@ const receipt = {
   version: 1,
   fixturePath,
   outFile,
+  feedMode,
   wasm: {
     packageJs: join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm.js"),
     packageWasm: join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"),
