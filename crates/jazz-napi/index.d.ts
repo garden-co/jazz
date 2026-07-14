@@ -72,6 +72,7 @@ export declare class TestJwtIssuer {
 
 export declare class Transport {
   sendWireFrame(frame: Uint8Array): void
+  sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>
   tick(): number
   close(): boolean
