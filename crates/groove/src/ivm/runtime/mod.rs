@@ -4956,6 +4956,56 @@ where
         Ok(false)
     }
 
+    fn aggregate_arrangements_are_current(
+        &mut self,
+        node: NodeId,
+    ) -> Result<bool, IvmRuntimeError> {
+        self.aggregate_arrangements_are_current_inner(node, &mut HashSet::new())
+    }
+
+    fn aggregate_arrangements_are_current_inner(
+        &mut self,
+        node: NodeId,
+        seen: &mut HashSet<NodeId>,
+    ) -> Result<bool, IvmRuntimeError> {
+        if !seen.insert(node) {
+            return Ok(true);
+        }
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        let operator = graph_node.descriptor.operator.clone();
+        let inputs = graph_node.descriptor.inputs.clone();
+        if let OpType::Aggregate(aggregate) = operator {
+            let [input] = inputs.as_slice() else {
+                return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+            };
+            let input_desc = self
+                .graph
+                .node(*input)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(*input))?
+                .descriptor
+                .output;
+            let group_fields = self.aggregate_group_fields(node, &aggregate);
+            let arrangement_key = self.arrangement_key(*input, input_desc, group_fields)?;
+            if self
+                .arrangement_states
+                .get(&arrangement_key)
+                .and_then(AsOf::as_of)
+                != Some(self.arrangement_sub_tick(&arrangement_key))
+            {
+                return Ok(false);
+            }
+        }
+        for input in inputs {
+            if !self.aggregate_arrangements_are_current_inner(input, seen)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn update_node(&mut self, node: NodeId) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
         let graph_node = self
             .graph
@@ -4965,7 +5015,8 @@ where
         let memo_key = self.memo_key(node, &signature)?;
         let current_watermark = self.input_generation(node);
         let requires_state_rebuild = (self.context.hydrate_arrangements
-            && self.node_depends_on_aggregate(node)?)
+            && self.node_depends_on_aggregate(node)?
+            && !self.aggregate_arrangements_are_current(node)?)
             || (self.context.eval_mode == EvalMode::Tick
                 && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
         if !requires_state_rebuild
@@ -8287,6 +8338,109 @@ mod tests {
 
         runtime.tick(Vec::new(), &storage).unwrap();
         assert!(subscription.try_recv().is_err());
+    }
+
+    fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
+        let store = RecordStore::new(storage, "albums", albums);
+        let first = albums
+            .create(&[Value::U64(1), Value::String("one".to_owned())])
+            .unwrap();
+        let second = albums
+            .create(&[Value::U64(2), Value::String("two".to_owned())])
+            .unwrap();
+        store
+            .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
+            .unwrap();
+    }
+
+    fn album_count_graph() -> GraphBuilder {
+        GraphBuilder::aggregate(
+            GraphBuilder::table("albums"),
+            Vec::<String>::new(),
+            [AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: None,
+                distinct: false,
+                output_name: Some("count".to_owned()),
+            }],
+        )
+    }
+
+    #[test]
+    fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+        let albums = schema.table("albums").unwrap().record_schema();
+        write_two_album_rows(&storage, &albums);
+
+        let first = runtime
+            .subscribe_one_sink(album_count_graph(), &storage)
+            .unwrap();
+        let first_snapshot = first.recv().unwrap();
+        assert_eq!(
+            first_snapshot.to_values().unwrap(),
+            vec![(vec![Value::U64(2)], 1)]
+        );
+        let after_first = runtime.stats();
+        assert!(after_first.hydration_memo_computes > 0);
+
+        let mut fresh_runtime = IvmRuntime::new(schema).unwrap();
+        let fresh = fresh_runtime
+            .subscribe_one_sink(album_count_graph(), &storage)
+            .unwrap()
+            .recv()
+            .unwrap();
+
+        let second = runtime
+            .subscribe_one_sink(album_count_graph(), &storage)
+            .unwrap();
+        let reused = second.recv().unwrap();
+        let after_second = runtime.stats();
+
+        assert_eq!(reused, fresh);
+        assert_eq!(
+            after_second.hydration_memo_computes, after_first.hydration_memo_computes,
+            "second identical subscriber should reuse the hydrated aggregate output"
+        );
+        assert!(
+            after_second.hydration_memo_hits > after_first.hydration_memo_hits,
+            "second identical subscriber should record a hydration memo hit"
+        );
+    }
+
+    #[test]
+    fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+        let albums = schema.table("albums").unwrap().record_schema();
+        write_two_album_rows(&storage, &albums);
+
+        let one_shot = runtime
+            .query_snapshot(album_count_graph(), &storage)
+            .unwrap();
+        assert_eq!(
+            one_shot.to_values().unwrap(),
+            vec![(vec![Value::U64(2)], 1)]
+        );
+        let after_one_shot = runtime.stats();
+        assert_eq!(after_one_shot.arrangement_count, 0);
+
+        let subscription = runtime
+            .subscribe_one_sink(album_count_graph(), &storage)
+            .unwrap();
+        let snapshot = subscription.recv().unwrap();
+        let after_subscribe = runtime.stats();
+
+        assert_eq!(snapshot, one_shot);
+        assert!(
+            after_subscribe.hydration_memo_computes > after_one_shot.hydration_memo_computes,
+            "subscription hydration must rebuild when a one-shot memo has no current arrangement"
+        );
+        assert_eq!(after_subscribe.arrangement_count, 1);
     }
 
     #[test]
