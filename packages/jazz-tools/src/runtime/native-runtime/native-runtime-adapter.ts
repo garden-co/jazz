@@ -50,6 +50,8 @@ import {
 
 export { encodeSchema } from "./schema-codec.js";
 
+const SERVER_PUMP_DEBOUNCE_MS = 16;
+
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -1662,7 +1664,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private scheduleServerPump(): void {
     if (this.closed || !this.serverTransport || this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
-    queueMicrotask(() => {
+    setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
       this.pumpServerTransport();
@@ -1670,7 +1672,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.serverPumpAgain = false;
         this.scheduleServerPump();
       }
-    });
+    }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
   private pumpServerTransport(): void {
