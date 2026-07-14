@@ -156,12 +156,14 @@ export async function startApp(
     if (!sessionUserId) return;
     clearErrorMessage();
     const selectedParentId = parentSelect.value;
-    db.insert(app.todos, {
-      title: input.value,
-      done: false,
-      owner_id: sessionUserId,
-      ...(selectedParentId ? { parentId: selectedParentId } : {}),
-    });
+    void db
+      .insert(app.todos, {
+        title: input.value,
+        done: false,
+        owner_id: sessionUserId,
+        ...(selectedParentId ? { parentId: selectedParentId } : {}),
+      })
+      .wait({ tier: "local" });
     input.value = "";
     parentSelect.value = "";
   });

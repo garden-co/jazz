@@ -151,23 +151,22 @@ function mockDb() {
 
   return {
     db: {
-      insertDurable: vi.fn(
-        async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
-          const id = `new-${inserts.length}`;
-          inserts.push({ table, data, tier: options?.tier ?? "edge" });
-          return { id, ...data };
-        },
-      ),
-      updateDurable: vi.fn(
-        async (
-          table: unknown,
-          id: string,
-          data: Record<string, unknown>,
-          options?: { tier?: string },
-        ) => {
-          updates.push({ table, id, data, tier: options?.tier ?? "edge" });
-        },
-      ),
+      insert: vi.fn((table: unknown, data: Record<string, unknown>) => {
+        const id = `new-${inserts.length}`;
+        const row = { id, ...data };
+        return {
+          ...row,
+          wait: vi.fn(async (options?: { tier?: string }) => {
+            inserts.push({ table, data, tier: options?.tier ?? "local" });
+            return row;
+          }),
+        };
+      }),
+      update: vi.fn((table: unknown, id: string, data: Record<string, unknown>) => ({
+        wait: vi.fn(async (options?: { tier?: string }) => {
+          updates.push({ table, id, data, tier: options?.tier ?? "local" });
+        }),
+      })),
     } as any,
     inserts,
     updates,
