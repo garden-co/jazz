@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
 
 use groove::ivm::{MultisinkDeltas, RecordDeltas};
 use groove::records::{BorrowedRecord, RecordDescriptor, RecordProjector, Value};
@@ -51,9 +52,16 @@ pub(crate) struct MaintainedSubscriptionView {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MaintainedSubscriptionViewFootprint {
     pub(crate) result_rows: usize,
+    pub(crate) result_weights: usize,
+    pub(crate) result_payloads: usize,
     pub(crate) version_identities: usize,
     pub(crate) version_tx_entries: usize,
     pub(crate) replacement_entries: usize,
+    pub(crate) result_weights_bytes: usize,
+    pub(crate) result_payloads_bytes: usize,
+    pub(crate) versions_bytes: usize,
+    pub(crate) replacements_bytes: usize,
+    pub(crate) total_heap_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -331,12 +339,30 @@ impl MaintainedSubscriptionView {
     }
 
     pub(crate) fn footprint(&self) -> MaintainedSubscriptionViewFootprint {
+        let result_weights_bytes = btree_map_bytes(self.result_weights.len())
+            + self
+                .result_weights
+                .keys()
+                .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
+                .sum::<usize>();
+        let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
+            + self
+                .result_payloads
+                .iter()
+                .map(|(member, payload)| {
+                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
+                })
+                .sum::<usize>();
+        let versions_bytes = self.versions.footprint_bytes();
+        let replacements_bytes = self.replacements.footprint_bytes();
         MaintainedSubscriptionViewFootprint {
             result_rows: self
                 .result_weights
                 .values()
                 .filter(|weight| **weight > 0)
                 .count(),
+            result_weights: self.result_weights.len(),
+            result_payloads: self.result_payloads.len(),
             version_identities: self.versions.by_identity.len(),
             version_tx_entries: self
                 .versions
@@ -346,6 +372,14 @@ impl MaintainedSubscriptionView {
                 .map(BTreeSet::len)
                 .sum(),
             replacement_entries: self.replacements.entry_count(),
+            result_weights_bytes,
+            result_payloads_bytes,
+            versions_bytes,
+            replacements_bytes,
+            total_heap_bytes: result_weights_bytes
+                + result_payloads_bytes
+                + versions_bytes
+                + replacements_bytes,
         }
     }
 
@@ -469,6 +503,20 @@ impl MaintainedSubscriptionView {
 }
 
 impl MaintainedTerminalSchemas {
+    #[cfg(feature = "testing")]
+    pub(crate) fn footprint(&self) -> MaintainedTerminalSchemasFootprint {
+        let terminal_schemas_bytes = btree_map_bytes(self.sinks.len())
+            + self
+                .sinks
+                .iter()
+                .map(|(sink, kind)| sink.len() + mem::size_of_val(kind))
+                .sum::<usize>();
+        MaintainedTerminalSchemasFootprint {
+            terminal_schemas: self.sinks.len(),
+            terminal_schemas_bytes,
+        }
+    }
+
     fn for_program(program: &QueryProgram) -> Self {
         let mut sinks = BTreeMap::new();
         for terminal in &program.lowered.terminals {
@@ -537,6 +585,13 @@ impl MaintainedTerminalSchemas {
             "maintained view delta arrived for an unknown query-engine terminal",
         ))
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(feature = "testing")]
+pub(crate) struct MaintainedTerminalSchemasFootprint {
+    pub(crate) terminal_schemas: usize,
+    pub(crate) terminal_schemas_bytes: usize,
 }
 
 impl MaintainedTerminalKind {
@@ -1011,6 +1066,33 @@ fn field_idx_in_descriptor(
 }
 
 impl WeightedVersionIndex {
+    fn footprint_bytes(&self) -> usize {
+        btree_map_bytes(self.by_identity.len())
+            + self
+                .by_identity
+                .iter()
+                .map(|(identity, version)| {
+                    version_identity_bytes(identity) + weighted_version_bytes(version)
+                })
+                .sum::<usize>()
+            + btree_map_bytes(self.by_tx.len())
+            + self
+                .by_tx
+                .values()
+                .map(|by_sort_key| {
+                    btree_map_bytes(by_sort_key.len())
+                        + by_sort_key
+                            .iter()
+                            .map(|(sort_key, identities)| {
+                                version_sort_key_bytes(sort_key)
+                                    + btree_set_bytes(identities.len())
+                                    + identities.iter().map(version_identity_bytes).sum::<usize>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
     fn apply_delta(
         &mut self,
         identity: VersionIdentity,
@@ -1084,6 +1166,10 @@ impl WeightedVersionIndex {
 }
 
 impl ReplacementIndex {
+    fn footprint_bytes(&self) -> usize {
+        replacement_map_bytes(&self.content_by_key) + replacement_map_bytes(&self.deletion_by_key)
+    }
+
     fn apply_delta(
         &mut self,
         key: ReplacementKey,
@@ -1150,6 +1236,108 @@ impl ReplacementIndex {
             .map(BTreeMap::len)
             .sum()
     }
+}
+
+fn replacement_map_bytes(
+    by_key: &BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+) -> usize {
+    btree_map_bytes(by_key.len())
+        + by_key
+            .iter()
+            .map(|(key, row_versions)| {
+                replacement_key_bytes(key)
+                    + btree_map_bytes(row_versions.len())
+                    + row_versions
+                        .iter()
+                        .map(|(identity, version)| {
+                            version_identity_bytes(identity) + weighted_version_bytes(version)
+                        })
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
+fn btree_map_bytes(len: usize) -> usize {
+    len * 96
+}
+
+fn btree_set_bytes(len: usize) -> usize {
+    len * 64
+}
+
+fn intern_string_bytes(value: &groove::Intern<String>) -> usize {
+    mem::size_of_val(value) + value.as_str().len()
+}
+
+fn vec_bytes<T>(value: &[T]) -> usize {
+    mem::size_of::<Vec<T>>() + mem::size_of_val(value)
+}
+
+fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
+    value.as_deref().map(vec_bytes).unwrap_or_default()
+}
+
+fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
+    mem::size_of_val(member)
+        + match member {
+            ResultMemberEntry::Row(row) => {
+                intern_string_bytes(&row.table)
+                    + option_vec_bytes(&row.branch_or_prefix)
+                    + option_vec_bytes(&row.row_digest)
+            }
+            ResultMemberEntry::Synthetic {
+                table,
+                row,
+                revision,
+            } => table.len() + vec_bytes(row) + vec_bytes(revision),
+            ResultMemberEntry::PathTuple {
+                path,
+                source_table,
+                target_table,
+                edge_id,
+                revision,
+                ..
+            } => {
+                path.len()
+                    + intern_string_bytes(source_table)
+                    + intern_string_bytes(target_table)
+                    + option_vec_bytes(edge_id)
+                    + vec_bytes(revision)
+            }
+        }
+}
+
+fn result_member_payload_entry_bytes(payload: &ResultMemberPayloadEntry) -> usize {
+    mem::size_of_val(payload)
+        + result_member_entry_bytes(&payload.member)
+        + vec_bytes(&payload.descriptor)
+        + vec_bytes(&payload.record)
+}
+
+fn version_identity_bytes(identity: &VersionIdentity) -> usize {
+    mem::size_of_val(identity)
+        + intern_string_bytes(&identity.table)
+        + vec_bytes(&identity.raw_record)
+}
+
+fn version_sort_key_bytes(sort_key: &VersionSortKey) -> usize {
+    mem::size_of_val(sort_key)
+        + intern_string_bytes(&sort_key.table)
+        + vec_bytes(&sort_key.raw_record)
+}
+
+fn replacement_key_bytes(key: &ReplacementKey) -> usize {
+    mem::size_of_val(key) + intern_string_bytes(&key.table)
+}
+
+fn weighted_version_bytes(version: &WeightedVersion) -> usize {
+    mem::size_of_val(version)
+        + version_row_bytes(&version.row)
+        + version_sort_key_bytes(&version.sort_key)
+}
+
+fn version_row_bytes(row: &VersionRow) -> usize {
+    mem::size_of_val(row) + intern_string_bytes(&row.table) + row.record.raw().len()
 }
 
 impl VersionIdentity {

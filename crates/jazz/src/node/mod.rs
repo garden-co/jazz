@@ -74,6 +74,8 @@ mod recovery;
 mod source_resolution;
 pub mod text_oplog;
 mod views;
+#[cfg(feature = "testing")]
+pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 pub(crate) use query_eval::{
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
 };

@@ -498,6 +498,7 @@ struct RunSummary {
     slowest_subscription: String,
     slowest_subscription_ms: u128,
     timelines: Vec<SubscriptionTimeline>,
+    size_receipts: Vec<SubscriptionSizeReceipt>,
 }
 
 struct SubscriptionTimeline {
@@ -507,6 +508,19 @@ struct SubscriptionTimeline {
     first_settled_ms: u128,
     raw_expected_count_ms: u128,
     materialized_ms: u128,
+}
+
+struct SubscriptionSizeReceipt {
+    name: String,
+    rows: usize,
+    root_rows: usize,
+    relation_edges: usize,
+    footprint_bytes: usize,
+    maintained_bytes: usize,
+    control_state_bytes: usize,
+    snapshot_bytes: usize,
+    reset_frame_bytes: usize,
+    validation_tuple_estimate_bytes: usize,
 }
 
 #[derive(Default)]
@@ -1057,6 +1071,23 @@ fn run_connect_and_subscribe(
         .iter()
         .map(|sub| sub.rows.len())
         .sum::<usize>();
+    let size_receipts = client
+        .db
+        .maintained_subscription_size_receipts_for_test()
+        .into_iter()
+        .map(|receipt| SubscriptionSizeReceipt {
+            name: receipt.name,
+            rows: receipt.rows,
+            root_rows: receipt.root_rows,
+            relation_edges: receipt.relation_edges,
+            footprint_bytes: receipt.footprint.total_heap_bytes,
+            maintained_bytes: receipt.footprint.maintained_heap_bytes,
+            control_state_bytes: receipt.footprint.control_state_bytes,
+            snapshot_bytes: receipt.snapshot_bytes,
+            reset_frame_bytes: receipt.reset_frame_bytes,
+            validation_tuple_estimate_bytes: receipt.validation_tuple_estimate_bytes,
+        })
+        .collect::<Vec<_>>();
     let timelines = subscriptions
         .into_iter()
         .map(|sub| SubscriptionTimeline {
@@ -1096,6 +1127,7 @@ fn run_connect_and_subscribe(
         slowest_subscription: slowest.name.clone(),
         slowest_subscription_ms: slowest.materialized_ms,
         timelines,
+        size_receipts,
     }
 }
 
@@ -1269,6 +1301,29 @@ fn emit_summary(config: &Config, session_id: &str, phase: &str, summary: &RunSum
                 .collect(),
         ),
     );
+    fields.insert(
+        "warm_subscription_size_receipts".to_owned(),
+        JsonValue::Array(
+            summary
+                .size_receipts
+                .iter()
+                .map(|receipt| {
+                    json!({
+                        "name": receipt.name,
+                        "rows": receipt.rows,
+                        "root_rows": receipt.root_rows,
+                        "relation_edges": receipt.relation_edges,
+                        "footprint_bytes": receipt.footprint_bytes,
+                        "maintained_bytes": receipt.maintained_bytes,
+                        "control_state_bytes": receipt.control_state_bytes,
+                        "snapshot_bytes": receipt.snapshot_bytes,
+                        "reset_frame_bytes": receipt.reset_frame_bytes,
+                        "validation_tuple_estimate_bytes": receipt.validation_tuple_estimate_bytes,
+                    })
+                })
+                .collect(),
+        ),
+    );
     let line = serde_json::to_string(&fields).expect("serialize policy graph receipt");
     emit_json_line("policy_graph_concurrent", &line);
 }
@@ -1302,6 +1357,16 @@ fn emit_phase_receipt(config: &Config, session_id: &str, phase: &str, summary: &
         "seed_ms": summary.seed_ms,
         "slowest_subscription": summary.slowest_subscription,
         "slowest_subscription_ms": summary.slowest_subscription_ms,
+        "warm_subscription_size_receipts": summary.size_receipts.iter().map(|receipt| {
+            json!({
+                "name": receipt.name,
+                "rows": receipt.rows,
+                "footprint_bytes": receipt.footprint_bytes,
+                "snapshot_bytes": receipt.snapshot_bytes,
+                "reset_frame_bytes": receipt.reset_frame_bytes,
+                "validation_tuple_estimate_bytes": receipt.validation_tuple_estimate_bytes,
+            })
+        }).collect::<Vec<_>>(),
     });
     eprintln!(
         "POLICY_GRAPH_CONCURRENT_PHASE {}",

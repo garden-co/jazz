@@ -16,6 +16,10 @@ use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
+#[cfg(feature = "testing")]
+use super::maintained_subscription_view::{
+    MaintainedSubscriptionViewFootprint, MaintainedTerminalSchemasFootprint,
+};
 use super::query_engine::{
     AggregateExpr as NormalizedAggregateExpr, AggregateFunction as NormalizedAggregateFunction,
     AppProjectionTree, AppRowOutputRequest, AppRowSchema, CapabilityReport, ClaimPath, ClosurePath,
@@ -66,6 +70,87 @@ pub(crate) struct LocalMaintainedViewSubscription {
     result_set: BTreeSet<ResultMemberEntry>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     program_facts: BTreeSet<ProgramFactEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(feature = "testing")]
+pub(crate) struct LocalMaintainedViewSubscriptionFootprint {
+    pub(crate) maintained: MaintainedSubscriptionViewFootprint,
+    pub(crate) terminal_schemas: MaintainedTerminalSchemasFootprint,
+    pub(crate) tables: usize,
+    pub(crate) result_set: usize,
+    pub(crate) result_payloads: usize,
+    pub(crate) program_facts: usize,
+    pub(crate) control_state_bytes: usize,
+    pub(crate) total_heap_bytes: usize,
+}
+
+impl LocalMaintainedViewSubscription {
+    #[cfg(feature = "testing")]
+    pub(crate) fn footprint(&self) -> LocalMaintainedViewSubscriptionFootprint {
+        let maintained = self.maintained.footprint();
+        let terminal_schemas = self.terminal_schemas.footprint();
+        let tables_bytes = self
+            .tables
+            .iter()
+            .map(|(name, schema)| name.len() + std::mem::size_of_val(schema))
+            .sum::<usize>()
+            + self.tables.len() * 96;
+        let result_set_bytes = self
+            .result_set
+            .iter()
+            .map(|member| {
+                postcard::to_allocvec(member)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>()
+            + self.result_set.len() * 64;
+        let result_payloads_bytes = self
+            .result_payloads
+            .iter()
+            .map(|(member, payload)| {
+                postcard::to_allocvec(member)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+                    + postcard::to_allocvec(payload)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(0)
+            })
+            .sum::<usize>()
+            + self.result_payloads.len() * 96;
+        let program_facts_bytes = self
+            .program_facts
+            .iter()
+            .map(|fact| {
+                postcard::to_allocvec(fact)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>()
+            + self.program_facts.len() * 64;
+        let control_state_bytes = terminal_schemas.terminal_schemas_bytes
+            + tables_bytes
+            + self.result_table.len()
+            + self
+                .result_select
+                .as_ref()
+                .map(|columns| columns.iter().map(String::len).sum::<usize>())
+                .unwrap_or_default()
+            + result_set_bytes
+            + result_payloads_bytes
+            + program_facts_bytes;
+        LocalMaintainedViewSubscriptionFootprint {
+            maintained,
+            terminal_schemas,
+            tables: self.tables.len(),
+            result_set: self.result_set.len(),
+            result_payloads: self.result_payloads.len(),
+            program_facts: self.program_facts.len(),
+            control_state_bytes,
+            total_heap_bytes: maintained.total_heap_bytes + control_state_bytes,
+        }
+    }
 }
 
 pub(crate) fn take_required_sink_deltas(

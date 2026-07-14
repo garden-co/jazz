@@ -2147,12 +2147,26 @@ pub struct PeerMetrics {
 pub struct MaintainedSubscriptionViewMetricsFootprint {
     /// Active result-current rows in the maintained index.
     pub result_rows: usize,
+    /// Result weight map entries, including non-positive transient entries.
+    pub result_weights: usize,
+    /// Result payload map entries retained for projected/synthetic output.
+    pub result_payloads: usize,
     /// Active readable version identities retained by full record identity.
     pub version_identities: usize,
     /// Entries reachable through the version-by-transaction index.
     pub version_tx_entries: usize,
     /// Active replacement winner entries across content and deletion maps.
     pub replacement_entries: usize,
+    /// Approximate heap bytes retained by result_weights.
+    pub result_weights_bytes: usize,
+    /// Approximate heap bytes retained by result_payloads.
+    pub result_payloads_bytes: usize,
+    /// Approximate heap bytes retained by WeightedVersionIndex.
+    pub versions_bytes: usize,
+    /// Approximate heap bytes retained by ReplacementIndex.
+    pub replacements_bytes: usize,
+    /// Approximate heap bytes retained by maintained-view indexes.
+    pub total_heap_bytes: usize,
 }
 
 /// Observable maintained subscription view metrics.
@@ -2172,9 +2186,16 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
     fn from(footprint: MaintainedSubscriptionViewIndexFootprint) -> Self {
         Self {
             result_rows: footprint.result_rows,
+            result_weights: footprint.result_weights,
+            result_payloads: footprint.result_payloads,
             version_identities: footprint.version_identities,
             version_tx_entries: footprint.version_tx_entries,
             replacement_entries: footprint.replacement_entries,
+            result_weights_bytes: footprint.result_weights_bytes,
+            result_payloads_bytes: footprint.result_payloads_bytes,
+            versions_bytes: footprint.versions_bytes,
+            replacements_bytes: footprint.replacements_bytes,
+            total_heap_bytes: footprint.total_heap_bytes,
         }
     }
 }

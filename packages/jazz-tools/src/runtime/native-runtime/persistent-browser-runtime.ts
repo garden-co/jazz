@@ -249,13 +249,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         await this.connectionReady;
         await this.settleServerWaitsForRead(tier);
       }
-      return this.send("createExecutedSubscription", [
-        localHandle,
-        queryJson,
-        sessionJson,
-        tier,
-        translatedOptionsJson,
-      ]) as Promise<number>;
+      return this.send(
+        "createExecutedSubscription",
+        [localHandle, queryJson, sessionJson, tier, translatedOptionsJson],
+        {
+          query: queryJson,
+          debugName: subscriptionDebugName(queryJson),
+        },
+      ) as Promise<number>;
     });
     void remoteHandle.catch(ignoreExpectedShutdown);
     this.remoteSubscriptions.set(localHandle, remoteHandle);
@@ -347,6 +348,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private send<Method extends PersistentBrowserWorkerMethod>(
     method: Method,
     args: PersistentBrowserRequestArgs<Method>,
+    metadata?: Partial<PersistentBrowserOpfsOwnerRequest>,
   ): Promise<unknown> {
     if (this.closed) {
       return Promise.reject(new Error("Persistent browser native runtime is closed"));
@@ -354,7 +356,12 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     const id = this.nextCallId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args } as PersistentBrowserOpfsOwnerRequest);
+      this.worker.postMessage({
+        id,
+        method,
+        args,
+        ...metadata,
+      } as PersistentBrowserOpfsOwnerRequest);
     });
   }
 
@@ -562,6 +569,24 @@ function nativeDeltaFromFrame(
     removedCount: message.frame.removedCount,
     updatedCount: message.frame.updatedCount,
   };
+}
+
+function subscriptionDebugName(queryJson: string): string {
+  try {
+    const query = JSON.parse(queryJson) as {
+      table?: unknown;
+      relation_ir?: { table?: unknown };
+      debugName?: unknown;
+    };
+    if (typeof query.debugName === "string" && query.debugName.trim()) {
+      return query.debugName;
+    }
+    const table = typeof query.table === "string" ? query.table : query.relation_ir?.table;
+    if (typeof table === "string" && table.trim()) return table;
+  } catch {
+    // Fall through to the bounded raw query label below.
+  }
+  return queryJson.length > 120 ? `${queryJson.slice(0, 117)}...` : queryJson;
 }
 
 function ignoreExpectedShutdown(error: unknown): void {

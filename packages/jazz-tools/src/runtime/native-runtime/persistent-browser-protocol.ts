@@ -105,6 +105,8 @@ export type PersistentBrowserOpfsOwnerRequest =
   | {
       id: number;
       method: "createExecutedSubscription";
+      query?: string;
+      debugName?: string;
       args: [
         ownerHandle: number,
         queryJson: string,
