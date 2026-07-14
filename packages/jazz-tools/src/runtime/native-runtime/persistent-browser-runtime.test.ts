@@ -307,12 +307,8 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app/ws", "{}");
     const queryPromise = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-    const subscriptionHandle = runtime.createSubscription(
-      JSON.stringify({ table: "todos" }),
-      null,
-      "edge",
-      null,
-    );
+    const subscriptionQuery = JSON.stringify({ table: "todos", debugName: "active todos" });
+    const subscriptionHandle = runtime.createSubscription(subscriptionQuery, null, "edge", null);
     runtime.executeSubscription(subscriptionHandle, () => undefined);
 
     await vi.waitFor(() => {
@@ -344,6 +340,8 @@ describe("PersistentBrowserOpfsRuntime", () => {
 
     await expect(queryPromise).resolves.toEqual([]);
     expect(createSubscriptionMessage?.args[0]).toBe(subscriptionHandle);
+    expect(createSubscriptionMessage?.query).toBe(subscriptionQuery);
+    expect(createSubscriptionMessage?.debugName).toBe("active todos");
 
     await runtime.close();
   });

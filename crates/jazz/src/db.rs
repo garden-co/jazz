@@ -2738,6 +2738,305 @@ where
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
     }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only maintained subscription sizing diagnostics used by
+    /// warm-cache performance receipts.
+    pub fn maintained_subscription_size_receipts_for_test(
+        &self,
+    ) -> Vec<MaintainedSubscriptionSizeReceipt> {
+        self.node
+            .subscriptions
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter_map(|state| {
+                let state = state.borrow();
+                let SubscriptionKind::Prepared {
+                    shape,
+                    binding,
+                    maintained_subscription,
+                } = &state.kind;
+                let maintained_subscription = maintained_subscription.as_ref()?;
+                let snapshot = &state.snapshot;
+                let snapshot_bytes = encode_relation_snapshot_for_size(snapshot)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or_default();
+                let reset_frame_bytes = encode_subscription_reset_frame_for_size(
+                    state.read_tier,
+                    state.settled,
+                    snapshot,
+                )
+                .map(|bytes| bytes.len())
+                .unwrap_or_default();
+                Some(MaintainedSubscriptionSizeReceipt {
+                    name: shape.query().table.clone(),
+                    shape_id: shape.shape_id().0,
+                    binding_id: binding.binding_id().0,
+                    rows: snapshot.rows.len(),
+                    root_rows: snapshot.root_count,
+                    relation_edges: snapshot.edges.len(),
+                    footprint: DbMaintainedSubscriptionFootprint::from_local(
+                        maintained_subscription.footprint(),
+                    ),
+                    snapshot_bytes,
+                    reset_frame_bytes,
+                    validation_tuple_estimate_bytes: validation_tuple_estimate_bytes(
+                        shape,
+                        binding,
+                        state.author,
+                        state.read_tier,
+                        &state.read_view,
+                    ),
+                })
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "testing")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Test/bench-only sizing receipt for one active maintained subscription.
+pub struct MaintainedSubscriptionSizeReceipt {
+    /// Debug label for the subscription, currently the root query table.
+    pub name: String,
+    /// Stable query shape id.
+    pub shape_id: uuid::Uuid,
+    /// Stable binding id.
+    pub binding_id: uuid::Uuid,
+    /// Materialized snapshot row count, including related rows.
+    pub rows: usize,
+    /// Materialized root row count.
+    pub root_rows: usize,
+    /// Materialized relation/include edge count.
+    pub relation_edges: usize,
+    /// Approximate maintained-view and local control-state footprint.
+    pub footprint: DbMaintainedSubscriptionFootprint,
+    /// Postcard bytes for the materialized relation snapshot shape used by native runtimes.
+    pub snapshot_bytes: usize,
+    /// Postcard bytes for the native reset delta row payload.
+    pub reset_frame_bytes: usize,
+    /// Estimated validation tuple bytes for a future warm-cache key.
+    pub validation_tuple_estimate_bytes: usize,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Test/bench-only approximate heap footprint for a maintained subscription.
+pub struct DbMaintainedSubscriptionFootprint {
+    /// Active result-current rows in the maintained index.
+    pub result_rows: usize,
+    /// Result weight map entries, including non-positive transient entries.
+    pub result_weights: usize,
+    /// Result payload map entries retained for projected/synthetic output.
+    pub result_payloads: usize,
+    /// Active readable version identities retained by full record identity.
+    pub version_identities: usize,
+    /// Entries reachable through the version-by-transaction index.
+    pub version_tx_entries: usize,
+    /// Active replacement winner entries across content and deletion maps.
+    pub replacement_entries: usize,
+    /// Approximate heap bytes retained by result_weights.
+    pub result_weights_bytes: usize,
+    /// Approximate heap bytes retained by result_payloads.
+    pub result_payloads_bytes: usize,
+    /// Approximate heap bytes retained by WeightedVersionIndex.
+    pub versions_bytes: usize,
+    /// Approximate heap bytes retained by ReplacementIndex.
+    pub replacements_bytes: usize,
+    /// Approximate heap bytes retained by maintained-view indexes.
+    pub maintained_heap_bytes: usize,
+    /// Lowered terminal schema count.
+    pub terminal_schemas: usize,
+    /// Approximate heap bytes retained by terminal schemas.
+    pub terminal_schemas_bytes: usize,
+    /// Table schema count retained by the local subscription.
+    pub tables: usize,
+    /// Local result-set member count.
+    pub result_set: usize,
+    /// Local result payload count.
+    pub local_result_payloads: usize,
+    /// Local program fact count.
+    pub program_facts: usize,
+    /// Approximate heap bytes retained by local subscription control state.
+    pub control_state_bytes: usize,
+    /// Approximate maintained plus local control-state heap bytes.
+    pub total_heap_bytes: usize,
+}
+
+#[cfg(feature = "testing")]
+impl DbMaintainedSubscriptionFootprint {
+    fn from_local(footprint: crate::node::LocalMaintainedViewSubscriptionFootprint) -> Self {
+        Self {
+            result_rows: footprint.maintained.result_rows,
+            result_weights: footprint.maintained.result_weights,
+            result_payloads: footprint.maintained.result_payloads,
+            version_identities: footprint.maintained.version_identities,
+            version_tx_entries: footprint.maintained.version_tx_entries,
+            replacement_entries: footprint.maintained.replacement_entries,
+            result_weights_bytes: footprint.maintained.result_weights_bytes,
+            result_payloads_bytes: footprint.maintained.result_payloads_bytes,
+            versions_bytes: footprint.maintained.versions_bytes,
+            replacements_bytes: footprint.maintained.replacements_bytes,
+            maintained_heap_bytes: footprint.maintained.total_heap_bytes,
+            terminal_schemas: footprint.terminal_schemas.terminal_schemas,
+            terminal_schemas_bytes: footprint.terminal_schemas.terminal_schemas_bytes,
+            tables: footprint.tables,
+            result_set: footprint.result_set,
+            local_result_payloads: footprint.result_payloads,
+            program_facts: footprint.program_facts,
+            control_state_bytes: footprint.control_state_bytes,
+            total_heap_bytes: footprint.total_heap_bytes,
+        }
+    }
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeRelationSnapshot<'a> {
+    cursor: u64,
+    root_count: u64,
+    rows: Vec<SizeRowBatch<'a>>,
+    edges: Vec<SizeRelationEdge>,
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeSubscriptionDelta<'a> {
+    added: Vec<SizeRowBatch<'a>>,
+    updated: Vec<SizeRowBatch<'a>>,
+    removed: Vec<SizeRemovedRow>,
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeRowBatch<'a> {
+    table: &'a str,
+    descriptor: groove::records::RecordDescriptor,
+    rows: Vec<SizeRow<'a>>,
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeRow<'a> {
+    row_id: RowUuid,
+    deleted: bool,
+    raw: &'a [u8],
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeRemovedRow {
+    table: String,
+    row_id: RowUuid,
+}
+
+#[cfg(feature = "testing")]
+#[derive(serde::Serialize)]
+struct SizeRelationEdge {
+    source_table: String,
+    source_row_id: RowUuid,
+    relation: String,
+    target_table: String,
+    target_row_id: RowUuid,
+}
+
+#[cfg(feature = "testing")]
+fn encode_relation_snapshot_for_size(
+    snapshot: &RelationSnapshot,
+) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&SizeRelationSnapshot {
+        cursor: 0,
+        root_count: snapshot.root_count as u64,
+        rows: size_row_batches(&snapshot.rows),
+        edges: snapshot.edges.iter().map(size_relation_edge).collect(),
+    })
+}
+
+#[cfg(feature = "testing")]
+fn encode_subscription_reset_frame_for_size(
+    _tier: DurabilityTier,
+    _settled: bool,
+    snapshot: &RelationSnapshot,
+) -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&SizeSubscriptionDelta {
+        added: size_row_batches(&snapshot.rows),
+        updated: Vec::new(),
+        removed: Vec::new(),
+    })
+}
+
+#[cfg(feature = "testing")]
+fn size_row_batches(rows: &[CurrentRow]) -> Vec<SizeRowBatch<'_>> {
+    let mut batches = Vec::<SizeRowBatch<'_>>::new();
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        match batches.last_mut() {
+            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
+                batch.rows.push(size_row(row, raw));
+            }
+            _ => batches.push(SizeRowBatch {
+                table: row.table(),
+                descriptor: *descriptor,
+                rows: vec![size_row(row, raw)],
+            }),
+        }
+    }
+    batches
+}
+
+#[cfg(feature = "testing")]
+fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
+    SizeRow {
+        row_id: row.row_uuid(),
+        deleted: row.is_deleted(),
+        raw,
+    }
+}
+
+#[cfg(feature = "testing")]
+fn size_relation_edge(edge: &RelationEdge) -> SizeRelationEdge {
+    SizeRelationEdge {
+        source_table: edge.source_table.clone(),
+        source_row_id: edge.source_row,
+        relation: edge.relation.clone(),
+        target_table: edge.target_table.clone(),
+        target_row_id: edge.target_row,
+    }
+}
+
+#[cfg(feature = "testing")]
+fn validation_tuple_estimate_bytes(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    author: AuthorId,
+    tier: DurabilityTier,
+    read_view: &ReadViewSpec,
+) -> usize {
+    #[derive(serde::Serialize)]
+    struct ValidationTuple<'a> {
+        shape_id: uuid::Uuid,
+        binding_id: uuid::Uuid,
+        schema_version: SchemaVersionId,
+        canonical_query: &'a [u8],
+        canonical_binding: &'a [u8],
+        author: AuthorId,
+        tier: DurabilityTier,
+        read_view: &'a ReadViewSpec,
+    }
+
+    postcard::to_allocvec(&ValidationTuple {
+        shape_id: shape.shape_id().0,
+        binding_id: binding.binding_id().0,
+        schema_version: shape.schema_version(),
+        canonical_query: shape.canonical_bytes(),
+        canonical_binding: binding.canonical_bytes(),
+        author,
+        tier,
+        read_view,
+    })
+    .map(|bytes| bytes.len())
+    .unwrap_or_default()
 }
 
 /// Counts produced while servicing non-blocking database connection work.
