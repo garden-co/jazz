@@ -48,8 +48,14 @@ evaluated.
 Use the package split deliberately:
 
 ```tsx
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore, useLocalFirstAuth } from "jazz-tools/expo";
+import {
+  ExpoAuthSecretStore,
+  JazzProvider,
+  useAll,
+  useDb,
+  useLocalFirstAuth,
+  useSession,
+} from "jazz-tools/expo";
 ```
 
 Do not import browser React bindings into the native app.

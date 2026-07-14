@@ -41,11 +41,11 @@ changes authorship only.
 ## Request-scoped route
 
 ```ts
-app.get("/api/todos", async (request) => {
+export async function GET(request: Request) {
   const db = await jazz.forRequest(request);
-  const todos = await db.all(appSchema.todos, { tier: "edge" });
+  const todos = await db.all(app.todos, { tier: "edge" });
   return Response.json(todos);
-});
+}
 ```
 
 Standard Fetch `Request`, Express/Hono-style request objects, and objects exposing ordinary headers

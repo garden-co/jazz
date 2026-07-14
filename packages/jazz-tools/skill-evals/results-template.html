@@ -488,6 +488,9 @@
       .history-run-row.is-active .run-select b {
         color: var(--accent);
       }
+      .stale-run {
+        color: var(--danger);
+      }
       .results-context {
         display: grid;
         grid-template-columns: auto 1fr;
@@ -890,6 +893,8 @@
       };
       const historyConfiguration = (entry) =>
         Object.values(historyConfigurationParts(entry)).join(" · ");
+      const historyConfigurationKey = (entry) =>
+        `${historyConfiguration(entry)} · ${entry.execution?.harnessHash ?? "legacy-harness"}`;
       const modelOrder = [
         "gpt-5",
         "gpt-5.4",
@@ -913,6 +918,7 @@
         );
         const historyByFilename = new Map(runs.map((entry) => [entry.filename, entry]));
         const latestRun = runs.at(-1);
+        const currentSourceHash = initialReport.execution?.sourceHash;
         let activeFilename = null;
         const corpusSelect = document.querySelector("#history-corpus");
         const runHistory = document.querySelector("#run-history");
@@ -992,7 +998,7 @@
           });
           const latestByConfiguration = new Map();
           for (const entry of filtered)
-            latestByConfiguration.set(historyConfiguration(entry), entry);
+            latestByConfiguration.set(historyConfigurationKey(entry), entry);
           const series = [...latestByConfiguration.entries()].sort(([, left], [, right]) => {
             const leftParts = historyConfigurationParts(left);
             const rightParts = historyConfigurationParts(right);
@@ -1000,8 +1006,8 @@
             const rightRank = modelOrder.indexOf(rightParts.model);
             if (leftRank !== rightRank && leftRank !== -1 && rightRank !== -1)
               return leftRank - rightRank;
-            return historyConfiguration(left).localeCompare(
-              historyConfiguration(right),
+            return historyConfigurationKey(left).localeCompare(
+              historyConfigurationKey(right),
               undefined,
               {
                 numeric: true,
@@ -1022,8 +1028,9 @@
           }
 
           const rows = series
-            .map(([configuration, entry]) => {
+            .map(([, entry]) => {
               const parts = historyConfigurationParts(entry);
+              const configuration = historyConfiguration(entry);
               const baseline = entry.summary.baseline.rubric;
               const loaded = entry.summary.loaded.rubric;
               const baselineValue = ratio(baseline);
@@ -1044,10 +1051,24 @@
               ? '<tr><td class="empty-table" colspan="6">No archived runs match these filters.</td></tr>'
               : [...tableRuns]
                   .reverse()
-                  .map(
-                    (entry) =>
-                      `<tr class="history-run-row" data-run-filename="${escapeHtml(entry.filename)}"><td data-label="Run"><button class="run-select" type="button" data-run-filename="${escapeHtml(entry.filename)}" aria-pressed="false"><b>${escapeHtml(new Date(entry.generatedAt).toLocaleString())}</b><br><span class="meta">${escapeHtml(entry.filename)}</span></button></td><td data-label="Configuration">${escapeHtml(historyConfiguration(entry))}</td><td data-label="Corpus">${escapeHtml(historyCorpusLabel(entry))}</td><td data-label="Routing">${scoreText(entry.summary.routing)} · ${ratio(entry.summary.routing)}%<br><span class="meta">${routingExact(entry.summary.routing)} exact</span></td><td data-label="Baseline">${scoreText(entry.summary.baseline.rubric)} · ${ratio(entry.summary.baseline.rubric)}%</td><td data-label="Loaded">${scoreText(entry.summary.loaded.rubric)} · ${ratio(entry.summary.loaded.rubric)}%</td></tr>`,
-                  )
+                  .map((entry) => {
+                    const sourceMismatch =
+                      currentSourceHash &&
+                      entry.execution?.sourceHash &&
+                      entry.execution.sourceHash !== currentSourceHash;
+                    const provenance = [
+                      entry.execution?.harnessHash
+                        ? `harness ${entry.execution.harnessHash}`
+                        : "legacy harness fingerprint",
+                      entry.execution?.dirty ? "dirty worktree" : null,
+                      sourceMismatch
+                        ? `skill source ${entry.execution.sourceHash}; current ${currentSourceHash}`
+                        : null,
+                    ].filter(Boolean);
+                    const provenanceClass =
+                      entry.execution?.dirty || sourceMismatch ? "meta stale-run" : "meta";
+                    return `<tr class="history-run-row" data-run-filename="${escapeHtml(entry.filename)}"><td data-label="Run"><button class="run-select" type="button" data-run-filename="${escapeHtml(entry.filename)}" aria-pressed="false"><b>${escapeHtml(new Date(entry.generatedAt).toLocaleString())}</b><br><span class="meta">${escapeHtml(entry.filename)}</span></button></td><td data-label="Configuration">${escapeHtml(historyConfiguration(entry))}<br><span class="${provenanceClass}">${escapeHtml(provenance.join(" · "))}</span></td><td data-label="Corpus">${escapeHtml(historyCorpusLabel(entry))}</td><td data-label="Routing">${scoreText(entry.summary.routing)} · ${ratio(entry.summary.routing)}%<br><span class="meta">${routingExact(entry.summary.routing)} exact</span></td><td data-label="Baseline">${scoreText(entry.summary.baseline.rubric)} · ${ratio(entry.summary.baseline.rubric)}%</td><td data-label="Loaded">${scoreText(entry.summary.loaded.rubric)} · ${ratio(entry.summary.loaded.rubric)}%</td></tr>`;
+                  })
                   .join("");
           for (const button of document.querySelectorAll(".run-select")) {
             button.addEventListener("click", () => {
@@ -1067,7 +1088,7 @@
           runs.find(
             (entry) =>
               entry.generatedAt === initialReport.generatedAt &&
-              historyConfiguration(entry) === historyConfiguration(initialReport),
+              historyConfigurationKey(entry) === historyConfigurationKey(initialReport),
           ) ?? latestRun;
         if (initialRun) selectRun(initialRun);
         else selectRun(initialReport, { label: "Current report" });

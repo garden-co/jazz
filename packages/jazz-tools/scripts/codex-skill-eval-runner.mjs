@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -40,6 +40,11 @@ function run(command, args, { cwd, input }) {
 }
 
 const request = JSON.parse(await readStdin());
+const codexBin = process.env.CODEX_BIN ?? "codex";
+let runnerVersion = "unknown";
+try {
+  runnerVersion = execFileSync(codexBin, ["--version"], { encoding: "utf8" }).trim();
+} catch {}
 const runDir = mkdtempSync(join(tmpdir(), "jazz-skill-eval-"));
 const schemaPath = join(runDir, "output-schema.json");
 const outputPath = join(runDir, "output.json");
@@ -67,7 +72,7 @@ try {
   args.push("-");
 
   const startedAt = Date.now();
-  const result = await run(process.env.CODEX_BIN ?? "codex", args, {
+  const result = await run(codexBin, args, {
     cwd: runDir,
     input: request.prompt,
   });
@@ -87,6 +92,7 @@ try {
       output,
       meta: {
         runner: "codex",
+        runnerVersion,
         model,
         durationMs: Date.now() - startedAt,
         tokens: tokens ? Number(tokens) : null,

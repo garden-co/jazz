@@ -16,6 +16,7 @@ function parseArguments(args) {
     model: null,
     reasoning: null,
     commit: null,
+    allowDirty: false,
     render: true,
   };
   let reportPathSet = false;
@@ -30,6 +31,7 @@ function parseArguments(args) {
     else if (argument === "--model") options.model = args[++index];
     else if (argument === "--reasoning") options.reasoning = args[++index];
     else if (argument === "--commit") options.commit = args[++index];
+    else if (argument === "--allow-dirty") options.allowDirty = true;
     else if (argument === "--no-render") options.render = false;
     else if (!argument.startsWith("-") && !reportPathSet) {
       options.reportPath = resolve(argument);
@@ -54,6 +56,7 @@ Options:
   --harness <name>       Evaluation harness, for example codex-subagents
   --reasoning <name>     Reasoning level, for example high
   --commit <hash>        Override the current Git commit
+  --allow-dirty          Archive a run produced from an uncommitted skill or harness state
   --history-dir <path>   Historical-run directory (default: next to latest.json)
   --latest <path>        latest.json destination
   --no-render            Do not regenerate latest.html
@@ -122,21 +125,33 @@ function collectFiles(directory) {
     .sort();
 }
 
-function sourceHash() {
-  const inputs = [
-    join(packageRoot, "skill-evals", "cases.json"),
-    ...collectFiles(join(packageRoot, "skills")),
-  ]
-    .filter((path) => path.endsWith(".json") || path.endsWith(".md"))
-    .sort();
+function hashFiles(inputs) {
   const hash = createHash("sha256");
-  for (const path of inputs) {
+  for (const path of inputs.sort()) {
     hash.update(relative(packageRoot, path));
     hash.update("\0");
     hash.update(readFileSync(path));
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 12);
+}
+
+function sourceHash() {
+  return hashFiles(
+    [
+      join(packageRoot, "skill-evals", "cases.json"),
+      ...collectFiles(join(packageRoot, "skills")),
+    ].filter((path) => path.endsWith(".json") || path.endsWith(".md")),
+  );
+}
+
+function harnessHash(report) {
+  const runnerPath = resolve(packageRoot, report.runner);
+  return hashFiles([
+    join(packageRoot, "scripts", "run-skill-evals.mjs"),
+    join(packageRoot, "scripts", "eval-skills.mjs"),
+    runnerPath,
+  ]);
 }
 
 function validateReport(report) {
@@ -157,14 +172,25 @@ if (options.help) {
 const report = JSON.parse(readFileSync(options.reportPath, "utf8"));
 validateReport(report);
 const git = gitMetadata(options.commit);
+if (git.dirty && !options.allowDirty) {
+  throw new Error(
+    "Refusing to archive results from a dirty jazz-tools worktree. Commit the skill and harness state first, or pass --allow-dirty for an explicitly provisional run.",
+  );
+}
+const runnerVersions = [
+  ...new Set((report.runs ?? []).map((run) => run.runnerVersion).filter(Boolean)),
+];
 const execution = {
   commit: git.short,
   commitFull: git.full,
   dirty: git.dirty,
   sourceHash: sourceHash(),
+  harnessHash: harnessHash(report),
   model: options.model ?? report.execution?.model ?? "unknown-model",
   harness: options.harness ?? report.execution?.harness ?? report.runner ?? "unknown-harness",
   reasoning: options.reasoning ?? report.execution?.reasoning ?? "unknown-reasoning",
+  runnerVersion:
+    runnerVersions.join(", ") || report.execution?.runnerVersion || "unknown-runner-version",
 };
 report.corpus = reportCorpus(report);
 report.execution = execution;
