@@ -69,6 +69,12 @@ try {
     outputPath,
   ];
   if (process.env.SKILL_EVAL_MODEL) args.push("--model", process.env.SKILL_EVAL_MODEL);
+  if (process.env.SKILL_EVAL_REASONING) {
+    args.push(
+      "--config",
+      `model_reasoning_effort=${JSON.stringify(process.env.SKILL_EVAL_REASONING)}`,
+    );
+  }
   args.push("-");
 
   const startedAt = Date.now();
@@ -85,6 +91,10 @@ try {
   const output = JSON.parse(readFileSync(outputPath, "utf8"));
   const log = `${result.stdout}\n${result.stderr}`;
   const model = log.match(/^model:\s*(.+)$/mu)?.[1]?.trim() ?? process.env.SKILL_EVAL_MODEL ?? null;
+  const reasoning =
+    log.match(/^reasoning effort:\s*(.+)$/mu)?.[1]?.trim() ??
+    process.env.SKILL_EVAL_REASONING ??
+    null;
   const tokens = log.match(/tokens used\s*\n([\d,]+)/u)?.[1]?.replaceAll(",", "");
 
   process.stdout.write(
@@ -94,6 +104,7 @@ try {
         runner: "codex",
         runnerVersion,
         model,
+        reasoning,
         durationMs: Date.now() - startedAt,
         tokens: tokens ? Number(tokens) : null,
       },
