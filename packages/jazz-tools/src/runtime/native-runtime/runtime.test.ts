@@ -23,6 +23,10 @@ function decodeTestDeltas(
   return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
 }
 
+async function waitForServerPumpTimer(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
@@ -58,6 +62,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await Promise.resolve();
     await Promise.resolve();
+    await waitForServerPumpTimer();
 
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.url).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
@@ -134,6 +139,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await Promise.resolve();
     await Promise.resolve();
+    await waitForServerPumpTimer();
 
     expect(transport.tickCount).toBeGreaterThan(0);
     expect(dbTicks).toBe(0);
@@ -180,10 +186,54 @@ describe("NativeRuntimeAdapter server transport", () => {
     const frames = [Uint8Array.from([1]), Uint8Array.from([1, 42]), Uint8Array.from([1, 43])];
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch(frames));
     await Promise.resolve();
-    await Promise.resolve();
+    await waitForServerPumpTimer();
 
     expect(transport.receivedBatches).toEqual([frames]);
     expect(transport.received).toEqual(frames);
+    expect(transport.tickCount).toBe(1);
+  });
+
+  it("coalesces separate websocket messages that arrive before the server pump timer", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await Promise.resolve();
+    await Promise.resolve();
+    transport.tickCount = 0;
+
+    const first = Uint8Array.from([1, 10]);
+    const second = Uint8Array.from([1, 11]);
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([first]));
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([second]));
+    await Promise.resolve();
+    await waitForServerPumpTimer();
+
+    expect(transport.receivedBatches).toEqual([[first, second]]);
+    expect(transport.received).toEqual([first, second]);
     expect(transport.tickCount).toBe(1);
   });
 
@@ -278,6 +328,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await Promise.resolve();
     await Promise.resolve();
+    await waitForServerPumpTimer();
 
     expect(transport.tickCount).toBeGreaterThan(0);
     expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
