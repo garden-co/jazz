@@ -67,22 +67,34 @@ impl SyncManager {
         let Ok(row_locators) = storage.scan_row_locators() else {
             return;
         };
+        let authoritative_fates: HashMap<BatchId, BatchFate> = storage
+            .scan_authoritative_batch_fates()
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|fate| (fate.batch_id(), fate))
+            .collect();
 
         let mut row_sync: Vec<RowSyncData> = Vec::new();
 
         for (object_id, row_locator) in row_locators {
-            self.collect_row_sync_versions(storage, object_id, &row_locator, &mut row_sync);
+            self.collect_row_sync_versions(
+                storage,
+                object_id,
+                &row_locator,
+                &authoritative_fates,
+                &mut row_sync,
+            );
         }
 
         for (table, metadata, row) in row_sync {
-            let mut visiting = std::collections::HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
                 table.as_str(),
                 server_id,
                 &metadata,
                 row,
-                &mut visiting,
+                Some(&authoritative_fates),
             );
         }
     }
@@ -92,6 +104,7 @@ impl SyncManager {
         storage: &H,
         object_id: ObjectId,
         row_locator: &RowLocator,
+        authoritative_fates: &HashMap<BatchId, BatchFate>,
         row_sync: &mut Vec<RowSyncData>,
     ) {
         let metadata = metadata_from_row_locator(row_locator);
@@ -102,11 +115,11 @@ impl SyncManager {
         let my_max_tier = self.max_local_durability_tier();
 
         for row in rows.into_iter() {
-            let authoritative_fate = storage
-                .load_authoritative_batch_fate(row.batch_id)
-                .ok()
-                .flatten();
-            if !should_replay_row_to_server(&row, authoritative_fate.as_ref(), my_max_tier) {
+            if !should_replay_row_to_server(
+                &row,
+                authoritative_fates.get(&row.batch_id),
+                my_max_tier,
+            ) {
                 continue;
             }
             row_sync.push((row_locator.table.clone(), metadata.clone(), row));

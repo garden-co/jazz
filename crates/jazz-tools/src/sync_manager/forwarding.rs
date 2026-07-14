@@ -199,14 +199,13 @@ impl SyncManager {
         }
 
         for server_id in server_ids {
-            let mut visited = HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
                 table,
                 server_id,
                 &metadata,
                 row.clone(),
-                &mut visited,
+                None,
             );
         }
     }
@@ -218,10 +217,11 @@ impl SyncManager {
         server_id: ServerId,
         metadata: &HashMap<String, String>,
         row: StoredRowBatch,
-        visited: &mut HashSet<BatchId>,
+        authoritative_fates: Option<&HashMap<BatchId, BatchFate>>,
     ) {
         let object_id = row.row_id;
         let branch_name = BranchName::new(&row.branch);
+        let mut visited = HashSet::new();
 
         // Iterative post-order walk, not recursion: a deep history chain would
         // otherwise put one frame per ancestor on the stack and overflow it.
@@ -240,6 +240,19 @@ impl SyncManager {
                         .and_then(|server| server.sent_batch_ids.get(&(object_id, branch_name)))
                         .is_some_and(|sent| sent.contains(&parent_batch_id))
                     {
+                        continue;
+                    }
+                    let parent_is_rejected = match authoritative_fates {
+                        Some(fates) => fates
+                            .get(&parent_batch_id)
+                            .is_some_and(BatchFate::is_rejected),
+                        None => storage
+                            .load_authoritative_batch_fate(parent_batch_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|fate| fate.is_rejected()),
+                    };
+                    if parent_is_rejected {
                         continue;
                     }
                     if !visited.insert(parent_batch_id) {
