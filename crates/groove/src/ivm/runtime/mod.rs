@@ -342,6 +342,7 @@ impl IvmRuntime {
             operator_states: &mut self.operator_states,
             arrangement_states: &mut self.arrangement_states,
             eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut self.memo_use_clock,
@@ -444,8 +445,17 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
-        self.recompute_eval_memo_bytes();
+        if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
+            let mut retained_bytes = 0usize;
+            self.eval_memo.retain(|key, entry| {
+                let keep = key.tick_epoch.is_none();
+                if keep {
+                    retained_bytes = retained_bytes.saturating_add(entry.payload_bytes);
+                }
+                keep
+            });
+            self.eval_memo_bytes = retained_bytes;
+        }
         if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
             && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
         {
@@ -469,6 +479,7 @@ impl IvmRuntime {
         }
     }
 
+    #[cfg(test)]
     fn recompute_eval_memo_bytes(&mut self) {
         self.eval_memo_bytes = self
             .eval_memo
@@ -528,6 +539,7 @@ impl IvmRuntime {
             // any table or binding change that could invalidate it advances the
             // input frontier counters stored with each memo entry.
             eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut self.memo_use_clock,
@@ -585,6 +597,7 @@ impl IvmRuntime {
             operator_states: &mut self.operator_states,
             arrangement_states: &mut self.arrangement_states,
             eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut self.memo_use_clock,
@@ -682,6 +695,7 @@ impl IvmRuntime {
             operator_states: &mut self.operator_states,
             arrangement_states: &mut self.arrangement_states,
             eval_memo: &mut self.eval_memo,
+            eval_memo_bytes: &mut self.eval_memo_bytes,
             table_frontiers: &self.table_frontiers,
             binding_frontiers: &self.binding_frontiers,
             memo_use_clock: &mut self.memo_use_clock,
@@ -4736,6 +4750,7 @@ struct TickEvaluator<'a, S> {
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
     binding_frontiers: &'a HashMap<String, u64>,
     memo_use_clock: &'a mut u64,
@@ -4757,6 +4772,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
     binding_frontiers: &'a HashMap<String, u64>,
     memo_use_clock: &'a mut u64,
@@ -4777,6 +4793,7 @@ fn graph_runtime_view<'a, S>(
     operator_states: &'a mut HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: &'a mut HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     eval_memo: &'a mut HashMap<EvalMemoKey, EvalMemoEntry>,
+    eval_memo_bytes: &'a mut usize,
     table_frontiers: &'a HashMap<String, u64>,
     binding_frontiers: &'a HashMap<String, u64>,
     memo_use_clock: &'a mut u64,
@@ -4795,6 +4812,7 @@ fn graph_runtime_view<'a, S>(
         operator_states,
         arrangement_states,
         eval_memo,
+        eval_memo_bytes,
         table_frontiers,
         binding_frontiers,
         memo_use_clock,
@@ -4826,6 +4844,7 @@ where
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
             eval_memo: self.eval_memo,
+            eval_memo_bytes: self.eval_memo_bytes,
             table_frontiers: self.table_frontiers,
             binding_frontiers: self.binding_frontiers,
             memo_use_clock: self.memo_use_clock,
@@ -4848,6 +4867,7 @@ where
         node: NodeId,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut isolated_memo = HashMap::default();
+        let mut isolated_memo_bytes = 0usize;
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
@@ -4858,6 +4878,7 @@ where
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
             eval_memo: &mut isolated_memo,
+            eval_memo_bytes: &mut isolated_memo_bytes,
             table_frontiers: self.table_frontiers,
             binding_frontiers: self.binding_frontiers,
             memo_use_clock: self.memo_use_clock,
@@ -4893,6 +4914,7 @@ where
             operator_states: self.operator_states,
             arrangement_states: self.arrangement_states,
             eval_memo: self.eval_memo,
+            eval_memo_bytes: self.eval_memo_bytes,
             table_frontiers: self.table_frontiers,
             binding_frontiers: self.binding_frontiers,
             memo_use_clock: self.memo_use_clock,
@@ -4967,7 +4989,7 @@ where
         if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
             let result = Arc::new(RecordDeltas::empty(output_desc));
             *self.memo_use_clock += 1;
-            self.eval_memo.insert(
+            if let Some(previous) = self.eval_memo.insert(
                 memo_key,
                 EvalMemoEntry::new(
                     Arc::clone(&result),
@@ -4975,7 +4997,9 @@ where
                     0,
                     *self.memo_use_clock,
                 ),
-            );
+            ) {
+                *self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+            }
             return Ok(result);
         }
         let result = match &graph_node.descriptor.operator {
@@ -5190,8 +5214,9 @@ where
                 *self.memo_use_clock,
             ),
         ) {
-            drop(previous);
+            *self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
         }
+        *self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
         Ok(result)
     }
 
@@ -6063,6 +6088,7 @@ where
                 self.operator_states,
                 self.arrangement_states,
                 self.eval_memo,
+                self.eval_memo_bytes,
                 self.table_frontiers,
                 self.binding_frontiers,
                 self.memo_use_clock,
@@ -6091,6 +6117,7 @@ where
                 self.operator_states,
                 self.arrangement_states,
                 self.eval_memo,
+                self.eval_memo_bytes,
                 self.table_frontiers,
                 self.binding_frontiers,
                 self.memo_use_clock,
