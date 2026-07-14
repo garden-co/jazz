@@ -76,6 +76,10 @@ impl BatchFate {
         }
     }
 
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+
     pub fn confirmed_tier(&self) -> Option<DurabilityTier> {
         match self {
             Self::DurableDirect { confirmed_tier, .. }
