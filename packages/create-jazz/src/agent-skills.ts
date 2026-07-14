@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 interface Command {
   executable: string;
@@ -46,6 +48,18 @@ export function setupAgentSkills(
   const command = intentInstallCommand(packageManager);
 
   try {
+    const packageJsonPath = join(dir, "package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      intent?: Record<string, unknown>;
+    };
+    const configuredSkills = Array.isArray(packageJson.intent?.skills)
+      ? packageJson.intent.skills.filter((skill): skill is string => typeof skill === "string")
+      : [];
+    packageJson.intent = {
+      ...packageJson.intent,
+      skills: [...new Set([...configuredSkills, "jazz-tools"])],
+    };
+    writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
     run(command.executable, command.args, { cwd: dir, stdio: "pipe" });
   } catch (error) {
     const stderr =

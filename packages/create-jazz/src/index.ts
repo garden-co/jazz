@@ -5,7 +5,7 @@ import { scaffold, validateAppName, type StarterName, type ScaffoldOptions } fro
 import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
-import { setupAgentSkills } from "./agent-skills.js";
+import { intentInstallCommand, setupAgentSkills } from "./agent-skills.js";
 
 type Framework = "next" | "react" | "sveltekit" | "ts";
 type Hosting = "hosted" | "selfhosted";
@@ -272,8 +272,19 @@ async function main() {
 
     if (enableAgentSkills && pm) {
       s.message("Setting up Jazz coding skills");
-      setupAgentSkills(targetDir, pm);
-      deferredLogs.push({ kind: "info", message: "Jazz coding skills are ready for your agent." });
+      try {
+        setupAgentSkills(targetDir, pm);
+        deferredLogs.push({
+          kind: "info",
+          message: "Jazz coding skills are ready for your agent.",
+        });
+      } catch (error) {
+        const command = intentInstallCommand(pm);
+        deferredLogs.push({
+          kind: "warn",
+          message: `${error instanceof Error ? error.message : String(error)}\nYour app is ready. Retry skill setup with: ${[command.executable, ...command.args].join(" ")}`,
+        });
+      }
     } else if (enableAgentSkills) {
       deferredLogs.push({
         kind: "warn",

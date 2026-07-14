@@ -119,6 +119,51 @@ describe("create-jazz CLI end-to-end", () => {
     expect(fs.existsSync(path.join(tmpDir, "skills-app", "package.json"))).toBe(true);
   });
 
+  it("keeps a scaffolded app when optional Intent setup fails", { timeout: 60_000 }, () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-skills-failure-"));
+    const binDir = path.join(tmpDir, "bin");
+    fs.mkdirSync(binDir);
+    const fakePnpm = path.join(binDir, "pnpm");
+    fs.writeFileSync(
+      fakePnpm,
+      `#!/usr/bin/env node
+if (process.argv[2] === "install") process.exit(0);
+console.error("network unavailable");
+process.exit(1);
+`,
+    );
+    fs.chmodSync(fakePnpm, 0o755);
+
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      JAZZ_STARTER_PATH: path.join(repoRoot, "starters/next-localfirst"),
+      npm_config_user_agent: "pnpm/10.0.0",
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    };
+
+    const result = spawnSync(
+      tsxBin,
+      [cliEntry, "skills-failure-app", "--starter", "next-localfirst", "--skills", "--no-git"],
+      {
+        cwd: tmpDir,
+        env,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    const output = result.stdout + result.stderr;
+    expect(result.status, output).toBe(0);
+    expect(output).toContain("Jazz coding skill setup failed: network unavailable");
+    expect(output).toContain(
+      "Your app is ready. Retry skill setup with: pnpm dlx @tanstack/intent@latest install --no-notices",
+    );
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, "skills-failure-app", "package.json"), "utf8"),
+    ) as { intent?: { skills?: string[] } };
+    expect(packageJson.intent?.skills).toEqual(["jazz-tools"]);
+  });
+
   it("rejects contradictory skill setup flags before scaffolding", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-skills-flags-"));
 

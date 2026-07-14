@@ -269,6 +269,11 @@ async function main(): Promise<void> {
     assert.match(generatedAgents, /@tanstack\/intent@latest list/);
     assert.match(generatedAgents, /<!-- intent-skills:end -->/);
 
+    const generatedPackage = JSON.parse(
+      fs.readFileSync(path.join(appDir, "package.json"), "utf8"),
+    ) as { intent?: { skills?: string[] } };
+    assert.deepEqual(generatedPackage.intent?.skills, ["jazz-tools"]);
+
     console.log("create-jazz interactive agent skill setup: passed");
   } finally {
     fs.rmSync(fixtureDir, { recursive: true, force: true });
