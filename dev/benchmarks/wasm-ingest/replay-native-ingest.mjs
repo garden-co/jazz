@@ -3,18 +3,20 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
+import { createRequire } from "node:module";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../../..");
+const require = createRequire(import.meta.url);
 const fixturePath = requiredEnv("JAZZ_WASM_INGEST_FIXTURE");
 const outFile = resolve(
-  process.env.JAZZ_WASM_INGEST_RECEIPT ??
-    join(dirname(fixturePath), `wasm-ingest-replay-${timestamp()}.json`),
+  process.env.JAZZ_NATIVE_INGEST_RECEIPT ??
+    join(dirname(fixturePath), `native-ingest-replay-${timestamp()}.json`),
 );
 const maxWaitMs = Number(process.env.JAZZ_WASM_INGEST_WAIT_MS ?? "120000");
 const microtaskRounds = Number(process.env.JAZZ_WASM_INGEST_MICROTASK_ROUNDS ?? "4");
 
-const [{ encodeSchema }, { openConfig }, websocketCodec, adapterModule, wasmModule] =
+const [{ encodeSchema }, { openConfig }, websocketCodec, adapterModule, napiModule] =
   await Promise.all([
     import(pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/schema-codec.js"))),
     import(pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-codec.js"))),
@@ -22,17 +24,12 @@ const [{ encodeSchema }, { openConfig }, websocketCodec, adapterModule, wasmModu
     import(
       pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-runtime-adapter.js"))
     ),
-    import(pathToFileURL(join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm.js"))),
+    Promise.resolve(require(join(repoRoot, "crates/jazz-napi/index.js"))),
   ]);
 
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 const open = fixture.workerCapture?.open ?? fixture.open;
 if (!open?.schema) throw new Error("fixture is missing workerCapture.open.schema");
-
-const wasmBytes = await readFile(join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"));
-const loadStart = performance.now();
-await wasmModule.default(wasmBytes);
-const loadMs = performance.now() - loadStart;
 
 const schema = open.schema;
 const node = base64Bytes(envOr(process.env.JAZZ_WASM_INGEST_NODE_B64, open.node));
@@ -41,7 +38,7 @@ const sourceId = Number(process.env.JAZZ_WASM_INGEST_SOURCE_ID ?? "1");
 const historyComplete = process.env.JAZZ_WASM_INGEST_HISTORY_COMPLETE !== "0";
 
 const openStart = performance.now();
-const db = wasmModule.WasmDb.openMemory(
+const db = napiModule.NapiDb.openMemory(
   encodeSchema(schema),
   openConfig(node, author, sourceId, historyComplete),
 );
@@ -144,9 +141,8 @@ const receipt = {
   version: 1,
   fixturePath,
   outFile,
-  wasm: {
-    packageJs: join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm.js"),
-    packageWasm: join(repoRoot, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"),
+  native: {
+    package: join(repoRoot, "crates/jazz-napi/index.js"),
   },
   counts: {
     subscriptions: subscriptions.length,
@@ -157,7 +153,6 @@ const receipt = {
     errors: errors.length,
   },
   timingMs: {
-    loadWasm: round(loadMs),
     openMemory: round(openMs),
     subscribe: round(subscribeMs),
     decodeWebsocketBatches: round(decodeMs),
@@ -165,7 +160,7 @@ const receipt = {
     framePump: round(frameTimings.reduce((sum, frame) => sum + frame.pumpMs, 0)),
     microtaskDrain: round(frameTimings.reduce((sum, frame) => sum + frame.drainMs, 0)),
     callbackSelf: round(callbackSelfMs),
-    wall: round(loadMs + openMs + subscribeMs + decodeMs + ingestMs),
+    wall: round(openMs + subscribeMs + decodeMs + ingestMs),
   },
   frameTimingSummary: summarizeFrames(frameTimings),
   slowFrames: frameTimings
@@ -182,6 +177,7 @@ const receipt = {
 
 await writeFile(outFile, `${JSON.stringify(receipt, null, 2)}\n`);
 console.log(JSON.stringify({ ok: errors.length === 0 && settled.ok, receipt: outFile, ...receipt.counts, timingMs: receipt.timingMs }));
+process.exit(errors.length === 0 && settled.ok ? 0 : 1);
 
 function decodeFixtureServerFrames(rawFixture, codec) {
   if (Array.isArray(rawFixture.receivedFrames)) {
@@ -240,7 +236,6 @@ async function closeAdapter(adapter) {
   try {
     await adapter.close?.();
   } catch {
-    // Profiling harness shutdown should not mask the receipt.
   }
 }
 
