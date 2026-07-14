@@ -258,7 +258,7 @@ where
         Ok(versions)
     }
 
-    fn tx_version_scan_tables(&self) -> BTreeSet<String> {
+    pub(super) fn tx_version_scan_tables(&self) -> BTreeSet<String> {
         self.catalogue
             .schema
             .tables
