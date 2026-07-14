@@ -78,18 +78,25 @@ impl SyncManager {
         let my_max_tier = self.max_local_durability_tier();
 
         for row in rows.into_iter() {
+            let authoritative_fate = storage
+                .load_authoritative_batch_fate(row.batch_id)
+                .ok()
+                .flatten();
+            if matches!(
+                authoritative_fate.as_ref(),
+                Some(BatchFate::Rejected { .. })
+            ) {
+                continue;
+            }
+
             // Skip rows already confirmed above our own tier — an upstream
             // server has them. Without this, a user-role client replays every
             // stored row (including ones authored by other users that it only
             // observed via subscription) on every reconnect, which the server
             // rejects under row-level update policies.
-            let effective_confirmed_tier = row.confirmed_tier.or_else(|| {
-                storage
-                    .load_authoritative_batch_fate(row.batch_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|fate| fate.confirmed_tier())
-            });
+            let effective_confirmed_tier = row
+                .confirmed_tier
+                .or_else(|| authoritative_fate.and_then(|fate| fate.confirmed_tier()));
             let already_upstream = match (effective_confirmed_tier, my_max_tier) {
                 (None, _) => false,
                 (Some(_), None) => true,
