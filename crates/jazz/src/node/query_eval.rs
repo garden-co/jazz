@@ -10056,11 +10056,13 @@ mod tests {
     use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::{Durability, RocksDbStorage};
 
-    use crate::ids::{AuthorId, NodeUuid, RowUuid};
+    use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
     use crate::node::query_engine::{CoverageScope, ProgramFactOutput};
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
-    use crate::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage};
+    use crate::protocol::{
+        ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage,
+    };
     use crate::query::{
         Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
         lit, lte, param,
@@ -10151,6 +10153,26 @@ mod tests {
         subscribe_query_binding(node, shape, binding);
     }
 
+    fn lowered_current_app_rows_graph(
+        node: &mut NodeState<RocksDbStorage>,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> GraphBuilder {
+        let program = node
+            .compile_current_query_program_for_read_view(
+                shape,
+                binding,
+                DurabilityTier::Local,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                read_view,
+            )
+            .expect("compile current query program");
+        lowered_app_rows_graph(&program).expect("app rows graph")
+    }
+
     fn schema() -> JazzSchema {
         JazzSchema::new([
             TableSchema::new(
@@ -10174,6 +10196,135 @@ mod tests {
             .with_reference("issue", "issues")
             .with_reference("user", "users"),
         ])
+    }
+
+    fn owner_policy_schema() -> JazzSchema {
+        JazzSchema::new([TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+                ColumnSchema::new("requiresAdmin", ColumnType::Bool),
+            ],
+        )
+        .with_read_policy(Query::from("issues").filter(eq(col("assignee"), claim("sub"))))])
+    }
+
+    #[test]
+    fn lowered_groove_graph_differs_for_distinct_identity_claims() {
+        let schema = owner_policy_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), schema.clone());
+        let shape = Query::from("issues").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        let alice_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            author(0xa1),
+            &ReadViewSpec::default(),
+        );
+        let bob_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            author(0xb2),
+            &ReadViewSpec::default(),
+        );
+
+        assert_ne!(
+            alice_graph, bob_graph,
+            "claim('sub') must be encoded in the lowered Groove descriptor graph"
+        );
+    }
+
+    #[test]
+    fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("requiresAdmin", ColumnType::Bool),
+            ],
+        )]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), schema.clone());
+        let identity = author(0xa3);
+        let shape = Query::from("issues")
+            .filter(eq(col("requiresAdmin"), claim("isAdmin")))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("isAdmin".to_owned(), Value::Bool(true))]),
+        );
+        let admin_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            identity,
+            &ReadViewSpec::default(),
+        );
+
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("isAdmin".to_owned(), Value::Bool(false))]),
+        );
+        let non_admin_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            identity,
+            &ReadViewSpec::default(),
+        );
+
+        assert_ne!(
+            admin_graph, non_admin_graph,
+            "session claim values must be encoded in the lowered Groove descriptor graph"
+        );
+    }
+
+    #[test]
+    fn lowered_groove_graph_differs_for_distinct_read_views() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "docs",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
+        let shape = Query::from("docs").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let identity = AuthorId::SYSTEM;
+        let branch_id = BranchId::from_bytes([0xbe; 16]);
+        node.create_branch(branch_id).unwrap();
+
+        let current_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            identity,
+            &ReadViewSpec::default(),
+        );
+        let branch_graph = lowered_current_app_rows_graph(
+            &mut node,
+            &shape,
+            &binding,
+            identity,
+            &ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: branch_id.0,
+                },
+                ..ReadViewSpec::default()
+            },
+        );
+
+        assert_ne!(
+            current_graph, branch_graph,
+            "read-view source must be encoded in the lowered Groove descriptor graph"
+        );
     }
 
     fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {

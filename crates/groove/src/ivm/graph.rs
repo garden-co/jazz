@@ -700,6 +700,10 @@ impl GraphNode {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeDescriptor {
     /// Structural operator payload used for node identity.
+    ///
+    /// Descriptors are the sharing boundary for Groove nodes. Any literal or
+    /// policy input that can affect output must be encoded here or in an input
+    /// descriptor before cross-retainer reuse is valid.
     pub operator: OpType,
     pub inputs: Vec<NodeId>,
     pub output: RecordDescriptor,
@@ -1058,6 +1062,29 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    fn node_identity_is_descriptor_only_not_retainer_scope() {
+        let descriptor = NodeDescriptor::new(
+            OpType::TableSource(TableSourceOp {
+                table: "albums".to_owned(),
+                scan: None,
+            }),
+            [],
+            output(),
+        );
+        let id = descriptor.node_id();
+
+        let subscription_retainer = Retainer::Subscription("subscriber-a".to_owned());
+        let prepared_retainer = Retainer::PreparedShape("shape-b".to_owned());
+
+        assert_ne!(subscription_retainer, prepared_retainer);
+        assert_eq!(
+            id,
+            descriptor.node_id(),
+            "retainer tags must not participate in graph node identity"
+        );
     }
 
     #[test]

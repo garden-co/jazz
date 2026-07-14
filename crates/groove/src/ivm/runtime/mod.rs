@@ -8912,6 +8912,46 @@ mod tests {
     }
 
     #[test]
+    fn identical_subscriptions_share_one_node_with_multiple_retainers() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+        let graph = || {
+            GraphBuilder::table("albums")
+                .filter(PredicateExpr::gt("id", Value::U64(10)))
+                .project(["title"])
+        };
+
+        let first = runtime.subscribe_one_sink(graph(), &storage).unwrap();
+        let second = runtime.subscribe_one_sink(graph(), &storage).unwrap();
+        let output = runtime.subscription_output_node(first.id()).unwrap();
+
+        assert_eq!(Some(output), runtime.subscription_output_node(second.id()));
+        assert_eq!(
+            runtime
+                .node_meta
+                .get(&output)
+                .map(|meta| meta.retainers.len()),
+            Some(2)
+        );
+
+        assert!(runtime.unsubscribe(first.id()));
+        assert!(runtime.graph().node(output).is_some());
+        assert_eq!(
+            runtime
+                .node_meta
+                .get(&output)
+                .map(|meta| meta.retainers.len()),
+            Some(1)
+        );
+
+        assert!(runtime.unsubscribe(second.id()));
+        assert!(runtime.graph().node(output).is_none());
+        assert!(!runtime.node_meta.contains_key(&output));
+    }
+
+    #[test]
     fn durable_schema_nodes_are_runtime_retainer_roots() {
         let schema = indexed_albums_schema();
         let runtime = IvmRuntime::new(schema).unwrap();
