@@ -1,4 +1,3 @@
-export * from "../react-native/index.js";
 export { useLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 export {
   ExpoAuthSecretStore,

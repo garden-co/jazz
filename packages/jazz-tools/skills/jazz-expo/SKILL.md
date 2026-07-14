@@ -1,6 +1,6 @@
 ---
 name: jazz-expo
-description: Build and troubleshoot Jazz applications in Expo and React Native. Use for jazz-rn installation and codegen, development builds, Expo polyfills, Metro and withJazz setup, jazz-tools/expo bindings, secure local-first identity, native persistent storage and dataPath, simulator or device sync URLs, offline cold starts, native lifecycle, and iOS or Android verification. Do not use Expo Go for Jazz native runtime work.
+description: Build and troubleshoot Jazz applications in Expo and React Native. Use for jazz-rn installation and codegen, development builds, Expo polyfills, Metro and withJazz setup, jazz-tools/react-native bindings, secure local-first identity, native persistent storage and dataPath, simulator or device sync URLs, offline cold starts, native lifecycle, and iOS or Android verification. Do not use Expo Go for Jazz native runtime work.
 ---
 
 # Jazz Expo and React Native
@@ -28,7 +28,8 @@ device-reachable networking.
 - Install `jazz-rn` as a direct application dependency at the same compatible version as
   `jazz-tools`; React Native codegen must discover its Turbo Module.
 - Import `jazz-tools/expo/polyfills` in the entry point before any module that imports Jazz.
-- Import providers, data hooks, and Expo-specific secure identity helpers from `jazz-tools/expo`.
+- Import providers and data hooks from `jazz-tools/react-native`. Import Expo-specific secure
+  identity helpers from `jazz-tools/expo`.
 - Keep Hermes and New Architecture settings consistent with the installed working example and
   `jazz-rn` requirements.
 - Use a development/native build (`expo run:ios` or `expo run:android`) and verify generated native
