@@ -27,6 +27,9 @@ use wasm_bindgen_futures::future_to_promise;
 
 mod identity;
 
+#[cfg(feature = "bench-probes")]
+pub mod bench_probes;
+
 #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 #[global_allocator]
 static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocator();
@@ -56,6 +59,36 @@ pub fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(feature = "bench-probes")]
+#[wasm_bindgen(js_name = benchProbeArithmeticHash)]
+pub fn bench_probe_arithmetic_hash(iterations: u32) -> u64 {
+    bench_probes::arithmetic_hash(iterations)
+}
+
+#[cfg(feature = "bench-probes")]
+#[wasm_bindgen(js_name = benchProbeDynDispatch)]
+pub fn bench_probe_dyn_dispatch(iterations: u32) -> u64 {
+    bench_probes::dyn_dispatch(iterations)
+}
+
+#[cfg(feature = "bench-probes")]
+#[wasm_bindgen(js_name = benchProbeRefCellBorrow)]
+pub fn bench_probe_refcell_borrow(iterations: u32) -> u64 {
+    bench_probes::refcell_borrow(iterations)
+}
+
+#[cfg(feature = "bench-probes")]
+#[wasm_bindgen(js_name = benchProbeAllocChurn)]
+pub fn bench_probe_alloc_churn(iterations: u32) -> u64 {
+    bench_probes::alloc_churn(iterations)
+}
+
+#[cfg(feature = "bench-probes")]
+#[wasm_bindgen(js_name = benchProbeRandomAccessMemory)]
+pub fn bench_probe_random_access_memory(iterations: u32, entries: u32) -> u64 {
+    bench_probes::random_access_memory(iterations, entries)
 }
 
 fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
