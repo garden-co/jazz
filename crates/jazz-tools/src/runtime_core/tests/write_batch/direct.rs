@@ -13,6 +13,78 @@ fn rc_auto_committed_direct_write_rejects_later_commit() {
 }
 
 #[test]
+fn rc_direct_commit_persistence_failure_keeps_rows_staged_and_retryable() {
+    let fail_sealed_submission_upserts = Arc::new(Mutex::new(true));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "direct-commit-persistence-failure-test",
+        Box::new(
+            RowRegionReadFailingStorage::with_sealed_submission_upsert_failure(
+                fail_sealed_submission_upserts.clone(),
+            ),
+        ),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+    let ((first_row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+    let ((second_row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    let error = core
+        .commit_batch(batch_id)
+        .expect_err("metadata persistence failure must fail the direct commit");
+    assert!(
+        error
+            .to_string()
+            .contains("persist sealed batch submission"),
+        "expected the injected sealed-submission failure, got {error}"
+    );
+
+    let branch_name = core.schema_manager().branch_name();
+    for row_id in [first_row_id, second_row_id] {
+        assert_eq!(
+            core.storage()
+                .load_visible_region_row("users", branch_name.as_str(), row_id)
+                .unwrap(),
+            None,
+            "a failed direct commit must not publish any batch member"
+        );
+    }
+
+    *fail_sealed_submission_upserts.lock().unwrap() = false;
+    core.commit_batch(batch_id)
+        .expect("the direct batch should remain retryable after persistence recovers");
+
+    for row_id in [first_row_id, second_row_id] {
+        let visible = core
+            .storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("a successful retry should publish every direct batch member");
+        assert_eq!(visible.batch_id, batch_id);
+        assert_eq!(visible.state, crate::row_histories::RowState::VisibleDirect);
+    }
+}
+
+#[test]
 fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
     let mut core = create_runtime_with_boxed_storage(
         test_schema(),
