@@ -67,10 +67,18 @@ impl SyncManager {
         let Ok(row_locators) = storage.scan_row_locators() else {
             return;
         };
-        let authoritative_fates: HashMap<BatchId, BatchFate> = storage
-            .scan_authoritative_batch_fates()
-            .ok()
-            .unwrap_or_default()
+        let authoritative_fates = match storage.scan_authoritative_batch_fates() {
+            Ok(fates) => fates,
+            Err(error) => {
+                tracing::error!(
+                    %server_id,
+                    %error,
+                    "failed to load authoritative batch fates; aborting full server replay"
+                );
+                return;
+            }
+        };
+        let authoritative_fates: HashMap<BatchId, BatchFate> = authoritative_fates
             .into_iter()
             .map(|fate| (fate.batch_id(), fate))
             .collect();
