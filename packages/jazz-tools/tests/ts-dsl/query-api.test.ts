@@ -1114,6 +1114,36 @@ describe("TS Query API", () => {
       expect(result.todosViaProject.map((todo) => todo.id)).toEqual([includedTodoId]);
     });
 
+    it("include builders apply every notIn exclusion to reverse relations", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: includedTodoId } = insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: firstExcludedTodoId } = insertTodo(db, {
+        title: "Ship release",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: secondExcludedTodoId } = insertTodo(db, {
+        title: "Write docs",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({
+            id: { notIn: [firstExcludedTodoId, secondExcludedTodoId] },
+          }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject.map((todo) => todo.id)).toEqual([includedTodoId]);
+    });
+
     it("include builders return no rows for an empty in list", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       insertTodo(db, {
