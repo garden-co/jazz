@@ -283,20 +283,44 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
+    expectTypeOf<TodoWhere["id"]>().branded.toEqualTypeOf<
+      string | { eq?: string; ne?: string; in?: string[]; notIn?: string[] } | undefined
+    >();
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
-      string | { eq?: string; ne?: string; in?: string[] } | undefined
+      string | { eq?: string; ne?: string; in?: string[]; notIn?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
       | string
       | null
-      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | {
+          eq?: string | null;
+          ne?: string | null;
+          in?: string[];
+          notIn?: string[];
+          isNull?: boolean;
+        }
       | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][] } | undefined
+      | string[]
+      | {
+          eq?: string[];
+          ne?: string[];
+          contains?: string;
+          in?: string[][];
+          notIn?: string[][];
+        }
+      | undefined
     >();
     expectTypeOf<TodoWhere["attachment"]>().branded.toEqualTypeOf<
-      Uint8Array | { eq?: Uint8Array; ne?: Uint8Array; in?: (Uint8Array | number[])[] } | undefined
+      | Uint8Array
+      | {
+          eq?: Uint8Array;
+          ne?: Uint8Array;
+          in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
+        }
+      | undefined
     >();
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
@@ -388,13 +412,22 @@ describe("typed app prototype", () => {
     }
   });
 
-  it("infers in filters for boolean, bytes, and array columns", () => {
+  it("infers membership filters for boolean, bytes, and array columns", () => {
+    const notInFilter: s.WhereOf<typeof app.todos> = { done: { notIn: [true] } };
+    void notInFilter;
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error notIn membership filters require an array
+      app.todos.where({ done: { notIn: true } });
+    }
+
     expectTypeOf<s.WhereOf<typeof app.todos>["done"]>().branded.toEqualTypeOf<
       | boolean
       | {
           eq?: boolean;
           ne?: boolean;
           in?: boolean[];
+          notIn?: boolean[];
         }
       | undefined
     >();
@@ -405,6 +438,7 @@ describe("typed app prototype", () => {
           ne?: string[];
           contains?: string;
           in?: string[][];
+          notIn?: string[][];
         }
       | undefined
     >();
@@ -414,6 +448,7 @@ describe("typed app prototype", () => {
           eq?: Uint8Array;
           ne?: Uint8Array;
           in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
         }
       | undefined
     >();
@@ -439,6 +474,7 @@ describe("typed app prototype", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();

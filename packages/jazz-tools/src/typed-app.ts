@@ -222,10 +222,11 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
       eq?: MaybeNullableWhere<T, TOptional>;
       ne?: MaybeNullableWhere<T, TOptional>;
     } & TExtra);
+type WhereMembership<T> = { in?: T[]; notIn?: T[] };
 type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
-  { gt?: T; gte?: T; lt?: T; lte?: T; in?: T[] }
+  { gt?: T; gte?: T; lt?: T; lte?: T } & WhereMembership<T>
 >;
 type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   Date | number,
@@ -235,20 +236,23 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     gte?: Date | number;
     lt?: Date | number;
     lte?: Date | number;
-    in?: (Date | number)[];
-  }
+  } & WhereMembership<Date | number>
 >;
 type UuidWhere<TOptional extends boolean> = WhereEqNe<
   string,
   TOptional,
-  TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+  TOptional extends true ? WhereMembership<string> & { isNull?: boolean } : WhereMembership<string>
 >;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string; in?: string[] }>
+    ? WhereEqNe<
+        string,
+        ColumnBuilderOptional<TBuilder>,
+        { contains?: string } & WhereMembership<string>
+      >
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, { in?: boolean[] }>
+      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, WhereMembership<boolean>>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
@@ -259,19 +263,19 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
               ? WhereEqNe<
                   Uint8Array,
                   ColumnBuilderOptional<TBuilder>,
-                  { in?: (Uint8Array | number[])[] }
+                  WhereMembership<Uint8Array | number[]>
                 >
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
                 ? WhereEqNe<
                     StoredColumnValue<TBuilder>,
                     ColumnBuilderOptional<TBuilder>,
-                    { in?: StoredColumnValue<TBuilder>[] }
+                    WhereMembership<StoredColumnValue<TBuilder>>
                   >
                 : ColumnBuilderSqlType<TBuilder> extends {
                       kind: "ENUM";
                       variants: readonly (infer TVariant extends string)[];
                     }
-                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
+                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, WhereMembership<TVariant>>
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ARRAY";
                         element: infer TElementSql extends SqlType;
@@ -279,10 +283,9 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                     ? WhereEqNe<
                         StoredColumnValue<TBuilder>,
                         ColumnBuilderOptional<TBuilder>,
-                        {
-                          contains?: TSTypeFromSqlType<TElementSql>;
-                          in?: StoredColumnValue<TBuilder>[];
-                        }
+                        { contains?: TSTypeFromSqlType<TElementSql> } & WhereMembership<
+                          StoredColumnValue<TBuilder>
+                        >
                       >
                     : never;
 
@@ -291,7 +294,7 @@ export type TableWhereInput<
   TTable extends TableName<TSchema>,
 > = Simplify<
   {
-    id?: string | { eq?: string; ne?: string; in?: string[] };
+    id?: string | ({ eq?: string; ne?: string } & WhereMembership<string>);
   } & {
     [TColumn in ColumnName<TSchema, TTable>]?: WhereInputForBuilder<
       BuilderForColumn<TSchema, TTable, TColumn>
