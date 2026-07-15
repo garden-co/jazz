@@ -279,6 +279,56 @@ fn add_server_with_storage_skips_rows_with_rejected_batch_fate() {
 }
 
 #[test]
+fn add_server_with_storage_fails_closed_when_authoritative_fate_scan_fails() {
+    let mut io = FailingHistoryPatchStorage::new();
+    let row_id = ObjectId::new();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"local"),
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+
+    seed_users_schema(io.inner_mut());
+    io.inner_mut()
+        .put_row_locator(
+            row_id,
+            Some(
+                &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                    .expect("row metadata should produce a row locator"),
+            ),
+        )
+        .unwrap();
+    io.inner_mut()
+        .append_history_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+    io.inner_mut()
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&VisibleRowEntry::rebuild(
+                row.clone(),
+                std::slice::from_ref(&row),
+            )),
+        )
+        .unwrap();
+    io.fail_authoritative_fate_scan = true;
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    assert!(
+        sm.take_outbox().into_iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowBatchCreated { .. },
+            } if id == server_id
+        )),
+        "full replay must not send rows when authoritative fates cannot be loaded"
+    );
+}
+
+#[test]
 fn add_server_with_storage_withholds_local_child_of_rejected_parent() {
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();

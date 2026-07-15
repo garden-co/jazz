@@ -138,6 +138,7 @@ fn persist_visible_row_settlement(
 struct FailingHistoryPatchStorage {
     inner: MemoryStorage,
     fail_history_load: bool,
+    fail_authoritative_fate_scan: bool,
     fail_authoritative_settlement_upsert: bool,
     fail_sealed_submission_upsert: bool,
 }
@@ -147,6 +148,7 @@ impl FailingHistoryPatchStorage {
         Self {
             inner: MemoryStorage::new(),
             fail_history_load: false,
+            fail_authoritative_fate_scan: false,
             fail_authoritative_settlement_upsert: false,
             fail_sealed_submission_upsert: false,
         }
@@ -158,6 +160,20 @@ impl FailingHistoryPatchStorage {
 }
 
 impl Storage for FailingHistoryPatchStorage {
+    fn scan_row_locators(
+        &self,
+    ) -> Result<crate::storage::RowLocatorRows, crate::storage::StorageError> {
+        self.inner.scan_row_locators()
+    }
+
+    fn scan_history_row_batches(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowBatch>, crate::storage::StorageError> {
+        self.inner.scan_history_row_batches(table, row_id)
+    }
+
     fn apply_encoded_row_mutation(
         &mut self,
         table: &str,
@@ -257,6 +273,17 @@ impl Storage for FailingHistoryPatchStorage {
             )));
         }
         self.inner.upsert_authoritative_batch_fate(settlement)
+    }
+
+    fn scan_authoritative_batch_fates(
+        &self,
+    ) -> Result<Vec<BatchFate>, crate::storage::StorageError> {
+        if self.fail_authoritative_fate_scan {
+            return Err(crate::storage::StorageError::IoError(
+                "simulated authoritative fate scan failure".to_string(),
+            ));
+        }
+        self.inner.scan_authoritative_batch_fates()
     }
 
     fn upsert_sealed_batch_submission(
