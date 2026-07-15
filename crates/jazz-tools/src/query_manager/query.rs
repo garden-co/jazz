@@ -1355,6 +1355,15 @@ impl RecursiveBuilder {
         self
     }
 
+    /// Add an in-list filter to each recursive step query.
+    pub fn filter_in(mut self, column: impl Into<String>, values: Vec<Value>) -> Self {
+        self.filters.push(Condition::In {
+            column: column.into(),
+            values,
+        });
+        self
+    }
+
     /// Join another table in each recursive step query.
     pub fn join(mut self, table: impl Into<TableName>) -> Self {
         self.joins.push(JoinSpec {

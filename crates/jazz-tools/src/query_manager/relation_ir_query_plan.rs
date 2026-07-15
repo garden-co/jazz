@@ -170,6 +170,16 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
         PredicateExpr::IsNotNull { column } => Some(Condition::IsNotNull {
             column: to_scoped_runtime_column(column),
         }),
+        PredicateExpr::In { left, values } => Some(Condition::In {
+            column: to_scoped_runtime_column(left),
+            values: values
+                .iter()
+                .map(|value| match value {
+                    ValueRef::Literal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
         PredicateExpr::True => None,
         _ => None,
     }
@@ -1098,7 +1108,7 @@ mod tests {
         assert_eq!(
             plan.recursive.expect("expected recursive plan").filters,
             vec![Condition::In {
-                column: "team_edges.kind".to_string(),
+                column: "kind".to_string(),
                 values: vec![Value::Text("target".to_string())],
             }]
         );
