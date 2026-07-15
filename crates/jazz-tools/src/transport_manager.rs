@@ -8,7 +8,7 @@ use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, Sy
 use futures::channel::mpsc;
 use std::time::Duration;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 3;
+pub const SYNC_PROTOCOL_VERSION: u32 = 4;
 const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
 
 pub trait TickNotifier: 'static {

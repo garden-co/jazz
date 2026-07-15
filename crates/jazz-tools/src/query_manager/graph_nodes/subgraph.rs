@@ -105,6 +105,10 @@ impl SubgraphTemplate {
                     crate::query_manager::query::Condition::Eq { column, value } => {
                         query_builder.filter_eq(column, value.clone())
                     }
+                    crate::query_manager::query::Condition::In { column, values } => {
+                        query_builder.filter_in(column, values.clone())
+                    }
+                    crate::query_manager::query::Condition::NotIn { .. } => return None,
                     crate::query_manager::query::Condition::Ne { column, value } => {
                         query_builder.filter_ne(column, value.clone())
                     }

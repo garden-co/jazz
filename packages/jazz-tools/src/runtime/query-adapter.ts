@@ -240,6 +240,18 @@ function conditionToArraySubqueryFilter(
 
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
+  if (cond.op === "in") {
+    if (!Array.isArray(cond.value)) {
+      throw new Error('"in" operator requires an array value');
+    }
+    return {
+      In: {
+        column,
+        values: cond.value.map((value) => toWasmValue(value, columnType, column)),
+      },
+    };
+  }
+
   const literalValue = toWasmValue(cond.value, valueTypeForCondition, column);
   const isNullValue = cond.value === undefined ? true : cond.value;
 
