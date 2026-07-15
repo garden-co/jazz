@@ -90,6 +90,7 @@ impl BatchFate {
 
     pub fn merged_with(&self, incoming: &BatchFate) -> BatchFate {
         match (self, incoming) {
+            (Self::Rejected { .. }, _) => self.clone(),
             (
                 Self::DurableDirect {
                     batch_id,

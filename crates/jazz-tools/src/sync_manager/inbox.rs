@@ -182,14 +182,14 @@ impl SyncManager {
         &self,
         storage: &mut H,
         fate: &BatchFate,
-    ) -> Result<bool, crate::storage::StorageError> {
+    ) -> Result<(BatchFate, bool), crate::storage::StorageError> {
         let previous = storage.load_authoritative_batch_fate(fate.batch_id())?;
         let merged = match previous.as_ref() {
             Some(existing) => existing.merged_with(fate),
             None => fate.clone(),
         };
         if previous.as_ref() == Some(&merged) {
-            return Ok(false);
+            return Ok((merged, false));
         }
         storage
             .upsert_authoritative_batch_fate(&merged)
@@ -201,7 +201,7 @@ impl SyncManager {
                 );
                 error
             })?;
-        Ok(true)
+        Ok((merged, true))
     }
 
     fn persist_sealed_batch_submission<H: Storage>(
@@ -372,6 +372,12 @@ impl SyncManager {
         row.confirmed_tier = None;
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
+        if matches!(
+            storage.load_authoritative_batch_fate(row.batch_id),
+            Ok(Some(BatchFate::Rejected { .. }))
+        ) {
+            return None;
+        }
         let (is_newly_located_object, needs_exact_locator) =
             self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
@@ -438,11 +444,8 @@ impl SyncManager {
                     unreachable!("row.state.is_visible() guarded non-visible states")
                 }
             };
-            if matches!(
-                self.persist_authoritative_batch_fate(storage, &fate),
-                Ok(true)
-            ) {
-                self.pending_batch_fates.push(fate.clone());
+            if let Ok((fate, true)) = self.persist_authoritative_batch_fate(storage, &fate) {
+                self.pending_batch_fates.push(fate);
             }
         }
 
@@ -898,11 +901,14 @@ impl SyncManager {
         fate: BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
-        match self.persist_authoritative_batch_fate(storage, &fate) {
-            Ok(true) => self.pending_batch_fates.push(fate.clone()),
-            Ok(false) => {}
+        let fate = match self.persist_authoritative_batch_fate(storage, &fate) {
+            Ok((fate, true)) => {
+                self.pending_batch_fates.push(fate.clone());
+                fate
+            }
+            Ok((fate, false)) => fate,
             Err(_) => return,
-        }
+        };
         if let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id()) {
             tracing::warn!(
                 batch_id = ?fate.batch_id(),
@@ -966,8 +972,8 @@ impl SyncManager {
                     batch_id,
                     confirmed_tier,
                 };
-                let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
-                    Ok(changed) => changed,
+                let (fate, changed) = match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok(result) => result,
                     Err(_) => return,
                 };
                 if changed {
@@ -998,10 +1004,11 @@ impl SyncManager {
                             confirmed_tier,
                         },
                     };
-                    let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
-                        Ok(changed) => changed,
-                        Err(_) => return,
-                    };
+                    let (fate, changed) =
+                        match self.persist_authoritative_batch_fate(storage, &fate) {
+                            Ok(result) => result,
+                            Err(_) => return,
+                        };
                     if changed {
                         self.pending_batch_fates.push(fate.clone());
                     }
@@ -1306,10 +1313,11 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFate { fate } => {
-                match self.persist_authoritative_batch_fate(storage, &fate) {
-                    Ok(_) => self.pending_batch_fates.push(fate.clone()),
+                let fate = match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok((fate, _)) => fate,
                     Err(_) => return,
-                }
+                };
+                self.pending_batch_fates.push(fate.clone());
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
                     self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
