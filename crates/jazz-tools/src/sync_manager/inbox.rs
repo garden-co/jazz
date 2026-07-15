@@ -946,6 +946,28 @@ impl SyncManager {
             return false;
         }
 
+        if matches!(fate, BatchFate::Rejected { .. }) {
+            let submission = match storage.load_sealed_batch_submission(fate.batch_id()) {
+                Ok(Some(submission)) => submission,
+                Ok(None) => return true,
+                Err(error) => {
+                    tracing::error!(
+                        batch_id = ?fate.batch_id(),
+                        %error,
+                        "failed to verify rejected batch membership; retaining sealed batch submission for recovery"
+                    );
+                    return false;
+                }
+            };
+            if !Self::sealed_submission_members_are_complete(&submission, batch_rows) {
+                tracing::error!(
+                    batch_id = ?fate.batch_id(),
+                    "authoritative rejection has not been applied to every declared member; retaining sealed batch submission for recovery"
+                );
+                return false;
+            }
+        }
+
         if self.batch_fate_is_settled(fate)
             && let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id())
         {
@@ -1034,6 +1056,19 @@ impl SyncManager {
             declared_rows.push(matching_row.clone());
         }
         Some(declared_rows)
+    }
+
+    fn sealed_submission_members_are_complete(
+        submission: &SealedBatchSubmission,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> bool {
+        submission.members.iter().all(|member| {
+            batch_rows.iter().any(|(_, row)| {
+                row.batch_id == submission.batch_id
+                    && row.row_id == member.object_id
+                    && row.branch.as_str() == submission.target_branch_name.as_str()
+            })
+        })
     }
 
     /// True when this authority's tier outranks an existing `DurableDirect`
@@ -1173,6 +1208,26 @@ impl SyncManager {
                     // Continue into seal validation so this authority can promote a
                     // previously local direct fate to its own durability tier.
                 } else {
+                    if matches!(fate, BatchFate::Rejected { .. }) {
+                        let batch_rows = self.transactional_batch_rows(
+                            storage,
+                            batch_id,
+                            Some(&submission.target_branch_name),
+                            &submission
+                                .members
+                                .iter()
+                                .map(|member| member.object_id)
+                                .collect::<Vec<_>>(),
+                        );
+                        let _ = self.apply_batch_fate_and_retire_sealed_submission(
+                            storage,
+                            Some(client_id),
+                            &fate,
+                            &batch_rows,
+                        );
+                        self.queue_batch_fate_to_client_unfiltered(client_id, fate);
+                        return;
+                    }
                     let should_prune_submission = self.batch_fate_is_settled(&fate);
                     let prune_result = if should_prune_submission {
                         storage.delete_sealed_batch_submission(batch_id)
