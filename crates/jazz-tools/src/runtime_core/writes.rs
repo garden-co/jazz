@@ -1115,12 +1115,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(());
         }
 
-        let submission = self.sealed_batch_submission(&record)?;
+        let retry_record = record.clone();
+        let result = (|| {
+            let submission = self.sealed_batch_submission(&record)?;
 
-        record.mark_sealed(submission.clone());
-        let mut settled_at_commit = false;
-        if record.mode == BatchMode::Direct {
-            if let Some(confirmed_tier) = self.local_write_confirmed_tier() {
+            record.mark_sealed(submission.clone());
+            let mut settled_at_commit = false;
+            let mut confirmed_tier_at_commit = None;
+            if record.mode == BatchMode::Direct
+                && let Some(confirmed_tier) = self.local_write_confirmed_tier()
+            {
                 let settlement = BatchFate::DurableDirect {
                     batch_id,
                     confirmed_tier,
@@ -1132,23 +1136,37 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
                 settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
-                self.durability.record_batch_ack(batch_id, confirmed_tier);
+                confirmed_tier_at_commit = Some(confirmed_tier);
             }
-            self.publish_direct_batch_rows(&record)?;
-        }
-        if !settled_at_commit {
-            self.storage
-                .upsert_sealed_batch_submission(&submission)
-                .map_err(|err| {
-                    RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
-                })?;
-            self.storage
-                .upsert_local_batch_record(&record)
-                .map_err(|err| {
-                    RuntimeError::WriteError(format!("persist local batch record: {err}"))
-                })?;
-        }
+            if !settled_at_commit {
+                self.storage
+                    .upsert_sealed_batch_submission(&submission)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
+                    })?;
+                self.storage
+                    .upsert_local_batch_record(&record)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("persist local batch record: {err}"))
+                    })?;
+            }
+            if record.mode == BatchMode::Direct {
+                self.publish_direct_batch_rows(&record)?;
+            }
+            Ok((submission, confirmed_tier_at_commit))
+        })();
+        let (submission, confirmed_tier_at_commit) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.local_batch_record_cache.insert(batch_id, retry_record);
+                return Err(error);
+            }
+        };
+
         self.local_batch_record_cache.insert(batch_id, record);
+        if let Some(confirmed_tier) = confirmed_tier_at_commit {
+            self.durability.record_batch_ack(batch_id, confirmed_tier);
+        }
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
