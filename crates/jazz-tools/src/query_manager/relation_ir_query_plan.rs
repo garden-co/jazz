@@ -1093,8 +1093,9 @@ mod tests {
                     .max_depth(4)
             })
             .build();
-        let relation = crate::query_manager::query_to_relation_ir::normalize_query_to_rel_expr(&query)
-            .expect("recursive in filter should normalize to relation");
+        let relation =
+            crate::query_manager::query_to_relation_ir::normalize_query_to_rel_expr(&query)
+                .expect("recursive in filter should normalize to relation");
 
         let plan = lower_relation_to_execution_plan(
             &relation,
