@@ -1116,6 +1116,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         let retry_record = record.clone();
+        let mut seal_persisted = false;
         let result = (|| {
             let submission = self.sealed_batch_submission(&record)?;
 
@@ -1135,18 +1136,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 confirmed_tier_at_commit = Some(confirmed_tier);
                 settlement_at_commit = Some(settlement);
             }
-            if !settled_at_commit {
-                self.storage
-                    .upsert_sealed_batch_submission(&submission)
-                    .map_err(|err| {
-                        RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
-                    })?;
-                self.storage
-                    .upsert_local_batch_record(&record)
-                    .map_err(|err| {
-                        RuntimeError::WriteError(format!("persist local batch record: {err}"))
-                    })?;
-            }
+            self.storage
+                .upsert_sealed_batch_submission(&submission)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
+                })?;
+            seal_persisted = true;
+            self.storage
+                .upsert_local_batch_record(&record)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("persist local batch record: {err}"))
+                })?;
             if let Some(settlement) = settlement_at_commit {
                 self.storage
                     .upsert_authoritative_batch_fate(&settlement)
@@ -1157,19 +1157,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if record.mode == BatchMode::Direct {
                 self.publish_direct_batch_rows(&record)?;
             }
-            Ok((submission, confirmed_tier_at_commit))
+            Ok((submission, confirmed_tier_at_commit, settled_at_commit))
         })();
-        let (submission, confirmed_tier_at_commit) = match result {
+        let (submission, confirmed_tier_at_commit, settled_at_commit) = match result {
             Ok(result) => result,
             Err(error) => {
-                self.local_batch_record_cache.insert(batch_id, retry_record);
+                self.local_batch_record_cache
+                    .insert(batch_id, if seal_persisted { record } else { retry_record });
                 return Err(error);
             }
         };
 
-        self.local_batch_record_cache.insert(batch_id, record);
+        self.local_batch_record_cache
+            .insert(batch_id, record.clone());
         if let Some(confirmed_tier) = confirmed_tier_at_commit {
             self.durability.record_batch_ack(batch_id, confirmed_tier);
+            if settled_at_commit {
+                self.retire_settled_batch(batch_id, confirmed_tier);
+                self.local_batch_record_cache.insert(batch_id, record);
+            }
         }
         self.schema_manager
             .query_manager_mut()
