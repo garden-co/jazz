@@ -217,6 +217,22 @@ function validateIncludeBuilderSpec(
   }
 }
 
+function lowerNotInConditions(conditions: BuiltCondition[]): BuiltCondition[] {
+  return conditions.flatMap((condition) => {
+    if (condition.op !== "notIn") {
+      return [condition];
+    }
+    if (!Array.isArray(condition.value)) {
+      throw new Error('"notIn" operator requires an array value');
+    }
+    return condition.value.map((value) => ({
+      column: condition.column,
+      op: "ne",
+      value,
+    }));
+  });
+}
+
 function conditionToArraySubqueryFilter(
   cond: BuiltCondition,
   schema: WasmSchema,
@@ -314,7 +330,7 @@ function toArraySubqueries(
     const includeProjectionColumns = hasExplicitSelect
       ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
       : [];
-    const filters = spec.conditions.map((condition) =>
+    const filters = lowerNotInConditions(spec.conditions).map((condition) =>
       conditionToArraySubqueryFilter(condition, schema, rel.toTable),
     );
     const orderBy = spec.orderBy.map(([column, direction]) => [
@@ -484,14 +500,18 @@ function conditionsToRelPredicate(
   table: string,
   scope?: string,
 ): RelPredicateExpr {
-  if (conditions.length === 0) {
+  const loweredConditions = lowerNotInConditions(conditions);
+
+  if (loweredConditions.length === 0) {
     return "True";
   }
-  if (conditions.length === 1) {
-    return conditionToRelPredicate(conditions[0]!, schema, table, scope);
+  if (loweredConditions.length === 1) {
+    return conditionToRelPredicate(loweredConditions[0]!, schema, table, scope);
   }
   return {
-    And: conditions.map((condition) => conditionToRelPredicate(condition, schema, table, scope)),
+    And: loweredConditions.map((condition) =>
+      conditionToRelPredicate(condition, schema, table, scope),
+    ),
   };
 }
 

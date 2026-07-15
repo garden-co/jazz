@@ -248,6 +248,145 @@ describe("TS Query API", () => {
       });
     });
 
+    describe("notIn operator", () => {
+      it("filters enum columns with multiple exclusions", async () => {
+        db.insert(app.table_with_defaults, { enum: "a" });
+        const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
+        db.insert(app.table_with_defaults, { enum: "c" });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ enum: { notIn: ["a", "c"] } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([rowB.id]);
+      });
+
+      it("ANDs membership filters across chained where calls", async () => {
+        db.insert(app.table_with_defaults, { enum: "a" });
+        const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
+        db.insert(app.table_with_defaults, { enum: "c" });
+
+        const results = await db.all(
+          app.table_with_defaults
+            .where({ enum: { in: ["a", "b"] } })
+            .where({ enum: { notIn: ["a"] } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([rowB.id]);
+      });
+
+      it("applies the same exclusions to id and reference columns", async () => {
+        const projectA = insertProject(db, "Project A");
+        const projectB = insertProject(db, "Project B");
+        const projectC = insertProject(db, "Project C");
+        insertTodo(db, { title: "A", projectId: projectA.id });
+        const todoB = insertTodo(db, { title: "B", projectId: projectB.id });
+        insertTodo(db, { title: "C", projectId: projectC.id });
+
+        const projects = await db.all(
+          app.projects.where({ id: { notIn: [projectA.id, projectC.id] } }),
+        );
+        const todos = await db.all(
+          app.todos.where({ projectId: { notIn: [projectA.id, projectC.id] } }),
+        );
+
+        expect(projects.map((project) => project.id)).toEqual([projectB.id]);
+        expect(todos.map((todo) => todo.id)).toEqual([todoB.id]);
+      });
+
+      it("matches all rows for an empty list", async () => {
+        const { value: rowA } = db.insert(app.table_with_defaults, { enum: "a" });
+        const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
+
+        const results = await db.all(app.table_with_defaults.where({ enum: { notIn: [] } }));
+
+        expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
+      });
+
+      it("preserves ne semantics for nullable columns", async () => {
+        const { value: nullRow } = db.insert(app.table_with_defaults, { nullable: null });
+        const { value: keptRow } = db.insert(app.table_with_defaults, { nullable: "kept" });
+        db.insert(app.table_with_defaults, { nullable: "excluded" });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ nullable: { notIn: ["excluded"] } }),
+        );
+
+        expect(results.map((row) => row.id).sort()).toEqual([nullRow.id, keptRow.id].sort());
+      });
+
+      it("serializes timestamp exclusions", async () => {
+        const excluded = new Date("2026-03-01T00:00:00.000Z");
+        const kept = new Date("2026-03-02T00:00:00.000Z");
+        db.insert(app.table_with_defaults, { timestampDate: excluded });
+        const { value: keptRow } = db.insert(app.table_with_defaults, { timestampDate: kept });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ timestampDate: { notIn: [excluded] } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([keptRow.id]);
+      });
+
+      it("serializes byte-array exclusions", async () => {
+        db.insert(app.table_with_defaults, { bytes: new Uint8Array([1, 2, 3]) });
+        const { value: keptRow } = db.insert(app.table_with_defaults, {
+          bytes: new Uint8Array([4, 5, 6]),
+        });
+
+        const results = await db.all(
+          app.table_with_defaults.where({
+            bytes: { notIn: [new Uint8Array([1, 2, 3])] },
+          }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([keptRow.id]);
+      });
+
+      it("serializes JSON exclusions", async () => {
+        db.insert(app.table_with_defaults, { json: { name: "excluded", age: 1 } });
+        const { value: keptRow } = db.insert(app.table_with_defaults, {
+          json: { name: "kept", age: 2 },
+        });
+
+        const results = await db.all(
+          app.table_with_defaults.where({
+            json: { notIn: [{ name: "excluded", age: 1 }] },
+          }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([keptRow.id]);
+      });
+
+      it("compares array exclusions by whole-array equality", async () => {
+        db.insert(app.table_with_defaults, { array: ["a", "b"] });
+        const { value: shorterRow } = db.insert(app.table_with_defaults, { array: ["a"] });
+        const { value: reorderedRow } = db.insert(app.table_with_defaults, {
+          array: ["b", "a"],
+        });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ array: { notIn: [["a", "b"]] } }),
+        );
+
+        expect(results.map((row) => row.id).sort()).toEqual(
+          [shorterRow.id, reorderedRow.id].sort(),
+        );
+      });
+
+      it("composes with another predicate on the same column", async () => {
+        db.insert(app.table_with_defaults, { integer: 5 });
+        db.insert(app.table_with_defaults, { integer: 10 });
+        const { value: keptRow } = db.insert(app.table_with_defaults, { integer: 15 });
+
+        const results = await db.all(
+          app.table_with_defaults.where({ integer: { notIn: [10], gt: 5 } }),
+        );
+
+        expect(results.map((row) => row.id)).toEqual([keptRow.id]);
+      });
+    });
+
     it("filters int columns with multiple range operators on the same column", async () => {
       db.insert(app.table_with_defaults, { integer: 5 });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });
@@ -952,6 +1091,59 @@ describe("TS Query API", () => {
       expect(result.todosViaProject.map((todo) => todo.id)).toEqual([matchingTodoId]);
     });
 
+    it("include builders filter reverse relations with notIn", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: includedTodoId } = insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: excludedTodoId } = insertTodo(db, {
+        title: "Ship release",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({ id: { notIn: [excludedTodoId] } }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject.map((todo) => todo.id)).toEqual([includedTodoId]);
+    });
+
+    it("include builders apply every notIn exclusion to reverse relations", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: includedTodoId } = insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: firstExcludedTodoId } = insertTodo(db, {
+        title: "Ship release",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: secondExcludedTodoId } = insertTodo(db, {
+        title: "Write docs",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({
+            id: { notIn: [firstExcludedTodoId, secondExcludedTodoId] },
+          }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject.map((todo) => todo.id)).toEqual([includedTodoId]);
+    });
+
     it("include builders return no rows for an empty in list", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       insertTodo(db, {
@@ -968,6 +1160,31 @@ describe("TS Query API", () => {
 
       assert(result, "Result is not defined");
       expect(result.todosViaProject).toEqual([]);
+    });
+
+    it("include builders return all rows for an empty notIn list", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: firstTodoId } = insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: secondTodoId } = insertTodo(db, {
+        title: "Ship release",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({ id: { notIn: [] } }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject.map((todo) => todo.id).sort()).toEqual(
+        [firstTodoId, secondTodoId].sort(),
+      );
     });
 
     it("subscribeAll updates filtered included relations", async () => {

@@ -32,25 +32,25 @@ describe("TableFilterBuilder", () => {
     const booleanOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(booleanOperators).toEqual(["eq", "ne", "in"]);
+    expect(booleanOperators).toEqual(["eq", "ne", "in", "notIn"]);
 
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
     const numericOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(numericOperators).toEqual(["eq", "ne", "gt", "gte", "lt", "lte", "in"]);
+    expect(numericOperators).toEqual(["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"]);
 
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "bytes" } });
     const byteaOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(byteaOperators).toEqual(["eq", "ne", "in"]);
+    expect(byteaOperators).toEqual(["eq", "ne", "in", "notIn"]);
 
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "assignee_id" } });
     const refOperators = Array.from(operatorSelect.querySelectorAll("option")).map((option) =>
       option.getAttribute("value"),
     );
-    expect(refOperators).toEqual(["eq", "ne", "in", "isNull"]);
+    expect(refOperators).toEqual(["eq", "ne", "in", "notIn", "isNull"]);
   });
 
   it("does not show unsupported columns", () => {
@@ -91,6 +91,30 @@ describe("TableFilterBuilder", () => {
       column: "count",
       operator: "gt",
       value: 3,
+    });
+  });
+
+  it("parses notIn values as a membership array", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "count" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "notIn" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "3, 5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "count",
+      operator: "notIn",
+      value: [3, 5],
     });
   });
 
