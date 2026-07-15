@@ -1222,6 +1222,7 @@ impl SyncManager {
                         let _ = self.apply_batch_fate_and_retire_sealed_submission(
                             storage,
                             Some(client_id),
+                            None,
                             &fate,
                             &batch_rows,
                         );
@@ -1444,13 +1445,18 @@ impl SyncManager {
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
-        match entry.source {
+        let retry_entry = entry.clone();
+        let processed = match entry.source {
             Source::Server(server_id) => {
                 self.process_from_server(storage, server_id, entry.payload)
             }
             Source::Client(client_id) => {
-                self.process_from_client(storage, client_id, entry.payload)
+                self.process_from_client(storage, client_id, entry.payload);
+                true
             }
+        };
+        if !processed {
+            self.inbox.push(retry_entry);
         }
     }
 
@@ -1460,7 +1466,7 @@ impl SyncManager {
         storage: &mut H,
         server_id: ServerId,
         payload: SyncPayload,
-    ) {
+    ) -> bool {
         let _span = tracing::debug_span!("process_from_server", %server_id, payload = payload.variant_name()).entered();
         match payload {
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -1483,32 +1489,28 @@ impl SyncManager {
                     %branch_name,
                     "server→row-batch payload"
                 );
-                if let Some(applied) = self.apply_row_updated(
+                let Some(applied) = self.apply_row_updated(
                     storage,
                     metadata,
                     row.clone(),
                     AuthoritativeFateRecording::AcceptedByLocalAuthority,
-                ) {
-                    self.apply_authoritative_transaction_fate_for_row(
-                        storage,
-                        server_id,
-                        &applied.row,
+                ) else {
+                    return matches!(
+                        storage.load_authoritative_batch_fate(row.batch_id),
+                        Ok(Some(BatchFate::Rejected { .. }))
                     );
+                };
+                self.apply_authoritative_transaction_fate_for_row(storage, server_id, &applied.row);
 
-                    if let Some(update) = applied.visibility_change {
-                        self.pending_row_visibility_changes.push(update);
-                        self.forward_update_to_clients_with_storage(
-                            storage,
-                            object_id,
-                            branch_name,
-                        );
-                    }
+                if let Some(update) = applied.visibility_change {
+                    self.pending_row_visibility_changes.push(update);
+                    self.forward_update_to_clients_with_storage(storage, object_id, branch_name);
                 }
             }
             SyncPayload::BatchFate { fate } => {
                 let fate = match self.persist_authoritative_batch_fate(storage, &fate) {
                     Ok((fate, _)) => fate,
-                    Err(_) => return,
+                    Err(_) => return true,
                 };
                 self.pending_batch_fates.push(fate.clone());
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
@@ -1616,6 +1618,7 @@ impl SyncManager {
             | SyncPayload::QueryUnsubscription { .. }
             | SyncPayload::SealBatch { .. } => {}
         }
+        true
     }
 
     /// Process a payload from a client.

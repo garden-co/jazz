@@ -246,7 +246,10 @@ fn server_row_is_retried_after_post_fate_materialisation_failure() {
         crate::row_histories::RowState::VisibleTransactional
     );
     assert_eq!(
-        io.scan_history_row_batches("users", row_id).unwrap().len(),
+        io.inner
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .len(),
         1,
         "retry must materialise the server row exactly once"
     );
