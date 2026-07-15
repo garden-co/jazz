@@ -134,6 +134,55 @@ fn server_replay_does_not_send_local_durability_ack_upstream() {
 }
 
 #[test]
+fn delayed_server_row_does_not_override_authoritative_rejection() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let rejected = BatchFate::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleTransactional,
+        Some(DurabilityTier::EdgeServer),
+    );
+
+    seed_users_schema(&mut io);
+    io.upsert_authoritative_batch_fate(&rejected).unwrap();
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(rejected),
+        "a delayed accepted row must not replace an authoritative rejection"
+    );
+    assert!(
+        io.load_history_row_batch("users", "main", row_id, batch_id)
+            .unwrap()
+            .is_none(),
+        "a delayed row from a rejected batch must remain invisible"
+    );
+}
+
+#[test]
 fn client_durability_ack_is_not_authoritative() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mut io = MemoryStorage::new();
