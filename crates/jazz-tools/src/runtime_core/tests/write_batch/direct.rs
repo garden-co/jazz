@@ -57,6 +57,13 @@ fn rc_direct_commit_persistence_failure_keeps_rows_staged_and_retryable() {
             .contains("persist sealed batch submission"),
         "expected the injected sealed-submission failure, got {error}"
     );
+    assert_eq!(
+        core.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        None,
+        "a direct batch fate must not be durable before its seal"
+    );
 
     let branch_name = core.schema_manager().branch_name();
     for row_id in [first_row_id, second_row_id] {
