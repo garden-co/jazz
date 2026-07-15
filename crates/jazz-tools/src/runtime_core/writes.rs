@@ -1122,6 +1122,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             record.mark_sealed(submission.clone());
             let mut settled_at_commit = false;
             let mut confirmed_tier_at_commit = None;
+            let mut settlement_at_commit = None;
             if record.mode == BatchMode::Direct
                 && let Some(confirmed_tier) = self.local_write_confirmed_tier()
             {
@@ -1130,13 +1131,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     confirmed_tier,
                 };
                 record.apply_fate(settlement.clone());
-                self.storage
-                    .upsert_authoritative_batch_fate(&settlement)
-                    .map_err(|err| {
-                        RuntimeError::WriteError(format!("persist batch fate: {err}"))
-                    })?;
                 settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
                 confirmed_tier_at_commit = Some(confirmed_tier);
+                settlement_at_commit = Some(settlement);
             }
             if !settled_at_commit {
                 self.storage
@@ -1148,6 +1145,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .upsert_local_batch_record(&record)
                     .map_err(|err| {
                         RuntimeError::WriteError(format!("persist local batch record: {err}"))
+                    })?;
+            }
+            if let Some(settlement) = settlement_at_commit {
+                self.storage
+                    .upsert_authoritative_batch_fate(&settlement)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
             }
             if record.mode == BatchMode::Direct {
