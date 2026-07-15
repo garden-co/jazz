@@ -279,7 +279,7 @@ fn add_server_with_storage_skips_rows_with_rejected_batch_fate() {
 }
 
 #[test]
-fn add_server_with_storage_skips_rejected_parent_before_local_child() {
+fn add_server_with_storage_withholds_local_child_of_rejected_parent() {
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();
     let rejected_parent = row_with_state(
@@ -337,7 +337,10 @@ fn add_server_with_storage_skips_rejected_parent_before_local_child() {
         })
         .collect();
 
-    assert_eq!(pushed_batch_ids, vec![local_child.batch_id()]);
+    assert!(
+        pushed_batch_ids.is_empty(),
+        "a row whose parent was terminally rejected cannot be applied by a fresh upstream"
+    );
 }
 
 #[test]
