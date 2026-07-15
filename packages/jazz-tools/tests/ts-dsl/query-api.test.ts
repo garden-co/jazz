@@ -999,7 +999,18 @@ describe("TS Query API", () => {
       };
 
       await waitForSnapshot([]);
-      insertTodo(db, { title: "Other", projectId, assigneesIds: [] });
+      const { id: otherTodoId } = insertTodo(db, {
+        title: "Other",
+        projectId,
+        assigneesIds: [],
+      });
+
+      db.update(app.todos, otherTodoId, { title: "Target" });
+      await waitForSnapshot([otherTodoId]);
+
+      db.update(app.todos, otherTodoId, { title: "Other" });
+      await waitForSnapshot([]);
+
       const { id: targetTodoId } = insertTodo(db, {
         title: "Target",
         projectId,

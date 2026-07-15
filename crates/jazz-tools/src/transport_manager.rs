@@ -1419,6 +1419,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handshake_rejects_fixed_v3_response() {
+        let controller = Arc::new(TestStreamController::default());
+        let response = ConnectedResponse {
+            sync_protocol_version: 3,
+            connection_id: "conn-1".into(),
+            client_id: "client-1".into(),
+            next_sync_seq: Some(0),
+            catalogue_state_hash: None,
+        };
+        *controller.handshake_response.lock().unwrap() = Some(frame_encode(
+            &serde_json::to_vec(&response).expect("encode handshake response"),
+        ));
+        let mut stream = TestStreamAdapter {
+            controller,
+            handshake_delivered: false,
+        };
+
+        let result =
+            TransportManager::<TestStreamAdapter, CountingTick>::do_handshake(&mut stream, vec![])
+                .await;
+
+        match result {
+            HandshakeResult::NetworkError(message) => {
+                assert!(message.contains("incompatible Jazz sync protocol"));
+                assert!(message.contains("server sent 3"));
+            }
+            HandshakeResult::Connected(_) => panic!("fixed v3 response must be rejected"),
+            HandshakeResult::AuthFailure(_) => panic!("protocol mismatch is not an auth failure"),
+        }
+    }
+
+    #[tokio::test]
     async fn shutdown_during_connect() {
         let controller = Arc::new(TestStreamController::default());
         controller.connect_pending.store(true, Ordering::SeqCst);
