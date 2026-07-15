@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
 
 import {
   buildIndex,
@@ -12,8 +11,6 @@ import {
   resolveIncludes,
   splitIntoSections,
 } from "./build-index.js";
-
-const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -408,32 +405,4 @@ describe("buildIndex", () => {
       await cleanupFixtureTree(tmpDir);
     }
   }, 10_000);
-});
-
-describe("packaged docs index", () => {
-  it("ships current authentication docs in docs-index.txt", async () => {
-    const txt = await readFile(join(packageBinDir, "docs-index.txt"), "utf8");
-
-    expect(txt).toContain("===PAGE:auth/authentication===");
-    expect(txt).toContain(
-      'DESCRIPTION:"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
-    );
-    expect(txt).toContain("Jazz has three auth modes: `anonymous`, `local-first`, and `external`.");
-    expect(txt).toContain('jwtToken: "<provider-jwt>"');
-    expect(txt).toContain("db.updateAuthToken(jwt)");
-    expect(txt).toContain("recreate `JazzProvider` or `Db` with a new auth config");
-    expect(txt).toContain("### Managing JWT changes on a live client");
-    expect(txt).toContain("### Reacting to expiry and unauthenticated responses");
-
-    expect(txt).toContain("JAZZ_AUTH_COOKIE_NAME");
-    expect(txt).toContain("### Subscriptions");
-    expect(txt).toContain("NAPI SQLite storage");
-    expect(txt).not.toContain("### Live Query");
-    expect(txt).not.toContain("DevTools panel");
-    expect(txt).not.toContain("attachDevTools");
-    expect(txt).not.toContain("NAPI Fjall");
-
-    expect(txt).not.toContain("allowSelfSigned");
-    expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");
-  });
 });

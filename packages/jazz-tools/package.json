@@ -118,6 +118,7 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
+    "build:docs-index": "node --import tsx src/mcp/build-index.ts",
     "build:runtime": "tsc && node scripts/bundle-broker-worker.mjs && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
@@ -168,6 +169,7 @@
     "react-dom": "^19.0.0",
     "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
+    "tsx": "^4.21.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-solid": "catalog:default",
