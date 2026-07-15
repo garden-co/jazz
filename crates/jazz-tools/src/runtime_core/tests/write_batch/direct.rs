@@ -92,6 +92,53 @@ fn rc_direct_commit_persistence_failure_keeps_rows_staged_and_retryable() {
 }
 
 #[test]
+fn rc_direct_publication_failure_retains_frozen_recovery_state() {
+    let fail_prepared_row_mutations = Arc::new(Mutex::new(false));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "direct-publication-failure-test",
+        Box::new(
+            RowRegionReadFailingStorage::with_prepared_row_mutation_failure(
+                fail_prepared_row_mutations.clone(),
+            ),
+        ),
+    );
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    *fail_prepared_row_mutations.lock().unwrap() = true;
+    core.commit_batch(batch_id)
+        .expect_err("row publication failure must fail the direct commit");
+
+    assert!(
+        core.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_some(),
+        "a publication failure must retain the durable seal for restart recovery"
+    );
+    assert!(
+        core.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("already sealed"),
+        "a batch with durable recovery metadata must stay frozen"
+    );
+}
+
+#[test]
 fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
     let mut core = create_runtime_with_boxed_storage(
         test_schema(),

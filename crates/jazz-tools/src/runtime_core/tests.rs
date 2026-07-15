@@ -37,6 +37,7 @@ struct RowRegionReadFailingStorage {
     fail_visible_row_reads: bool,
     fail_row_locator_scans: bool,
     fail_sealed_submission_upserts: Arc<Mutex<bool>>,
+    fail_prepared_row_mutations: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,7 @@ impl RowRegionReadFailingStorage {
             fail_visible_row_reads: true,
             fail_row_locator_scans: false,
             fail_sealed_submission_upserts: Arc::new(Mutex::new(false)),
+            fail_prepared_row_mutations: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -81,6 +83,7 @@ impl RowRegionReadFailingStorage {
             fail_visible_row_reads: false,
             fail_row_locator_scans: true,
             fail_sealed_submission_upserts: Arc::new(Mutex::new(false)),
+            fail_prepared_row_mutations: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -92,6 +95,17 @@ impl RowRegionReadFailingStorage {
             fail_visible_row_reads: false,
             fail_row_locator_scans: false,
             fail_sealed_submission_upserts,
+            fail_prepared_row_mutations: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    fn with_prepared_row_mutation_failure(fail_prepared_row_mutations: Arc<Mutex<bool>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            fail_visible_row_reads: false,
+            fail_row_locator_scans: false,
+            fail_sealed_submission_upserts: Arc::new(Mutex::new(false)),
+            fail_prepared_row_mutations,
         }
     }
 }
@@ -147,6 +161,11 @@ impl Storage for RowRegionReadFailingStorage {
         encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(), StorageError> {
+        if *self.fail_prepared_row_mutations.lock().unwrap() {
+            return Err(StorageError::IoError(
+                "prepared row mutations deliberately disabled in this test".to_string(),
+            ));
+        }
         self.inner.apply_prepared_row_mutation(
             table,
             history_rows,
