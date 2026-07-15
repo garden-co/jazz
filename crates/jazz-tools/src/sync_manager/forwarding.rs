@@ -253,7 +253,7 @@ impl SyncManager {
                             .is_some_and(|fate| fate.is_rejected()),
                     };
                     if parent_is_rejected {
-                        continue;
+                        return;
                     }
                     if !visited.insert(parent_batch_id) {
                         continue;
