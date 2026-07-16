@@ -1,1 +1,14 @@
 /server-dist/
+# Credentials
+.env*
+!.env.example
+oauth-sessions.json
+
+# Local Jazz and SQLite storage
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
