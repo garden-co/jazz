@@ -101,6 +101,44 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
+  it("keeps result object identity stable while the state is unchanged", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-stable-identity");
+    const noQueryResults: NoQueryResult[] = [];
+    const queryResults: UseAllResult<Todo>[] = [];
+    let force!: (n: number) => void;
+
+    function Probe() {
+      const [, setN] = useState(0);
+      force = setN;
+      noQueryResults.push(useAll<Todo>());
+      queryResults.push(useAll(makeQuery()));
+      return null;
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    const initialNoQuery = noQueryResults[0]!;
+    const initialLoading = queryResults[0]!;
+
+    act(() => force(1));
+
+    expect(noQueryResults.at(-1)).toBe(initialNoQuery);
+    expect(queryResults.at(-1)).toBe(initialLoading);
+
+    act(() => subscribeCalls[0]!.callback(delta([{ id: "1", title: "first" }])));
+
+    const fulfilled = queryResults.at(-1)!;
+    expect(fulfilled.data).toEqual([{ id: "1", title: "first" }]);
+
+    act(() => force(2));
+
+    expect(queryResults.at(-1)).toBe(fulfilled);
+  });
+
   it("an inline query does not resubscribe across re-renders", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-01");
     let force!: (n: number) => void;

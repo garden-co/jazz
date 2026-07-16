@@ -302,6 +302,9 @@ impl SyncManager {
             && existing.metadata == incoming.metadata
     }
 
+    /// Returns the row's visible content immediately before the incoming batch
+    /// This "old" content is used to permission-check the change as an operation
+    /// from old content to new content
     fn pre_batch_visible_row<H: Storage>(
         &self,
         storage: &H,

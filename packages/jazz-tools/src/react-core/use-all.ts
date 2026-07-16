@@ -1,4 +1,4 @@
-import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
+import { type Usable, use, useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { useJazzClient } from "./provider.js";
 
@@ -7,21 +7,27 @@ type UseAllOptions = {
 };
 
 export type UseAllResult<T extends { id: string }> =
-  | {
-      data: undefined;
-      isLoading: true;
-      error: null;
-    }
-  | {
-      data: T[];
-      isLoading: false;
-      error: null;
-    }
-  | {
-      data: undefined;
-      isLoading: false;
-      error: Error;
-    };
+  | UseAllLoadingResult
+  | UseAllFulfilledResult<T>
+  | UseAllErrorResult;
+
+type UseAllLoadingResult = {
+  data: undefined;
+  isLoading: true;
+  error: null;
+};
+
+type UseAllFulfilledResult<T extends { id: string }> = {
+  data: T[];
+  isLoading: false;
+  error: null;
+};
+
+type UseAllErrorResult = {
+  data: undefined;
+  isLoading: false;
+  error: Error;
+};
 
 type UseAllNoQueryResult = {
   data: undefined;
@@ -86,6 +92,25 @@ function useAllBase<T extends { id: string }>(
   );
 
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const status = state?.status;
+  const data = state?.status === "fulfilled" ? state.data : undefined;
+  const stateError = state?.status === "rejected" ? state.error : null;
+
+  const result = useMemo<UseAllResult<T> | UseAllNoQueryResult>(() => {
+    if (key === null) {
+      return { data: undefined, isLoading: false, error: null };
+    }
+
+    if (status === "fulfilled") {
+      return { data: data!, isLoading: false, error: null };
+    }
+
+    if (status === "rejected") {
+      return { data: undefined, isLoading: false, error: toError(stateError) };
+    }
+
+    return { data: undefined, isLoading: true, error: null };
+  }, [data, key, stateError, status]);
 
   if (suspense) {
     if (!query || key === null) {
@@ -116,19 +141,7 @@ function useAllBase<T extends { id: string }>(
     return use(entry.promise as unknown as Usable<T[]>);
   }
 
-  if (!query || key === null) {
-    return { data: undefined, isLoading: false, error: null };
-  }
-
-  if (state?.status === "fulfilled") {
-    return { data: state.data, isLoading: false, error: null };
-  }
-
-  if (state?.status === "rejected") {
-    return { data: undefined, isLoading: false, error: toError(state.error) };
-  }
-
-  return { data: undefined, isLoading: true, error: null };
+  return result;
 }
 
 /**
