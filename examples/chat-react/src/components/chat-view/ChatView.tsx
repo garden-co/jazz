@@ -28,13 +28,14 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
   const chatRowsResult = useAll(app.chats.where({ id: chatId }));
-  const chatRows = chatRowsResult ?? [];
+  const chatRows = chatRowsResult.data ?? [];
   const chatKnown = chatRows.length > 0;
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
   // chatMember row so they appear in the member list and can send messages.
-  const myMemberships =
-    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
+  const { data: myMemberships = [] } = useAll(
+    userId !== null ? app.chatMembers.where({ chatId, userId }) : undefined,
+  );
   const isMember = myMemberships.length > 0;
   // autoJoinPending: true while we've started the insert but haven't yet
   // received server acknowledgement.  Used to suppress the isMember shortcut
@@ -99,14 +100,13 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     }
   }, []);
 
-  const messages =
-    useAll(
-      app.messages
-        .where({ chatId })
-        .include({ sender: true })
-        .orderBy("createdAt", "desc")
-        .limit(showNLastMessages + 1),
-    ) ?? [];
+  const { data: messages = [] } = useAll(
+    app.messages
+      .where({ chatId })
+      .include({ sender: true })
+      .orderBy("createdAt", "desc")
+      .limit(showNLastMessages + 1),
+  );
 
   const hasMore = messages.length > showNLastMessages;
 
@@ -114,7 +114,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     db.delete(app.messages, messageId);
   };
 
-  if (chatRowsResult !== undefined && !chatKnown && userId) {
+  if (!chatRowsResult.isLoading && !chatKnown && userId) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>

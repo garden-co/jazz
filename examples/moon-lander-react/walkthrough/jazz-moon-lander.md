@@ -154,17 +154,17 @@ import { useAll, useDb } from "jazz-tools/react";
 
 export function useSync(playerId: string): SyncResult {
   // Other players' positions, modes, fuel levels (live from the server)
-  const remotePlayers = useAll(
+  const { data: remotePlayers = [] } = useAll(
     app.players.where({ playerId: { ne: playerId } }),
   );
 
   // Deposits on the surface (drives the game's collectible objects)
-  const uncollectedDeposits = useAll(
+  const { data: uncollectedDeposits = [] } = useAll(
     app.fuel_deposits.where({ collected: false }),
   );
 
   // Chat messages, newest-last
-  const chatMessages = useAll(
+  const { data: chatMessages = [] } = useAll(
     app.chat_messages.orderBy("createdAt", "asc"),
   );
   ...
@@ -180,10 +180,11 @@ Results stream from the sync server. When any client writes, every subscriber re
 The first `useAll` result may arrive before all remote data has synced. Moon Lander uses a `settled` flag to delay game setup until the edge subscription has delivered its initial payload.
 
 ```typescript
-// "edge" tier: undefined = still connecting to server; [] or [...] = server has responded
-const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
+// "edge" tier: isLoading = still connecting to server; data = [] or [...] once the server responds
+const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
 
-const settled = allUncollected !== undefined;
+const settled = !allUncollected.isLoading;
+const uncollectedDeposits = allUncollected.data ?? [];
 ```
 
 `settled` gates two things:
@@ -395,7 +396,7 @@ Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` sub
 | ---------------------------- | ---------------------------------------------------------------------------- |
 | `JazzProvider`               | Wrap the app; handles WASM worker + OPFS + sync internally                   |
 | `useDb()`                    | Access the db write API from any component                                   |
-| `useAll(query, tier?)`       | Live subscription; re-renders on every remote or local change                |
+| `useAll(query, options?)`    | Live subscription; re-renders on every remote or local change                |
 | `db.insert(table, data)`     | Eventually consistent insert. Instant local update, propagates in background |
 | `db.update(table, id, data)` | Eventually consistent update. Instant local update, propagates in background |
 | `db.delete(table, id)`       | Eventually consistent delete. Used before re-inserting a released deposit    |

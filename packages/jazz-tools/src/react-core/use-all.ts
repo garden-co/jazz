@@ -1,9 +1,38 @@
-import { type Usable, use, useCallback, useRef, useSyncExternalStore } from "react";
+import { type Usable, use, useCallback, useMemo, useRef, useSyncExternalStore } from "react";
 import type { QueryBuilder, QueryOptions, UseAllState } from "../shared/index.js";
 import { useJazzClient } from "./provider.js";
 
 type UseAllOptions = {
   suspense?: boolean;
+};
+
+export type UseAllResult<T extends { id: string }> =
+  | UseAllLoadingResult
+  | UseAllFulfilledResult<T>
+  | UseAllErrorResult;
+
+type UseAllLoadingResult = {
+  data: undefined;
+  isLoading: true;
+  error: null;
+};
+
+type UseAllFulfilledResult<T extends { id: string }> = {
+  data: T[];
+  isLoading: false;
+  error: null;
+};
+
+type UseAllErrorResult = {
+  data: undefined;
+  isLoading: false;
+  error: Error;
+};
+
+type UseAllNoQueryResult = {
+  data: undefined;
+  isLoading: false;
+  error: null;
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -12,11 +41,15 @@ type UseAllOptions = {
 // its entry promise — opened during render so a suspended effect can't strand it.
 const SUSPEND_FOREVER: Promise<never> = new Promise(() => {});
 
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
 function useAllBase<T extends { id: string }>(
   query?: QueryBuilder<T>,
   queryOptions?: QueryOptions,
   options?: UseAllOptions,
-): T[] | undefined {
+): T[] | UseAllResult<T> | UseAllNoQueryResult {
   const { suspense = false } = options ?? {};
   const { manager } = useJazzClient();
 
@@ -59,6 +92,25 @@ function useAllBase<T extends { id: string }>(
   );
 
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const status = state?.status;
+  const data = state?.status === "fulfilled" ? state.data : undefined;
+  const stateError = state?.status === "rejected" ? state.error : null;
+
+  const result = useMemo<UseAllResult<T> | UseAllNoQueryResult>(() => {
+    if (key === null) {
+      return { data: undefined, isLoading: false, error: null };
+    }
+
+    if (status === "fulfilled") {
+      return { data: data!, isLoading: false, error: null };
+    }
+
+    if (status === "rejected") {
+      return { data: undefined, isLoading: false, error: toError(stateError) };
+    }
+
+    return { data: undefined, isLoading: true, error: null };
+  }, [data, key, stateError, status]);
 
   if (suspense) {
     if (!query || key === null) {
@@ -89,27 +141,41 @@ function useAllBase<T extends { id: string }>(
     return use(entry.promise as unknown as Usable<T[]>);
   }
 
-  return state?.status === "fulfilled" ? state.data : undefined;
+  return result;
 }
 
 /**
  * Read all matching rows and subscribe to changes that modify the query's results.
  *
- * Loading and error states are handled the React way: `undefined` means the
- * query has not resolved yet, and for error handling use {@link useAllSuspense}
- * with a Suspense + error boundary. (The Svelte and Vue bindings expose the same
- * capabilities idiomatically — Svelte's `QuerySubscription` via
- * `.current`/`.loading`/`.error`, Vue's `useAll` via `{ data, error, loading }`.)
- *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns the matching rows, or `undefined` if the query is not yet executed
+ * @returns `{ data, isLoading, error }`
+ * - `data` is `undefined` until the query resolves or if the query fails.
+ * - `isLoading` is `true` before the first result is available.
+ * - `error` is `null` unless there was a problem setting up the subscription
+ *   and no results could be loaded.
+ *
+ * Use {@link useAllSuspense} when you want loading and errors to flow through
+ * Suspense and an error boundary instead.
  */
+export function useAll<T extends { id: string } = { id: string }>(): UseAllNoQueryResult;
+export function useAll<T extends { id: string } = { id: string }>(
+  query: undefined,
+  options?: QueryOptions,
+): UseAllNoQueryResult;
+export function useAll<T extends { id: string }>(
+  query: QueryBuilder<T>,
+  options?: QueryOptions,
+): UseAllResult<T>;
+export function useAll<T extends { id: string }>(
+  query: QueryBuilder<T> | undefined,
+  options?: QueryOptions,
+): UseAllResult<T> | UseAllNoQueryResult;
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
-): T[] | undefined {
-  return useAllBase(query, options, { suspense: false });
+): UseAllResult<T> | UseAllNoQueryResult {
+  return useAllBase(query, options, { suspense: false }) as UseAllResult<T> | UseAllNoQueryResult;
 }
 
 /**

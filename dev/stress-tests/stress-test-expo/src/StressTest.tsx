@@ -120,7 +120,7 @@ export function StressTest() {
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
   const [subscribed, setSubscribed] = useState(false);
-  const todos = useAll(subscribed ? app.todos : undefined) ?? [];
+  const { data: todos = [] } = useAll(subscribed ? app.todos : undefined);
 
   const [count, setCount] = useState("15000");
   const [isRunning, setIsRunning] = useState(false);

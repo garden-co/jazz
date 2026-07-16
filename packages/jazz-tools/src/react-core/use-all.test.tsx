@@ -1,15 +1,16 @@
 import * as React from "react";
 import { Component, Suspense, useState, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { JazzClientProvider } from "./provider.js";
-import { useAll, useAllSuspense } from "./use-all.js";
+import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 
 type Todo = { id: string; title: string };
+type NoQueryResult = { data: undefined; isLoading: false; error: null };
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
   return {
@@ -70,6 +71,74 @@ afterEach(() => {
 });
 
 describe("react-core/useAll", () => {
+  it("returns no result when no query is provided", () => {
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      expectTypeOf(useAll<Todo>()).toEqualTypeOf<NoQueryResult>();
+      expectTypeOf(useAll<Todo>(undefined)).toEqualTypeOf<NoQueryResult>();
+
+      const maybeQuery = makeQuery() as QueryBuilder<Todo> | undefined;
+      expectTypeOf(useAll(maybeQuery)).toEqualTypeOf<UseAllResult<Todo> | NoQueryResult>();
+    }
+  });
+
+  it("returns no result without subscribing when no query is provided", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-00");
+    let result: NoQueryResult | undefined;
+
+    function Probe() {
+      result = useAll<Todo>();
+      return <span>{result.isLoading ? "loading" : "idle"}</span>;
+    }
+
+    const { container } = render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    expect(container.textContent).toBe("idle");
+    expect(result).toEqual({ data: undefined, isLoading: false, error: null });
+    expect(subscribeCalls).toHaveLength(0);
+  });
+
+  it("keeps result object identity stable while the state is unchanged", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-stable-identity");
+    const noQueryResults: NoQueryResult[] = [];
+    const queryResults: UseAllResult<Todo>[] = [];
+    let force!: (n: number) => void;
+
+    function Probe() {
+      const [, setN] = useState(0);
+      force = setN;
+      noQueryResults.push(useAll<Todo>());
+      queryResults.push(useAll(makeQuery()));
+      return null;
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    const initialNoQuery = noQueryResults[0]!;
+    const initialLoading = queryResults[0]!;
+
+    act(() => force(1));
+
+    expect(noQueryResults.at(-1)).toBe(initialNoQuery);
+    expect(queryResults.at(-1)).toBe(initialLoading);
+
+    act(() => subscribeCalls[0]!.callback(delta([{ id: "1", title: "first" }])));
+
+    const fulfilled = queryResults.at(-1)!;
+    expect(fulfilled.data).toEqual([{ id: "1", title: "first" }]);
+
+    act(() => force(2));
+
+    expect(queryResults.at(-1)).toBe(fulfilled);
+  });
+
   it("an inline query does not resubscribe across re-renders", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-01");
     let force!: (n: number) => void;
@@ -97,7 +166,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-02");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -133,7 +202,7 @@ describe("react-core/useAll", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-03");
 
     function List() {
-      const todos = useAll(makeQuery());
+      const { data: todos } = useAll(makeQuery());
       return <span>{(todos ?? []).length}</span>;
     }
 
@@ -154,7 +223,7 @@ describe("react-core/useAll", () => {
     manager.makeQueryKey(query, undefined, [{ id: "1", title: "seeded" }]);
 
     function List() {
-      const todos = useAll(query);
+      const { data: todos } = useAll(query);
       return (
         <>
           {(todos ?? []).map((t) => (
@@ -174,14 +243,22 @@ describe("react-core/useAll", () => {
     expect(subscribeCalls).toHaveLength(0);
   });
 
-  it("a failed subscription leaves non-suspense useAll undefined and does not throw", () => {
+  it("a failed subscription surfaces a non-suspense useAll error and does not throw", async () => {
     const { client } = makeHarness("rc-all-05", {
       throwOnSubscribe: new Error("subscribe failed"),
     });
 
     function List() {
-      const todos = useAll(makeQuery());
-      return <span>{todos === undefined ? "no-data" : String(todos.length)}</span>;
+      const result = useAll(makeQuery());
+      return (
+        <span>
+          {result.error
+            ? result.error.message
+            : result.isLoading
+              ? "loading"
+              : String(result.data.length)}
+        </span>
+      );
     }
 
     const { container } = render(
@@ -190,7 +267,7 @@ describe("react-core/useAll", () => {
       </JazzClientProvider>,
     );
 
-    expect(container.textContent).toBe("no-data");
+    await waitFor(() => expect(container.textContent).toBe("subscribe failed"));
   });
 
   it("useAllSuspense throws a failed subscription to the error boundary", () => {

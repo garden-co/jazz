@@ -722,12 +722,10 @@ export function TableDataGrid() {
       }) as const,
     [runtime],
   );
-  // `undefined` means the live query hasn't resolved yet (loading); `[]` means
-  // it resolved and is genuinely empty. Keep them apart so the grid can
-  // show a skeleton while the first result is in flight.
   const queryResult = useAll<DynamicTableRow>(queryBuilder, queryOptions);
-  const isInitialLoading = queryResult === undefined;
-  const rows = queryResult ?? EMPTY_ROWS;
+  // show a grid skeleton while the first result is in flight.
+  const isInitialLoading = queryResult.isLoading;
+  const rows = queryResult.data ?? EMPTY_ROWS;
 
   const gridColumns = useMemo<GridColumn[]>(
     () => [
@@ -1473,7 +1471,7 @@ function RelationCell({
     () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
     [relationId, relationTable, schema],
   );
-  const relationRows = useAll<DynamicTableRow>(queryBuilder, queryOptions) ?? EMPTY_ROWS;
+  const { data: relationRows = EMPTY_ROWS } = useAll<DynamicTableRow>(queryBuilder, queryOptions);
   const relationRow = relationRows[0];
   const displayColumn = useMemo(
     () => getRelationDisplayColumn(schema, relationTable),
