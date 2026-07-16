@@ -11,6 +11,8 @@ import { createOAuthSessionStore } from "./oauth-session-store.js";
 
 describe("OAuth session storage", () => {
   it("persists sessions for the backend without exposing them to users", async () => {
+    const previousEncryptionKey = process.env.OAUTH_SESSION_ENCRYPTION_KEY;
+    process.env.OAUTH_SESSION_ENCRYPTION_KEY = "00".repeat(32);
     const dataDirectory = mkdtempSync(join(tmpdir(), "jazz-oauth-sessions-"));
     const context = createJazzContext({
       appId: randomUUID(),
@@ -30,6 +32,11 @@ describe("OAuth session storage", () => {
     try {
       await store.set(did, session);
 
+      const persisted = await context
+        .db()
+        .one(app.oauthSessions.where({ sessionKey: { eq: did } }));
+      expect(persisted?.sessionJson).not.toContain("access");
+      expect(persisted?.sessionJson).not.toContain("refresh");
       expect(await store.get(did)).toEqual(session);
       expect(await context.forSession({ user_id: did, claims: {}, authMode: "external" })
         .all(app.oauthSessions.where({}))).toEqual([]);
@@ -39,6 +46,11 @@ describe("OAuth session storage", () => {
     } finally {
       await context.shutdown();
       rmSync(dataDirectory, { recursive: true, force: true });
+      if (previousEncryptionKey === undefined) {
+        delete process.env.OAUTH_SESSION_ENCRYPTION_KEY;
+      } else {
+        process.env.OAUTH_SESSION_ENCRYPTION_KEY = previousEncryptionKey;
+      }
     }
   });
 });
