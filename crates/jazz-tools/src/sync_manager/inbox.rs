@@ -376,7 +376,21 @@ impl SyncManager {
             storage.load_authoritative_batch_fate(row.batch_id),
             Ok(Some(BatchFate::Rejected { .. }))
         ) {
-            return None;
+            let is_declared_member = storage
+                .load_sealed_batch_submission(row.batch_id)
+                .ok()
+                .flatten()
+                .is_some_and(|submission| {
+                    submission.target_branch_name.as_str() == row.branch.as_str()
+                        && submission.members.iter().any(|member| {
+                            member.object_id == row.row_id
+                                && member.row_digest == row.content_digest()
+                        })
+                });
+            if !is_declared_member {
+                return None;
+            }
+            row.state = RowState::Rejected;
         }
         let (is_newly_located_object, needs_exact_locator) =
             self.ensure_object_metadata(storage, row.row_id, metadata.clone());
