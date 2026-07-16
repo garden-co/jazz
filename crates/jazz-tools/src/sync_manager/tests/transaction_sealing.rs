@@ -322,6 +322,73 @@ fn direct_client_settlement_before_row_is_not_authoritative_after_row() {
 }
 
 #[test]
+fn rejected_sealed_batch_records_late_declared_member_as_rejected() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: transactional_sealed_submission(
+                batch_id,
+                "main",
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: row.content_digest(),
+                }],
+                Vec::new(),
+            ),
+        },
+    );
+    let rejected = BatchFate::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+    io.upsert_authoritative_batch_fate(&rejected).unwrap();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    assert_eq!(
+        io.load_history_row_batch("users", "main", row_id, batch_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::row_histories::RowState::Rejected,
+        "a late declared member must be accounted for without becoming visible"
+    );
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(rejected)
+    );
+}
+
+#[test]
 fn direct_client_settlement_before_row_keeps_sealed_submission_without_server() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
