@@ -1,12 +1,12 @@
 # Jazz ❤️ Bluesky — Local-first ATProto
 
-A proof of concept showing how Jazz can be layered over ATProto. This Jazz-backed app implements a subset of the features which exist on a normal Bluesky app view, showing how you can add Jazz to an existing application or stack to give local-first, offline-capable reactive views into data which does not natively support it.
+A proof of concept showing how Jazz can be layered over ATProto. It provides a following timeline with text and image posts, lazy-loaded threads, likes, reposts, and queued offline writes, while the PDS remains authoritative.
 
 - ATProto remains the source of truth for posts, likes, and reposts.
 - A slim Hono server performs authenticated PDS writes.
-- It exposes an `/api/timeline` endpoint to fetch AppView feed events and write sync them into Jazz.
-- The data itself is fetched through Jazz directly: React uses one reactive query subscription for timeline events, posts, profiles, images, threads, likes, and reposts.
-- Posts and reaction intentions are written to Jazz first. If the online PDS write fails, they remain queued and retry after connectivity returns
+- `/api/timeline` triggers bounded AppView fetches and projects the results into Jazz.
+- React renders the timeline from one deep reactive Jazz query covering timeline events, posts, profiles, images, threads, likes, and reposts.
+- Posts and reaction intentions are written to Jazz first. If the online PDS write fails, they remain queued and retry after connectivity returns.
 
 ## Data flow
 
@@ -18,10 +18,10 @@ WRITE
 Bluesky PDS <──── Bluesky adapter <──── Jazz bridge <──── pending Jazz intentions <──── React
 ```
 
-`/api/timeline` is only a trigger. It asks Bluesky for one bounded page and returns cursor metadata immediately, rather than returning posts to React directly. The bridge projects rows into Jazz incrementally as they arrive, and they sync to the client over the normal path.
+`/api/timeline` is only a trigger. It waits for one bounded AppView page, then returns cursor and count metadata; it does not deliver the fetched ATProto data to React. The bridge projects the page into Jazz, and the resulting rows sync to the client through Jazz's normal reactive path.
 
 > [!NOTE]
-The 'poll' from the client could easily be replaced with a 'push' mechanism. For example, a firehose consumer could project rows into Jazz, and these would sync through the reactive subscription to Jazz directly, without any separate messaging channel with the client.
+> Client polling could be replaced with a push mechanism. For example, a firehose consumer could project rows into Jazz, which would then sync through the reactive Jazz subscription without a separate client messaging channel. Continuously consuming the firehose is substantially more resource-intensive, so it is deliberately outside this POC's bounded scope.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `server/auth.ts` | OAuth sessions and Jazz JWTs | Stores sessions in a backend-only table | Yes |
 | `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
 | `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
-| `server/timeline.ts` | Pure Bluesky-to-projection normalization | Only the projection shape | Yes |
+| `server/timeline.ts` | Pure Bluesky-to-projection normalisation | Only the projection shape | Yes |
 | `server/bridge.ts` | Project reads into Jazz and reconcile queued intentions | Yes | Calls the Bluesky adapter |
 | `schema.ts` | Local relational projection and pending intentions | Yes | No protocol calls |
 | `src/Timeline.tsx` | One reactive Jazz query plus local-first commands | Yes | Only calls trigger/reconcile routes |
@@ -61,17 +61,26 @@ For a conventional SQL-backed application, keep the Jazz-facing projection and c
 
 The authoritative database still owns business rules and final write ordering. Jazz adds local availability, reactive transport, shared caching, and durable offline intentions without requiring that database to become local-first itself.
 
->[!NOTE]
->By using Jazz as a layer in front of a traditional database, you not only unlock offline/local-first capabilities, you also add a powerful relation-based authorisation engine, which you can use to create more complex access criteria than your existing database allows.
+> [!NOTE]
+> With ATProto, the PDS remains authoritative and Jazz permissions govern only the projected data delivered to clients. When Jazz fronts a traditional database, an application could instead choose Jazz as its client-facing authorisation layer, while server-side writes still enforce the rules required by the underlying system.
+
+## POC limitations
+
+- Timeline updates use bounded polling rather than consuming the firehose.
+- Moderation labels and most rich embeds are not projected; image embeds are supported.
+- The example has no production cache-retention policy.
+- Loopback OAuth and environment-managed encryption keys are development choices, not a production deployment design.
 
 ## Run
 
 ```sh
 cp .env.example .env
+openssl rand -hex 32
+# Copy the output into OAUTH_SESSION_ENCRYPTION_KEY in .env.
 pnpm install
 pnpm dev
 ```
 
 Open `http://127.0.0.1:5173`. OAuth uses ATProto's loopback client metadata and redirects through `http://127.0.0.1:3001`; use the same loopback address for the app so its session cookie is sent correctly.
 
-Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match. OAuth session material is stored in Jazz's `oauthSessions` table, which deliberately has no client permissions and therefore does not sync to browsers.
+Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match. OAuth session material is encrypted with AES-256-GCM before it is stored in Jazz's backend-only `oauthSessions` table. `OAUTH_SESSION_ENCRYPTION_KEY` must contain a 64-character hexadecimal key; changing it invalidates existing sessions. The table has no client permissions and does not sync to browsers.
