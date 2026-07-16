@@ -1,5 +1,6 @@
 <!-- #region auth-anon-svelte -->
 <script lang="ts">
+  import type { Db } from 'jazz-tools';
   import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
 
   const client = createJazzClient({
@@ -9,7 +10,7 @@
 </script>
 
 <JazzSvelteProvider {client}>
-  {#snippet children({ db })}
+  {#snippet children({ db }: { db: Db })}
     <slot />
   {/snippet}
 </JazzSvelteProvider>

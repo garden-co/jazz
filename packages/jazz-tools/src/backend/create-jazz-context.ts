@@ -23,7 +23,7 @@ export type BackendJwtPublicKey = JWK | string;
 export type BackendDriver =
   | {
       type: "persistent";
-      /** Path to the Fjall file used by the server runtime. */
+      /** Path to the SQLite database file used by the server runtime. */
       dataPath: string;
     }
   | {

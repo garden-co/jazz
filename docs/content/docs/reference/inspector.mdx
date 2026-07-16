@@ -1,7 +1,7 @@
 ---
 title: Inspector
-description: Standalone admin client for exploring Jazz sync servers, schemas, permissions, and live queries.
-reviewedAt: "efa67bfc2"
+description: Standalone admin client for exploring Jazz sync servers, schemas, permissions, and subscriptions.
+reviewedAt: "3384730e1"
 ---
 
 The [Jazz Inspector](https://v2.inspector.jazz.tools/) is a standalone client for inspecting a Jazz
@@ -44,11 +44,12 @@ Each table includes a schema view showing the stored structural schema for that 
 mode, the same page also shows the currently published sync-server permissions for that table, which
 is useful when you want to confirm what policy bundle the server is enforcing.
 
-### Live Query
+### Subscriptions
 
-The Live Query tab shows active server-managed subscriptions grouped by query on the connected sync
-server. You can inspect the table, propagation mode, branches, and compiled query JSON, then jump
-straight into the matching table view in Data Explorer.
+The Subscriptions tab shows active subscriptions from the inspected page runtime and active
+server-managed subscriptions from the connected sync server. You can inspect the table, propagation
+mode, branches, and compiled query JSON, then jump straight into the matching table view in Data
+Explorer.
 
 ### Schema switching
 
@@ -56,8 +57,12 @@ If an app has multiple published schema hashes, the inspector lets you switch be
 reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
 that still lives on older schema branches.
 
-## DevTools panel
+## Development overlay
 
-The same inspector UI also exists as a browser DevTools panel for local debugging. The hosted
-client at [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect
-a remote or self-hosted sync server directly.
+The Vite and SvelteKit development integrations can serve an in-app inspector overlay that opens the
+embedded inspector against the running app's local runtime. The overlay is enabled by default during
+development and can be disabled with the integration's `inspector: false` option.
+
+For remote or self-hosted sync servers, the hosted client at
+[v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect the server
+directly.

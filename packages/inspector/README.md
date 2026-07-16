@@ -1,13 +1,13 @@
 # Jazz Inspector
 
-Inspector UI for exploring Jazz databases, usable either as a standalone web app or as a Chrome DevTools panel.
+Inspector UI for exploring Jazz databases, usable either as a standalone web app or as an embedded development overlay.
 
 ## Running the Inspector in standalone mode
 
-You can run the Inspector as a regular web app that connects to a Jazz cloud server.
+You can run the Inspector as a regular web app that connects to a Jazz sync server.
 
 ```sh
-cd /Users/takeno/Workspace/Jazz/jazz2/packages/inspector
+cd packages/inspector
 pnpm dev
 ```
 
@@ -23,23 +23,23 @@ Then open `http://localhost:5173` in your browser (Vite’s default dev server p
 The inspector derives app-scoped endpoints automatically from `serverUrl` and `appId`, so there is
 no separate path-prefix setting.
 
-## Building the DevTools extension
+## Building the Inspector
 
-The Chrome DevTools extension bundle is produced via Vite’s `extension` mode.
+The package provides standalone web and embedded builds.
 
-- **Build only the extension from the package**
+- **Build the standalone web app**
 
 ```sh
 cd packages/inspector
-pnpm build:extension
+pnpm build
 ```
 
-## Installing the DevTools extension in Chrome
+- **Build the embedded inspector**
 
-1. **Build the extension** (see above) so that `dist-extension/` exists.
-2. Open Chrome and go to `chrome://extensions`.
-3. Enable **Developer mode** (toggle in the top-right).
-4. Click **Load unpacked** and select the `packages/inspector/dist-extension` directory.
-5. Open DevTools on any page that runs a Jazz app; a **Jazz Inspector** panel should appear in the DevTools tab strip.
+```sh
+cd packages/inspector
+pnpm build:embedded
+```
 
-If the panel is open but no runtime is connected yet, the Inspector will show a waiting state until a Jazz runtime with devtools support is active in the page.
+The Jazz Vite and SvelteKit development integrations serve the embedded inspector as an in-app
+overlay by default. Set their `inspector` option to `false` to disable it.

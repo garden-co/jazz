@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build": "next build",
+    "build": "pnpm --filter jazz-tools build:docs-index && next build",
     "dev": "next dev",
     "prebuild": "fumadocs-mdx",
     "predev": "fumadocs-mdx",
