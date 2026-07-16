@@ -1566,7 +1566,9 @@ pub trait Storage {
             HistoryScan::Branch | HistoryScan::AsOf { .. } => {
                 key_codec::history_row_raw_table_prefix(None)
             }
-            HistoryScan::Row { row_id } => key_codec::history_row_raw_table_prefix(Some(row_id)),
+            HistoryScan::Row { row_id } => {
+                key_codec::history_row_raw_table_branch_prefix(row_id, branch)
+            }
         };
         let mut scanned = Vec::new();
         for resolved in &resolved_tables {

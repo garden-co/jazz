@@ -289,6 +289,13 @@ pub(super) fn history_row_raw_table_prefix(row_id: Option<ObjectId>) -> String {
     }
 }
 
+pub(super) fn history_row_raw_table_branch_prefix(row_id: ObjectId, branch: &str) -> String {
+    let mut prefix = history_row_raw_table_prefix(Some(row_id));
+    prefix.push_str(branch);
+    prefix.push(':');
+    prefix
+}
+
 pub(super) fn decode_history_row_raw_table_key(
     key: &str,
 ) -> Result<(ObjectId, String, BatchId), StorageError> {

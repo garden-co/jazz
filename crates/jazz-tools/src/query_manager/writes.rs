@@ -6,8 +6,9 @@ use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_proven
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
-    ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
-    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
+    ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, HistoryScan, QueryRowBatch,
+    RowHistoryError, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch,
+    apply_row_batch_with_context,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -671,10 +672,12 @@ impl QueryManager {
         }
 
         let history_table = crate::storage::history_table_for_row(storage, row_id, table);
-        if let Ok(history_rows) = storage.scan_history_row_batches(&history_table, row_id) {
-            let branch_rows = history_rows
+        if let Ok(branch_rows) =
+            storage.scan_history_region(&history_table, branch, HistoryScan::Row { row_id })
+        {
+            let branch_rows = branch_rows
                 .iter()
-                .filter(|row| row.branch.as_str() == branch && row.state.is_visible())
+                .filter(|row| row.state.is_visible())
                 .collect::<Vec<_>>();
             let mut non_tips = HashSet::new();
             for row in &branch_rows {
