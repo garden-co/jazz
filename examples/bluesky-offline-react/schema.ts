@@ -1,6 +1,11 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
+  oauthSessions: s.table({
+    sessionKey: s.string(),
+    sessionJson: s.string(),
+    updatedAt: s.string(),
+  }),
   profiles: s.table({
     did: s.string(),
     handle: s.string().optional(),

@@ -1,12 +1,11 @@
 import {
   buildAtprotoLoopbackClientMetadata,
   NodeOAuthClient,
-  type NodeSavedSession,
   type NodeSavedState,
 } from "@atproto/oauth-client-node";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { db } from "./jazz.js";
+import { createOAuthSessionStore } from "./oauth-session-store.js";
 
 const port = Number(process.env.PORT ?? 3001);
 export const oauthScope = "atproto transition:generic";
@@ -15,28 +14,7 @@ const clientMetadata = buildAtprotoLoopbackClientMetadata({
   scope: oauthScope,
 });
 
-const oauthSessionsPath = process.env.OAUTH_SESSIONS_FILE ?? "./data/oauth-sessions.json";
-mkdirSync(dirname(oauthSessionsPath), { recursive: true });
-
-function loadPersistentMap<T>(path: string) {
-  try {
-    return new Map(Object.entries(JSON.parse(readFileSync(path, "utf8"))) as [string, T][]);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn(`Could not load OAuth sessions from ${path}:`, error);
-    }
-    return new Map<string, T>();
-  }
-}
-
-function savePersistentMap<T>(path: string, values: Map<string, T>) {
-  const temporaryPath = `${path}.tmp`;
-  writeFileSync(temporaryPath, JSON.stringify(Object.fromEntries(values)), { mode: 0o600 });
-  renameSync(temporaryPath, path);
-}
-
 const states = new Map<string, NodeSavedState>();
-const sessions = loadPersistentMap<NodeSavedSession>(oauthSessionsPath);
 export const oauth = new NodeOAuthClient({
   clientMetadata,
   stateStore: {
@@ -44,17 +22,7 @@ export const oauth = new NodeOAuthClient({
     async get(key) { return states.get(key); },
     async del(key) { states.delete(key); },
   },
-  sessionStore: {
-    async set(key, value) {
-      sessions.set(key, value);
-      savePersistentMap(oauthSessionsPath, sessions);
-    },
-    async get(key) { return sessions.get(key); },
-    async del(key) {
-      sessions.delete(key);
-      savePersistentMap(oauthSessionsPath, sessions);
-    },
-  },
+  sessionStore: createOAuthSessionStore(db),
   allowHttp: true,
 });
 

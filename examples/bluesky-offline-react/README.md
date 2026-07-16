@@ -30,7 +30,8 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | Component | Responsibility | Knows about Jazz? | Knows about Bluesky? |
 | --- | --- | --- | --- |
 | `server/app.ts` | HTTP routes and request validation | No | Only session-shaped route inputs |
-| `server/auth.ts` | OAuth sessions and Jazz JWTs | Only JWT issuance | Yes |
+| `server/auth.ts` | OAuth sessions and Jazz JWTs | Stores sessions in a backend-only table | Yes |
+| `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
 | `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
 | `server/timeline.ts` | Pure Bluesky-to-projection normalization | Only the projection shape | Yes |
 | `server/bridge.ts` | Project reads into Jazz and reconcile queued intentions | Yes | Calls the Bluesky adapter |
@@ -73,4 +74,4 @@ pnpm dev
 
 Open `http://127.0.0.1:5173`. OAuth uses ATProto's loopback client metadata and redirects through `http://127.0.0.1:3001`; use the same loopback address for the app so its session cookie is sent correctly.
 
-Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match.
+Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match. OAuth session material is stored in Jazz's `oauthSessions` table, which deliberately has no client permissions and therefore does not sync to browsers.
