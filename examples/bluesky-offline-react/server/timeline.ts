@@ -13,6 +13,10 @@ export type StrongRef = { uri?: string; cid?: string };
 export type PostRecord = {
   text?: string;
   createdAt?: string;
+  facets?: Array<{
+    index?: { byteStart?: number; byteEnd?: number };
+    features?: Array<{ $type?: string; uri?: string }>;
+  }>;
   reply?: { parent?: StrongRef; root?: StrongRef };
 };
 
@@ -112,6 +116,16 @@ export function normalizePost(post: PostView | undefined) {
       aspectWidth: image.aspectRatio?.width,
       aspectHeight: image.aspectRatio?.height,
     }));
+  const linkFacets = (record.facets ?? []).flatMap((facet) => {
+    const link = facet.features?.find(
+      (feature) => feature.$type === "app.bsky.richtext.facet#link" && feature.uri,
+    );
+    const byteStart = facet.index?.byteStart;
+    const byteEnd = facet.index?.byteEnd;
+    return link && Number.isInteger(byteStart) && Number.isInteger(byteEnd)
+      ? [{ byteStart: byteStart!, byteEnd: byteEnd!, uri: link.uri! }]
+      : [];
+  });
 
   return {
     profile: authorProfile,
@@ -122,6 +136,7 @@ export function normalizePost(post: PostView | undefined) {
       authorDid,
       authorProfileId: stableObjectId("bluesky-profile", authorDid),
       text: record.text,
+      facetsJson: linkFacets.length > 0 ? JSON.stringify(linkFacets) : undefined,
       createdAt: record.createdAt,
       createdAtMs: Math.floor(Date.parse(record.createdAt) / 1_000),
       indexedAt,

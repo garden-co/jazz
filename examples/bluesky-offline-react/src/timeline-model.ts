@@ -28,6 +28,7 @@ export type IncludedPost = {
   cid?: string | null;
   authorDid: string;
   text: string;
+  facetsJson?: string | null;
   createdAt: string;
   indexedAt: string;
   replyParentId?: string | null;

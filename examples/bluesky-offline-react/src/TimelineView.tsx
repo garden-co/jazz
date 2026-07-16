@@ -29,6 +29,50 @@ function linkMentions(text: string) {
   return parts;
 }
 
+type LinkFacet = { byteStart: number; byteEnd: number; uri: string };
+
+function parseLinkFacets(facetsJson: string | null | undefined, byteLength: number) {
+  if (!facetsJson) return [];
+  try {
+    const facets = JSON.parse(facetsJson) as LinkFacet[];
+    if (!Array.isArray(facets)) return [];
+    return facets
+      .filter(({ byteStart, byteEnd, uri }) =>
+        Number.isInteger(byteStart)
+        && Number.isInteger(byteEnd)
+        && byteStart >= 0
+        && byteEnd > byteStart
+        && byteEnd <= byteLength
+        && /^https?:\/\//.test(uri))
+      .sort((a, b) => a.byteStart - b.byteStart)
+      .filter((facet, index, sorted) => index === 0 || facet.byteStart >= sorted[index - 1].byteEnd);
+  } catch {
+    return [];
+  }
+}
+
+export function PostText({ text, facetsJson }: { text: string; facetsJson?: string | null }) {
+  const bytes = new TextEncoder().encode(text);
+  const decoder = new TextDecoder();
+  const facets = parseLinkFacets(facetsJson, bytes.length);
+  if (facets.length === 0) return <>{linkMentions(text)}</>;
+
+  const parts: ReactNode[] = [];
+  let end = 0;
+  for (const facet of facets) {
+    if (facet.byteStart > end) {
+      parts.push(<span key={`text-${end}`}>{linkMentions(decoder.decode(bytes.slice(end, facet.byteStart)))}</span>);
+    }
+    const label = decoder.decode(bytes.slice(facet.byteStart, facet.byteEnd));
+    parts.push(<a className="post-link" href={facet.uri} target="_blank" rel="noopener noreferrer" title={facet.uri} key={`link-${facet.byteStart}`}>{label}</a>);
+    end = facet.byteEnd;
+  }
+  if (end < bytes.length) {
+    parts.push(<span key={`text-${end}`}>{linkMentions(decoder.decode(bytes.slice(end)))}</span>);
+  }
+  return <>{parts}</>;
+}
+
 export function AppHeader({
   online,
   profile,
@@ -86,7 +130,7 @@ function PostCard({
   const author = profile?.handle ?? profile?.displayName ?? post.authorDid;
   return <article className={`post-card${pendingPost ? " pending" : ""}${isNew ? " new" : ""}`} data-post-uri={post.uri}>
     <header className="post-header">{profile?.avatar ? <img className="avatar" src={profile.avatar} alt="" loading="lazy" /> : <span className="avatar" aria-hidden="true">{author.charAt(0).toUpperCase()}</span>}<div><strong>{author}</strong><time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time></div>{pendingPost && <span className="pending-label">Pending</span>}</header>
-    <p>{linkMentions(post.text)}</p>
+    <p><PostText text={post.text} facetsJson={post.facetsJson} /></p>
     {post.images.length > 0 && <div className="post-images" data-count={post.images.length}>{post.images.map((image) => <a className="post-image" href={image.fullsize} target="_blank" rel="noopener noreferrer" aria-label={image.alt || "View full-size image"} key={image.id}><img src={image.thumb} alt={image.alt} loading="lazy" style={{ aspectRatio: image.aspectWidth && image.aspectHeight ? `${image.aspectWidth} / ${image.aspectHeight}` : undefined }} /></a>)}</div>}
     <footer className="post-actions">
       <button className={`reaction-button like-button${post.like?.active ? " active" : ""}`} type="button" aria-pressed={post.like?.active ?? false} aria-label={`${post.like?.active ? "Unlike" : "Like"} post by ${author}`} title={post.cid ? undefined : "Likes are available once this post has synced"} disabled={!post.cid} onClick={() => onToggleReaction("like", post)}><span aria-hidden="true">{post.like?.active ? "♥" : "♡"}</span><span>{post.likeCount || ""}</span></button>

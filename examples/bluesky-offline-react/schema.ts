@@ -20,6 +20,7 @@ const schema = {
     authorDid: s.string(),
     authorProfileId: s.ref("profiles"),
     text: s.string(),
+    facetsJson: s.string().optional(),
     createdAt: s.string(),
     createdAtMs: s.int().optional(),
     indexedAt: s.string(),

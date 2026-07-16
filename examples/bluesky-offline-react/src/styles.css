@@ -103,7 +103,7 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
 .reaction-button > span:first-child { font-size: 1rem; line-height: 1; }
 .repost-button:hover:not(:disabled), .repost-button.active { color: var(--success); background: var(--success-soft); }
 .reaction-pending { color: var(--accent-dark); font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-.mention-link { color: var(--accent); font-weight: 700; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.mention-link, .post-link { color: var(--accent); font-weight: 700; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .thread-node { display: grid; gap: 11px; min-width: 0; }
 .timeline-thread { display: grid; gap: 11px; min-width: 0; }
 .thread-replies { position: relative; display: grid; gap: 11px; margin-left: 30px; padding-left: 18px; }
