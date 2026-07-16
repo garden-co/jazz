@@ -49,6 +49,28 @@ describe("serializeRuntimeSchema", () => {
     });
   });
 
+  it("canonicalizes table order while preserving column order", () => {
+    const projects = {
+      columns: [{ name: "name", column_type: { type: "Text" as const }, nullable: false }],
+    };
+    const todos = {
+      columns: [
+        { name: "title", column_type: { type: "Text" as const }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" as const }, nullable: false },
+      ],
+    };
+
+    const projectsFirst = serializeRuntimeSchema({ projects, todos });
+    const todosFirst = serializeRuntimeSchema({ todos, projects });
+    const reorderedColumns = serializeRuntimeSchema({
+      projects,
+      todos: { columns: [...todos.columns].reverse() },
+    });
+
+    expect(todosFirst).toBe(projectsFirst);
+    expect(reorderedColumns).not.toBe(projectsFirst);
+  });
+
   it("memoizes cache keys by runtime schema identity", () => {
     const schema: WasmSchema = {
       todos: {

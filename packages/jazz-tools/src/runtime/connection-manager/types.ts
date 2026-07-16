@@ -124,7 +124,7 @@ export abstract class ConnectionManager {
    * private fields.
    */
   getRuntimeSchema(): WasmSchema | null {
-    return this.client ? this.client.getSchema() : null;
+    return this.client?.getSchema() ?? null;
   }
 
   protected get clientEntry(): ConnectionManagerClientInput | null {
