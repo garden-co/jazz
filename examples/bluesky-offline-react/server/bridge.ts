@@ -223,11 +223,9 @@ async function finishTimelinePage(
   cursor: string | undefined,
   pending: Set<string>,
 ) {
-  const entries = [];
-  for (const item of items) {
-    const entry = await writeTimelineItem(ownerDid, item, pending);
-    if (entry) entries.push(entry);
-  }
+  const entries = (await Promise.all(
+    items.map((item) => writeTimelineItem(ownerDid, item, pending)),
+  )).filter((entry) => entry !== undefined);
   if (!cursor && entries.length) {
     const returnedIds = new Set(entries.map((entry) => entry.id));
     const boundary = entries.reduce((oldest, entry) => entry.sortAt < oldest ? entry.sortAt : oldest, entries[0]!.sortAt);
