@@ -13,6 +13,7 @@
     "reading",
     "writing",
     "auth",
+    "server-rendering",
     "---Recipes---",
     "recipes/access-control",
     "recipes/data-patterns",

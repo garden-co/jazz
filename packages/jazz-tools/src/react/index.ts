@@ -9,6 +9,7 @@ export {
   useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense } from "./use-all.js";
+export type { DehydratedSnapshot } from "../backend/ssr.js";
 export {
   useLocalFirstAuth,
   type LocalFirstAuth,

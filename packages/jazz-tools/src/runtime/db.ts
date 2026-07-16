@@ -1538,6 +1538,46 @@ export class Db {
   }
 
   /**
+   * Compose the CRDT sync bundle for `query` under this Db's scope, returning
+   * its wire bytes. The SSR snapshot builder ships this so the client hydrates
+   * its store flash-free. Mirrors {@link Db.subscribeAll}'s query translation.
+   */
+  composeQueryBundle<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    // Query options are intentionally unused: the bundle is the server's
+    // permission-filtered delivery for the query *predicate*; tier / propagation
+    // / localUpdates are client transport concerns, not row selectors.
+    _options?: QueryOptions,
+    session?: Session,
+  ): Uint8Array {
+    const client = this.getClient(query._schema);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
+    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const context = this.getRuntimeOperationContext();
+    const effectiveSession = context?.session ?? session;
+    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    return client.composeQueryBundle(wasmQuery, sessionJson);
+  }
+
+  /**
+   * Seed the live store from a sync bundle's wire bytes (SSR hydration), before
+   * sync connects. The connection manager owns the live client and queues this
+   * until that client is created by the first subscription.
+   */
+  applyQueryBundle(bytes: Uint8Array): void {
+    this.connection.applyQueryBundle(bytes);
+  }
+
+  /**
    * Shutdown the Db and release all resources.
    * Closes the JazzClient and the worker.
    *

@@ -45,6 +45,12 @@ export type JazzProviderProps = {
   onJWTExpired?: () => Promise<string | null | undefined>;
   /** Dev-only: auto-open the inspector overlay. Default true. */
   autoAttachDevTools?: boolean;
+  /**
+   * Opt into the synchronous seed phase for SSR/hydration. When set, a child
+   * `useAll(query, { snapshot })` can render its rows on the first paint without
+   * suspending on the live client.
+   */
+  ssr?: boolean;
 };
 
 export function JazzProvider({
@@ -53,6 +59,7 @@ export function JazzProvider({
   children,
   onJWTExpired,
   autoAttachDevTools,
+  ssr,
 }: JazzProviderProps) {
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
@@ -61,6 +68,7 @@ export function JazzProvider({
       fallback={fallback}
       createJazzClient={createJazzClient}
       onJWTExpired={onJWTExpired}
+      ssr={ssr}
     >
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}

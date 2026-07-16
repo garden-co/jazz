@@ -1306,4 +1306,5 @@ mod policies;
 mod recursive_queries;
 mod server_subscriptions;
 mod subscriptions;
+mod sync_bundle_e2e;
 mod updates;

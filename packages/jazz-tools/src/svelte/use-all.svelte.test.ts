@@ -10,12 +10,14 @@ const mocks = vi.hoisted(() => {
     state: { status: "fulfilled", data: [] },
     subscribe,
   }));
+  const applySnapshot = vi.fn();
 
   return {
     makeQueryKey,
     getCacheEntry,
     subscribe,
     unsubscribe,
+    applySnapshot,
     reset() {
       unsubscribe.mockReset();
       subscribe.mockReset().mockReturnValue(unsubscribe);
@@ -24,6 +26,7 @@ const mocks = vi.hoisted(() => {
         state: { status: "fulfilled", data: [] },
         subscribe,
       });
+      applySnapshot.mockReset();
     },
   };
 });
@@ -37,6 +40,12 @@ vi.mock("./context.svelte.js", () => ({
       getCacheEntry: mocks.getCacheEntry,
     },
   }),
+}));
+
+vi.mock("../ssr/apply-snapshot.js", () => ({ applySnapshot: mocks.applySnapshot }));
+vi.mock("../drivers/schema-wire.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../drivers/schema-wire.js")>()),
+  computeSchemaFingerprint: () => "fp",
 }));
 
 const { QuerySubscription } = await import("./use-all.svelte.js");
@@ -216,6 +225,13 @@ describe("svelte/QuerySubscription", () => {
   });
 
   it("starts with current undefined regardless of options.tier", () => {
+    // An unseeded query (no snapshot) has no fulfilled entry yet, so the
+    // constructor's synchronous first read leaves current untouched.
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "pending" as const, data: undefined },
+      subscribe: mocks.subscribe,
+    } as any);
+
     let withoutTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
     let withTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
     const cleanup = $effect.root(() => {
@@ -226,6 +242,77 @@ describe("svelte/QuerySubscription", () => {
     expect(withoutTier.current).toBeUndefined();
     expect(withTier.current).toBeUndefined();
 
+    cleanup();
+  });
+
+  it("reads a fulfilled entry synchronously, before the effect subscribes", async () => {
+    const query = makeQuery("inbox");
+    const seeded = [{ id: "1", title: "seeded" }];
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: seeded },
+      subscribe: mocks.subscribe,
+    } as any);
+
+    let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      ref = new QuerySubscription(query);
+    });
+
+    // Synchronous: the SSR render (no $effect) already has the rows, unsubscribed.
+    expect(ref.current).toEqual(seeded);
+    expect(ref.loading).toBe(false);
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    await settle();
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("applies a snapshot from a getter once, and keeps the options reactive", async () => {
+    const query = makeQuery("inbox");
+    const snapshot = {} as any;
+    let tier = $state<"edge" | "global">("edge");
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(query, () => ({ tier, snapshot }));
+    });
+    await settle();
+
+    expect(mocks.applySnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.makeQueryKey).toHaveBeenLastCalledWith(query, { tier: "edge" });
+
+    tier = "global";
+    await settle();
+
+    // The snapshot is one-shot (not re-applied); the tier reactively updates the key.
+    expect(mocks.applySnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.makeQueryKey).toHaveBeenLastCalledWith(query, { tier: "global" });
+
+    cleanup();
+  });
+
+  it("warns once and ignores a snapshot that changes after the first render", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const query = makeQuery("inbox");
+    let snapshot = $state<any>({ id: "a" });
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(query, () => ({ snapshot }));
+    });
+    await settle();
+    expect(mocks.applySnapshot).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+
+    snapshot = { id: "b" };
+    await settle();
+
+    // The changed snapshot is ignored (not re-applied) and flagged exactly once.
+    expect(mocks.applySnapshot).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("snapshot");
+
+    warn.mockRestore();
     cleanup();
   });
 });

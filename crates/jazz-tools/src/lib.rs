@@ -17,6 +17,7 @@ pub mod schema_manager;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
 pub mod storage;
+pub mod sync_bundle;
 pub mod sync_manager;
 #[cfg(feature = "test-utils")]
 pub mod test_support;

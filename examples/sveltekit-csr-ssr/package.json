@@ -1,0 +1,31 @@
+{
+  "name": "sveltekit-csr-ssr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "dev:e2e": "node e2e/clear-jazz-store.mjs && vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@sveltejs/adapter-node": "^5.2.12",
+    "@sveltejs/kit": "^2.20.0",
+    "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "catalog:default",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^4",
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
+  }
+}

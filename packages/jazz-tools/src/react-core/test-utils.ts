@@ -16,6 +16,9 @@ export function makeFakeClient(params: {
   const updateAuthTokenSpy = { lastToken: null as string | null };
   return {
     db: {
+      // No-op DbLike surface: these fakes drive the non-SSR auth paths and never
+      // attach to an orchestrator, but the provider's db type now requires it.
+      subscribeAll: () => () => {},
       getAuthState: () => state,
       onAuthChanged: (cb: (s: AuthState) => void) => {
         listeners.add(cb);

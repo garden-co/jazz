@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "./types.js";
-import { getRuntimeSchemaCacheKey, serializeRuntimeSchema } from "./schema-wire.js";
+import {
+  computeSchemaFingerprint,
+  getRuntimeSchemaCacheKey,
+  resolveWasmSchema,
+  serializeRuntimeSchema,
+} from "./schema-wire.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -75,5 +80,65 @@ describe("serializeRuntimeSchema", () => {
     expect(JSON.parse(unloaded)).toMatchObject({ loadedPolicyBundle: false });
     expect(JSON.parse(loaded)).toMatchObject({ loadedPolicyBundle: true });
     expect(stringify).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("computeSchemaFingerprint", () => {
+  it("returns the same fingerprint for the same schema across calls", () => {
+    const schema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "id", column_type: { type: "Text" }, nullable: false },
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    };
+
+    expect(computeSchemaFingerprint(schema)).toBe(computeSchemaFingerprint(schema));
+  });
+
+  it("differs for structurally different schemas", () => {
+    const a: WasmSchema = {
+      todos: {
+        columns: [{ name: "id", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const b: WasmSchema = {
+      notes: {
+        columns: [{ name: "id", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+
+    expect(computeSchemaFingerprint(a)).not.toBe(computeSchemaFingerprint(b));
+  });
+
+  it("is stable between two independently-built copies of the same schema", () => {
+    const buildSchema = (): WasmSchema => ({
+      todos: {
+        columns: [
+          { name: "id", column_type: { type: "Text" }, nullable: false },
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+        ],
+      },
+    });
+
+    expect(computeSchemaFingerprint(buildSchema())).toBe(computeSchemaFingerprint(buildSchema()));
+  });
+});
+
+describe("resolveWasmSchema", () => {
+  const schema: WasmSchema = {
+    todos: {
+      columns: [{ name: "id", column_type: { type: "Text" }, nullable: false }],
+    },
+  };
+
+  it("returns a raw WasmSchema unchanged", () => {
+    expect(resolveWasmSchema(schema)).toBe(schema);
+  });
+
+  it("unwraps an App-like value with a wasmSchema field", () => {
+    const app = { wasmSchema: schema, todos: { _table: "todos" } };
+    expect(resolveWasmSchema(app)).toBe(schema);
   });
 });
