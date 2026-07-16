@@ -1122,7 +1122,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
             record.mark_sealed(submission.clone());
             let mut settled_at_commit = false;
-            let mut confirmed_tier_at_commit = None;
             let mut settlement_at_commit = None;
             if record.mode == BatchMode::Direct
                 && let Some(confirmed_tier) = self.local_write_confirmed_tier()
@@ -1133,7 +1132,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 };
                 record.apply_fate(settlement.clone());
                 settled_at_commit = !self.batch_needs_settlement(Some(&settlement));
-                confirmed_tier_at_commit = Some(confirmed_tier);
                 settlement_at_commit = Some(settlement);
             }
             self.storage
@@ -1147,9 +1145,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .map_err(|err| {
                     RuntimeError::WriteError(format!("persist local batch record: {err}"))
                 })?;
-            if let Some(settlement) = settlement_at_commit {
+            if let Some(settlement) = settlement_at_commit.as_ref() {
                 self.storage
-                    .upsert_authoritative_batch_fate(&settlement)
+                    .upsert_authoritative_batch_fate(settlement)
                     .map_err(|err| {
                         RuntimeError::WriteError(format!("persist batch fate: {err}"))
                     })?;
@@ -1157,9 +1155,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if record.mode == BatchMode::Direct {
                 self.publish_direct_batch_rows(&record)?;
             }
-            Ok((submission, confirmed_tier_at_commit, settled_at_commit))
+            Ok((submission, settlement_at_commit, settled_at_commit))
         })();
-        let (submission, confirmed_tier_at_commit, settled_at_commit) = match result {
+        let (submission, settlement_at_commit, settled_at_commit) = match result {
             Ok(result) => result,
             Err(error) => {
                 self.local_batch_record_cache
@@ -1170,7 +1168,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         self.local_batch_record_cache
             .insert(batch_id, record.clone());
-        if let Some(confirmed_tier) = confirmed_tier_at_commit {
+        if let Some(BatchFate::DurableDirect { confirmed_tier, .. }) = settlement_at_commit {
             self.durability.record_batch_ack(batch_id, confirmed_tier);
             if settled_at_commit {
                 self.retire_settled_batch(batch_id, confirmed_tier);
