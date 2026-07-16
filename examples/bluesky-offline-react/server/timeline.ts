@@ -50,12 +50,24 @@ export type FeedViewPost = {
   reason?: RepostReason;
 };
 
-export function stableObjectId(namespace: string, value: string) {
-  const bytes = createHash("sha256").update(`${namespace}:${value}`).digest().subarray(0, 16);
+function objectId(key: string) {
+  const bytes = createHash("sha256").update(key).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function stableObjectId(
+  namespace: string,
+  value: string,
+  appId = process.env.JAZZ_APP_ID ?? "bluesky-offline-react-v2",
+) {
+  return objectId(`${appId}:${namespace}:${value}`);
+}
+
+export function legacyObjectId(namespace: string, value: string) {
+  return objectId(`${namespace}:${value}`);
 }
 
 function profileRow(profile: ProfileView | undefined, indexedAt: string) {

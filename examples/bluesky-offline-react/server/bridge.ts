@@ -32,12 +32,24 @@ export type QueuedOperation = {
   payload: string;
 };
 
+function upsertOrUpdate(table: AnyTable, id: string, data: Record<string, unknown>) {
+  try {
+    db.upsert(table as never, data as never, { id });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("object already exists")) throw error;
+    db.update(table as never, id, data as never);
+  }
+}
+
 async function upsertChanged(table: AnyTable, id: string, data: Record<string, unknown>) {
   const query = table.where({ id: { eq: id } });
   const existing = await db.one(query as never) as Record<string, unknown> | null;
   const unchanged = existing && Object.entries(data).every(([key, value]) =>
     (existing[key] ?? undefined) === (value ?? undefined));
-  if (!unchanged) db.upsert(table as never, data as never, { id });
+  if (!unchanged) {
+    if (existing) db.update(table as never, id, data as never);
+    else upsertOrUpdate(table, id, data);
+  }
   return existing;
 }
 
@@ -65,7 +77,10 @@ async function writeProfile(profile: {
     || existing.displayName !== (data.displayName ?? null)
     || existing.description !== (data.description ?? null)
     || existing.avatar !== (data.avatar ?? null);
-  if (profileChanged) db.upsert(app.profiles, data, { id: profile.id });
+  if (profileChanged) {
+    if (existing) db.update(app.profiles, profile.id, data);
+    else upsertOrUpdate(app.profiles as unknown as AnyTable, profile.id, data);
+  }
 }
 
 async function writePostBundle(bundle: NonNullable<ReturnType<typeof normalizePost>>) {

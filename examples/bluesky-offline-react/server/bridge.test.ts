@@ -16,6 +16,8 @@ describe("timeline projection", () => {
   });
 
   it("updates rows when the same deterministic objects are projected again", async () => {
+    expect(stableObjectId("bluesky-profile", "did:plc:author", "app-v1"))
+      .not.toBe(stableObjectId("bluesky-profile", "did:plc:author", "app-v2"));
     const dataDirectory = mkdtempSync(join(tmpdir(), "jazz-timeline-projection-"));
     const dataPath = join(dataDirectory, "jazz.db");
     const appId = randomUUID();
@@ -37,16 +39,17 @@ describe("timeline projection", () => {
       record: { text: "Hello", createdAt: "2026-07-16T10:00:00.000Z" },
       indexedAt: "2026-07-16T10:00:01.000Z",
     };
+    const viewerProfile = {
+      did: viewerDid,
+      handle: "viewer.test",
+      indexedAt: "2026-07-16T10:00:01.000Z",
+    };
 
     vi.doMock("./jazz.js", () => ({ db: database }));
     vi.doMock("./bluesky.js", () => ({
       deleteRecord: vi.fn(),
       fetchPostThread: vi.fn(),
-      fetchProfile: vi.fn(async () => ({
-        did: viewerDid,
-        handle: "viewer.test",
-        indexedAt: "2026-07-16T10:00:01.000Z",
-      })),
+      fetchProfile: vi.fn(async () => viewerProfile),
       fetchTimelineFeed: vi.fn(async () => ({ feed: [{ post }], cursor: "next" })),
       fetchViewerPosts: vi.fn(),
       OperationError: class OperationError extends Error {},
@@ -63,17 +66,22 @@ describe("timeline projection", () => {
         }))).toMatchObject({ handle: "author.test" });
       });
 
-      vi.spyOn(database, "upsert").mockImplementation(() => {
+      vi.spyOn(database, "one").mockResolvedValueOnce(null as never);
+      vi.spyOn(database, "upsert").mockImplementationOnce(() => {
         throw new Error("object already exists");
       });
 
       post.author.handle = "author-updated.test";
+      viewerProfile.handle = "viewer-updated.test";
       await projectTimelinePage(viewerDid, {} as never);
 
       await vi.waitFor(async () => {
         expect(await database.one(app.profiles.where({
           id: { eq: stableObjectId("bluesky-profile", authorDid) },
         }))).toMatchObject({ handle: "author-updated.test" });
+        expect(await database.one(app.profiles.where({
+          id: { eq: stableObjectId("bluesky-profile", viewerDid) },
+        }))).toMatchObject({ handle: "viewer-updated.test" });
       });
     } finally {
       await context.shutdown();

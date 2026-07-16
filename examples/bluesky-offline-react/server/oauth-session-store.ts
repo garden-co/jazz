@@ -2,7 +2,7 @@ import type { NodeSavedSessionStore } from "@atproto/oauth-client-node";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
-import { stableObjectId } from "./timeline.js";
+import { legacyObjectId, stableObjectId } from "./timeline.js";
 
 type EncryptedSession = {
   v: 1;
@@ -61,6 +61,7 @@ function decryptSession(key: Buffer, sessionKey: string, stored: string) {
 export function createOAuthSessionStore(db: Db): NodeSavedSessionStore {
   const encryptionKeyBuffer = encryptionKey();
   const rowId = (key: string) => stableObjectId("oauth-session", key);
+  const legacyRowId = (key: string) => legacyObjectId("oauth-session", key);
 
   return {
     async set(sessionKey, value) {
@@ -71,13 +72,19 @@ export function createOAuthSessionStore(db: Db): NodeSavedSessionStore {
       }, { id: rowId(sessionKey) });
     },
     async get(sessionKey) {
-      const row = await db.one(app.oauthSessions.where({ id: { eq: rowId(sessionKey) } }));
+      const row = await db.one(app.oauthSessions.where({ id: { eq: rowId(sessionKey) } }))
+        ?? await db.one(app.oauthSessions.where({ id: { eq: legacyRowId(sessionKey) } }));
       return row
         ? decryptSession(encryptionKeyBuffer, sessionKey, row.sessionJson)
         : undefined;
     },
     async del(sessionKey) {
-      db.delete(app.oauthSessions, rowId(sessionKey));
+      const ids = [rowId(sessionKey), legacyRowId(sessionKey)];
+      for (const id of ids) {
+        if (await db.one(app.oauthSessions.where({ id: { eq: id } }))) {
+          db.delete(app.oauthSessions, id);
+        }
+      }
     },
   };
 }

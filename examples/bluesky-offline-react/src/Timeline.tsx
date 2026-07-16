@@ -24,7 +24,8 @@ type TimelinePayload = { cursor?: string; hasMore?: boolean; count?: number };
 const stableObjectIds = new Map<string, Promise<string>>();
 
 function stableObjectId(namespace: string, value: string) {
-  const key = `${namespace}:${value}`;
+  const appId = import.meta.env.VITE_JAZZ_APP_ID ?? "bluesky-offline-react-v2";
+  const key = `${appId}:${namespace}:${value}`;
   let id = stableObjectIds.get(key);
   if (!id) {
     id = crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)).then((digest) => {
