@@ -700,10 +700,16 @@ impl SyncManager {
         &mut self,
         storage: &mut H,
         origin_client_id: Option<ClientId>,
+        origin_server_id: Option<ServerId>,
         fate: &BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
-        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        let server_ids: Vec<_> = self
+            .servers
+            .keys()
+            .copied()
+            .filter(|server_id| Some(*server_id) != origin_server_id)
+            .collect();
         match fate {
             BatchFate::DurableDirect { .. } => {
                 for (table, row) in batch_rows {
@@ -867,6 +873,7 @@ impl SyncManager {
     fn apply_authoritative_transaction_fate_for_row<H: Storage>(
         &mut self,
         storage: &mut H,
+        origin_server_id: ServerId,
         row: &StoredRowBatch,
     ) {
         let fate = match storage.load_authoritative_batch_fate(row.batch_id) {
@@ -891,7 +898,13 @@ impl SyncManager {
                 .unwrap_or_default(),
             row.clone(),
         )];
-        self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
+        self.apply_transactional_batch_fate_to_rows(
+            storage,
+            None,
+            Some(origin_server_id),
+            &fate,
+            &rows,
+        );
     }
 
     fn reject_sealed_transactional_batch<H: Storage>(
@@ -916,7 +929,13 @@ impl SyncManager {
                 "failed to delete rejected sealed batch submission"
             );
         }
-        self.apply_transactional_batch_fate_to_rows(storage, origin_client_id, &fate, batch_rows);
+        self.apply_transactional_batch_fate_to_rows(
+            storage,
+            origin_client_id,
+            None,
+            &fate,
+            batch_rows,
+        );
     }
 
     fn declared_rows_for_submission(
@@ -1036,6 +1055,7 @@ impl SyncManager {
         self.apply_transactional_batch_fate_to_rows(
             storage,
             origin_client_id,
+            None,
             &fate,
             rows_to_patch,
         );
@@ -1300,7 +1320,11 @@ impl SyncManager {
                     row.clone(),
                     AuthoritativeFateRecording::AcceptedByLocalAuthority,
                 ) {
-                    self.apply_authoritative_transaction_fate_for_row(storage, &applied.row);
+                    self.apply_authoritative_transaction_fate_for_row(
+                        storage,
+                        server_id,
+                        &applied.row,
+                    );
 
                     if let Some(update) = applied.visibility_change {
                         self.pending_row_visibility_changes.push(update);
@@ -1320,7 +1344,13 @@ impl SyncManager {
                 self.pending_batch_fates.push(fate.clone());
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
-                    self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
+                    self.apply_transactional_batch_fate_to_rows(
+                        storage,
+                        None,
+                        Some(server_id),
+                        &fate,
+                        &rows,
+                    );
                 }
                 let interested = self.interested_clients_for_batch_fate(&fate);
                 for cid in interested {
