@@ -6,8 +6,12 @@ Real-time, permission-aware chat app. Public rooms, private chats with invite li
 
 ```bash
 pnpm install
-pnpm dev        # starts the Jazz server, pushes the schema, and opens Vite
+pnpm dev        # starts Vite — the app runs local-first by default
 ```
+
+The app is local-first: without configuration it persists everything in the browser. To
+sync across devices, point it at a Jazz server with `VITE_JAZZ_SERVER_URL` (and
+`VITE_JAZZ_APP_ID`). `pnpm dev` does not start a server or push the schema.
 
 To understand how the app uses Jazz, run the walkthrough:
 
@@ -50,3 +54,5 @@ Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` val
 - **canvases** — chat (ref), createdAt
 - **strokes** — canvas (ref), ownerId, color, width, pointsJson, createdAt
 - **attachments** — message (ref), type, name, file (ref), size
+- **files** — name (nullable), mimeType, partIds (refs), partSizes
+- **file_parts** — data (bytes)
