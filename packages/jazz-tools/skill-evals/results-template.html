@@ -702,7 +702,7 @@
       <section>
         <div class="section-head">
           <h2>Behavior quality</h2>
-          <span class="meta">rubric criteria passed</span>
+          <span class="meta" id="comparison-meta">median across configurations</span>
         </div>
         <div class="card comparison" id="comparison"></div>
       </section>
@@ -837,7 +837,14 @@
           (character) =>
             ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character],
         );
-      const ratio = (score) => (score.total ? Math.round((score.passed / score.total) * 100) : 0);
+      const exactPercentage = (score) => (score.total ? (score.passed / score.total) * 100 : 0);
+      const ratio = (score) => Math.round(exactPercentage(score));
+      const median = (values) => {
+        const sorted = [...values].sort((left, right) => left - right);
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+      };
+      const percentage = (value) => String(Number(value.toFixed(1)));
       const scoreText = (score) => `${score.passed}/${score.total}`;
       const pills = (skills) =>
         skills?.length
@@ -893,8 +900,7 @@
       };
       const historyConfiguration = (entry) =>
         Object.values(historyConfigurationParts(entry)).join(" · ");
-      const historyConfigurationKey = (entry) =>
-        `${historyConfiguration(entry)} · ${entry.execution?.harnessHash ?? "legacy-harness"}`;
+      const historyConfigurationKey = (entry) => historyConfiguration(entry);
       const modelOrder = [
         "gpt-5",
         "gpt-5.4",
@@ -912,6 +918,28 @@
           : `legacy · ${entry.summary.loaded.rubric.total} points`;
       const routingExact = (score) => score.exact ?? score.passed;
 
+      const renderComparison = (entries) => {
+        if (entries.length === 0) return;
+        const baselinePercent = median(
+          entries.map((entry) => exactPercentage(entry.summary.baseline.rubric)),
+        );
+        const loadedPercent = median(
+          entries.map((entry) => exactPercentage(entry.summary.loaded.rubric)),
+        );
+        const uplift = median(
+          entries.map(
+            (entry) =>
+              exactPercentage(entry.summary.loaded.rubric) -
+              exactPercentage(entry.summary.baseline.rubric),
+          ),
+        );
+        const count = entries.length;
+        document.querySelector("#comparison-meta").textContent =
+          `latest run per configuration · ${count} configuration${count === 1 ? "" : "s"}`;
+        document.querySelector("#comparison").innerHTML =
+          `<div class="uplift"><span class="metric-label">Median uplift</span><strong>${uplift >= 0 ? "+" : ""}${percentage(uplift)}</strong><span class="meta">percentage points after loading skills</span></div><div><div class="bar-row"><span>Median baseline</span><div class="bar"><span style="width:${baselinePercent}%"></span></div><b>${percentage(baselinePercent)}%</b></div><div class="bar-row"><span>Median loaded</span><div class="bar loaded"><span style="width:${loadedPercent}%"></span></div><b>${percentage(loadedPercent)}%</b></div></div>`;
+      };
+
       function renderHistory(history, initialReport) {
         const runs = [...history].sort((left, right) =>
           String(left.generatedAt).localeCompare(String(right.generatedAt)),
@@ -926,15 +954,27 @@
         const harnessSelect = document.querySelector("#run-harness-filter");
         const reasoningSelect = document.querySelector("#run-reasoning-filter");
         const corpora = new Map();
-        for (const entry of runs) corpora.set(historyCorpusKey(entry), historyCorpusLabel(entry));
+        for (const entry of runs) {
+          const key = historyCorpusKey(entry);
+          const current = corpora.get(key);
+          if (!current || String(entry.generatedAt).localeCompare(current.generatedAt) > 0)
+            corpora.set(key, {
+              generatedAt: String(entry.generatedAt),
+              label: historyCorpusLabel(entry),
+            });
+        }
+        const sortedCorpora = [...corpora].sort(([, left], [, right]) =>
+          right.generatedAt.localeCompare(left.generatedAt),
+        );
         corpusSelect.innerHTML =
           '<option value="all">All corpora</option>' +
-          [...corpora]
+          sortedCorpora
             .map(
-              ([value, label]) =>
-                `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`,
+              ([value, corpus]) =>
+                `<option value="${escapeHtml(value)}">${escapeHtml(corpus.label)}</option>`,
             )
             .join("");
+        if (sortedCorpora.length > 0) corpusSelect.value = sortedCorpora[0][0];
 
         const populateFilter = (select, entries, key, allLabel) => {
           const currentValue = select.value || "all";
@@ -998,7 +1038,10 @@
           });
           const latestByConfiguration = new Map();
           for (const entry of filtered)
-            latestByConfiguration.set(historyConfigurationKey(entry), entry);
+            latestByConfiguration.set(
+              `${historyCorpusKey(entry)} · ${historyConfigurationKey(entry)}`,
+              entry,
+            );
           const series = [...latestByConfiguration.entries()].sort(([, left], [, right]) => {
             const leftParts = historyConfigurationParts(left);
             const rightParts = historyConfigurationParts(right);
@@ -1018,6 +1061,7 @@
             `${filtered.length} run${filtered.length === 1 ? "" : "s"} · ${series.length} configuration${series.length === 1 ? "" : "s"}`;
           document.querySelector("#run-history-meta").textContent =
             `${tableRuns.length} of ${filtered.length} archived run${filtered.length === 1 ? "" : "s"} shown · select one to inspect`;
+          renderComparison(series.length > 0 ? series.map(([, entry]) => entry) : [initialReport]);
 
           if (filtered.length === 0) {
             document.querySelector("#history-chart").innerHTML =
@@ -1136,12 +1180,6 @@
               `<article class="card metric"><div><div class="metric-label">${label}</div><div class="metric-value ${className}">${value}</div></div><div class="metric-detail">${detail}</div></article>`,
           )
           .join("");
-
-        const baselinePercent = ratio(summary.baseline.rubric);
-        const loadedPercent = ratio(summary.loaded.rubric);
-        const uplift = summary.rubricUplift;
-        document.querySelector("#comparison").innerHTML =
-          `<div class="uplift"><span class="metric-label">Rubric uplift</span><strong>${uplift >= 0 ? "+" : ""}${uplift}</strong><span class="meta">criteria after loading skills</span></div><div><div class="bar-row"><span>Baseline</span><div class="bar"><span style="width:${baselinePercent}%"></span></div><b>${baselinePercent}%</b></div><div class="bar-row"><span>Loaded</span><div class="bar loaded"><span style="width:${loadedPercent}%"></span></div><b>${loadedPercent}%</b></div></div>`;
 
         document.querySelector("#routing-meta").textContent =
           `${scoreText(summary.routing)} acceptable matches · ${routingExact(summary.routing)} exact`;
