@@ -6,6 +6,7 @@ use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
+use crate::query_manager::graph_nodes::tuple_delta::compute_tuple_delta;
 use crate::query_manager::magic_columns::{MagicColumnKind, magic_column_descriptor};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
@@ -67,6 +68,7 @@ pub struct MagicColumnsNode {
     current_tuples: AHashSet<Tuple>,
     input_tuples: AHashSet<Tuple>,
     projected_by_input: AHashMap<Tuple, Tuple>,
+    ordered_tuples: Vec<Tuple>,
     dirty: bool,
 }
 
@@ -165,6 +167,7 @@ impl MagicColumnsNode {
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
             projected_by_input: AHashMap::new(),
+            ordered_tuples: Vec::new(),
             dirty: true,
         })
     }
@@ -175,6 +178,11 @@ impl MagicColumnsNode {
 
     pub fn dependency_tables(&self) -> &HashSet<String> {
         &self.dependency_tables
+    }
+
+    /// Augmented tuples in the same order as an ordered upstream node.
+    pub fn ordered_tuples(&self) -> &[Tuple] {
+        &self.ordered_tuples
     }
 
     pub fn mark_dependency_dirty(&mut self) {
@@ -255,6 +263,24 @@ impl MagicColumnsNode {
 
         self.dirty = false;
         result
+    }
+
+    /// Process an update while preserving the exact order supplied by an
+    /// upstream sort or pagination node.
+    pub fn process_with_ordered_input(
+        &mut self,
+        input: TupleDelta,
+        ordered_input: &[Tuple],
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> TupleDelta {
+        let old_ordered = std::mem::take(&mut self.ordered_tuples);
+        self.process_with_context(input, io, row_loader);
+        self.ordered_tuples = ordered_input
+            .iter()
+            .filter_map(|tuple| self.projected_by_input.get(tuple).cloned())
+            .collect();
+        compute_tuple_delta(&old_ordered, &self.ordered_tuples)
     }
 
     fn reevaluate_all_with_context(
