@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::batch_fate::BatchFate;
+use crate::batch_fate::{BatchFate, BatchMode};
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::row_format::decode_row;
 use crate::row_histories::{RowState, StoredRowBatch};
@@ -351,15 +351,8 @@ fn subscribing_to_a_backend_transaction_does_not_replay_it_after_reload() {
         DurabilityTier::GlobalServer,
     );
 
-    let batch_id = crate::row_histories::BatchId::new();
-    let write_context = WriteContext {
-        session: None,
-        attribution: None,
-        updated_at: None,
-        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
-        batch_id: Some(batch_id),
-        target_branch_name: None,
-    };
+    let batch_id = server.begin_batch(BatchMode::Transactional);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
     let ((profile_id, _), _) = server
         .insert(
             "profiles",
