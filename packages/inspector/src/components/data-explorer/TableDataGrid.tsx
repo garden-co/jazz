@@ -82,9 +82,11 @@ interface GridColumn {
   accessorKey: string;
   header: string;
   enableSorting: boolean;
+  // `true` unless specified
+  visibleByDefault?: boolean;
 }
 
-const PROVENANCE_TIMESTAMP_GRID_COLUMNS: readonly GridColumn[] = [
+const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
   {
     id: "$createdAt",
     accessorKey: "$createdAt",
@@ -92,10 +94,24 @@ const PROVENANCE_TIMESTAMP_GRID_COLUMNS: readonly GridColumn[] = [
     enableSorting: true,
   },
   {
+    id: "$createdBy",
+    accessorKey: "$createdBy",
+    header: "$createdBy",
+    enableSorting: true,
+    visibleByDefault: false,
+  },
+  {
     id: "$updatedAt",
     accessorKey: "$updatedAt",
     header: "$updatedAt",
     enableSorting: true,
+  },
+  {
+    id: "$updatedBy",
+    accessorKey: "$updatedBy",
+    header: "$updatedBy",
+    enableSorting: true,
+    visibleByDefault: false,
   },
 ];
 
@@ -725,7 +741,7 @@ export function TableDataGrid() {
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema).select(
       "*",
-      ...PROVENANCE_TIMESTAMP_GRID_COLUMNS.map((column) => column.id),
+      ...PROVENANCE_GRID_COLUMNS.map((column) => column.id),
     );
     for (const filter of filters) {
       if (filter.operator === "eq") {
@@ -774,7 +790,7 @@ export function TableDataGrid() {
           enableSorting: isColumnSortable(column.column_type),
         }),
       ),
-      ...PROVENANCE_TIMESTAMP_GRID_COLUMNS,
+      ...PROVENANCE_GRID_COLUMNS,
     ],
     [schemaColumns],
   );

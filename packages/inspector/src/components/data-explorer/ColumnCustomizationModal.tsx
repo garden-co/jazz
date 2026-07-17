@@ -4,6 +4,8 @@ import styles from "./ColumnCustomizationModal.module.css";
 export interface CustomizableColumn {
   id: string;
   header: string;
+  // `true` unless specified
+  visibleByDefault?: boolean;
 }
 
 export interface ColumnPreference {
@@ -43,7 +45,7 @@ export function reconcileColumnPreferences(
 
   for (const column of columns) {
     if (!seenColumnIds.has(column.id)) {
-      preferences.push({ id: column.id, visible: true });
+      preferences.push({ id: column.id, visible: column.visibleByDefault ?? true });
     }
   }
 
@@ -277,7 +279,12 @@ export function ColumnCustomizationModal({
             type="button"
             className={styles.resetButton}
             onClick={() => {
-              setDraftPreferences(columns.map((column) => ({ id: column.id, visible: true })));
+              setDraftPreferences(
+                columns.map((column) => ({
+                  id: column.id,
+                  visible: column.visibleByDefault ?? true,
+                })),
+              );
             }}
           >
             Reset

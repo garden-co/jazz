@@ -123,7 +123,9 @@ describe("TableDataGrid", () => {
         blob: new Uint8Array([1, 2]),
         status: "open",
         $createdAt: new Date("2026-07-17T08:00:00.000Z"),
+        $createdBy: "seed-user",
         $updatedAt: new Date("2026-07-17T09:00:00.000Z"),
+        $updatedBy: "editor-user",
       },
       {
         id: "row-1",
@@ -135,7 +137,9 @@ describe("TableDataGrid", () => {
         blob: new Uint8Array([5, 6]),
         status: "closed",
         $createdAt: new Date("2026-07-16T08:00:00.000Z"),
+        $createdBy: "import-user",
         $updatedAt: new Date("2026-07-16T09:00:00.000Z"),
+        $updatedBy: "import-user",
       },
     ];
     currentReferenceRowsByTable = {
@@ -210,9 +214,11 @@ describe("TableDataGrid", () => {
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();
-    // The $createdAt and $updatedAt magic columns are included by default as the last two columns
+    // Provenance timestamps are included by default as the last two columns.
     expect(screen.getByRole("columnheader", { name: "$createdAt" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "$updatedAt" })).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$createdBy" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$updatedBy" })).toBeNull();
     const dataColumnHeaders = screen
       .getAllByRole("columnheader")
       .map((header) => header.textContent ?? "")
@@ -223,7 +229,38 @@ describe("TableDataGrid", () => {
     expect(screen.getByText('{"done":true}')).not.toBeNull();
     expect(screen.getByText("2026-07-17T08:00:00.000Z")).not.toBeNull();
     expect(screen.getByText("2026-07-17T09:00:00.000Z")).not.toBeNull();
+    expect(screen.queryByText("seed-user")).toBeNull();
+    expect(screen.queryByText("editor-user")).toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
+  });
+
+  it("can show creator and updater columns", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    const createdByCheckbox = screen.getByRole("checkbox", { name: "Show $createdBy" });
+    const updatedByCheckbox = screen.getByRole("checkbox", { name: "Show $updatedBy" });
+    expect((createdByCheckbox as HTMLInputElement).checked).toBe(false);
+    expect((updatedByCheckbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(createdByCheckbox);
+    fireEvent.click(updatedByCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(screen.getByRole("columnheader", { name: "$createdBy" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "$updatedBy" })).not.toBeNull();
+    const dataColumnHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "")
+      .filter((header) => header.length > 0);
+    expect(dataColumnHeaders.slice(-4)).toEqual([
+      "$createdAt",
+      "$createdBy",
+      "$updatedAt",
+      "$updatedBy",
+    ]);
+    expect(screen.getByText("seed-user")).not.toBeNull();
+    expect(screen.getByText("editor-user")).not.toBeNull();
   });
 
   it("can hide and show a column", () => {
@@ -326,7 +363,7 @@ describe("TableDataGrid", () => {
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
-      select: ["*", "$createdAt", "$updatedAt"],
+      select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
       orderBy: [["id", "asc"]],
       limit: 26,
       offset: 0,
