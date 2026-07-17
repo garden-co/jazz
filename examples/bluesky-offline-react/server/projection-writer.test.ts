@@ -10,6 +10,34 @@ afterEach(() => {
 });
 
 describe("profile projection", () => {
+  it("does not write an unchanged profile twice", async () => {
+    let storedProfile: Record<string, unknown> | null = null;
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => storedProfile),
+      upsert: vi.fn((_table, data: Record<string, unknown>, options: { id: string }) => {
+        storedProfile = { id: options.id, ...data };
+        return settledWrite();
+      }),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+    const writer = createProjectionWriter();
+    const profile = {
+      did: "did:plc:viewer",
+      handle: "viewer.test",
+      indexedAt: "2026-07-17T08:00:00.000Z",
+    };
+
+    await writer.projectProfile(profile);
+    await writer.projectProfile(profile);
+
+    expect(database.upsert).toHaveBeenCalledTimes(1);
+    expect(database.update).not.toHaveBeenCalled();
+  });
+
   it("reports a Jazz write rejected by the sync server", async () => {
     const database = {
       all: vi.fn(async () => []),
