@@ -1,7 +1,7 @@
 import type { Operation, ReactionOperation } from "../operations.js";
 import { decodeOperation, encodeOperationPayload } from "../operations.js";
 import { app } from "../schema.js";
-import type { TableProxy } from "jazz-tools/backend";
+import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
 import type { ThreadViewNode } from "./bluesky.js";
 import {
   normalizePost,
@@ -19,12 +19,31 @@ type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
 type NormalizedPost = PostBundle["post"];
 export type ReactionIntents = Map<string, ReactionOperation>;
 
-async function projectRow<TRow, TInit>(
+type ProjectionTable<TRow, TInit> = TableProxy<TRow, TInit> & {
+  where(filter: { id: { eq: string } }): QueryBuilder<TRow>;
+};
+
+function projectionMatches<TRow extends object, TInit extends object>(
+  existing: TRow,
+  data: Partial<TInit>,
+) {
+  return Object.entries(data).every(([key, value]) =>
+    value === undefined || Object.is(Reflect.get(existing, key), value));
+}
+
+async function projectRow<TRow extends object, TInit extends object>(
   database: ProjectionDatabase,
-  table: TableProxy<TRow, TInit>,
+  table: ProjectionTable<TRow, TInit>,
   id: string,
   data: Partial<TInit>,
 ) {
+  const existing = await database.one(table.where({ id: { eq: id } }));
+  if (existing && projectionMatches(existing, data)) return;
+  if (existing) {
+    await database.update(table, id, data).wait({ tier: "edge" });
+    return;
+  }
+
   try {
     await database.upsert(table, data, { id }).wait({ tier: "edge" });
   } catch (error) {
