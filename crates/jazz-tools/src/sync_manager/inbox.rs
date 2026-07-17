@@ -556,46 +556,28 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
-        target_branch_name: Option<&BranchName>,
         object_ids: &[ObjectId],
     ) -> Vec<(String, StoredRowBatch)> {
-        let mut rows = Vec::new();
-        for row_id in object_ids {
-            if let Some(target_branch_name) = target_branch_name
-                && let Ok(Some(locator)) = storage.load_history_row_batch_table_locator(
-                    target_branch_name.as_str(),
-                    *row_id,
+        let object_ids = object_ids.iter().copied().collect::<HashSet<_>>();
+        let Ok(Some(batch_rows)) = storage.load_local_batch_row_index(batch_id) else {
+            return Vec::new();
+        };
+        let mut rows = batch_rows
+            .into_iter()
+            .filter(|member| object_ids.contains(&member.object_id))
+            .filter_map(|member| {
+                let Ok(Some(row)) = storage.load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
                     batch_id,
-                )
-            {
-                let table = locator.table_name.to_string();
-                if let Ok(Some(row)) = storage.load_history_row_batch_for_schema_hash(
-                    &table,
-                    locator.schema_hash,
-                    target_branch_name.as_str(),
-                    *row_id,
-                    batch_id,
-                ) {
-                    rows.push((table, row));
-                    continue;
-                }
-            }
-
-            let Ok(Some(row_locator)) = storage.load_row_locator(*row_id) else {
-                continue;
-            };
-            let Ok(history_rows) =
-                storage.scan_history_row_batches(row_locator.table.as_str(), *row_id)
-            else {
-                continue;
-            };
-
-            for row in history_rows {
-                if row.batch_id == batch_id {
-                    rows.push((row_locator.table.to_string(), row));
-                }
-            }
-        }
+                ) else {
+                    return None;
+                };
+                (row.content_digest() == member.row_digest).then_some((member.table_name, row))
+            })
+            .collect::<Vec<_>>();
 
         rows.sort_by(|(_, left), (_, right)| {
             left.row_id
@@ -627,14 +609,12 @@ impl SyncManager {
             return self.transactional_batch_rows(
                 storage,
                 batch_id,
-                Some(&submission.target_branch_name),
                 &object_ids.into_iter().collect::<Vec<_>>(),
             );
         }
         self.transactional_batch_rows(
             storage,
             batch_id,
-            None,
             &object_ids.into_iter().collect::<Vec<_>>(),
         )
     }
@@ -1133,7 +1113,6 @@ impl SyncManager {
         let batch_rows = self.transactional_batch_rows(
             storage,
             batch_id,
-            Some(&submission.target_branch_name),
             &submission
                 .members
                 .iter()
@@ -1236,7 +1215,6 @@ impl SyncManager {
             let batch_rows = self.transactional_batch_rows(
                 storage,
                 submission.batch_id,
-                Some(&submission.target_branch_name),
                 &submission
                     .members
                     .iter()
@@ -1913,7 +1891,6 @@ impl SyncManager {
                     let batch_rows = self.transactional_batch_rows(
                         storage,
                         submission.batch_id,
-                        Some(&submission.target_branch_name),
                         &submission
                             .members
                             .iter()
