@@ -186,6 +186,51 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("shuts down a stale client when the same browser tab reconnects", async () => {
+    const { workers, FakeSharedWorker } = createFakeWorkerEnv();
+    const demotedLeadershipIds: number[] = [];
+    const closedErrors: Error[] = [];
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: FakeSharedWorker,
+        MessageChannel,
+        navigator: { locks: { request() {} } },
+      },
+      onDemote: async (leadershipId) => {
+        demotedLeadershipIds.push(leadershipId);
+      },
+      onClosed: (error) => {
+        closedErrors.push(error);
+      },
+    });
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "leader-ready",
+      brokerInstanceId: "instance-a",
+      leaderTabId: "tab-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+    await client.waitForRole("leader", 100);
+
+    dispatchPortMessage(workers[0]!.port, {
+      type: "tab-replaced",
+      brokerInstanceId: "instance-a",
+      leadershipId: 1,
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(
+      () => demotedLeadershipIds.includes(1) && closedErrors.length === 1,
+      100,
+      "replaced client should release leadership and close",
+    );
+    expect(workers[0]!.port.closed).toBe(true);
+  });
+
   it("stamps tab messages with the active broker instance", async () => {
     const env = createFakeWorkerEnv();
 

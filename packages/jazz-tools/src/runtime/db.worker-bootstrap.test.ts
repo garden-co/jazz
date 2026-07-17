@@ -93,6 +93,7 @@ import { BrowserConnectionManager } from "./connection-manager/browser-connectio
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
+const originalDocument = (globalThis as Record<string, unknown>).document;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
 const originalBroadcastChannel = (globalThis as Record<string, unknown>).BroadcastChannel;
@@ -131,6 +132,12 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>).window;
   } else {
     (globalThis as Record<string, unknown>).window = originalWindow;
+  }
+
+  if (originalDocument === undefined) {
+    delete (globalThis as Record<string, unknown>).document;
+  } else {
+    (globalThis as Record<string, unknown>).document = originalDocument;
   }
 
   if (originalLocation === undefined) {
@@ -726,6 +733,73 @@ describe("Db worker runtime bootstrap", () => {
         { leadershipId: 1, reason: "tab lock stolen" },
       ]);
       expect(browserConnection(db).tabRole).toBe("follower");
+    } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("releases broker leadership resources when the page navigates away", async () => {
+    const appId = "worker-bootstrap-pagehide";
+    const dbName = "worker-bootstrap-pagehide";
+    const releasedLocks = new Set<string>();
+    let terminatedWorkers = 0;
+
+    tryAcquireWebLockMock.mockImplementation(async (lockName?: string) => ({
+      release: vi.fn(() => {
+        if (lockName) {
+          releasedLocks.add(lockName);
+        }
+      }),
+    }));
+
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {
+        terminatedWorkers++;
+      }
+    }
+
+    const browserWindow = new EventTarget();
+    const browserDocument = new EventTarget();
+    Object.defineProperty(browserDocument, "visibilityState", {
+      value: "visible",
+      configurable: true,
+    });
+    (globalThis as Record<string, unknown>).window = browserWindow;
+    (globalThis as Record<string, unknown>).document = browserDocument;
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await createWorkerDb({
+      appId,
+      driver: { type: "persistent", dbName },
+    });
+
+    try {
+      const pagehide = new Event("pagehide");
+      Object.defineProperty(pagehide, "persisted", {
+        value: false,
+        configurable: true,
+      });
+      browserWindow.dispatchEvent(pagehide);
+
+      await waitFor(() => terminatedWorkers === 1, 200, "leader worker should terminate");
+      expect(releasedLocks).toEqual(new Set([`jazz-leader-tab:${appId}:${dbName}`]));
     } finally {
       await db.shutdown();
     }
