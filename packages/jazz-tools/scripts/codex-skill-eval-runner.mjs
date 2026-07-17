@@ -54,6 +54,8 @@ try {
 
   const args = [
     "exec",
+    "--disable",
+    "multi_agent",
     "--ephemeral",
     "--ignore-user-config",
     "--skip-git-repo-check",
