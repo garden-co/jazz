@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::batch_fate::BatchFate;
+use crate::batch_fate::{BatchFate, BatchMode};
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::row_format::decode_row;
 use crate::row_histories::{RowState, StoredRowBatch};
@@ -61,11 +61,22 @@ fn pump<S: Storage, Sch: Scheduler>(
     server_id: ServerId,
     client: &mut RuntimeCore<S, Sch>,
     client_id: ClientId,
-) {
+) -> Vec<(ServerId, &'static str)> {
+    let mut upstream_row_writes = Vec::new();
     for _ in 0..12 {
         let mut any = false;
         client.batched_tick();
         for entry in client.sync_sender().take() {
+            if let Destination::Server(destination_server_id) = &entry.destination
+                && matches!(
+                    &entry.payload,
+                    SyncPayload::RowBatchCreated { .. }
+                        | SyncPayload::RowBatchNeeded { .. }
+                        | SyncPayload::SealBatch { .. }
+                )
+            {
+                upstream_row_writes.push((*destination_server_id, entry.payload.variant_name()));
+            }
             if entry.destination == Destination::Server(server_id) {
                 any = true;
                 server.park_sync_message(InboxEntry {
@@ -92,6 +103,7 @@ fn pump<S: Storage, Sch: Scheduler>(
             break;
         }
     }
+    upstream_row_writes
 }
 
 /// Bidirectional pump for `C_backend ↔ S ↔ C_owner`, routing each server output
@@ -170,8 +182,17 @@ fn new_server<S: Storage>(
     schema: Schema,
     app_name: &str,
 ) -> RuntimeCore<S, NoopScheduler> {
+    new_server_at_tier(storage, schema, app_name, DurabilityTier::EdgeServer)
+}
+
+fn new_server_at_tier<S: Storage>(
+    storage: S,
+    schema: Schema,
+    app_name: &str,
+    tier: DurabilityTier,
+) -> RuntimeCore<S, NoopScheduler> {
     let schema_manager = SchemaManager::new(
-        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+        SyncManager::new().with_durability_tier(tier),
         schema.clone(),
         AppId::from_name(app_name),
         "dev",
@@ -309,6 +330,122 @@ fn owner_update_of_backend_created_row_is_not_destroyed() {
             .unwrap()
             .is_some(),
         "the row must also survive on the client"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn subscribing_to_a_backend_transaction_does_not_replay_it_after_reload() {
+    use crate::storage::SqliteStorage;
+
+    let schema = profiles_schema();
+    let server_dir = tempfile::TempDir::new().unwrap();
+    let client_dir = tempfile::TempDir::new().unwrap();
+    let client_path = client_dir.path().join("jazz.sqlite");
+    let app_name = "accepted-transaction-subscription";
+
+    let mut server = new_server_at_tier(
+        SqliteStorage::open(server_dir.path().join("jazz.sqlite")).unwrap(),
+        schema.clone(),
+        app_name,
+        DurabilityTier::GlobalServer,
+    );
+
+    let batch_id = server.begin_batch(BatchMode::Transactional);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+    let ((profile_id, _), _) = server
+        .insert(
+            "profiles",
+            profiles_values("Ada", "Lovelace"),
+            Some(&write_context),
+        )
+        .unwrap();
+    server.commit_batch(batch_id).unwrap();
+    server.immediate_tick();
+
+    assert!(matches!(
+        server
+            .storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(BatchFate::AcceptedTransaction { .. })
+    ));
+
+    let first_client_id = ClientId::new();
+    let first_server_id = ServerId::new();
+    let first_forward_server_id = ServerId::new();
+    server.add_client(first_client_id, Some(Session::new("owner-1")));
+    let mut client = new_client(
+        SqliteStorage::open(&client_path).unwrap(),
+        schema.clone(),
+        app_name,
+    );
+    client.add_server(first_server_id);
+    client.add_server(first_forward_server_id);
+    let _first_handle = client
+        .subscribe(
+            QueryBuilder::new("profiles").build(),
+            |_delta| {},
+            Some(Session::new("owner-1")),
+        )
+        .unwrap();
+
+    let first_upstream_writes = pump(&mut server, first_server_id, &mut client, first_client_id);
+    assert!(
+        client
+            .storage()
+            .load_visible_region_row(
+                "profiles",
+                client.schema_manager().branch_name().as_str(),
+                profile_id,
+            )
+            .unwrap()
+            .is_some(),
+        "the subscribed profile should be visible before reload"
+    );
+
+    drop(client);
+    server.remove_client(first_client_id);
+
+    let second_client_id = ClientId::new();
+    let second_server_id = ServerId::new();
+    let second_forward_server_id = ServerId::new();
+    server.add_client(second_client_id, Some(Session::new("owner-1")));
+    let mut reloaded_client =
+        new_client(SqliteStorage::open(&client_path).unwrap(), schema, app_name);
+    reloaded_client.add_server(second_server_id);
+    reloaded_client.add_server(second_forward_server_id);
+    let _second_handle = reloaded_client
+        .subscribe(
+            QueryBuilder::new("profiles").build(),
+            |_delta| {},
+            Some(Session::new("owner-1")),
+        )
+        .unwrap();
+
+    let reloaded_upstream_writes = pump(
+        &mut server,
+        second_server_id,
+        &mut reloaded_client,
+        second_client_id,
+    );
+    assert!(
+        first_upstream_writes
+            .iter()
+            .all(|(destination, _)| *destination != first_server_id)
+            && reloaded_upstream_writes
+                .iter()
+                .all(|(destination, _)| *destination != second_server_id),
+        "subscription delivery and reload must not replay the accepted profile to its source server: first={first_upstream_writes:?}, reloaded={reloaded_upstream_writes:?}"
+    );
+    assert!(
+        first_upstream_writes
+            .iter()
+            .any(|(destination, _)| *destination == first_forward_server_id)
+            && reloaded_upstream_writes
+                .iter()
+                .any(|(destination, _)| *destination == second_forward_server_id),
+        "the accepted profile must still be forwarded to a distinct upstream: first={first_upstream_writes:?}, reloaded={reloaded_upstream_writes:?}"
     );
 }
 

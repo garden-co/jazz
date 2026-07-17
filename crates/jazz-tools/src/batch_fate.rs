@@ -76,6 +76,10 @@ impl BatchFate {
         }
     }
 
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+
     pub fn confirmed_tier(&self) -> Option<DurabilityTier> {
         match self {
             Self::DurableDirect { confirmed_tier, .. }
@@ -86,6 +90,7 @@ impl BatchFate {
 
     pub fn merged_with(&self, incoming: &BatchFate) -> BatchFate {
         match (self, incoming) {
+            (Self::Rejected { .. }, _) => self.clone(),
             (
                 Self::DurableDirect {
                     batch_id,

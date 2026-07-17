@@ -8,6 +8,30 @@ use std::collections::HashMap;
 
 type RowSyncData = (SharedString, HashMap<String, String>, StoredRowBatch);
 
+/// Decide whether a stored row is still eligible for upstream row replay.
+///
+/// A rejected fate is terminal for the row submission, while a missing fate
+/// remains replayable. Rows already confirmed above this node's tier are also
+/// skipped because an upstream server already has them.
+fn should_replay_row_to_server(
+    row: &StoredRowBatch,
+    authoritative_fate: Option<&BatchFate>,
+    my_max_tier: Option<DurabilityTier>,
+) -> bool {
+    if authoritative_fate.is_some_and(BatchFate::is_rejected) {
+        return false;
+    }
+
+    let effective_confirmed_tier = row
+        .confirmed_tier
+        .or_else(|| authoritative_fate.and_then(BatchFate::confirmed_tier));
+    match (effective_confirmed_tier, my_max_tier) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(row_tier), Some(local_tier)) => row_tier <= local_tier,
+    }
+}
+
 impl SyncManager {
     fn scope_delivery_row(mut row: StoredRowBatch) -> StoredRowBatch {
         if row.state.is_visible() {
@@ -43,22 +67,42 @@ impl SyncManager {
         let Ok(row_locators) = storage.scan_row_locators() else {
             return;
         };
+        let authoritative_fates = match storage.scan_authoritative_batch_fates() {
+            Ok(fates) => fates,
+            Err(error) => {
+                tracing::error!(
+                    %server_id,
+                    %error,
+                    "failed to load authoritative batch fates; aborting full server replay"
+                );
+                return;
+            }
+        };
+        let authoritative_fates: HashMap<BatchId, BatchFate> = authoritative_fates
+            .into_iter()
+            .map(|fate| (fate.batch_id(), fate))
+            .collect();
 
         let mut row_sync: Vec<RowSyncData> = Vec::new();
 
         for (object_id, row_locator) in row_locators {
-            self.collect_row_sync_versions(storage, object_id, &row_locator, &mut row_sync);
+            self.collect_row_sync_versions(
+                storage,
+                object_id,
+                &row_locator,
+                &authoritative_fates,
+                &mut row_sync,
+            );
         }
 
         for (table, metadata, row) in row_sync {
-            let mut visiting = std::collections::HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
                 table.as_str(),
                 server_id,
                 &metadata,
                 row,
-                &mut visiting,
+                Some(&authoritative_fates),
             );
         }
     }
@@ -68,6 +112,7 @@ impl SyncManager {
         storage: &H,
         object_id: ObjectId,
         row_locator: &RowLocator,
+        authoritative_fates: &HashMap<BatchId, BatchFate>,
         row_sync: &mut Vec<RowSyncData>,
     ) {
         let metadata = metadata_from_row_locator(row_locator);
@@ -78,24 +123,11 @@ impl SyncManager {
         let my_max_tier = self.max_local_durability_tier();
 
         for row in rows.into_iter() {
-            // Skip rows already confirmed above our own tier — an upstream
-            // server has them. Without this, a user-role client replays every
-            // stored row (including ones authored by other users that it only
-            // observed via subscription) on every reconnect, which the server
-            // rejects under row-level update policies.
-            let effective_confirmed_tier = row.confirmed_tier.or_else(|| {
-                storage
-                    .load_authoritative_batch_fate(row.batch_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|fate| fate.confirmed_tier())
-            });
-            let already_upstream = match (effective_confirmed_tier, my_max_tier) {
-                (None, _) => false,
-                (Some(_), None) => true,
-                (Some(row_tier), Some(local_tier)) => row_tier > local_tier,
-            };
-            if already_upstream {
+            if !should_replay_row_to_server(
+                &row,
+                authoritative_fates.get(&row.batch_id),
+                my_max_tier,
+            ) {
                 continue;
             }
             row_sync.push((row_locator.table.clone(), metadata.clone(), row));
