@@ -8,6 +8,28 @@ afterEach(() => {
 });
 
 describe("profile projection", () => {
+  it("reports a Jazz write rejected by the sync server", async () => {
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => null),
+      upsert: vi.fn(() => ({
+        wait: vi.fn(async () => {
+          throw new Error("Insert denied on table profiles - missing explicit policy");
+        }),
+      })),
+      update: vi.fn(),
+      delete: vi.fn(),
+    };
+    vi.doMock("./jazz.js", () => ({ db: database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+
+    await expect(createProjectionWriter().projectProfile({
+      did: "did:plc:viewer",
+      handle: "viewer.test",
+      indexedAt: "2026-07-17T08:00:00.000Z",
+    })).rejects.toThrow("Insert denied on table profiles");
+  });
+
   it("updates a deterministic Jazz object that already exists remotely", async () => {
     const database = {
       all: vi.fn(async () => []),
