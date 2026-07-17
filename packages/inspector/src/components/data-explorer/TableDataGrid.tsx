@@ -72,7 +72,6 @@ const EMPTY_ROWS: DynamicTableRow[] = [];
 const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
-const DATA_COLUMN_MAX_WIDTH = 360;
 const STAGED_INSERT_ROW_ID_PREFIX = "__jazz_inspector_staged_insert__";
 const ACTIONS_COLUMN_KEY = "__actions__";
 const COLUMN_PREFERENCES_STORAGE_KEY_PREFIX = "jazz.inspector.dataExplorer.columnPreferences";
@@ -1828,9 +1827,8 @@ function PlainTableView({
         sortable: column.enableSorting,
         resizable: true,
         editable: isEditable,
+        width: isIdColumn ? "minmax(148px, 1fr)" : "minmax(120px, 1fr)",
         minWidth: isIdColumn ? 148 : 120,
-        maxWidth: isIdColumn ? 220 : DATA_COLUMN_MAX_WIDTH,
-        width: isIdColumn ? 180 : undefined,
         headerCellClass: column.enableSorting ? styles.sortableHeaderCell : styles.gridHeaderCell,
         cellClass: (row) =>
           row.changedCellIds?.[column.id]
@@ -2075,9 +2073,11 @@ function PlainTableView({
 
     onSelectedRowIdsChange(nextSelectedRowIds);
   };
+  const columnLayoutKey = JSON.stringify(gridColumns.map((column) => column.id));
 
   return (
     <DataGrid
+      key={columnLayoutKey}
       ref={dataGridRef}
       className={`${styles.dataGrid} rdg-dark`}
       columns={columns}

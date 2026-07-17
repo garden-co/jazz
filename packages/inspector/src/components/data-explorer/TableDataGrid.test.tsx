@@ -595,14 +595,15 @@ describe("TableDataGrid", () => {
     expect(screen.getByLabelText("Edit title")).not.toBeNull();
   });
 
-  it("caps data column width so long cell values do not stretch the whole grid", () => {
+  it("uses uncapped flexible widths so visible data columns can fill the grid", () => {
     renderGrid();
 
     const titleMeasuringCell = document.querySelector(
       '[data-measuring-cell-key="title"]',
     ) as HTMLElement | null;
     expect(titleMeasuringCell).not.toBeNull();
-    expect(titleMeasuringCell?.style.maxWidth).toBe("360px");
+    expect(titleMeasuringCell?.style.minWidth).toBe("120px");
+    expect(titleMeasuringCell?.style.maxWidth).toBe("");
   });
 
   it("renders without frozen columns so actions stay last and id scrolls normally", () => {
