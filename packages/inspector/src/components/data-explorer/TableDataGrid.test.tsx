@@ -122,6 +122,8 @@ describe("TableDataGrid", () => {
         owner_id: "owner-a",
         blob: new Uint8Array([1, 2]),
         status: "open",
+        $createdAt: new Date("2026-07-17T08:00:00.000Z"),
+        $updatedAt: new Date("2026-07-17T09:00:00.000Z"),
       },
       {
         id: "row-1",
@@ -132,6 +134,8 @@ describe("TableDataGrid", () => {
         owner_id: "owner-b",
         blob: new Uint8Array([5, 6]),
         status: "closed",
+        $createdAt: new Date("2026-07-16T08:00:00.000Z"),
+        $updatedAt: new Date("2026-07-16T09:00:00.000Z"),
       },
     ];
     currentReferenceRowsByTable = {
@@ -206,9 +210,19 @@ describe("TableDataGrid", () => {
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();
+    // The $createdAt and $updatedAt magic columns are included by default as the last two columns
+    expect(screen.getByRole("columnheader", { name: "$createdAt" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "$updatedAt" })).not.toBeNull();
+    const dataColumnHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "")
+      .filter((header) => header.length > 0);
+    expect(dataColumnHeaders.slice(-2)).toEqual(["$createdAt", "$updatedAt"]);
     expect(screen.getByText("row-2")).not.toBeNull();
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
+    expect(screen.getByText("2026-07-17T08:00:00.000Z")).not.toBeNull();
+    expect(screen.getByText("2026-07-17T09:00:00.000Z")).not.toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
@@ -312,6 +326,7 @@ describe("TableDataGrid", () => {
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
+      select: ["*", "$createdAt", "$updatedAt"],
       orderBy: [["id", "asc"]],
       limit: 26,
       offset: 0,

@@ -48,6 +48,7 @@ const NULL_CELL_MARKER = "<null>";
 function formatCellValue(value: unknown): string {
   if (value === null) return NULL_CELL_MARKER;
   if (value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (typeof value === "object") return JSON.stringify(value);
@@ -82,6 +83,21 @@ interface GridColumn {
   header: string;
   enableSorting: boolean;
 }
+
+const PROVENANCE_TIMESTAMP_GRID_COLUMNS: readonly GridColumn[] = [
+  {
+    id: "$createdAt",
+    accessorKey: "$createdAt",
+    header: "$createdAt",
+    enableSorting: true,
+  },
+  {
+    id: "$updatedAt",
+    accessorKey: "$updatedAt",
+    header: "$updatedAt",
+    enableSorting: true,
+  },
+];
 
 type RowChangeState = "added" | "removed";
 
@@ -707,7 +723,10 @@ export function TableDataGrid() {
   const queryOffset = pageIndex * pageSize;
   const queryLimit = pageSize + 1;
   const queryBuilder = useMemo(() => {
-    let builder = new GenericQueryBuilder(table, schema);
+    let builder = new GenericQueryBuilder(table, schema).select(
+      "*",
+      ...PROVENANCE_TIMESTAMP_GRID_COLUMNS.map((column) => column.id),
+    );
     for (const filter of filters) {
       if (filter.operator === "eq") {
         builder = builder.where({ [filter.column]: filter.value });
@@ -755,6 +774,7 @@ export function TableDataGrid() {
           enableSorting: isColumnSortable(column.column_type),
         }),
       ),
+      ...PROVENANCE_TIMESTAMP_GRID_COLUMNS,
     ],
     [schemaColumns],
   );

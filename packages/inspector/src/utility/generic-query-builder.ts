@@ -21,6 +21,7 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   readonly _rowType: DynamicTableRow = undefined as unknown as DynamicTableRow;
 
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _selectColumns: string[] = [];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal: number | undefined = undefined;
   private _offsetVal: number | undefined = undefined;
@@ -53,6 +54,12 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
     return clone;
   }
 
+  select(...columns: string[]): GenericQueryBuilder {
+    const clone = this._clone();
+    clone._selectColumns = [...columns];
+    return clone;
+  }
+
   orderBy(column: string, direction: "asc" | "desc" = "asc"): GenericQueryBuilder {
     const clone = this._clone();
     clone._orderBys.push([column, direction]);
@@ -76,6 +83,7 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
       table: this._table,
       conditions: this._conditions,
       includes: {},
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -86,6 +94,7 @@ export class GenericQueryBuilder implements QueryBuilder<DynamicTableRow> {
   private _clone(): GenericQueryBuilder {
     const clone = new GenericQueryBuilder(this._table, this._schema);
     clone._conditions = [...this._conditions];
+    clone._selectColumns = [...this._selectColumns];
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
