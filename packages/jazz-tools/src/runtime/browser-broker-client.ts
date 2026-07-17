@@ -460,9 +460,6 @@ export class BrowserBrokerClient {
         }
         void this.options.onDemote?.(message.leadershipId);
         return;
-      case "tab-replaced":
-        this.handleTabReplacement(message.leadershipId).catch(() => undefined);
-        return;
       case "leader-ready":
         this.leadershipId = message.leadershipId;
         this.leaderTabId = message.leaderTabId;
@@ -530,21 +527,6 @@ export class BrowserBrokerClient {
         `Browser broker instance changed from ${this.brokerInstanceId} to ${nextBrokerInstanceId}`,
       ),
     );
-  }
-
-  private async handleTabReplacement(leadershipId: number): Promise<void> {
-    if (this.closed) return;
-
-    this.closed = true;
-    this.stopBrokerLivenessTimer();
-    this.role = "follower";
-    this.leaderTabId = null;
-    this.resolveRoleWaiters();
-    try {
-      await this.options.onDemote?.(leadershipId);
-    } finally {
-      this.closeWithError(new Error("Browser tab connection was replaced by a reload"));
-    }
   }
 
   private async reconnectAfterBrokerPortFailure(_error: Error): Promise<void> {

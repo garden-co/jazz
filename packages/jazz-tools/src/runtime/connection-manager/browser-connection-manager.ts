@@ -82,19 +82,9 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.brokerClient?.reportVisibility(hidden ? "hidden" : "visible");
     this.sendLifecycleHint(hidden ? "visibility-hidden" : "visibility-visible");
   };
-  private readonly onPageHide = (event: PageTransitionEvent): void => {
+  private readonly onPageHide = (): void => {
     markWasmTeardownInProgress();
     this.sendLifecycleHint("pagehide");
-    if (event.persisted) return;
-
-    this.detachLifecycleHooks();
-    const roleShutdown = this.shutdownLeaderWorker();
-    this.releaseBrokerLeadershipResources();
-    roleShutdown.catch(() => undefined);
-
-    const brokerClient = this.brokerClient;
-    this.brokerClient = null;
-    brokerClient?.shutdown().catch(() => undefined);
   };
   private readonly onPageFreeze = (): void => {
     this.sendLifecycleHint("freeze");

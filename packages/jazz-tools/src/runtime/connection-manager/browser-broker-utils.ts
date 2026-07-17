@@ -12,7 +12,6 @@ import { resolveBrokerWorkerUrl } from "../browser-broker-client.js";
 export const BROKER_STORAGE_DELETE_MAX_RETRIES = 8;
 const BROKER_STORAGE_DELETE_RETRY_BASE_MS = 50;
 const BROKER_STORAGE_DELETE_RETRY_MAX_MS = 500;
-const BROWSER_TAB_ID_STORAGE_KEY = "jazz-browser-tab-id";
 
 export function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
@@ -48,20 +47,7 @@ export function brokerStorageDeleteRetryDelayMs(retry: number): number {
 }
 
 export function createBrowserTabId(): string {
-  if (typeof sessionStorage === "undefined") {
-    return createRandomId();
-  }
-
-  try {
-    const existing = sessionStorage.getItem(BROWSER_TAB_ID_STORAGE_KEY);
-    if (existing) return existing;
-
-    const tabId = createRandomId();
-    sessionStorage.setItem(BROWSER_TAB_ID_STORAGE_KEY, tabId);
-    return tabId;
-  } catch {
-    return createRandomId();
-  }
+  return createRandomId();
 }
 
 /** @internal Derive the default browser persistence namespace for this Db config. */

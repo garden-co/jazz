@@ -243,12 +243,12 @@ async function runWorkerHostWithOptionalLock(wasmModule: any, init: InitMessage)
   try {
     await locks.request(
       init.workerLockName,
-      { mode: "exclusive" },
+      { mode: "exclusive", ifAvailable: true },
       async (lock) => {
         if (!lock) {
           self.postMessage({
             type: "error",
-            message: `Worker lock acquisition failed: ${init.workerLockName} was not granted`,
+            message: `Worker lock preflight failed: ${init.workerLockName} is already held`,
           });
           return;
         }

@@ -830,6 +830,13 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
         WorkerLifecycleEvent::VisibilityHidden
         | WorkerLifecycleEvent::Pagehide
         | WorkerLifecycleEvent::Freeze => {
+            if let Some(rt) = runtime {
+                if let Err(err) = rt.flush_wal() {
+                    post_to_main(&WorkerToMainWire::Error {
+                        message: format!("lifecycle WAL flush failed: {}", js_error_message(&err)),
+                    });
+                }
+            }
             // On `pagehide` the page is navigating away and this worker is about
             // to be terminated. The `ws_stream_wasm` transport is abandoned
             // mid-flight and the dying WASM heap traps. Mark the worker scope so
@@ -841,16 +848,6 @@ fn handle_lifecycle_hint(event: WorkerLifecycleEvent, runtime: Option<&Rc<WasmRu
                     &JsValue::from_str("__jazzWorkerTearingDown"),
                     &JsValue::TRUE,
                 );
-                handle_shutdown(runtime, false);
-                return;
-            }
-
-            if let Some(rt) = runtime {
-                if let Err(err) = rt.flush_wal() {
-                    post_to_main(&WorkerToMainWire::Error {
-                        message: format!("lifecycle WAL flush failed: {}", js_error_message(&err)),
-                    });
-                }
             }
         }
         _ => {}
