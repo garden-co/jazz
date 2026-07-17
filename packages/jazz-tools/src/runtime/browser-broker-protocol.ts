@@ -181,6 +181,11 @@ export interface BrowserBrokerDemoteMessage extends BrokerInstanceMessage {
   leadershipId: number;
 }
 
+export interface BrowserBrokerTabReplacedMessage extends BrokerInstanceMessage {
+  type: "tab-replaced";
+  leadershipId: number;
+}
+
 export interface BrowserBrokerLeaderReadyAnnouncement extends BrokerInstanceMessage {
   type: "leader-ready";
   leaderTabId: string;
@@ -252,6 +257,7 @@ export type BrowserBrokerControlMessage =
   | BrowserBrokerPingMessage
   | BrowserBrokerBecomeLeaderMessage
   | BrowserBrokerDemoteMessage
+  | BrowserBrokerTabReplacedMessage
   | BrowserBrokerLeaderReadyAnnouncement
   | BrowserBrokerAttachFollowerPortMessage
   | BrowserBrokerUseFollowerPortMessage

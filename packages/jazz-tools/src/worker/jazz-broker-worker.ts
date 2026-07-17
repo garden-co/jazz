@@ -158,7 +158,20 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
   const now = Date.now();
   const previousTab = tabs.get(message.tabId);
   if (previousTab && previousTab.port !== port) {
-    previousTab.port.close();
+    if (leader?.tabId === message.tabId) {
+      // A same-tab reload keeps its sessionStorage identity. Tell the old page
+      // to release its worker and Web Locks before promoting the replacement.
+      // Closing its port alone leaves those resources alive until heartbeat
+      // eviction, which makes an OPFS reload wait several seconds. The old
+      // client closes its own port after demotion so it cannot reconnect.
+      post(previousTab.port, {
+        type: "tab-replaced",
+        brokerInstanceId,
+        leadershipId: leader.leadershipId,
+      });
+    } else {
+      previousTab.port.close();
+    }
   }
   clearFollowerAttachmentState(message.tabId);
 
