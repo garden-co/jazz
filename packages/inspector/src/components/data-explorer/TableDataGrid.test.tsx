@@ -111,6 +111,7 @@ describe("TableDataGrid", () => {
   });
 
   beforeEach(() => {
+    localStorage.clear();
     currentRows = [
       {
         id: "row-2",
@@ -198,6 +199,7 @@ describe("TableDataGrid", () => {
     // The toolbar actions are labelled via aria-label (their hover hint is now a
     // Popover-API tooltip, not a native title attribute).
     expect(screen.getByRole("link", { name: "Schema" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Customize columns" })).not.toBeNull();
     expect(screen.getByRole("button", { name: "Insert row" })).not.toBeNull();
     expect(screen.getByRole("button", { name: "Delete row(s)" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
@@ -208,6 +210,72 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
+  });
+
+  it("can hide and show a column", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    expect(screen.getByRole("dialog", { name: "Customize columns" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.queryByRole("columnheader", { name: "done" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
+  });
+
+  it("reorders a column", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move owner_id up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    const headers = screen.getAllByRole("columnheader").map((header) => header.textContent ?? "");
+    expect(headers.indexOf("owner_id")).toBeLessThan(headers.indexOf("meta"));
+  });
+
+  it("restores column choices after remounting", () => {
+    const { unmount } = renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move owner_id up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(localStorage.length).toBe(1);
+    expect(
+      JSON.parse(
+        localStorage.getItem("jazz.inspector.dataExplorer.columnPreferences.todos") ?? "[]",
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "done", visible: false }),
+        expect.objectContaining({ id: "owner_id", visible: true }),
+      ]),
+    );
+
+    unmount();
+    renderGrid();
+
+    expect(screen.queryByRole("columnheader", { name: "done" })).toBeNull();
+    const restoredHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "");
+    expect(restoredHeaders.indexOf("owner_id")).toBeLessThan(restoredHeaders.indexOf("meta"));
+  });
+
+  it("discards draft column changes when customization is cancelled", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show title" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
   });
 
   it("renders null cell values with a marker", () => {

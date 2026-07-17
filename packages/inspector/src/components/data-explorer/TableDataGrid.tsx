@@ -26,7 +26,14 @@ import {
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
+import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import { Tooltip } from "../tooltip/Tooltip.js";
+import {
+  ColumnCustomizationModal,
+  isColumnPreferences,
+  reconcileColumnPreferences,
+  type ColumnPreference,
+} from "./ColumnCustomizationModal.js";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,
@@ -68,6 +75,7 @@ const ROW_REMOVED_ANIMATION_MS = 650;
 const DATA_COLUMN_MAX_WIDTH = 360;
 const STAGED_INSERT_ROW_ID_PREFIX = "__jazz_inspector_staged_insert__";
 const ACTIONS_COLUMN_KEY = "__actions__";
+const COLUMN_PREFERENCES_STORAGE_KEY_PREFIX = "jazz.inspector.dataExplorer.columnPreferences";
 
 interface GridColumn {
   id: string;
@@ -684,6 +692,11 @@ export function TableDataGrid() {
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
   const [pendingScrollToRowId, setPendingScrollToRowId] = useState<string | null>(null);
+  const [isColumnCustomizationOpen, setIsColumnCustomizationOpen] = useState(false);
+  const columnPreferencesStorageKey = `${COLUMN_PREFERENCES_STORAGE_KEY_PREFIX}.${table}`;
+  const [storedColumnPreferences, setStoredColumnPreferences] = useLocalStorageState<
+    ColumnPreference[]
+  >(columnPreferencesStorageKey, [], { isValid: isColumnPreferences });
   const schemaColumns = schema[table]?.columns ?? [];
   const schemaColumnById = useMemo(
     () => new Map(schemaColumns.map((column) => [column.name, column])),
@@ -727,7 +740,7 @@ export function TableDataGrid() {
   const isInitialLoading = queryResult.isLoading;
   const rows = queryResult.data ?? EMPTY_ROWS;
 
-  const gridColumns = useMemo<GridColumn[]>(
+  const allGridColumns = useMemo<GridColumn[]>(
     () => [
       {
         id: "id",
@@ -746,6 +759,17 @@ export function TableDataGrid() {
     ],
     [schemaColumns],
   );
+  const columnPreferences = useMemo(
+    () => reconcileColumnPreferences(allGridColumns, storedColumnPreferences),
+    [allGridColumns, storedColumnPreferences],
+  );
+  const gridColumns = useMemo(() => {
+    const gridColumnById = new Map(allGridColumns.map((column) => [column.id, column]));
+    return columnPreferences.flatMap((preference) => {
+      const column = gridColumnById.get(preference.id);
+      return preference.visible && column ? [column] : [];
+    });
+  }, [allGridColumns, columnPreferences]);
   const hasNextPage = rows.length > pageSize;
   const visibleRows = hasNextPage ? rows.slice(0, pageSize) : rows;
   const queuedEditCount = useMemo(() => {
@@ -940,6 +964,16 @@ export function TableDataGrid() {
                 <CatalogIcon className={styles.buttonIcon} />
               </Link>
             </Tooltip>
+            <Tooltip label="Customize columns">
+              <button
+                type="button"
+                className={`${styles.secondaryButton} ${styles.iconButton}`}
+                aria-label="Customize columns"
+                onClick={() => setIsColumnCustomizationOpen(true)}
+              >
+                <ColumnsIcon className={styles.buttonIcon} />
+              </button>
+            </Tooltip>
             <Tooltip label="Insert row">
               <button
                 type="button"
@@ -973,6 +1007,13 @@ export function TableDataGrid() {
             </Tooltip>
           </>
         }
+      />
+      <ColumnCustomizationModal
+        open={isColumnCustomizationOpen}
+        columns={allGridColumns}
+        preferences={columnPreferences}
+        onApply={setStoredColumnPreferences}
+        onRequestClose={() => setIsColumnCustomizationOpen(false)}
       />
       <div className={styles.contentArea}>
         <div className={styles.gridFrame}>
@@ -1399,6 +1440,29 @@ function CatalogIcon({ className }: { className?: string }) {
       <path d="M8 7h6" />
       <path d="M8 11h8" />
       <path d="M8 15h5" />
+    </svg>
+  );
+}
+
+function ColumnsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+    >
+      <path d="M4 6h16" />
+      <path d="M4 12h16" />
+      <path d="M4 18h16" />
+      <path d="M8 4v4" />
+      <path d="M15 10v4" />
+      <path d="M11 16v4" />
     </svg>
   );
 }
