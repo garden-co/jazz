@@ -231,6 +231,41 @@
       ]
     },
     {
+      "id": "behavior-docs-live-lookup",
+      "kind": "behavior",
+      "prompt": "There is no Jazz project or installed package to inspect. Find the current official documentation for defining tables and explain how you selected the source.",
+      "expectedSkills": ["jazz-docs"],
+      "rubric": [
+        "Uses https://jazz.tools/docs/llms.txt to identify the relevant documentation page.",
+        "Fetches the selected page as MDX by appending .mdx to its documentation URL.",
+        "Fetches only the relevant page or pages instead of loading the complete documentation set.",
+        "States that an installed package version and its public types take precedence for version-specific implementation details when they are available."
+      ]
+    },
+    {
+      "id": "behavior-core-self-reference",
+      "kind": "behavior",
+      "prompt": "Show an initial Jazz schema for employees with an optional manager relation back to another employee.",
+      "expectedSkills": ["jazz-core"],
+      "rubric": [
+        "Defines employees with s.table and exports a typed app through s.defineApp.",
+        "Defines the scalar relation column as managerId or manager_id.",
+        "Uses s.ref(\"employees\").optional() for the self-reference."
+      ]
+    },
+    {
+      "id": "behavior-core-column-types",
+      "kind": "behavior",
+      "prompt": "Choose Jazz schema columns for an event timestamp, a small binary fingerprint that always loads with its row, and a reference to a projects table.",
+      "expectedSkills": ["jazz-core"],
+      "rubric": [
+        "Uses s.timestamp() for the event timestamp.",
+        "Uses s.bytes() for the small inline binary fingerprint.",
+        "Uses s.ref(\"projects\") for the project reference.",
+        "Names the scalar reference projectId or project_id."
+      ]
+    },
+    {
       "id": "behavior-permission-defaults",
       "kind": "behavior",
       "prompt": "Explain what changes when an app publishes its first permissions bundle and how later permissions affect historical rows.",
