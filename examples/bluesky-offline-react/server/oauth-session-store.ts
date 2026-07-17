@@ -1,14 +1,22 @@
-import type { NodeSavedSessionStore } from "@atproto/oauth-client-node";
+import type {
+  NodeSavedSessionStore,
+  NodeSavedState,
+} from "@atproto/oauth-client-node";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
-import { legacyObjectId, stableObjectId } from "./timeline.js";
 
 type EncryptedSession = {
   v: 1;
   iv: string;
   ciphertext: string;
   tag: string;
+};
+
+export type EncryptedValueStore<Value> = {
+  set(key: string, value: Value): Promise<void>;
+  get(key: string): Promise<Value | undefined>;
+  del(key: string): Promise<void>;
 };
 
 function encryptionKey() {
@@ -58,33 +66,66 @@ function decryptSession(key: Buffer, sessionKey: string, stored: string) {
   );
 }
 
-export function createOAuthSessionStore(db: Db): NodeSavedSessionStore {
+export function createEncryptedValueStore<Value>(
+  db: Db,
+  namespace = "",
+): EncryptedValueStore<Value> {
   const encryptionKeyBuffer = encryptionKey();
-  const rowId = (key: string) => stableObjectId("oauth-session", key);
-  const legacyRowId = (key: string) => legacyObjectId("oauth-session", key);
 
   return {
-    async set(sessionKey, value) {
-      db.upsert(app.oauthSessions, {
+    async set(key, value) {
+      const sessionKey = `${namespace}${key}`;
+      const session = {
         sessionKey,
         sessionJson: encryptSession(encryptionKeyBuffer, sessionKey, value),
         updatedAt: new Date().toISOString(),
-      }, { id: rowId(sessionKey) });
+      };
+      const existing = await db.one(app.oauthSessions.where({ sessionKey: { eq: sessionKey } }));
+      if (existing) {
+        db.update(app.oauthSessions, existing.id, session);
+      } else {
+        db.insert(app.oauthSessions, session);
+      }
     },
-    async get(sessionKey) {
-      const row = await db.one(app.oauthSessions.where({ id: { eq: rowId(sessionKey) } }))
-        ?? await db.one(app.oauthSessions.where({ id: { eq: legacyRowId(sessionKey) } }));
+    async get(key) {
+      const sessionKey = `${namespace}${key}`;
+      const row = await db.one(app.oauthSessions.where({ sessionKey: { eq: sessionKey } }));
       return row
-        ? decryptSession(encryptionKeyBuffer, sessionKey, row.sessionJson)
+        ? decryptSession(encryptionKeyBuffer, sessionKey, row.sessionJson) as Value
         : undefined;
     },
-    async del(sessionKey) {
-      const ids = [rowId(sessionKey), legacyRowId(sessionKey)];
-      for (const id of ids) {
-        if (await db.one(app.oauthSessions.where({ id: { eq: id } }))) {
-          db.delete(app.oauthSessions, id);
-        }
-      }
+    async del(key) {
+      const sessionKey = `${namespace}${key}`;
+      const rows = await db.all(app.oauthSessions.where({ sessionKey: { eq: sessionKey } }));
+      for (const row of rows) db.delete(app.oauthSessions, row.id);
+    },
+  };
+}
+
+export function createOAuthSessionStore(db: Db): NodeSavedSessionStore {
+  return createEncryptedValueStore(db);
+}
+
+export function createOAuthStateStore(db: Db) {
+  return createEncryptedValueStore<NodeSavedState>(db, "oauth-state:");
+}
+
+export function createBffSessionStore(db: Db) {
+  const sessions = createEncryptedValueStore<string>(db, "bff-session:");
+
+  return {
+    async create(did: string) {
+      const sessionId = randomBytes(32).toString("base64url");
+      await sessions.set(sessionId, did);
+      return sessionId;
+    },
+    resolve(sessionId: string) {
+      return sessions.get(sessionId);
+    },
+    async invalidate(sessionId: string) {
+      const did = await sessions.get(sessionId);
+      await sessions.del(sessionId);
+      return did;
     },
   };
 }

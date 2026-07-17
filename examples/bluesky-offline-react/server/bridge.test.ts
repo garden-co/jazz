@@ -50,32 +50,43 @@ describe("timeline projection", () => {
       deleteRecord: vi.fn(),
       fetchPostThread: vi.fn(),
       fetchProfile: vi.fn(async () => viewerProfile),
-      fetchTimelineFeed: vi.fn(async () => ({ feed: [{ post }], cursor: "next" })),
+      fetchTimelineFeed: vi.fn(async () => ({
+        feed: [
+          { post },
+          {
+            post: {
+              ...post,
+              uri: `at://${authorDid}/app.bsky.feed.post/3m12345678922`,
+              cid: "bafysecondpost",
+              record: { ...post.record, text: "Second post" },
+            },
+          },
+        ],
+        cursor: "next",
+      })),
       fetchViewerPosts: vi.fn(),
       OperationError: class OperationError extends Error {},
       putRecord: vi.fn(),
       recordKey: vi.fn(),
     }));
+    const session = { fetchHandler: vi.fn() };
 
     try {
-      const { projectTimelinePage } = await import("./bridge.js");
-      await projectTimelinePage(viewerDid, {} as never);
+      const { getTimelineProjectionStatus, projectTimelinePage } = await import("./bridge.js");
+      await projectTimelinePage(viewerDid, session);
       await vi.waitFor(async () => {
+        expect(getTimelineProjectionStatus(viewerDid)?.state).toBe("completed");
         expect(await database.one(app.profiles.where({
           id: { eq: stableObjectId("bluesky-profile", authorDid) },
         }))).toMatchObject({ handle: "author.test" });
       });
 
-      vi.spyOn(database, "one").mockResolvedValueOnce(null as never);
-      vi.spyOn(database, "upsert").mockImplementationOnce(() => {
-        throw new Error("object already exists");
-      });
-
       post.author.handle = "author-updated.test";
       viewerProfile.handle = "viewer-updated.test";
-      await projectTimelinePage(viewerDid, {} as never);
+      await projectTimelinePage(viewerDid, session);
 
       await vi.waitFor(async () => {
+        expect(getTimelineProjectionStatus(viewerDid)?.state).toBe("completed");
         expect(await database.one(app.profiles.where({
           id: { eq: stableObjectId("bluesky-profile", authorDid) },
         }))).toMatchObject({ handle: "author-updated.test" });
@@ -87,6 +98,96 @@ describe("timeline projection", () => {
       await context.shutdown();
       rmSync(dataDirectory, { recursive: true, force: true });
     }
+  });
+
+  it("preserves root and parent references when reconciling a queued reply", async () => {
+    const putRecord = vi.fn(async () => ({
+      uri: "at://did:plc:viewer/app.bsky.feed.post/3mreply",
+      cid: "bafyreply",
+    }));
+    const session = { fetchHandler: vi.fn() };
+    const root = { uri: "at://did:plc:author/app.bsky.feed.post/3mroot", cid: "bafyroot" };
+    const parent = { uri: "at://did:plc:author/app.bsky.feed.post/3mparent", cid: "bafyparent" };
+
+    const { createReconciler } = await import("./reconciler.js");
+    const writePostBundle = vi.fn(async () => undefined);
+    const reconciler = createReconciler({
+      deleteRecord: vi.fn(),
+      fetchViewerPosts: vi.fn(),
+      putRecord,
+      recordKey: vi.fn(),
+      writer: {
+        deactivateRepostTimelineEntries: vi.fn(async () => undefined),
+        markOperationSent: vi.fn(),
+        writeLike: vi.fn(),
+        writePostBundle,
+        writeRepost: vi.fn(),
+      },
+    });
+    await reconciler.reconcileOperations("did:plc:viewer", session, [{
+      id: "00000000-0000-0000-0000-000000000001",
+      ownerDid: "did:plc:viewer",
+      kind: "post",
+      rkey: "3mreply",
+      state: "queued",
+      createdAt: "2026-07-16T18:00:00.000Z",
+      payload: {
+        text: "A reply",
+        createdAt: "2026-07-16T18:00:00.000Z",
+        reply: { root, parent },
+      },
+    }]);
+
+    expect(putRecord).toHaveBeenCalledWith(session, expect.objectContaining({
+      record: expect.objectContaining({ reply: { root, parent } }),
+    }));
+  });
+
+  it("reconciles intentions in queue order", async () => {
+    let releaseFirst!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const putRecord = vi.fn(async (_session: unknown, request: { rkey: string }) => {
+      if (request.rkey === "first") await firstWrite;
+      return {
+        uri: `at://did:plc:viewer/app.bsky.feed.post/${request.rkey}`,
+        cid: `bafy-${request.rkey}`,
+      };
+    });
+    const { createReconciler } = await import("./reconciler.js");
+    const reconciler = createReconciler({
+      deleteRecord: vi.fn(),
+      fetchViewerPosts: vi.fn(),
+      putRecord,
+      recordKey: vi.fn(),
+      writer: {
+        deactivateRepostTimelineEntries: vi.fn(async () => undefined),
+        markOperationSent: vi.fn(),
+        writeLike: vi.fn(),
+        writePostBundle: vi.fn(async () => undefined),
+        writeRepost: vi.fn(),
+      },
+    });
+    const operation = (id: string, rkey: string) => ({
+      id,
+      ownerDid: "did:plc:viewer",
+      kind: "post" as const,
+      rkey,
+      state: "queued" as const,
+      createdAt: "2026-07-16T18:00:00.000Z",
+      payload: { text: rkey, createdAt: "2026-07-16T18:00:00.000Z" },
+    });
+
+    const reconciliation = reconciler.reconcileOperations("did:plc:viewer", { fetchHandler: vi.fn() }, [
+      operation("00000000-0000-0000-0000-000000000001", "first"),
+      operation("00000000-0000-0000-0000-000000000002", "second"),
+    ]);
+    expect(putRecord).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await reconciliation;
+
+    expect(putRecord.mock.calls.map(([, request]) => request.rkey)).toEqual(["first", "second"]);
   });
 
 });

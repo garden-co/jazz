@@ -10,5 +10,6 @@
     "moduleResolution": "NodeNext",
     "types": ["node"]
   },
-  "include": ["server/**/*.ts", "schema.ts", "permissions.ts"]
+  "include": ["server/**/*.ts", "schema.ts", "permissions.ts", "operations.ts", "object-id.ts", "at-uri.ts"],
+  "exclude": ["server/**/*.test.ts"]
 }

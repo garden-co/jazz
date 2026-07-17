@@ -14,19 +14,28 @@ packages:
 catalogs:
   default:
     "@sveltejs/vite-plugin-svelte": 7.0.0
+    "@rolldown/plugin-babel": ^0.2.0
+    "@types/react": ^19.0.0
+    "@types/react-dom": ^19.0.0
     "@types/node": "^22.0.0"
     "@vitest/browser": 4.1.0
     "@vitest/browser-playwright": 4.1.0
     "@vitejs/plugin-react": 6.0.1
     "@vitejs/plugin-vue": 6.0.4
+    babel-plugin-react-compiler: ^1.0.0
+    concurrently: ^9.1.0
+    react: 19.2.4
+    react-dom: 19.2.4
     svelte-check: "^4.0.0"
     typescript: 6.0.2
+    tsx: ^4.19.4
     vite: 8.0.1
     vite-plugin-solid: 2.11.12
     "vite-plugin-top-level-await": 1.6.0
     "vite-plugin-wasm": 3.6.0
     vitest: 4.1.0
     vue-tsc: "^2.1.10"
+    wait-on: ^8.0.2
 
 ignoredBuiltDependencies:
   - blake3

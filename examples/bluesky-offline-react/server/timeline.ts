@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { formatObjectId, objectIdKey } from "../object-id.js";
 
 export type ProfileView = {
   did?: string;
@@ -27,6 +28,22 @@ export type PostImageView = {
   aspectRatio?: { width?: number; height?: number };
 };
 
+type EmbeddedRecordView = {
+  $type?: string;
+  uri?: string;
+  cid?: string;
+  author?: ProfileView;
+  value?: PostRecord;
+  indexedAt?: string;
+  embeds?: PostEmbedView[];
+};
+
+type PostEmbedView = {
+  images?: PostImageView[];
+  media?: { images?: PostImageView[] };
+  record?: EmbeddedRecordView & { record?: EmbeddedRecordView };
+};
+
 export type PostView = {
   uri?: string;
   cid?: string;
@@ -37,7 +54,7 @@ export type PostView = {
   likeCount?: number;
   repostCount?: number;
   viewer?: { like?: string; repost?: string };
-  embed?: { images?: PostImageView[]; media?: { images?: PostImageView[] } };
+  embed?: PostEmbedView;
 };
 
 export type RepostReason = {
@@ -54,24 +71,12 @@ export type FeedViewPost = {
   reason?: RepostReason;
 };
 
-function objectId(key: string) {
-  const bytes = createHash("sha256").update(key).digest().subarray(0, 16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
 export function stableObjectId(
   namespace: string,
   value: string,
   appId = process.env.JAZZ_APP_ID ?? "bluesky-offline-react-v2",
 ) {
-  return objectId(`${appId}:${namespace}:${value}`);
-}
-
-export function legacyObjectId(namespace: string, value: string) {
-  return objectId(`${namespace}:${value}`);
+  return formatObjectId(createHash("sha256").update(objectIdKey(appId, namespace, value)).digest());
 }
 
 function profileRow(profile: ProfileView | undefined, indexedAt: string) {
@@ -87,7 +92,7 @@ function profileRow(profile: ProfileView | undefined, indexedAt: string) {
   };
 }
 
-export function normalizePost(post: PostView | undefined) {
+function normalizePostBase(post: PostView | undefined) {
   const uri = post?.uri;
   const cid = post?.cid;
   const authorDid = post?.author?.did;
@@ -138,7 +143,6 @@ export function normalizePost(post: PostView | undefined) {
       text: record.text,
       facetsJson: linkFacets.length > 0 ? JSON.stringify(linkFacets) : undefined,
       createdAt: record.createdAt,
-      createdAtMs: Math.floor(Date.parse(record.createdAt) / 1_000),
       indexedAt,
       replyParentId,
       replyRootId,
@@ -148,6 +152,39 @@ export function normalizePost(post: PostView | undefined) {
       state: "synced",
     },
     images,
+  };
+}
+
+type BasePostBundle = NonNullable<ReturnType<typeof normalizePostBase>>;
+export type NormalizedPostBundle = Omit<BasePostBundle, "post"> & {
+  post: BasePostBundle["post"] & { quotedPostId?: string };
+  quote?: BasePostBundle;
+};
+
+function quotedPostView(embed: PostEmbedView | undefined): PostView | undefined {
+  const embedded = embed?.record?.record ?? embed?.record;
+  if (!embedded?.uri || !embedded.cid || !embedded.author?.did || !embedded.value) return undefined;
+  return {
+    uri: embedded.uri,
+    cid: embedded.cid,
+    author: embedded.author,
+    record: embedded.value,
+    indexedAt: embedded.indexedAt,
+    embed: embedded.embeds?.[0],
+  };
+}
+
+export function normalizePost(post: PostView | undefined): NormalizedPostBundle | null {
+  const normalized = normalizePostBase(post);
+  if (!normalized) return null;
+  const quote = normalizePostBase(quotedPostView(post?.embed));
+  return {
+    ...normalized,
+    post: {
+      ...normalized.post,
+      quotedPostId: quote?.post.id,
+    },
+    quote: quote ?? undefined,
   };
 }
 
@@ -210,13 +247,17 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
       ? `repost:${reason.by.did}:${post.uri}:${reason.indexedAt}`
       : post.uri);
   const threadRootId = post.replyRootId ?? post.id;
+  const context = [item.reply?.root, item.reply?.parent]
+    .map(normalizePost)
+    .filter((value): value is NonNullable<ReturnType<typeof normalizePost>> => value !== null);
+  const threadRoot = context.find((bundle) => bundle.post.id === threadRootId);
   const timelineEntry = {
     id: stableObjectId("timeline-entry", `${ownerDid}:${eventKey}`),
     ownerDid,
     postId: post.id,
     threadRootId,
     repostId: reasonRepostId,
-    sortAt: reason?.indexedAt ?? post.indexedAt,
+    sortAt: reason?.indexedAt ?? threadRoot?.post.indexedAt ?? post.indexedAt,
     active: true,
   };
 
@@ -227,8 +268,7 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
     likes,
     reposts: [...reposts.values()],
     timelineEntry,
-    context: [item.reply?.root, item.reply?.parent]
-      .map(normalizePost)
-      .filter((value): value is NonNullable<ReturnType<typeof normalizePost>> => value !== null),
+    context,
+    quote: normalizedPost.quote,
   };
 }

@@ -22,14 +22,14 @@ const schema = {
     text: s.string(),
     facetsJson: s.string().optional(),
     createdAt: s.string(),
-    createdAtMs: s.int().optional(),
     indexedAt: s.string(),
     replyParentId: s.ref("posts").optional(),
     replyRootId: s.ref("posts").optional(),
+    quotedPostId: s.ref("posts").optional(),
     replyCount: s.int(),
     likeCount: s.int(),
     repostCount: s.int(),
-    state: s.string(),
+    state: s.enum("pending", "synced"),
   }),
   postImages: s.table({
     postId: s.ref("posts"),
@@ -54,7 +54,7 @@ const schema = {
     postId: s.ref("posts"),
     parentPostId: s.ref("posts").optional(),
     sortOrder: s.int(),
-    state: s.string(),
+    state: s.enum("post", "blocked", "not-found"),
     indexedAt: s.string(),
   }),
   likes: s.table({
@@ -74,13 +74,11 @@ const schema = {
     active: s.boolean(),
   }),
   pendingOperations: s.table({
-    operationId: s.string(),
     ownerDid: s.string(),
-    kind: s.string(),
-    target: s.string(),
+    kind: s.enum("post", "like", "repost"),
     rkey: s.string(),
     payload: s.string(),
-    state: s.string(),
+    state: s.enum("queued", "sent", "failed"),
     error: s.string().optional(),
     createdAt: s.string(),
   }),
@@ -88,7 +86,3 @@ const schema = {
 
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
-
-export type Profile = s.RowOf<typeof app.profiles>;
-export type Post = s.RowOf<typeof app.posts>;
-export type PendingOperation = s.RowOf<typeof app.pendingOperations>;

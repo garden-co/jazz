@@ -79,7 +79,7 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
 .repost-reason { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 15px; color: var(--muted); font-size: .76rem; }
 .repost-reason strong { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
 .repost-avatar { width: 20px; height: 20px; border-radius: 7px; object-fit: cover; }
-.post-card { padding: 18px 20px 19px; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: 0 5px 18px rgba(34, 42, 79, .035); }
+.post-card { padding: 10px; border: 1px solid var(--line); border-radius: 17px; background: var(--surface); box-shadow: 0 5px 18px rgba(34, 42, 79, .035); }
 .post-card.new { animation: post-enter 420ms cubic-bezier(.2, .8, .2, 1) both; }
 .post-card.pending { border-color: #cfd3ff; background: linear-gradient(135deg, #fff, #f8f8ff); }
 .post-header { display: flex; align-items: center; gap: 11px; }
@@ -96,24 +96,40 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
 .post-image { display: block; min-width: 0; overflow: hidden; background: #e7eaf1; }
 .post-image img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .post-images[data-count="1"] img { height: auto; max-height: 520px; object-fit: contain; margin: auto; }
+.quoted-post { margin: 14px 0 0 47px; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: #fafbfe; }
+.quoted-post-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quoted-post-header strong { overflow: hidden; font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
+.quoted-post-header time { margin-left: auto; color: var(--muted); font-size: .68rem; white-space: nowrap; }
+.quoted-avatar { width: 28px; height: 28px; border-radius: 8px; }
+.quoted-post > p { margin: 10px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: .88rem; line-height: 1.5; }
+.quoted-post .post-images.compact { margin: 10px 0 0; border-radius: 10px; }
 .post-actions { display: flex; align-items: center; gap: 8px; margin: 13px 0 0 47px; }
 .reaction-button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 9px; border-radius: 9px; color: var(--muted); background: transparent; font-size: .78rem; font-weight: 750; font-variant-numeric: tabular-nums; }
 .like-button:hover:not(:disabled) { color: #c1154a; background: #fff0f4; }
 .like-button.active { color: #c1154a; background: #fff0f4; }
 .reaction-button > span:first-child { font-size: 1rem; line-height: 1; }
+.reply-button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .repost-button:hover:not(:disabled), .repost-button.active { color: var(--success); background: var(--success-soft); }
 .reaction-pending { color: var(--accent-dark); font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.reply-composer { display: grid; gap: 8px; margin: 10px 0 0 47px; padding-top: 10px; border-top: 1px solid var(--line); }
+.reply-composer label { font-size: .78rem; font-weight: 800; }
+.reply-composer textarea { min-height: 76px; padding: 10px 11px; font-size: .9rem; }
+.reply-composer > div { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.reply-composer > div > span { margin-right: auto; color: var(--muted); font-size: .72rem; }
+.reply-composer .primary { min-height: 32px; padding: 6px 12px; font-size: .76rem; }
 .mention-link, .post-link { color: var(--accent); font-weight: 700; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .thread-node { display: grid; gap: 11px; min-width: 0; }
 .timeline-thread { display: grid; gap: 11px; min-width: 0; }
 .thread-replies { position: relative; display: grid; gap: 11px; margin-left: 30px; padding-left: 18px; }
 .thread-replies::before { content: ""; position: absolute; top: -11px; left: 0; width: 18px; height: 30px; border-left: 2px solid #dfe2ff; border-bottom: 2px solid #dfe2ff; border-bottom-left-radius: 10px; pointer-events: none; }
-.thread-disclosure, .thread-reset { width: max-content; padding: 7px 10px; border-radius: 8px; color: var(--accent); background: transparent; font-size: .77rem; font-weight: 800; }
+.thread-disclosure, .thread-reset, .thread-link { width: max-content; padding: 7px 10px; border-radius: 8px; color: var(--accent); background: transparent; font-size: .77rem; font-weight: 800; }
 .thread-disclosure.load-thread { display: inline-flex; align-items: center; gap: 7px; }
 .thread-disclosure.load-thread .spinner { width: 12px; height: 12px; }
 .thread-disclosure::before { display: inline-block; margin-right: 7px; content: "›"; }
 .thread-reset::before { margin-right: 7px; content: "←"; }
-.thread-disclosure:hover, .thread-reset:hover { background: var(--accent-soft); }
+.thread-link { text-decoration: none; }
+.thread-link::before { margin-right: 7px; content: "↗"; }
+.thread-disclosure:hover, .thread-reset:hover, .thread-link:hover { background: var(--accent-soft); }
 .empty-state { display: grid; justify-items: center; padding: 54px 24px; border: 1px dashed #ccd2df; border-radius: 18px; text-align: center; background: rgba(255, 255, 255, .55); }
 .empty-state .brand-mark { width: 38px; height: 38px; margin-bottom: 17px; }
 .empty-state h3 { margin-bottom: 7px; font-size: 1rem; }
@@ -182,6 +198,7 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
   .post-card { padding: 16px; }
   .post-card > p { margin-left: 0; }
   .post-images { margin-left: 0; }
+  .quoted-post { margin-left: 0; }
   .post-actions { margin-left: 0; }
   .thread-replies { margin-left: 12px; padding-left: 12px; }
   .section-heading { align-items: flex-end; }

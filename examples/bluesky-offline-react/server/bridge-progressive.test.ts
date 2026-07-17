@@ -45,12 +45,19 @@ describe("progressive timeline projection", () => {
       putRecord: vi.fn(),
       recordKey: vi.fn(),
     }));
+    const session = { fetchHandler: vi.fn() };
 
     try {
       const { projectTimelinePage } = await import("./bridge.js");
-      await projectTimelinePage("did:plc:viewer", {} as never);
+      await projectTimelinePage("did:plc:viewer", session);
       await vi.waitFor(() => {
-        expect(database.one).toHaveBeenCalledTimes(2);
+        expect(database.upsert).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            uri: "at://did:plc:author2/app.bsky.feed.post/3m12345678922",
+          }),
+          expect.anything(),
+        );
       }, { timeout: 100 });
     } finally {
       releaseFirstLookup();

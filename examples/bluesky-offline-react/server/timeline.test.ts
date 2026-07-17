@@ -1,7 +1,81 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTimelineItem } from "./timeline.js";
+import { normalizePost, normalizeTimelineItem, stableObjectId } from "./timeline.js";
 
 describe("timeline ingestion", () => {
+  it("normalises a quoted post alongside its outer post", () => {
+    const quotedUri = "at://did:plc:quoted/app.bsky.feed.post/3m12345678920";
+    const normalized = normalizePost({
+      uri: "at://did:plc:author/app.bsky.feed.post/3m12345678921",
+      cid: "bafyouter",
+      author: { did: "did:plc:author", handle: "author.test" },
+      record: { text: "Worth reading", createdAt: "2026-07-17T08:00:00.000Z" },
+      indexedAt: "2026-07-17T08:00:01.000Z",
+      embed: {
+        record: {
+          $type: "app.bsky.embed.record#view",
+          uri: quotedUri,
+          cid: "bafyquoted",
+          author: { did: "did:plc:quoted", handle: "quoted.test" },
+          value: { text: "The quoted post", createdAt: "2026-07-17T07:00:00.000Z" },
+          indexedAt: "2026-07-17T07:00:01.000Z",
+        },
+      },
+    });
+
+    expect(normalized?.post.quotedPostId).toBe(stableObjectId("bluesky-post", quotedUri));
+    expect(normalized?.quote).toMatchObject({
+      profile: { handle: "quoted.test" },
+      post: { uri: quotedUri, text: "The quoted post" },
+    });
+  });
+
+  it("normalises record-with-media quotes", () => {
+    const normalized = normalizePost({
+      uri: "at://did:plc:author/app.bsky.feed.post/3m12345678922",
+      cid: "bafyouter",
+      author: { did: "did:plc:author" },
+      record: { text: "Quote with my own image", createdAt: "2026-07-17T08:00:00.000Z" },
+      embed: {
+        media: { images: [{ thumb: "https://cdn.test/outer-thumb", fullsize: "https://cdn.test/outer" }] },
+        record: {
+          record: {
+            uri: "at://did:plc:quoted/app.bsky.feed.post/3m12345678920",
+            cid: "bafyquoted",
+            author: { did: "did:plc:quoted" },
+            value: { text: "Quoted", createdAt: "2026-07-17T07:00:00.000Z" },
+          },
+        },
+      },
+    });
+
+    expect(normalized?.post.quotedPostId).toBe(normalized?.quote?.post.id);
+    expect(normalized?.images).toHaveLength(1);
+  });
+
+  it("anchors a reply thread to the root post time", () => {
+    const root = {
+      uri: "at://did:plc:author/app.bsky.feed.post/3m12345678920",
+      cid: "bafyroot",
+      author: { did: "did:plc:author" },
+      record: { text: "Root", createdAt: "2026-07-15T07:00:00.000Z" },
+      indexedAt: "2026-07-15T07:00:01.000Z",
+    };
+    const reply = {
+      uri: "at://did:plc:author/app.bsky.feed.post/3m12345678921",
+      cid: "bafyreply",
+      author: { did: "did:plc:author" },
+      record: {
+        text: "Much later reply",
+        createdAt: "2026-07-16T10:00:00.000Z",
+        reply: { root: { uri: root.uri, cid: root.cid }, parent: { uri: root.uri, cid: root.cid } },
+      },
+      indexedAt: "2026-07-16T10:00:01.000Z",
+    };
+
+    expect(normalizeTimelineItem("did:plc:viewer", { post: reply, reply: { root, parent: root } })!
+      .timelineEntry.sortAt).toBe(root.indexedAt);
+  });
+
   it("keeps a direct post and a repost as separate timeline events over one post row", () => {
     const post = {
       uri: "at://did:plc:author/app.bsky.feed.post/3m12345678921",

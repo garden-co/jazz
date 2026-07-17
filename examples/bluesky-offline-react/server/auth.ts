@@ -1,11 +1,19 @@
 import {
   buildAtprotoLoopbackClientMetadata,
   NodeOAuthClient,
-  type NodeSavedState,
 } from "@atproto/oauth-client-node";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import {
+  importJWK,
+  SignJWT,
+} from "jose";
 import { db } from "./jazz.js";
-import { createOAuthSessionStore } from "./oauth-session-store.js";
+import {
+  createBffSessionStore,
+  createEncryptedValueStore,
+  createOAuthSessionStore,
+  createOAuthStateStore,
+} from "./oauth-session-store.js";
+import { loadOrCreateJwtKeys, type StoredJwtKeys } from "./signing-keys.js";
 
 const port = Number(process.env.PORT ?? 3001);
 export const oauthScope = "atproto transition:generic";
@@ -14,26 +22,33 @@ const clientMetadata = buildAtprotoLoopbackClientMetadata({
   scope: oauthScope,
 });
 
-const states = new Map<string, NodeSavedState>();
 export const oauth = new NodeOAuthClient({
   clientMetadata,
-  stateStore: {
-    async set(key, value) { states.set(key, value); },
-    async get(key) { return states.get(key); },
-    async del(key) { states.delete(key); },
-  },
+  stateStore: createOAuthStateStore(db),
   sessionStore: createOAuthSessionStore(db),
   allowHttp: true,
 });
 
 export type OAuthSession = NonNullable<Awaited<ReturnType<typeof oauth.restore>>>;
+export const bffSessionCookie = "bff-session";
 
-const jwtKeys = await generateKeyPair("ES256");
-const jwtPublicKey = await exportJWK(jwtKeys.publicKey);
+const bffSessions = createBffSessionStore(db);
+
+export function createBffSession(did: string) {
+  return bffSessions.create(did);
+}
+
+export function invalidateBffSession(sessionId: string) {
+  return bffSessions.invalidate(sessionId);
+}
+
+const jwtKeyStore = createEncryptedValueStore<StoredJwtKeys>(db, "jazz-signing-key:");
+const jwtKeys = await loadOrCreateJwtKeys(jwtKeyStore);
+const jwtPrivateKey = await importJWK(jwtKeys.privateJwk, "ES256");
 const jwtKid = "local-dev";
 
 export const jazzJwks = {
-  keys: [{ ...jwtPublicKey, kid: jwtKid, alg: "ES256", use: "sig" }],
+  keys: [{ ...jwtKeys.publicJwk, kid: jwtKid, alg: "ES256", use: "sig" }],
 };
 
 export function jazzToken(did: string) {
@@ -42,10 +57,17 @@ export function jazzToken(did: string) {
     .setIssuer("bluesky-offline-react")
     .setIssuedAt()
     .setExpirationTime("15m")
-    .sign(jwtKeys.privateKey);
+    .sign(jwtPrivateKey);
 }
 
-export async function currentSession(did: string | undefined) {
+export async function currentSession(sessionId: string | undefined) {
+  if (!sessionId) return null;
+  const did = await bffSessions.resolve(sessionId);
   if (!did) return null;
-  try { return await oauth.restore(did); } catch { return null; }
+  try {
+    return { did, session: await oauth.restore(did) };
+  } catch {
+    await bffSessions.invalidate(sessionId);
+    return null;
+  }
 }

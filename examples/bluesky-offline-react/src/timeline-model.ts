@@ -1,78 +1,34 @@
-export type ProfileView = {
-  did?: string;
-  handle?: string;
-  displayName?: string;
-  avatar?: string;
-};
+import { schema as s } from "jazz-tools";
+import { app } from "../schema.js";
 
-export type ImageView = {
-  id: string;
-  postCid: string;
-  position: number;
-  thumb: string;
-  fullsize: string;
-  alt: string;
-  aspectWidth?: number | null;
-  aspectHeight?: number | null;
-};
+type ProfileRow = s.RowOf<typeof app.profiles>;
+type PostRow = s.RowOf<typeof app.posts>;
+type ImageRow = s.RowOf<typeof app.postImages>;
+type LikeRow = s.RowOf<typeof app.likes>;
+type RepostRow = s.RowOf<typeof app.reposts>;
+type ThreadEntryRow = s.RowOf<typeof app.threadEntries>;
+type TimelineEntryRow = s.RowOf<typeof app.timelineEntries>;
 
-export type ReactionView = {
-  id: string;
-  uri?: string | null;
-  active: boolean;
+export type IncludedPost = PostRow & {
+  authorProfile?: ProfileRow | null;
+  postImagesViaPost?: ImageRow[];
+  likesViaSubjectPost?: LikeRow[];
+  repostsViaSubjectPost?: RepostRow[];
+  quotedPost?: IncludedPost | null;
+  threadEntriesViaRootPost?: Array<ThreadEntryRow & { post?: IncludedPost | null }>;
 };
-
-export type IncludedPost = {
-  id: string;
-  uri: string;
-  cid?: string | null;
-  authorDid: string;
-  text: string;
-  facetsJson?: string | null;
-  createdAt: string;
-  indexedAt: string;
-  replyParentId?: string | null;
-  replyRootId?: string | null;
-  replyCount: number;
-  likeCount: number;
-  repostCount: number;
-  state: string;
-  authorProfile?: ProfileView | null;
-  postImagesViaPost?: ImageView[];
-  likesViaSubjectPost?: ReactionView[];
-  repostsViaSubjectPost?: ReactionView[];
-};
-
-type IncludedThreadEntry = {
-  id: string;
-  state: string;
-  sortOrder: number;
+export type IncludedRepost = RepostRow & { actorProfile?: ProfileRow | null };
+export type ImageView = ImageRow;
+export type ReactionView = LikeRow | RepostRow;
+export type TimelineEntryView = TimelineEntryRow & {
   post?: IncludedPost | null;
-};
-
-type IncludedThreadRoot = IncludedPost & {
-  threadEntriesViaRootPost?: IncludedThreadEntry[];
-};
-
-export type IncludedRepost = ReactionView & {
-  actorDid: string;
-  actorProfile?: ProfileView | null;
-};
-
-export type TimelineEntryView = {
-  id: string;
-  ownerDid: string;
-  postId: string;
-  threadRootId: string;
-  repostId?: string | null;
-  sortAt: string;
-  post?: IncludedPost | null;
-  threadRoot?: IncludedThreadRoot | null;
+  threadRoot?: IncludedPost | null;
   repost?: IncludedRepost | null;
 };
 
 export type DisplayPost = IncludedPost & {
   images: ImageView[];
+  quote?: DisplayPost;
   like?: ReactionView;
   repost?: ReactionView;
 };
@@ -86,26 +42,23 @@ export type TimelinePostNode = {
 export type TimelineItem = {
   id: string;
   node: TimelinePostNode;
+  threadRoot: DisplayPost;
   repost?: IncludedRepost | null;
+  threadUrl?: string;
 };
 
-export type PendingOperationView = {
-  id: string;
-  operationId: string;
-  ownerDid: string;
-  kind: string;
-  target: string;
-  rkey: string;
-  payload: string;
-  state: string;
-  error?: string | null;
-  createdAt: string;
-};
+export function optimisticReplyCount(
+  parent: Pick<IncludedPost, "authorDid" | "replyCount">,
+  viewerDid: string,
+) {
+  return parent.authorDid === viewerDid ? parent.replyCount + 1 : undefined;
+}
 
 function toDisplayPost(post: IncludedPost): DisplayPost {
   return {
     ...post,
     images: [...(post.postImagesViaPost ?? [])].sort((a, b) => a.position - b.position),
+    quote: post.quotedPost ? toDisplayPost(post.quotedPost) : undefined,
     like: post.likesViaSubjectPost?.[0],
     repost: post.repostsViaSubjectPost?.[0],
   };
@@ -127,7 +80,8 @@ export function buildThread(rootId: string, posts: IncludedPost[]) {
   const sort = (node: TimelinePostNode, authorDid: string): string => {
     node.replies.sort((a, b) =>
       Number(b.post.authorDid === authorDid) - Number(a.post.authorDid === authorDid)
-      || a.post.createdAt.localeCompare(b.post.createdAt));
+      || a.post.createdAt.localeCompare(b.post.createdAt)
+      || a.post.id.localeCompare(b.post.id));
     for (const reply of node.replies) {
       const activityAt = sort(reply, authorDid);
       if (activityAt > node.activityAt) node.activityAt = activityAt;
@@ -141,16 +95,29 @@ export function buildThread(rootId: string, posts: IncludedPost[]) {
 export function buildTimeline(rows: TimelineEntryView[]) {
   const items: TimelineItem[] = [];
   const seenThreads = new Set<string>();
-  for (const row of rows) {
+  const orderedRows = [...rows].sort((a, b) =>
+    b.sortAt.localeCompare(a.sortAt) || a.id.localeCompare(b.id));
+  for (const row of orderedRows) {
     if (!row.post) continue;
     if (!row.repostId && seenThreads.has(row.threadRootId)) continue;
     if (!row.repostId) seenThreads.add(row.threadRootId);
+    const repostedReply = Boolean(row.repostId && row.post.replyParentId);
     const threadPosts = (row.threadRoot?.threadEntriesViaRootPost ?? [])
       .flatMap((entry) => entry.state === "post" && entry.post ? [entry.post] : []);
     if (!threadPosts.some((post) => post.id === row.post!.id)) threadPosts.push(row.post);
     if (row.threadRoot && !threadPosts.some((post) => post.id === row.threadRoot!.id)) threadPosts.push(row.threadRoot);
-    const node = buildThread(row.threadRootId, threadPosts) ?? buildThread(row.post.id, [row.post]);
-    if (node) items.push({ id: row.id, node, repost: row.repost });
+    const node = repostedReply
+      ? buildThread(row.post.id, [row.post])
+      : buildThread(row.threadRootId, threadPosts) ?? buildThread(row.post.id, [row.post]);
+    if (node) items.push({
+      id: row.repostId ? row.id : `thread:${row.threadRootId}`,
+      node,
+      threadRoot: row.threadRoot ? toDisplayPost(row.threadRoot) : node.post,
+      repost: row.repost,
+      threadUrl: repostedReply
+        ? `https://bsky.app/profile/${row.post.authorDid}/post/${row.post.uri.split("/").at(-1)}`
+        : undefined,
+    });
   }
   return items;
 }

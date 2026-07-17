@@ -7,6 +7,7 @@ A proof of concept showing how Jazz can be layered over ATProto. It provides a f
 - `/api/timeline` triggers bounded AppView fetches and projects the results into Jazz.
 - React renders the timeline from one deep reactive Jazz query covering timeline events, posts, profiles, images, threads, likes, and reposts.
 - Posts and reaction intentions are written to Jazz first. If the online PDS write fails, they remain queued and retry after connectivity returns.
+- A service worker precaches the complete application shell, including Jazz's WASM and browser workers, so an installed production build can cold-start without a network connection.
 
 ## Data flow
 
@@ -18,7 +19,7 @@ WRITE
 Bluesky PDS <──── Bluesky adapter <──── Jazz bridge <──── pending Jazz intentions <──── React
 ```
 
-`/api/timeline` is only a trigger. It waits for one bounded AppView page, then returns cursor and count metadata; it does not deliver the fetched ATProto data to React. The bridge projects the page into Jazz, and the resulting rows sync to the client through Jazz's normal reactive path.
+`/api/timeline` is only a trigger. It waits for one bounded AppView fetch, starts projection, then returns cursor, count, and projection-acceptance metadata. It does not deliver any fetched ATProto data to React. Rows are projected progressively, so the reactive Jazz query updates as each item becomes available rather than waiting for the whole page. `/api/timeline/status` exposes whether the most recent projection is fetching, projecting, completed, or failed.
 
 > [!NOTE]
 > Client polling could be replaced with a push mechanism. For example, a firehose consumer could project rows into Jazz, which would then sync through the reactive Jazz subscription without a separate client messaging channel. Continuously consuming the firehose is substantially more resource-intensive, so it is deliberately outside this POC's bounded scope.
@@ -29,24 +30,60 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 
 | Component | Responsibility | Knows about Jazz? | Knows about Bluesky? |
 | --- | --- | --- | --- |
-| `server/app.ts` | HTTP routes and request validation | No | Only session-shaped route inputs |
-| `server/auth.ts` | OAuth sessions and Jazz JWTs | Stores sessions in a backend-only table | Yes |
+| `server/app.ts` | Session guard, HTTP validation, and error mapping | No | Only session-shaped route inputs |
+| `server/auth.ts` | OAuth, opaque BFF sessions, and Jazz JWTs | Stores encrypted authentication material in a backend-only table | Yes |
 | `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
 | `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
 | `server/timeline.ts` | Pure Bluesky-to-projection normalisation | Only the projection shape | Yes |
-| `server/bridge.ts` | Project reads into Jazz and reconcile queued intentions | Yes | Calls the Bluesky adapter |
+| `server/projector.ts` | Single-flight AppView reads and observable projection jobs | Through its writer | Calls the Bluesky adapter |
+| `server/projection-writer.ts` | Typed, idempotent projection writes into Jazz | Yes | Only normalised projection values |
+| `server/reconciler.ts` | Apply queued intentions to the PDS, then project the result | Through its writer | Yes |
+| `server/bridge.ts` | Compose the read and write sides into application operations | Yes | Yes |
 | `schema.ts` | Local relational projection and pending intentions | Yes | No protocol calls |
-| `src/Timeline.tsx` | One reactive Jazz query plus local-first commands | Yes | Only calls trigger/reconcile routes |
+| `operations.ts` | Validate the shared queued-operation contract | Describes intention rows | Describes source operations |
+| `src/Timeline.tsx` | Compose the reactive view and local-first commands | Yes | Only calls trigger/reconcile routes |
+| `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint | No | Knows only trigger metadata |
+| `src/use-outbox.ts` | Serialise retries of queued intentions | Yes | Calls the reconcile route |
 | `src/timeline-model.ts` | Pure rows-to-thread view model | No | No |
 | `src/TimelineView.tsx` | Presentational React components | No | No |
+| `pwa.ts` | Generate the install manifest and service worker | No | Keeps API traffic network-only |
 
-The bridge exposes three application-level operations:
+The bridge exposes three application-level operations and one status query:
 
 - `projectTimelinePage`: read a bounded authoritative page and progressively project it into Jazz.
 - `projectThread`: lazily read one thread and add it to the same projection.
 - `reconcileOperations`: apply queued local intentions to the authoritative system, then update Jazz with the result.
+- `getTimelineProjectionStatus`: inspect asynchronous projection completion or failure.
 
 For illustration purposes, Bluesky-specific OAuth, XRPC endpoints, AT URIs, records, and TIDs stay on one side. Jazz tables, permissions, reactive transport, and pending-operation rows stay on the other.
+
+## State lifecycles
+
+Timeline rows move from AppView through normalisation into idempotent Jazz upserts. The client never merges an HTTP timeline payload: `useAll` renders the local rows immediately and reacts as Jazz transports newly projected rows.
+
+Local posts and reactions are written to Jazz as `queued` intentions. The outbox serialises PDS writes and marks successful submissions as `sent`. For reactions, that durable marker remains until a later AppView read confirms the desired state; this means a process restart cannot let stale remote state overwrite the local intention. If several offline reaction changes target the same post, the final queued intention wins. This POC deliberately has no conflict UI.
+
+Authentication has two storage classes:
+
+- OAuth sessions, OAuth callback state, opaque BFF session mappings, and Jazz JWT signing keys are encrypted and persisted in the backend-only `oauthSessions` Jazz table.
+- The browser caches the short-lived Jazz JWT in local storage so an already-open or previously opened page can use its local Jazz data while the BFF is unreachable. An authoritative `401` or `403` clears that cache; a network failure does not.
+
+The login form state, in-flight HTTP requests, and projection-status history beyond the latest job are intentionally ephemeral.
+
+## Offline installation
+
+Production builds are installable PWAs. The generated service worker precaches the HTML, JavaScript, CSS, Jazz WASM, and Jazz worker files. It deliberately does not intercept `/api/*`, `/xrpc/*`, or Jazz sync traffic: Jazz remains responsible for local rows and queued intentions, while the network routes only hydrate or reconcile that state.
+
+Bluesky avatars and post images are cached as they are viewed. This media cache keeps at most 100 responses and expires entries after seven days so images cannot grow without bound. Text, profiles, thread structure, reactions, and the outbox remain in Jazz rather than the service-worker cache.
+
+The service worker is registered only in production builds, avoiding stale development modules during Vite hot reloads. To inspect the installable build locally:
+
+```sh
+pnpm build
+pnpm preview --port 5173
+```
+
+Loopback origins are considered secure for PWA development; a deployed copy must use HTTPS. A user must sign in and open the app online once before it can reopen their local timeline offline. OAuth and data that have never reached the device cannot work without a connection.
 
 ## Layering Jazz over another database
 
@@ -68,7 +105,8 @@ The authoritative database still owns business rules and final write ordering. J
 
 - Timeline updates use bounded polling rather than consuming the firehose.
 - Moderation labels and most rich embeds are not projected; image embeds are supported.
-- The example has no production cache-retention policy.
+- The example has no production Jazz row-retention policy.
+- The browser may evict service-worker or Jazz storage under device pressure; the POC does not request persistent storage.
 - Loopback OAuth and environment-managed encryption keys are development choices, not a production deployment design.
 
 ## Run
@@ -84,3 +122,21 @@ pnpm dev
 Open `http://127.0.0.1:5173`. OAuth uses ATProto's loopback client metadata and redirects through `http://127.0.0.1:3001`; use the same loopback address for the app so its session cookie is sent correctly.
 
 Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match. OAuth session material is encrypted with AES-256-GCM before it is stored in Jazz's backend-only `oauthSessions` table. `OAUTH_SESSION_ENCRYPTION_KEY` must contain a 64-character hexadecimal key; changing it invalidates existing sessions. The table has no client permissions and does not sync to browsers.
+
+## Changing the schema
+
+Keep existing local caches and describe schema changes with Jazz migrations:
+
+```sh
+pnpm exec jazz-tools migrations create --name "describe the change"
+```
+
+Review the generated snapshot and typed migration in `migrations/`. Fill in any explicit defaults requested by the generator, then run:
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+Do not change the app ID or database path merely to bypass an incompatible schema. A new app ID creates a separate Jazz application and is useful only when isolation is the intended result. For normal development, keep `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` aligned and add a migration so existing local and server data can evolve.
