@@ -45,7 +45,7 @@ describe("timeline projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     };
 
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     vi.doMock("./bluesky.js", () => ({
       deleteRecord: vi.fn(),
       fetchPostThread: vi.fn(),

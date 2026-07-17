@@ -100,7 +100,7 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
 
     const id = stableObjectId(`bluesky-${kind}`, `${did}:${post.uri}`);
     if (kind === "like") {
-      dependencies.writer.writeLike({
+      await dependencies.writer.writeLike({
         id,
         uri: uri ?? `at://${did}/${collection}/${operation.rkey}`,
         actorDid: did,
@@ -109,7 +109,7 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
         active: operation.payload.active,
       });
     } else {
-      dependencies.writer.writeRepost({
+      await dependencies.writer.writeRepost({
         id,
         uri,
         cid,
@@ -130,7 +130,7 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
     for (const operation of operations) {
       if (operation.kind === "post") await reconcilePost(did, session, operation);
       else await reconcileReaction(did, session, operation);
-      dependencies.writer.markOperationSent(operation);
+      await dependencies.writer.markOperationSent(operation);
     }
   }
 

@@ -14,6 +14,11 @@ export default defineConfig(({ mode }) => {
     plugins: [
       jazzPlugin({
         adminSecret: env.JAZZ_ADMIN_SECRET,
+        // The Vite plugin's managed runtime accepts this option, but its public
+        // Vite options type does not expose it yet. A spread keeps this example
+        // scoped to the public plugin while giving the separate BFF process the
+        // same explicit backend identity as the local Jazz server.
+        ...{ backendSecret: env.BACKEND_SECRET },
         server: {
           port: 4200,
           // Offline clients can reconnect with queued writes from an older

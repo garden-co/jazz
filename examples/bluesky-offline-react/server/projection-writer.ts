@@ -11,25 +11,25 @@ import {
   type PostView,
   type ProfileView,
 } from "./timeline.js";
-import { db } from "./jazz.js";
+import { getBackendDb } from "./jazz.js";
 import type { FlatThread } from "./thread-normalizer.js";
 
-type ProjectionDatabase = typeof db;
+type ProjectionDatabase = ReturnType<typeof getBackendDb>;
 type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
 type NormalizedPost = PostBundle["post"];
 export type ReactionIntents = Map<string, ReactionOperation>;
 
-function projectRow<TRow, TInit>(
+async function projectRow<TRow, TInit>(
   database: ProjectionDatabase,
   table: TableProxy<TRow, TInit>,
   id: string,
   data: Partial<TInit>,
 ) {
   try {
-    database.upsert(table, data, { id });
+    await database.upsert(table, data, { id }).wait({ tier: "edge" });
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("object already exists")) throw error;
-    database.update(table, id, data);
+    await database.update(table, id, data).wait({ tier: "edge" });
   }
 }
 
@@ -71,30 +71,30 @@ function reactionKey(kind: ReactionOperation["kind"], postId: string) {
   return `${kind}:${postId}`;
 }
 
-export function createProjectionWriter(database: ProjectionDatabase = db) {
+export function createProjectionWriter(database: ProjectionDatabase = getBackendDb()) {
   async function writeProfile(profile: ProfileProjection) {
     const existing = await database.one(app.profiles.where({ id: { eq: profile.id } }));
-    projectRow(database, app.profiles, profile.id, mergeProfileProjection(existing, profile));
+    await projectRow(database, app.profiles, profile.id, mergeProfileProjection(existing, profile));
   }
 
   async function writePostBundle(bundle: PostBundle) {
     if (bundle.quote) await writePostBundle(bundle.quote);
     if (bundle.profile) await writeProfile(bundle.profile);
     const { id, ...post } = bundle.post;
-    projectRow(database, app.posts, id, { ...post, state: "synced" });
+    await projectRow(database, app.posts, id, { ...post, state: "synced" });
 
     const expectedImages = new Set(bundle.images.map((image) => image.id));
     const existingImages = await database.all(app.postImages.where({ postId: { eq: id } }));
-    for (const image of bundle.images) {
+    await Promise.all(bundle.images.map(async (image) => {
       const { id: imageId, ...data } = image;
-      projectRow(database, app.postImages, imageId, data);
-    }
-    for (const image of existingImages) {
-      if (!expectedImages.has(image.id)) database.delete(app.postImages, image.id);
-    }
+      await projectRow(database, app.postImages, imageId, data);
+    }));
+    await Promise.all(existingImages
+      .filter((image) => !expectedImages.has(image.id))
+      .map((image) => database.delete(app.postImages, image.id).wait({ tier: "edge" })));
   }
 
-  function writeLike(data: {
+  async function writeLike(data: {
     id: string;
     uri: string;
     actorDid: string;
@@ -103,10 +103,10 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     active: boolean;
   }) {
     const { id, ...row } = data;
-    projectRow(database, app.likes, id, row);
+    await projectRow(database, app.likes, id, row);
   }
 
-  function writeRepost(data: {
+  async function writeRepost(data: {
     id: string;
     uri?: string;
     cid?: string;
@@ -117,7 +117,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     active: boolean;
   }) {
     const { id, ...row } = data;
-    projectRow(database, app.reposts, id, row);
+    await projectRow(database, app.reposts, id, row);
   }
 
   async function loadReactionIntents(ownerDid: string): Promise<ReactionIntents> {
@@ -152,7 +152,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
       if (kind === "like") {
         const existing = await database.one(app.likes.where({ id: { eq: id } }));
         if (viewerUri) {
-          writeLike({
+          await writeLike({
             id,
             uri: viewerUri,
             actorDid: ownerDid,
@@ -161,12 +161,12 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
             active: true,
           });
         } else if (existing) {
-          writeLike({ ...existing, active: false });
+          await writeLike({ ...existing, active: false });
         }
       } else {
         const existing = await database.one(app.reposts.where({ id: { eq: id } }));
         if (viewerUri) {
-          writeRepost({
+          await writeRepost({
             id,
             uri: viewerUri,
             cid: existing?.cid ?? undefined,
@@ -177,7 +177,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
             active: true,
           });
         } else if (existing) {
-          writeRepost({
+          await writeRepost({
             ...existing,
             uri: existing.uri ?? undefined,
             cid: existing.cid ?? undefined,
@@ -187,15 +187,15 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
       }
 
       if (intent) {
-        database.delete(app.pendingOperations, intent.id);
+        await database.delete(app.pendingOperations, intent.id).wait({ tier: "edge" });
         intents.delete(reactionKey(kind, post.id));
       }
     }
   }
 
-  function writeThreadEntry(rootPostId: string, bundle: PostBundle, sortOrder: number) {
+  async function writeThreadEntry(rootPostId: string, bundle: PostBundle, sortOrder: number) {
     const id = stableObjectId("thread-entry", `${rootPostId}:${bundle.post.id}`);
-    projectRow(database, app.threadEntries, id, {
+    await projectRow(database, app.threadEntries, id, {
       rootPostId,
       postId: bundle.post.id,
       parentPostId: bundle.post.replyParentId,
@@ -220,21 +220,22 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     for (const bundle of bundles.values()) {
       if (bundle.profile) profiles.set(bundle.profile.id, bundle.profile);
     }
+    // Profiles must settle before posts because authorProfileId is a required relation.
+    await Promise.all([...profiles.values()].map(writeProfile));
+    await Promise.all([...bundles.values()].map((bundle) =>
+      writePostBundle({ ...bundle, profile: undefined })));
     await Promise.all([
-      ...[...profiles.values()].map(writeProfile),
-      ...[...bundles.values()].map((bundle) => writePostBundle({ ...bundle, profile: undefined })),
+      ...normalized.likes.map(writeLike),
+      ...normalized.reposts.map(writeRepost),
     ]);
-    for (const like of normalized.likes) writeLike(like);
-    for (const repost of normalized.reposts) writeRepost(repost);
     await projectViewerState(ownerDid, normalized.post, item.post?.viewer, intents);
     const { id, ...entry } = normalized.timelineEntry;
-    projectRow(database, app.timelineEntries, id, entry);
+    await projectRow(database, app.timelineEntries, id, entry);
 
     const orderedBundles = [...bundles.values()]
       .sort((left, right) => left.post.createdAt.localeCompare(right.post.createdAt));
-    for (const [index, bundle] of orderedBundles.entries()) {
-      writeThreadEntry(normalized.timelineEntry.threadRootId, bundle, index);
-    }
+    await Promise.all(orderedBundles.map((bundle, index) =>
+      writeThreadEntry(normalized.timelineEntry.threadRootId, bundle, index)));
     return normalized.timelineEntry;
   }
 
@@ -260,11 +261,11 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
         `at://${ownerDid}/app.bsky.feed.post/${operation.rkey}`,
       )));
     const active = await database.all(app.timelineEntries.where({ ownerDid: { eq: ownerDid }, active: { eq: true } }));
-    for (const entry of active) {
-      if (entry.sortAt >= boundary && !returnedIds.has(entry.id) && !queuedPostIds.has(entry.postId)) {
-        projectRow(database, app.timelineEntries, entry.id, { active: false });
-      }
-    }
+    await Promise.all(active
+      .filter((entry) => entry.sortAt >= boundary
+        && !returnedIds.has(entry.id)
+        && !queuedPostIds.has(entry.postId))
+      .map((entry) => projectRow(database, app.timelineEntries, entry.id, { active: false })));
   }
 
   async function projectProfile(profile: (ProfileView & { indexedAt?: string }) | undefined) {
@@ -289,7 +290,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
         await projectViewerState(ownerDid, bundle.post, entry.node.post?.viewer, intents);
         count += 1;
       }
-      projectRow(database, app.threadEntries, stableObjectId(
+      await projectRow(database, app.threadEntries, stableObjectId(
         "thread-entry",
         `${thread.rootPostId}:${entry.postId}`,
       ), {
@@ -304,8 +305,8 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     return { rootPostId: thread.rootPostId, count };
   }
 
-  function markOperationSent(operation: Operation) {
-    projectRow(database, app.pendingOperations, operation.id, {
+  async function markOperationSent(operation: Operation) {
+    await projectRow(database, app.pendingOperations, operation.id, {
       ownerDid: operation.ownerDid,
       kind: operation.kind,
       rkey: operation.rkey,
@@ -322,9 +323,8 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
       repostId: { eq: repostId },
       active: { eq: true },
     }));
-    for (const entry of entries) {
-      projectRow(database, app.timelineEntries, entry.id, { active: false });
-    }
+    await Promise.all(entries.map((entry) =>
+      projectRow(database, app.timelineEntries, entry.id, { active: false })));
   }
 
   return {

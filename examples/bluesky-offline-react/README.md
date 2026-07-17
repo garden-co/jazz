@@ -115,6 +115,9 @@ The authoritative database still owns business rules and final write ordering. J
 cp .env.example .env
 openssl rand -hex 32
 # Copy the output into OAUTH_SESSION_ENCRYPTION_KEY in .env.
+openssl rand -hex 32
+# Copy the output into BACKEND_SECRET in .env. The local Jazz server and BFF
+# must use this same value so projection writes run with backend authority.
 pnpm install
 pnpm dev
 ```

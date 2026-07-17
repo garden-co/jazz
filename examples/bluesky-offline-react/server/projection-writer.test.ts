@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../operations.js";
 import { stableObjectId } from "./timeline.js";
 
+const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
+
 afterEach(() => {
   vi.doUnmock("./jazz.js");
   vi.resetModules();
@@ -17,10 +19,10 @@ describe("profile projection", () => {
           throw new Error("Insert denied on table profiles - missing explicit policy");
         }),
       })),
-      update: vi.fn(),
-      delete: vi.fn(),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await expect(createProjectionWriter().projectProfile({
@@ -37,10 +39,10 @@ describe("profile projection", () => {
       upsert: vi.fn(() => {
         throw new Error("Upsert failed: object already exists: profile-id");
       }),
-      update: vi.fn(),
-      delete: vi.fn(),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await createProjectionWriter().projectProfile({
@@ -68,7 +70,7 @@ describe("profile projection", () => {
       }),
       delete: vi.fn(),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await expect(createProjectionWriter().projectProfile({
@@ -79,6 +81,7 @@ describe("profile projection", () => {
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => ({}) }));
     const { mergeProfileProjection } = await import("./projection-writer.js");
     expect(mergeProfileProjection({
       did: "did:plc:author",
@@ -121,11 +124,11 @@ describe("durable reaction projection", () => {
     const database = {
       all: vi.fn(async () => [{ ...operation, payload: JSON.stringify(operation.payload) }]),
       one: vi.fn(async () => null),
-      upsert: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
     const writer = createProjectionWriter();
     const intents = await writer.loadReactionIntents(operation.ownerDid);

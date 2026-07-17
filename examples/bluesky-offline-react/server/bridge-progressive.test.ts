@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 describe("progressive timeline projection", () => {
+  const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
+
   afterEach(() => {
     vi.doUnmock("./bluesky.js");
     vi.doUnmock("./jazz.js");
@@ -17,9 +19,9 @@ describe("progressive timeline projection", () => {
       one: vi.fn()
         .mockImplementationOnce(() => firstLookup)
         .mockResolvedValue(null),
-      upsert: vi.fn(),
-      update: vi.fn(),
-      delete: vi.fn(),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
     };
     const post = (did: string, rkey: string) => ({
       uri: `at://${did}/app.bsky.feed.post/${rkey}`,
@@ -29,7 +31,7 @@ describe("progressive timeline projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     });
 
-    vi.doMock("./jazz.js", () => ({ db: database }));
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
     vi.doMock("./bluesky.js", () => ({
       deleteRecord: vi.fn(),
       fetchPostThread: vi.fn(),
