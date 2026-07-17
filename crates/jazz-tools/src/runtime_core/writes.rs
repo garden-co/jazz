@@ -367,53 +367,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         row_id: ObjectId,
         batch_id: BatchId,
     ) -> Result<Vec<LocalBatchMember>, RuntimeError> {
-        let row_locator = self
+        let members = self
             .storage
-            .load_row_locator(row_id)
-            .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            .load_local_batch_row_index(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch row index: {err}")))?
             .ok_or_else(|| {
                 RuntimeError::WriteError(format!(
-                    "missing row locator while tracking local batch {batch_id:?} for {row_id:?}"
+                    "missing local batch row index while tracking {batch_id:?}"
                 ))
-            })?;
-        let mut members = self
-            .storage
-            .scan_history_row_batches(row_locator.table.as_str(), row_id)
-            .map_err(|err| RuntimeError::WriteError(format!("scan history rows: {err}")))?
+            })?
             .into_iter()
-            .filter(|row| row.batch_id == batch_id)
-            .map(|row| {
-                let branch_name = BranchName::new(&row.branch);
-                Ok(LocalBatchMember {
-                    object_id: row_id,
-                    table_name: row_locator.table.to_string(),
-                    branch_name,
-                    schema_hash: self.local_batch_member_schema_hash(
-                        branch_name,
-                        row_id,
-                        row.batch_id(),
-                    )?,
-                    row_digest: row.content_digest(),
-                })
-            })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
-        if members.len() > 1 {
-            members.sort_by(|left, right| {
-                left.object_id
-                    .uuid()
-                    .as_bytes()
-                    .cmp(right.object_id.uuid().as_bytes())
-                    .then_with(|| left.table_name.cmp(&right.table_name))
-                    .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                    .then_with(|| {
-                        left.schema_hash
-                            .as_bytes()
-                            .cmp(right.schema_hash.as_bytes())
-                    })
-                    .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
-            });
-            members.dedup();
-        }
+            .filter(|member| member.object_id == row_id)
+            .collect::<Vec<_>>();
         if members.is_empty() {
             return Err(RuntimeError::WriteError(format!(
                 "missing local batch member rows for {batch_id:?} / {row_id:?}"
