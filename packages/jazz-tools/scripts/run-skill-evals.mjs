@@ -206,9 +206,17 @@ function buildJudgePrompt(cases, responses) {
     response: responses.find((response) => response.id === evalCase.id)?.response,
   }));
 
-  return `Grade these blind skill-evaluation responses. For each rubric criterion, return 1 only if
-the response explicitly and correctly satisfies it; otherwise return 0. Do not infer omitted facts,
-and do not reward the response merely for selecting the expected skill. Return rubric scores in the
+  return `Grade these blind skill-evaluation responses for semantic correctness, not phrase matching.
+For each rubric criterion, return 1 when the response correctly states, demonstrates, or
+unambiguously entails the required behavior; otherwise return 0. Code, API usage, type signatures,
+and concrete procedures can satisfy a prose criterion without repeating its wording. Accept ordinary
+equivalents such as creating a new client for recreating one, and do not require redundant statements
+when the required fact is already clear from a concrete example.
+
+Do not invent facts that are absent, excuse a technically important omission, or reward a response
+merely for selecting the expected skill. Do not claim knowledge of hidden tool calls: judge only the
+response's observable claims and evidence. For a negative criterion, score 1 when the response avoids
+the prohibited claim and does not otherwise contradict the criterion. Return rubric scores in the
 same order as the criteria. Each rubricScores array must contain exactly the number of entries in
 rubricScoreCount for that record—no more and no fewer.
 

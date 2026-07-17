@@ -21,7 +21,7 @@ uses.
 
 ## Find the relevant page
 
-1. Fetch `https://jazz.tools/docs/llms.txt`.
+1. Fetch `https://jazz.tools/llms.txt`.
 2. Select the page whose title and description match the question.
 3. Fetch that page by appending `.mdx` to its documentation URL. For example, fetch
    `https://jazz.tools/docs/schemas/defining-tables.mdx` for the page at

@@ -236,10 +236,10 @@
       "prompt": "There is no Jazz project or installed package to inspect. Find the current official documentation for defining tables and explain how you selected the source.",
       "expectedSkills": ["jazz-docs"],
       "rubric": [
-        "Uses https://jazz.tools/docs/llms.txt to identify the relevant documentation page.",
-        "Fetches the selected page as MDX by appending .mdx to its documentation URL.",
-        "Fetches only the relevant page or pages instead of loading the complete documentation set.",
-        "States that an installed package version and its public types take precedence for version-specific implementation details when they are available."
+        "Uses https://jazz.tools/llms.txt to identify the relevant documentation page.",
+        "Identifies the selected page's machine-readable MDX URL by appending .mdx to its documentation URL.",
+        "Selects only the relevant page or pages instead of recommending that the complete documentation set be loaded.",
+        "Explains that an installed package version and its public types take precedence for version-specific implementation details when available."
       ]
     },
     {
@@ -328,7 +328,7 @@
       "expectedSkills": ["jazz-auth"],
       "rubric": [
         "Uses updateAuthToken only for Alice's same-principal token refresh.",
-        "Recreates Db or JazzProvider for sign-out and the switch to Bob.",
+        "Creates a new Db or replaces or re-keys JazzProvider when signing in as Bob after Alice signs out.",
         "Does not use updateAuthToken(null) as logout or a principal switch.",
         "Uses Alice's stable JWT sub to confirm that the refreshed token is for the same principal."
       ]
@@ -341,8 +341,8 @@
       "rubric": [
         "States that logout shuts down the client but does not clear provider credentials for the app.",
         "States that wipeData deletes browser OPFS data but preserves the local-first secret.",
-        "States that deleteClientStorage resets browser worker-backed database storage while preserving identity storage.",
-        "States that clearing the local-first secret can create a different identity and make owned data inaccessible."
+        "States that deleteClientStorage resets browser worker-backed database storage while preserving the current identity or sign-in state, for example by not signing out or deleting credentials.",
+        "Explains that clearing or replacing the local-first secret changes identity access and can make data owned by the previous identity inaccessible."
       ]
     },
     {
@@ -428,7 +428,7 @@
         "Uses counter only on a non-nullable integer and explains MRCA-relative snapshot deltas.",
         "Uses g-set only on a non-nullable array and explains deterministic concurrent union.",
         "States that a later sequential array replacement can still remove g-set elements.",
-        "Recommends operation rows when intent identity, deduplication, removal, or auditing is required."
+        "Recommends operation rows when the application needs behavior snapshot merge strategies cannot represent, such as durable intent identity, deduplication, removal, or auditing."
       ]
     },
     {
@@ -466,7 +466,7 @@
         "Installs jazz-rn as a compatible direct application dependency.",
         "States that Jazz native code requires a development build and does not run in Expo Go.",
         "Imports jazz-tools/expo/polyfills before every Jazz import.",
-        "Uses jazz-tools/react-native for providers and data hooks and jazz-tools/expo for Expo identity helpers.",
+        "Uses jazz-tools/react-native for JazzProvider and jazz-tools/expo for Expo identity helpers.",
         "Prebuilds and runs both native targets to verify codegen and linkage."
       ]
     },
@@ -502,8 +502,8 @@
       "expectedSkills": ["jazz-rust"],
       "rubric": [
         "Builds schema and rows with SchemaBuilder, TableSchema builders, and row_input rather than JSON fixtures.",
-        "States that JazzClient query returns ObjectId plus positional Vec<Value> rows.",
-        "Defines an application struct and strict fallible positional decoder.",
+        "Treats JazzClient query results as object IDs plus positional Value data.",
+        "Introduces or clearly describes a typed application row and strict fallible positional decoder.",
         "Centralizes projection order with decoder order and validates nullability and Value variants.",
         "Does not claim that generated compile-time typed Rust table handles currently exist."
       ]
