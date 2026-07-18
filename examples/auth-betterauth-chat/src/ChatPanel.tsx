@@ -43,8 +43,14 @@ export function ChatPanel({
   React.useEffect(() => {
     let cancelled = false;
     const ids = rowIds.length > 0 ? rowIds.split("\0") : [];
-    const next = Object.fromEntries(ids.map((id) => [id, db.canDelete(app.messages, id)]));
-    if (!cancelled) setCanDeleteById(next);
+    void (async () => {
+      const next = Object.fromEntries(
+        await Promise.all(
+          ids.map(async (id) => [id, await db.canDelete(app.messages, id)] as const),
+        ),
+      );
+      if (!cancelled) setCanDeleteById(next);
+    })();
     return () => {
       cancelled = true;
     };
@@ -65,14 +71,14 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db
-        .insert(app.messages, {
+      await (
+        await db.insert(app.messages, {
           author_name: authorName,
           chat_id: chatId,
           text: messageText.trim(),
           sent_at: new Date(),
         })
-        .wait({ tier: "edge" });
+      ).wait({ tier: "edge" });
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
@@ -86,7 +92,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db.delete(app.messages, messageId).wait({ tier: "edge" });
+      await (await db.delete(app.messages, messageId)).wait({ tier: "edge" });
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {

@@ -65,11 +65,11 @@ export function CreateProject() {
   const session = useSession();
 
   async function handleCreate() {
-    const { value: project } = db.insert(app.projects, {
+    const { value: project } = await db.insert(app.projects, {
       name: "Website redesign",
     });
 
-    db.insert(app.tasks, {
+    await db.insert(app.tasks, {
       title: "Design homepage",
       done: false,
       projectId: project.id,

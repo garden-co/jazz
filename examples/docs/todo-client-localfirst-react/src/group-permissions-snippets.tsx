@@ -97,8 +97,12 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
 // #endregion group-permissions
 
 // #region group-create
-export function createWorkspace(db: ReturnType<typeof useDb>, name: string, creatorId: string) {
-  const { value: workspace } = db.insert(app.workspaces, { name });
+export async function createWorkspace(
+  db: ReturnType<typeof useDb>,
+  name: string,
+  creatorId: string,
+) {
+  const { value: workspace } = await db.insert(app.workspaces, { name });
   // Add the creator as admin immediately so they can manage the workspace
   db.insert(app.workspaceMembers, {
     workspaceId: workspace.id,
@@ -110,13 +114,13 @@ export function createWorkspace(db: ReturnType<typeof useDb>, name: string, crea
 // #endregion group-create
 
 // #region group-add-member
-export function addMember(
+export async function addMember(
   db: ReturnType<typeof useDb>,
   workspaceId: string,
   userId: string,
   role: "reader" | "writer" | "contributor" | "admin",
 ) {
-  db.insert(app.workspaceMembers, { workspaceId, user_id: userId, role });
+  await db.insert(app.workspaceMembers, { workspaceId, user_id: userId, role });
 }
 // #endregion group-add-member
 
@@ -155,12 +159,12 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 // #endregion group-members-list
 
 // #region group-change-role
-export function changeRole(
+export async function changeRole(
   db: ReturnType<typeof useDb>,
   memberId: string,
   newRole: "reader" | "contributor" | "writer" | "admin",
 ) {
-  db.update(app.workspaceMembers, memberId, { role: newRole });
+  await db.update(app.workspaceMembers, memberId, { role: newRole });
 }
 // #endregion group-change-role
 
@@ -171,6 +175,6 @@ export async function removeMember(
   userId: string,
 ) {
   const member = await db.one(app.workspaceMembers.where({ workspaceId, user_id: userId }));
-  if (member) db.delete(app.workspaceMembers, member.id);
+  if (member) await db.delete(app.workspaceMembers, member.id);
 }
 // #endregion group-remove-member

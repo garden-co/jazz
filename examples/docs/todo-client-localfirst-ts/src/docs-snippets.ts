@@ -14,13 +14,13 @@ export async function readTodosOneshot(db: Db) {
 
 // #region reading-subscriptions-ts
 export function subscribeTodos(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length));
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all?.length ?? 0));
 }
 // #endregion reading-subscriptions-ts
 
 // #region where-subscription-ts
 export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onChange(all));
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onChange(all ?? []));
 }
 // #endregion where-subscription-ts
 
