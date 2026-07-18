@@ -157,12 +157,11 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
         hasher.update(&[0]);
     }
 
-    // Schema-level default
+    // Absence of a default must hash like pre-default schemas so historical
+    // schema-qualified branch names remain stable.
     if let Some(default) = &col.default {
         hasher.update(&[1]);
         hash_value(hasher, default);
-    } else {
-        hasher.update(&[0]);
     }
 
     if let Some(strategy) = col.merge_strategy {
