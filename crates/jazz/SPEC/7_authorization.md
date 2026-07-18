@@ -210,6 +210,13 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   upstream permission-scope subscriptions (ch. 9). The current contract is
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
   future policy for cache lifetime, not a source of permission truth here.
+- 🔶 **Session claim list membership (`SessionInList`).** The public policy DSL
+  supports `SessionInList { path, values }` (e.g. role-in-set checks against
+  session claims), and pre-port examples use it (`auth-simple-chat`), but the
+  core server shell's public-schema conversion rejects it as unsupported. Needs
+  lowering to a claims-literal disjunction (or first-class support) so the
+  example suite can rejoin CI; until then `auth-simple-chat#test` is excluded
+  from the CI test filter (see `dev/CI_NOTES.md`, 2026-07-18).
 - 🔶 **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
