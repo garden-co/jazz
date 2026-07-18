@@ -399,7 +399,10 @@ describe("web/createJazzClient async subscription channel", () => {
     });
 
     expect(client.db).toBeDefined();
-    expect("all" in client.db).toBe(false);
+    // Channel facade intentionally exposes async read helpers (all/one) that
+    // route through the channel; the load-bearing invariant is that no local
+    // Db is created (next assertion). Surface extended 2026-07-18 (c2d24ffc6).
+    expect("all" in client.db).toBe(true);
     expect(mocks.createDb).not.toHaveBeenCalled();
 
     await expect(readSubscriptionRows(client)).resolves.toEqual([
@@ -468,7 +471,9 @@ describe("web/createJazzClient async subscription channel", () => {
     const client = await createJazzClient({ appId: "default-worker-channel" });
 
     expect(client.db).toBeDefined();
-    expect("all" in client.db).toBe(false);
+    // Channel facade intentionally exposes async read helpers since c2d24ffc6;
+    // the invariant under test is the worker-channel wiring below.
+    expect("all" in client.db).toBe(true);
     expect(mocks.createDb).toHaveBeenCalledWith(
       expect.objectContaining({
         appId: "default-worker-channel",

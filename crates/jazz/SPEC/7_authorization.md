@@ -225,6 +225,10 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
   this lands; see `dev/CI_NOTES.md` 2026-07-19).
+- 🔶 **Non-claims session references (`session.authMode`).** Policy conversion
+  supports only `session.user_id` and `session.claims.*`; the betterauth
+  example references `session.authMode`. Decide: promote to a first-class
+  session attribute, or migrate such policies to claims.
 - 🔶 **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
