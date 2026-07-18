@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 
 const profilePath = resolve(process.argv[2] ?? "");
 if (!process.argv[2]) {
-  console.error("usage: node dev/benchmarks/wasm-ingest/summarize-v8-profile.mjs isolate-*.cpuprofile");
+  console.error(
+    "usage: node dev/benchmarks/wasm-ingest/summarize-v8-profile.mjs isolate-*.cpuprofile",
+  );
   process.exit(2);
 }
 
@@ -115,7 +117,11 @@ function moduleName(callFrame) {
   const url = callFrame.url ?? "";
   if (url.includes("/packages/")) {
     const packageIndex = url.indexOf("/packages/");
-    return url.slice(packageIndex + 1).split("/").slice(0, 4).join("/");
+    return url
+      .slice(packageIndex + 1)
+      .split("/")
+      .slice(0, 4)
+      .join("/");
   }
   if (url.startsWith("node:")) return url.split("/").slice(0, 2).join("/");
   if (url.startsWith("wasm://")) return "wasm-unknown";
@@ -132,7 +138,9 @@ function rustPathParts(name, count) {
   if (parts.length < 2) return null;
   const crate = parts[0];
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(crate)) return null;
-  if (["core", "alloc", "std", "hashbrown", "talc", "sha1_smol", "groove", "jazz"].includes(crate)) {
+  if (
+    ["core", "alloc", "std", "hashbrown", "talc", "sha1_smol", "groove", "jazz"].includes(crate)
+  ) {
     return parts.slice(0, count).join("::");
   }
   return null;

@@ -5,7 +5,7 @@
     "format": "oxfmt --ignore-path .oxfmtignore .",
     "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
     "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
-    "ensure:rust-toolchain": "rustup target add wasm32-unknown-unknown",
+    "ensure:rust-toolchain": "rustup target add wasm32-unknown-unknown && (wasm-pack --version >/dev/null 2>&1 || cargo install wasm-pack@0.13.1 --locked)",
     "build:vercel-docs": "bash dev/scripts/install-vercel-deps.sh && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
     "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-wasm --only",

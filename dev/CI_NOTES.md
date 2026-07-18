@@ -1,0 +1,53 @@
+# CI adjustments for the engine-swap PR (draft, night of 2026-07-18)
+
+Per Anselm's directive: every CI-relevant removal or alteration documented in detail.
+"Add" items are new coverage; nothing existing is silently dropped.
+
+## ALTER: exempt benchmark ledgers from `pnpm format:check` (lint job)
+
+- **What**: add `dev/benchmarks/SMOKE_LEDGER.md` and
+  `dev/benchmarks/realistic/history/bench_history.json` to `.oxfmtignore`.
+- **Why**: the markdown formatter worker OOMs on the 18k-line append-only
+  SMOKE_LEDGER (CI lint job dies with `ERR_WORKER_OUT_OF_MEMORY`). Ledgers are
+  receipts of record, not source; reformatting them would churn historical
+  entries anyway. The bench-history JSON is machine-appended.
+- **Risk**: none to code style; ledger entries are free-form by design.
+
+## ADD: install wasm-pack in CI (test-ts job, and any job running `pnpm build:ci`)
+
+- **What**: CI fails with `sh: 1: wasm-pack: not found` — the port switched
+  `crates/jazz-wasm` to `wasm-pack build --target web --release`, and the
+  runner toolchain setup never installs wasm-pack.
+- **How**: extend `pnpm run ensure:rust-toolchain` (already invoked by every
+  job) to install wasm-pack if absent — keeps the fix in one place instead of
+  per-workflow steps. Pin a version for reproducibility.
+
+## FIX (not a CI change): 8 jazz-tools unit tests broken by tonight's
+
+anonymization commit `f84151180`
+
+- `converts_policy_graph_perf_public_schema_to_native_fixture_byte_stably` and
+  friends byte-snapshot the policy-graph-perf fixture, whose two metadata
+  strings were anonymized; snapshots regenerate to match the new strings.
+- `offline_persistent_client_rehydrates_rows_from_core_storage` references the
+  renamed trace env/log prefix (`JAZZ_CUSTOMER_TRACE_REHYDRATE` →
+  `JAZZ_REHYDRATE_TRACE`); references aligned.
+- The anonymization itself is kept: it removed, among other things, a
+  split-string evasion of the sensitive-data gate in the jazz-sim bench.
+
+## OBSERVATION: local canonical gate vs CI shape
+
+CI runs `cargo test --workspace --lib --bins --tests --features test` — a
+different slicing than the canonical per-crate gates. Both catch the 8
+failures; keep both (workspace slicing in CI catches feature-unification
+differences the per-crate gates can miss).
+
+## PENDING: realistic-benchmarks workflow verdict on this branch (run 29659318921)
+
+## PENDING: decide whether the incremental-delivery canaries + differential
+
+harness + oracle (currently local-convention gates) should be explicit named CI
+steps so PR reviewers see them green rather than trusting the ledger.
+Recommendation: yes — they are the correctness story of this PR; a dedicated
+`differential-gates` job makes them first-class. To be discussed with Anselm
+before altering ci.yml.

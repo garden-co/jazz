@@ -19,11 +19,23 @@ const feedMode = process.env.JAZZ_WASM_INGEST_FEED_MODE ?? "coalesced";
 
 const [{ encodeSchema }, { openConfig }, websocketCodec, adapterModule, napiModule] =
   await Promise.all([
-    import(pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/schema-codec.js"))),
-    import(pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-codec.js"))),
-    import(pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/websocket.js"))),
     import(
-      pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-runtime-adapter.js"))
+      pathToFileURL(
+        join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/schema-codec.js"),
+      )
+    ),
+    import(
+      pathToFileURL(
+        join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-codec.js"),
+      )
+    ),
+    import(
+      pathToFileURL(join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/websocket.js"))
+    ),
+    import(
+      pathToFileURL(
+        join(repoRoot, "packages/jazz-tools/dist/runtime/native-runtime/native-runtime-adapter.js"),
+      )
     ),
     Promise.resolve(require(join(repoRoot, "crates/jazz-napi/index.js"))),
   ]);
@@ -200,7 +212,14 @@ const receipt = {
 };
 
 await writeFile(outFile, `${JSON.stringify(receipt, null, 2)}\n`);
-console.log(JSON.stringify({ ok: errors.length === 0 && settled.ok, receipt: outFile, ...receipt.counts, timingMs: receipt.timingMs }));
+console.log(
+  JSON.stringify({
+    ok: errors.length === 0 && settled.ok,
+    receipt: outFile,
+    ...receipt.counts,
+    timingMs: receipt.timingMs,
+  }),
+);
 process.exit(errors.length === 0 && settled.ok ? 0 : 1);
 
 function decodeFixtureServerFrames(rawFixture, codec) {
@@ -259,8 +278,7 @@ async function waitForCallbacks(adapter, states, timeoutMs) {
 async function closeAdapter(adapter) {
   try {
     await adapter.close?.();
-  } catch {
-  }
+  } catch {}
 }
 
 function readySubscriptionCount(states) {
@@ -310,5 +328,8 @@ function round(value) {
 }
 
 function timestamp() {
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }

@@ -7,8 +7,7 @@ import { chromium } from "playwright";
 const baseUrl = process.env.JAZZ_WASM_INGEST_APP_URL ?? "http://localhost:3000";
 const email = process.env.JAZZ_WASM_INGEST_LOGIN_EMAIL ?? "";
 const outDir = resolve(
-  process.env.JAZZ_WASM_INGEST_CAPTURE_DIR ??
-    "/tmp/jazz-wasm-ingest-captures",
+  process.env.JAZZ_WASM_INGEST_CAPTURE_DIR ?? "/tmp/jazz-wasm-ingest-captures",
 );
 const outFile = resolve(
   process.env.JAZZ_WASM_INGEST_CAPTURE_FILE ??
@@ -199,7 +198,8 @@ async function authenticate(browser) {
 
 async function waitForReady(page) {
   const handle = await page.waitForFunction(
-    () => (globalThis.__codexJazzPerf ?? []).some((entry) => entry.label === "[jazz-holder] all-ready"),
+    () =>
+      (globalThis.__codexJazzPerf ?? []).some((entry) => entry.label === "[jazz-holder] all-ready"),
     undefined,
     { timeout: holderReadyTimeoutMs },
   );
@@ -257,5 +257,8 @@ async function findCachedChromium() {
 }
 
 function timestamp() {
-  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }

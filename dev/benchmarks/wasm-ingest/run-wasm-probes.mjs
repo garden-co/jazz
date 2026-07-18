@@ -21,7 +21,9 @@ const probes = [
 const results = [];
 for (const [shape, iterations, entries, run] of probes) {
   if (typeof run !== "function") {
-    throw new Error(`${shape} probe export missing; rebuild jazz-wasm with --features bench-probes`);
+    throw new Error(
+      `${shape} probe export missing; rebuild jazz-wasm with --features bench-probes`,
+    );
   }
   const started = performance.now();
   const checksum = entries > 0 ? run(iterations, entries) : run(iterations);
