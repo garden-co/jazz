@@ -2022,6 +2022,24 @@ fn convert_policy_predicate(
                 CmpOp::Ge => Predicate::Gte(left, right),
             })
         }
+        PolicyExpr::SessionCmp {
+            path: path_segments,
+            op,
+            value,
+        } => {
+            let left = convert_session_path_operand(table, path, path_segments)?;
+            let right = Operand::Literal(convert_policy_literal(table, path, value)?);
+            Ok(match op {
+                CmpOp::Eq => Predicate::Eq(left, right),
+                CmpOp::Ne => Predicate::Ne(left, right),
+                CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), path),
+                        "core schema policies only support Eq/Ne SessionCmp operators yet",
+                    ));
+                }
+            })
+        }
         PolicyExpr::IsNull { column } => Ok(Predicate::IsNull(Operand::Column(column.clone()))),
         PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
             Operand::Column(column.clone()),
@@ -2045,6 +2063,21 @@ fn convert_policy_predicate(
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Predicate::In(Operand::Column(column.clone()), values)),
+        PolicyExpr::SessionInList {
+            path: path_segments,
+            values,
+        } => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_policy_literal(table, &format!("{path}.SessionInList[{index}]"), value)
+                    .map(Operand::Literal)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|values| {
+                convert_session_path_operand(table, path, path_segments)
+                    .map(|operand| Predicate::In(operand, values))
+            }),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} yet"),
@@ -2876,6 +2909,74 @@ mod tests {
             vec![Predicate::In(
                 Operand::Column("kind".to_owned()),
                 Vec::new()
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_session_in_list_to_claim_membership_predicate() {
+        let legacy_role_id = ObjectId::from_uuid(
+            uuid::Uuid::parse_str("89d1af9b-6877-44d5-b214-7f9f95800a3d").unwrap(),
+        );
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::SessionInList {
+                        path: vec!["claims".to_owned(), "role".to_owned()],
+                        values: vec![
+                            Value::Text(legacy_role_id.uuid().to_string()),
+                            Value::Text("member".to_owned()),
+                        ],
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+        let policy = messages.read_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::In(
+                Operand::Claim("role".to_owned()),
+                vec![
+                    Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
+                    Operand::Literal(GrooveValue::String("member".to_owned())),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn converts_session_eq_cmp_to_claim_equality_predicate() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                        path: vec!["claims".to_owned(), "role".to_owned()],
+                        op: CmpOp::Eq,
+                        value: Value::Text("admin".to_owned()),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let messages = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "messages")
+            .unwrap();
+        let policy = messages.read_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::Eq(
+                Operand::Claim("role".to_owned()),
+                Operand::Literal(GrooveValue::String("admin".to_owned())),
             )]
         );
     }

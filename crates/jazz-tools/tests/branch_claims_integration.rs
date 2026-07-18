@@ -7,7 +7,8 @@ use std::time::Duration;
 use jazz_tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, row_input,
+    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, policy_expr,
+    row_input,
 };
 use serde_json::json;
 use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
@@ -28,6 +29,35 @@ fn branch_claims_gated_schema() -> Schema {
                             "join_code",
                             vec!["claims".into(), "join_code".into()],
                         )),
+                ),
+        )
+        .build()
+}
+
+fn role_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("role_in_list_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::SessionInList {
+                            path: vec!["claims".into(), "role".into()],
+                            values: vec!["admin".into(), "member".into()],
+                        }),
+                ),
+        )
+        .table(
+            TableSchema::builder("role_or_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::Or(vec![
+                            policy_expr::session_where("claims.role", "admin"),
+                            policy_expr::session_where("claims.role", "member"),
+                        ])),
                 ),
         )
         .build()
@@ -121,6 +151,133 @@ async fn query_applies_claims_select_policy() {
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");
             carol.shutdown().await.expect("shutdown carol");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_role_in_list_matches_equivalent_or_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = role_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("dddddddd-dddd-4ddd-dddd-ddddddddddd1")
+                .as_admin()
+                .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (in_list_row_id, _, in_list_batch_id) = admin
+                .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
+                .expect("admin creates in-list room");
+            admin
+                .wait_for_batch(in_list_batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("in-list room reaches edge");
+            let (or_row_id, _, or_batch_id) = admin
+                .insert("role_or_rooms", row_input!("name" => "or room"))
+                .expect("admin creates or room");
+            admin
+                .wait_for_batch(or_batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("or room reaches edge");
+
+            let in_list_query = QueryBuilder::new("role_in_list_rooms").build();
+            let or_query = QueryBuilder::new("role_or_rooms").build();
+
+            for (role, user_id) in [
+                ("admin", "dddddddd-dddd-4ddd-dddd-ddddddddddd2"),
+                ("member", "dddddddd-dddd-4ddd-dddd-ddddddddddd3"),
+            ] {
+                let client = TestingClient::builder()
+                    .with_server(&server)
+                    .with_schema(schema.clone())
+                    .with_user_id(user_id)
+                    .with_claims(json!({"role": role}))
+                    .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                    .connect()
+                    .await;
+
+                wait_for_query(
+                    &client,
+                    in_list_query.clone(),
+                    Some(DurabilityTier::EdgeServer),
+                    QUERY_TIMEOUT,
+                    "matching role sees SessionInList row",
+                    |rows| {
+                        rows.iter()
+                            .any(|(id, _)| *id == in_list_row_id)
+                            .then_some(())
+                    },
+                )
+                .await;
+                wait_for_query(
+                    &client,
+                    or_query.clone(),
+                    Some(DurabilityTier::EdgeServer),
+                    QUERY_TIMEOUT,
+                    "matching role sees Or-of-equals row",
+                    |rows| rows.iter().any(|(id, _)| *id == or_row_id).then_some(()),
+                )
+                .await;
+
+                client
+                    .shutdown()
+                    .await
+                    .unwrap_or_else(|error| panic!("shutdown {role}: {error}"));
+            }
+
+            for (label, user_id, claims) in [
+                (
+                    "non-matching role",
+                    "dddddddd-dddd-4ddd-dddd-ddddddddddd4",
+                    json!({"role": "viewer"}),
+                ),
+                (
+                    "missing role",
+                    "dddddddd-dddd-4ddd-dddd-ddddddddddd5",
+                    json!({}),
+                ),
+            ] {
+                let client = TestingClient::builder()
+                    .with_server(&server)
+                    .with_schema(schema.clone())
+                    .with_user_id(user_id)
+                    .with_claims(claims)
+                    .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                    .connect()
+                    .await;
+
+                let in_list_rows = client
+                    .query(in_list_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} queries SessionInList rooms: {error}"));
+                let or_rows = client
+                    .query(or_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} queries Or-of-equals rooms: {error}"));
+
+                assert!(
+                    in_list_rows.iter().all(|(id, _)| *id != in_list_row_id),
+                    "{label} should not see SessionInList row: {in_list_rows:?}"
+                );
+                assert!(
+                    or_rows.iter().all(|(id, _)| *id != or_row_id),
+                    "{label} should not see Or-of-equals row: {or_rows:?}"
+                );
+
+                client
+                    .shutdown()
+                    .await
+                    .unwrap_or_else(|error| panic!("shutdown {label}: {error}"));
+            }
+
+            admin.shutdown().await.expect("shutdown admin");
             server.shutdown().await;
         })
         .await;
