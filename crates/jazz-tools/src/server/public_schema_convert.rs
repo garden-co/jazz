@@ -56,7 +56,7 @@ pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, Schem
         .into_iter()
         .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
-    coerce_typed_literals(&mut converted);
+    coerce_typed_literals(schema, &mut converted);
     validate_converted_schema(&converted)?;
     Ok(JazzSchema {
         tables: converted,
@@ -92,14 +92,30 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     Ok(())
 }
 
-fn coerce_typed_literals(tables: &mut [CoreTableSchema]) {
+#[derive(Clone)]
+enum TypedLiteralTarget {
+    Core(GrooveColumnType),
+    PublicEnum,
+}
+
+fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
     let column_types = tables
         .iter()
         .map(|table| {
             let columns = table
                 .columns
                 .iter()
-                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .map(|column| {
+                    let target = schema
+                        .get(&TableName::from(table.name.clone()))
+                        .and_then(|table_schema| table_schema.columns.column(&column.name))
+                        .map(|public_column| match public_column.column_type {
+                            ColumnType::Enum { .. } => TypedLiteralTarget::PublicEnum,
+                            _ => TypedLiteralTarget::Core(column.column_type.clone()),
+                        })
+                        .unwrap_or_else(|| TypedLiteralTarget::Core(column.column_type.clone()));
+                    (column.name.clone(), target)
+                })
                 .collect::<BTreeMap<_, _>>();
             (table.name.clone(), columns)
         })
@@ -118,7 +134,7 @@ fn coerce_typed_literals(tables: &mut [CoreTableSchema]) {
 
 fn coerce_optional_query_typed_literals(
     query: &mut Option<Query>,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) {
     if let Some(query) = query {
         coerce_query_typed_literals(query, column_types);
@@ -127,7 +143,7 @@ fn coerce_optional_query_typed_literals(
 
 fn coerce_query_typed_literals(
     query: &mut Query,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) {
     coerce_predicates_typed_literals(&query.table, &mut query.filters, column_types);
     for join in &mut query.joins {
@@ -173,7 +189,7 @@ fn coerce_query_typed_literals(
 
 fn coerce_join_typed_literals(
     join: &mut JoinVia,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) {
     coerce_predicates_typed_literals(&join.table, &mut join.filters, column_types);
     for nested in &mut join.nested_joins {
@@ -184,7 +200,7 @@ fn coerce_join_typed_literals(
 fn coerce_predicates_typed_literals(
     table: &str,
     predicates: &mut [Predicate],
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) {
     for predicate in predicates {
         coerce_predicate_typed_literals(table, predicate, column_types);
@@ -194,7 +210,7 @@ fn coerce_predicates_typed_literals(
 fn coerce_predicate_typed_literals(
     table: &str,
     predicate: &mut Predicate,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) {
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => {
@@ -235,11 +251,16 @@ fn coerce_operand_pair_typed_literal(
     table: &str,
     column_operand: &Operand,
     literal_operand: &mut Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> bool {
     let Operand::Column(column) = column_operand else {
         return false;
     };
+    if let Some(target) = column_type_for_operand(table, column, column_types)
+        && let Operand::Literal(value) = literal_operand
+    {
+        *literal_operand = Operand::Literal(coerce_literal_for_target(value.clone(), &target));
+    }
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
@@ -258,11 +279,81 @@ fn coerce_operand_pair_typed_literal(
     false
 }
 
+fn column_type_for_operand(
+    table: &str,
+    column: &str,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+) -> Option<TypedLiteralTarget> {
+    match column {
+        "id" | "$createdBy" | "$updatedBy" => {
+            Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid))
+        }
+        "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
+        _ => column_types
+            .get(table)
+            .and_then(|columns| columns.get(column))
+            .cloned(),
+    }
+}
+
+fn coerce_literal_for_target(value: GrooveValue, target: &TypedLiteralTarget) -> GrooveValue {
+    match target {
+        TypedLiteralTarget::Core(column_type) => coerce_literal_for_column_type(value, column_type),
+        TypedLiteralTarget::PublicEnum => match value {
+            GrooveValue::String(value) => uuid::Uuid::parse_str(&value)
+                .map(GrooveValue::Uuid)
+                .unwrap_or(GrooveValue::String(value)),
+            value => value,
+        },
+    }
+}
+
+fn coerce_literal_for_column_type(
+    value: GrooveValue,
+    column_type: &GrooveColumnType,
+) -> GrooveValue {
+    match (value, column_type) {
+        (GrooveValue::Uuid(value), GrooveColumnType::String) => {
+            GrooveValue::String(value.to_string())
+        }
+        (GrooveValue::String(value), GrooveColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(GrooveValue::Uuid)
+            .unwrap_or(GrooveValue::String(value)),
+        (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
+            GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
+                *value, inner,
+            ))))
+        }
+        (GrooveValue::Array(values), GrooveColumnType::Array(inner)) => GrooveValue::Array(
+            values
+                .into_iter()
+                .map(|value| coerce_literal_for_column_type(value, inner))
+                .collect(),
+        ),
+        (GrooveValue::Tuple(values), GrooveColumnType::Tuple(types))
+            if values.len() == types.len() =>
+        {
+            GrooveValue::Tuple(
+                values
+                    .into_iter()
+                    .zip(types)
+                    .map(|(value, column_type)| coerce_literal_for_column_type(value, column_type))
+                    .collect(),
+            )
+        }
+        (GrooveValue::Nullable(Some(value)), column_type) => GrooveValue::Nullable(Some(Box::new(
+            coerce_literal_for_column_type(*value, column_type),
+        ))),
+        (value, GrooveColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
+        (value, _) => value,
+    }
+}
+
 fn column_enum_literal_discriminant(
     table: &str,
     column: &str,
     literal_operand: &Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> Option<u8> {
     let Operand::Literal(GrooveValue::String(value)) = literal_operand else {
         return None;
@@ -274,7 +365,7 @@ fn column_enum_literal_discriminant(
 fn column_is_enum(
     table: &str,
     column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> bool {
     column_enum_schema(table, column, column_types).is_some()
 }
@@ -282,11 +373,15 @@ fn column_is_enum(
 fn column_enum_schema<'a>(
     table: &str,
     column: &str,
-    column_types: &'a BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> Option<&'a EnumSchema> {
-    let column_type = column_types
+    let column_type = match column_types
         .get(table)
-        .and_then(|columns| columns.get(column))?;
+        .and_then(|columns| columns.get(column))?
+    {
+        TypedLiteralTarget::Core(column_type) => column_type,
+        TypedLiteralTarget::PublicEnum => return None,
+    };
     groove_column_type_enum_schema(column_type)
 }
 
@@ -301,9 +396,9 @@ fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&Enu
 fn column_is_string(
     table: &str,
     column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, GrooveColumnType>>,
+    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> bool {
-    let Some(column_type) = column_types
+    let Some(TypedLiteralTarget::Core(column_type)) = column_types
         .get(table)
         .and_then(|columns| columns.get(column))
     else {
