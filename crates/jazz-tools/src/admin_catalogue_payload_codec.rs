@@ -19,7 +19,8 @@ use crate::schema_lens::{LensOp, LensTransform};
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = 7;
 const SCHEMA_VERSION_WITHOUT_LARGE_VALUE: u8 = 6;
-const LENS_VERSION: u8 = 2;
+const LENS_VERSION: u8 = 3;
+const LENS_VERSION_WITHOUT_LARGE_VALUE: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
@@ -259,7 +260,7 @@ fn decode_column_descriptor(
     schema_version: u8,
 ) -> Result<ColumnDescriptor, CatalogueEncodingError> {
     let name = read_string(data, offset, "column_name")?;
-    let column_type = decode_column_type(data, offset)?;
+    let column_type = decode_column_type(data, offset, schema_version)?;
     let nullable = read_u8(data, offset)? != 0;
     let has_ref = read_u8(data, offset)? != 0;
     let references = if has_ref {
@@ -381,6 +382,7 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
 fn decode_column_type(
     data: &[u8],
     offset: &mut usize,
+    schema_version: u8,
 ) -> Result<ColumnType, CatalogueEncodingError> {
     let tag = read_u8(data, offset)?;
     match tag {
@@ -419,13 +421,13 @@ fn decode_column_type(
             Ok(ColumnType::Enum { variants })
         }
         TYPE_ARRAY => {
-            let elem = decode_column_type(data, offset)?;
+            let elem = decode_column_type(data, offset, schema_version)?;
             Ok(ColumnType::Array {
                 element: Box::new(elem),
             })
         }
         TYPE_ROW => {
-            let desc = decode_row_descriptor(data, offset, SCHEMA_VERSION_WITHOUT_LARGE_VALUE)?;
+            let desc = decode_row_descriptor(data, offset, schema_version)?;
             Ok(ColumnType::Row {
                 columns: Box::new(desc),
             })
@@ -476,14 +478,14 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION {
+    if version != LENS_VERSION && version != LENS_VERSION_WITHOUT_LARGE_VALUE {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
         });
     }
 
-    decode_current_lens_transform(data)
+    decode_current_lens_transform(data, version)
 }
 
 /// LensOp type tags.
@@ -548,7 +550,12 @@ fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
     }
 }
 
-fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
+fn decode_lens_op(
+    data: &[u8],
+    offset: &mut usize,
+    lens_version: u8,
+) -> Result<LensOp, CatalogueEncodingError> {
+    let schema_version = schema_version_for_lens_payload(lens_version);
     let tag = read_u8(data, offset)?;
     match tag {
         OP_RENAME_TABLE => {
@@ -559,7 +566,7 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
         OP_ADD_COLUMN => {
             let table = read_string(data, offset, "table")?;
             let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset)?;
+            let column_type = decode_column_type(data, offset, schema_version)?;
             let default = decode_value(data, offset)?;
             Ok(LensOp::AddColumn {
                 table,
@@ -571,7 +578,7 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
         OP_REMOVE_COLUMN => {
             let table = read_string(data, offset, "table")?;
             let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset)?;
+            let column_type = decode_column_type(data, offset, schema_version)?;
             let default = decode_value(data, offset)?;
             Ok(LensOp::RemoveColumn {
                 table,
@@ -592,12 +599,12 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
         }
         OP_ADD_TABLE => {
             let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset)?;
+            let schema = decode_table_schema(data, offset, lens_version)?;
             Ok(LensOp::AddTable { table, schema })
         }
         OP_REMOVE_TABLE => {
             let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset)?;
+            let schema = decode_table_schema(data, offset, lens_version)?;
             Ok(LensOp::RemoveTable { table, schema })
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
@@ -607,13 +614,16 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
     }
 }
 
-fn decode_current_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+fn decode_current_lens_transform(
+    data: &[u8],
+    lens_version: u8,
+) -> Result<LensTransform, CatalogueEncodingError> {
     let mut offset = 1;
 
     let op_count = read_u32(data, &mut offset)?;
     let mut ops = Vec::with_capacity(op_count as usize);
     for _ in 0..op_count {
-        ops.push(decode_lens_op(data, &mut offset)?);
+        ops.push(decode_lens_op(data, &mut offset, lens_version)?);
     }
 
     let draft_count = read_u32(data, &mut offset)?;
@@ -632,13 +642,23 @@ fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
 fn decode_table_schema(
     data: &[u8],
     offset: &mut usize,
+    lens_version: u8,
 ) -> Result<TableSchema, CatalogueEncodingError> {
-    let descriptor = decode_row_descriptor(data, offset, SCHEMA_VERSION_WITHOUT_LARGE_VALUE)?;
+    let schema_version = schema_version_for_lens_payload(lens_version);
+    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
     Ok(TableSchema {
         columns: descriptor,
         indexed_columns: None,
         policies: TablePolicies::default(),
     })
+}
+
+fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
+    if lens_version >= LENS_VERSION {
+        SCHEMA_VERSION
+    } else {
+        SCHEMA_VERSION_WITHOUT_LARGE_VALUE
+    }
 }
 
 // ============================================================================
