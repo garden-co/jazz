@@ -4,7 +4,15 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-PATTERN='pilot-applogs|pilot-app|aashto_cbr|sampling_interval_reading|watermark_mapping|3de33ec4-b6c3-4c6b-aa56-c4a9669daffd|99553aa2-e715-4492-8099-cd9bbceefcb6|jon@pilot-applogs\.com'
+# Guarded patterns are base64-encoded so this public file does not itself
+# publish the strings it exists to keep out of the repo. Decode to inspect;
+# re-encode with `printf %s '<pattern>' | base64` when updating.
+PATTERN_B64='Ym9yZWRtbG9nc3xib3JlZG18YWFzaHRvX2NicnxzYW1wbGluZ19pbnRlcnZhbF9yZWFkaW5nfHdhdGVybWFya19tYXBwaW5nfDNkZTMzZWM0LWI2YzMtNGM2Yi1hYTU2LWM0YTk2NjlkYWZmZHw5OTU1M2FhMi1lNzE1LTQ0OTItODA5OS1jZDliYmNlZWZjYjZ8am9uQGJvcmVkbWxvZ3NcLmNvbQ=='
+PATTERN=$(printf %s "$PATTERN_B64" | base64 -d)
+if [[ -z "$PATTERN" ]]; then
+  echo "sensitive-data guard error: pattern decode produced empty pattern" >&2
+  exit 2
+fi
 
 # The guard must fail closed: a missing scanner must never look like a clean
 # scan (rg exiting 127 is indistinguishable from "no match" in an `if`).
