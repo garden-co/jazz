@@ -255,3 +255,8 @@ overlay-probe phase (groove ch. 4 §4.6).
   these benchmark phases must report a visible
   `[needs: historical-implicit-include-source-coverage]` gate rather than being
   silently counted.
+- 🔶 **Policy authorization source node.** Read policy lowering currently bridges
+  policy authorization through a physical authorized-row-id graph before joining
+  it back to the base source. Decide the first-class groove/source node for
+  policy authorization facts so source authorization remains in the query engine
+  without relying on a materialized bridge.

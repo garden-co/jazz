@@ -3364,10 +3364,6 @@ fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
 ) -> GraphBuilder {
-    // TODO: Replace this per-binding sink tail with a partitioned sink operator
-    // once routed multisink semantics have settled. The semantic model should
-    // stay "route-carrying graph -> binding partition -> public sink", but the
-    // executor can avoid evaluating B x S filter/project tails for hot shapes.
     let predicates = terminal
         .route_fields
         .iter()

@@ -174,3 +174,8 @@ refuses unresolved drafts upstream.
 - 🔶 **Catalogue as a separate lane.** The design distributes the catalogue on a
   lane beside read/write sync; the protocol has the message variants but no
   separate-lane enforcement (ch. 8).
+- 🔶 **Schema-projected source nodes.** Projected historical/current reads still
+  materialize version-partition rows inside the source resolver. Decide the
+  first-class lowered source-node surface for schema/lens projections so
+  projected sources compose with the normal query graph instead of staying as an
+  inline resolver path.

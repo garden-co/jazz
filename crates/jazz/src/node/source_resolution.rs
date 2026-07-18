@@ -96,8 +96,6 @@ where
         read_schema_version: SchemaVersionId,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // TODO(query-engine): replace this inline projected source once schema
-        // lenses/projections are first-class source graph nodes.
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();

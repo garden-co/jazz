@@ -8039,10 +8039,6 @@ where
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics
             .policy_authorized_source_joins += 1;
-        // TODO(query-engine): replace this physical bridge with a first-class
-        // policy authorization graph node. The resolver now receives a
-        // query-engine request directly, so public query composition is no
-        // longer part of source authorization.
         let authorized = match self.policy_authorization_row_id_graph(policy_request) {
             Ok(authorized) => authorized,
             Err(Error::QueryCapability(_err)) => PolicyAuthorizationGraph {

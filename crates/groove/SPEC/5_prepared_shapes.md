@@ -159,3 +159,9 @@ the API does not define shape drop.
   `binding_source_shape`, nor check descriptor compatibility when the same source
   name is re-prepared with a different descriptor (`or_insert_with` keeps the
   first). Decide what `prepare` must validate.
+- 🔶 **Partitioned sink operator.** Routed multisink bindings currently append
+  per-binding filter/project tails to route a shared shape's internal output into
+  public sink rows. Decide whether groove should add a first-class partitioned
+  sink operator so hot shapes avoid evaluating binding-count by sink-count tails
+  while preserving the same "route-carrying graph -> binding partition -> public
+  sink" semantics.
