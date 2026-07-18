@@ -1,8 +1,8 @@
 import { existsSync } from "fs";
 import { access, rm } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { pathToFileURL } from "url";
-import { build } from "esbuild";
+import { fileURLToPath, pathToFileURL } from "url";
+import { build, type Plugin } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
@@ -18,6 +18,7 @@ import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
 let importCounter = 0;
+const localJazzToolsEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
 
 export interface LoadedSchemaProject {
   rootDir: string;
@@ -38,10 +39,20 @@ async function bundleToTempFile(filePath: string): Promise<string> {
     format: "esm",
     platform: "node",
     outfile: outFile,
-    packages: "external",
+    plugins: [localJazzToolsPlugin()],
   });
 
   return outFile;
+}
+
+function localJazzToolsPlugin(): Plugin {
+  return {
+    name: "local-jazz-tools",
+    setup(build) {
+      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry }));
+      build.onResolve({ filter: /^file:\/\// }, (args) => ({ path: fileURLToPath(args.path) }));
+    },
+  };
 }
 
 async function loadTsModule(filePath: string): Promise<Record<string, unknown>> {

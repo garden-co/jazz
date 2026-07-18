@@ -455,7 +455,7 @@ export class NativeRuntimeAdapter implements Runtime {
         ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
         : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
     );
-    return this.finishInsert(table, rowId, write, writeIdentity);
+    return this.finishInsert(table, rowId, values, write);
   }
 
   restore(
@@ -482,7 +482,7 @@ export class NativeRuntimeAdapter implements Runtime {
         ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
         : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
     );
-    return this.finishInsert(table, rowId, write, writeIdentity);
+    return this.finishInsert(table, rowId, values, write);
   }
 
   update(
@@ -922,13 +922,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private finishInsert(
     table: string,
     rowId: Uint8Array,
+    values: InsertValues,
     write: Write,
-    identity?: Uint8Array,
   ): InsertResult {
     const transactionId = writeId(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
-    return this.resultForRow(table, rowId, transactionId, identity);
+    const row = this.rowStateFromValues(table, rowId, values);
+    return { id: row.id, values: row.values, transactionId };
   }
 
   private finishMutation(write: Write): MutationResult {

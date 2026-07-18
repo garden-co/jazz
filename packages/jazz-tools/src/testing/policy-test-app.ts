@@ -42,7 +42,12 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
   Object.defineProperties(testDb, {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
-        expect(() => callback(db)).not.toThrow();
+        const tx = db.beginTransaction();
+        try {
+          expect(() => callback(tx as unknown as Db)).not.toThrow();
+        } finally {
+          tx.rollback();
+        }
       },
     },
     expectDenied: {

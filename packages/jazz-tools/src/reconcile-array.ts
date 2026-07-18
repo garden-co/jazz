@@ -8,7 +8,14 @@ export function applyDelta<T extends { id: string }>(
   target: T[],
   delta: SubscriptionDelta<T>,
 ): void {
-  applySubscriptionDelta(target, delta);
+  if (delta.all !== undefined) {
+    reconcileArray(target, delta.all);
+    return;
+  }
+
+  const next = [...target];
+  applySubscriptionDelta(next, delta);
+  reconcileArray(target, next);
 }
 
 /**

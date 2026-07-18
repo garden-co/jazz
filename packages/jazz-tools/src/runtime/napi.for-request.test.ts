@@ -61,6 +61,25 @@ async function createLocalFirstIdentity(
   return { token, userId };
 }
 
+async function removeTempDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        attempt === 4 ||
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOTEMPTY"
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 /**
  * Publishes the todo app schema + permissions to the server, creates a
  * persistent `JazzContext`, registers `onTestFinished` cleanup, and returns
@@ -105,7 +124,7 @@ async function createTestContext(
   onTestFinished(async () => {
     await context.shutdown();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await rm(dataRoot, { recursive: true, force: true });
+    await removeTempDir(dataRoot);
   });
 
   return context;

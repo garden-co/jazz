@@ -26,7 +26,7 @@ class FakeWorker {
   postMessage(message: PersistentBrowserOpfsOwnerRequest): void {
     this.messages.push(message);
 
-    if (message.method === "open") {
+    if (message.method === "open" || message.method === "close") {
       this.respond(message.id, undefined);
     }
   }
@@ -623,7 +623,7 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
-  it("terminates locally on close without sending an OPFS owner close command", async () => {
+  it("closes the OPFS owner before terminating the worker", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 
     const runtime = new PersistentBrowserOpfsRuntime(
@@ -642,8 +642,6 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
 
     expect(worker.terminated).toBe(true);
-    expect(
-      worker.messages.some((message) => (message as { method: string }).method === "close"),
-    ).toBe(false);
+    expect(worker.messages.some((message) => message.method === "close")).toBe(true);
   });
 });
