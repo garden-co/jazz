@@ -133,6 +133,46 @@ or validation engine. Multi-hop traversal and `gather` remain explicit
 unsupported relation operators until they can be normalized into the same program
 family with matching maintained semantics.
 
+## 6.4.1 Default result ordering
+
+Decision, Anselm 2026-07-18: when a relation-valued result has no explicit
+`order_by`, its default order is ascending row id (`RowUuid`). This applies at
+every relation-valued result boundary: root query rows, relation payloads from
+`array_subqueries`, and nested include/relation subtrees. A parent row's child
+relation is therefore ordered by child row id unless that child relation carries
+its own explicit `order_by`. The default is intentionally cheap: it matches
+primary-index scan order for row tables, is stable under updates because row ids
+are immutable, and for uuidv7-generated ids approximates creation-time order.
+
+Explicit `order_by` overrides the row-id primary ordering for the result boundary
+where it appears. Ordered row-valued results remain total and replay-stable:
+after the user-declared order terms, ties are broken by ascending row id unless
+the query surface later exposes an explicit, stable tie policy. Child-local
+`order_by` overrides only that child relation's ordering and does not reorder
+parents or sibling relation payloads.
+
+Aggregate or grouped outputs that do not have a real row id default to ascending
+group-key order. Composite group keys compare lexicographically in the query's
+declared `group_by` field order: compare the first component; if equal, compare
+the next component, and so on until a difference is found. Each component uses
+the logical order for its declared type, matching the order-preserving storage
+key encoding where that type is a valid key part (groove ch. 2). A grouped query
+whose group key contains a type without a specified stable order must be rejected
+until that type's ordering is specified. If an explicit `order_by` is applied to
+grouped output and multiple groups tie on the user order terms, the group key is
+the stable tie-breaker.
+
+Ordering is part of the delivered result, not a presentation hint. Initial
+snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
+settled subscriber reads must all reduce to the same ordered result as a
+one-shot read at the same frontier. Incremental delivery must include enough
+position/order information for insertions, removals, updates, and boundary churn
+to be applied in the specified order. This composes with
+`groove/SPEC/INVARIANTS.md::INV-INC-1`: because default row ordering is by
+immutable id, a single-row content update that does not change membership must
+not reorder neighboring rows, and a single-row insert must publish its ordered
+position without scanning or diffing the accumulated relation state.
+
 ## 6.5 Query-driven sync
 
 A subscription binds a shape to one binding in one read view and is addressed by
@@ -211,6 +251,42 @@ materializing them as row fields. Dry-run policy APIs return a concrete
 allow/deny result or an explicit indeterminate result when the probe lacks
 required input, such as a row id for a row-id-sensitive insert policy.
 
+## 6.7 Conformance test plan
+
+Default result ordering is a conformance requirement for every public query
+surface, but implementation work is deferred until after 2026-07-19. The test
+plan below records the intended coverage without changing tests now.
+
+- Strengthen the maintained-vs-one-shot differential oracle command
+  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  to assert ordered equality rather than set equality for root rows and every
+  relation payload. The oracle should keep using public query shapes/builders
+  and compare the maintained stream's reduced result to the one-shot result at
+  each checkpoint.
+- Extend the TS query API coverage in
+  `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
+  currently sort ids before comparison become ordered-equality assertions once
+  the two human-decision red buckets are resolved. Add explicit cases for
+  default root ordering, reverse/forward relation include arrays ordered by
+  child id, nested relation payloads, and explicit `orderBy` preserving its
+  override with row-id tie-breaks.
+- Add grouped/aggregate conformance cases for default group-key ordering:
+  scalar/global aggregate output, single-column groups, and composite groups
+  whose input rows are inserted in non-key order. These cases should assert the
+  lexicographic group-key order and explicit `orderBy` override/tie behavior.
+- Add a facade-level canary next to
+  `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
+  relation/include result. It should subscribe through the public `Db` API,
+  insert one child whose id belongs in the middle of the child relation, assert
+  the delivered insert position/order, and keep the existing scale-independent
+  allocation/byte expectation so ordered insertion remains covered by
+  `INV-INC-1`.
+- Keep Rust tests aligned with
+  `crates/jazz-tools/TESTING_GUIDELINES.md`: prefer black-box integration tests
+  through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,
+  `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
+  schema, permission, or query definitions for this ordering coverage.
+
 ## Open questions
 
 - 🔶 **Local one-shot reads vs. settled coverage reads.** Ordinary one-shot
@@ -238,3 +314,13 @@ required input, such as a row id for a row-id-sensitive insert policy.
   `all`/`one`/`subscribeAll` through that single path.
 - 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
   coarser covering shapes is a design direction, not a current MUST (ch. 8).
+- 🔶 **Non-uuidv7 id creation-order claims.** Ascending row id is the default
+  semantic order for all row ids, but only uuidv7-generated ids carry the
+  creation-time approximation. Caller-supplied ids, deterministic test ids, and
+  any future non-uuidv7 id source must not be documented as creation ordered
+  unless that id source explicitly preserves creation-time ordering.
+- 🔶 **Cross-type id and group-key comparison.** Current row tables use `RowUuid`
+  identity, so default row ordering does not require comparing different id
+  types inside one relation. If future relation-valued outputs can mix id types
+  or grouped outputs can expose heterogeneous key domains at one key position,
+  the spec needs a stable cross-type ordering rule or must reject those shapes.
