@@ -118,9 +118,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
-    const _txResult = tx.commit();
-    // No need to wait in this case, because the Db is not connected to a server
-    // await _txResult.wait();
+    tx.commit();
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
@@ -263,8 +261,6 @@ describe("db exclusive transaction reads browser integration", () => {
       const txResult = db.exclusiveTransaction((tx) => {
         return tx.insert(todos, { title: "Exclusive transaction", done: false });
       });
-      // No need to wait in this case, because the Db is not connected to a server
-      // await txResult.wait();
       const insertedTodo = txResult.value;
 
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
