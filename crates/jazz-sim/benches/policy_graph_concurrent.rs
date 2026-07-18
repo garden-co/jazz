@@ -245,16 +245,6 @@ fn public_fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PUBLIC_FIXTURE_DIR)
 }
 
-fn private_default_fixture_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("jazz-private")
-            .join("fixtures")
-            .join(format!("{}{}", "pilot", "-real")),
-    )
-}
-
 fn usable_fixture_dir(dir: &Path) -> bool {
     dir.join("schema.native.bin").is_file()
         && (dir.join(MEMBER_SEED_ROWS_JSON).is_file()
@@ -325,13 +315,6 @@ impl Fixture {
     fn from_env_or_exit() -> Self {
         if let Some(path) = std::env::var_os(FIXTURE_DIR_ENV).map(PathBuf::from) {
             return Self::require(path, "env");
-        }
-
-        if let Some(path) = private_default_fixture_dir().filter(|path| usable_fixture_dir(path)) {
-            return Self {
-                dir: path,
-                label: "private-real",
-            };
         }
 
         let public = public_fixture_dir();

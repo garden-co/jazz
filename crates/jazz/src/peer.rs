@@ -579,7 +579,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let trace_rehydrate = std::env::var_os("JAZZ_CUSTOMER_TRACE_REHYDRATE").is_some();
+        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
         let trace_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -744,7 +744,7 @@ impl PeerState {
             let drain_reads = drain_reads.expect("trace reads captured");
             let bundle_reads = bundle_reads.expect("trace reads captured");
             eprintln!(
-                "CUSTOMER_REHYDRATE stage=update subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
+                "JAZZ_REHYDRATE_TRACE stage=update subscription={subscription:?} drain_ms={} bundle_ms={} adds={} removes={} fact_adds={} fact_removes={} bundles={} fallback={} drain_reads={} drain_ranges={} bundle_reads={} bundle_ranges={}",
                 drain_elapsed.as_millis(),
                 bundle_elapsed.as_millis(),
                 result_add_count,
@@ -929,7 +929,7 @@ impl PeerState {
             tier,
             read_view,
         } = request;
-        let trace_rehydrate = std::env::var_os("JAZZ_CUSTOMER_TRACE_REHYDRATE").is_some();
+        let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
         let open_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -1059,7 +1059,7 @@ impl PeerState {
             let positioned_members = trace_positioned_members.expect("trace positioned members");
             let known_state = trace_known_state.expect("trace known state");
             eprintln!(
-                "CUSTOMER_REHYDRATE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                "JAZZ_REHYDRATE_TRACE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
                 shape.query().table,
                 reset_result_set,
                 known_state,

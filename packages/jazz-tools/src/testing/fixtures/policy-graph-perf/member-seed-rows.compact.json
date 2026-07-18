@@ -1,7 +1,7 @@
 {
   "fixture": "policy-graph-perf-member-seed-rows-v1",
   "anonymized": true,
-  "source": "row dump emitted from the same real import row staging path, translated through global rename-map tokens",
+  "source": "synthetic anonymized policy graph seed rows",
   "identity": {
     "member_row": "00000000-0000-4000-9000-000000000000",
     "claims": {
