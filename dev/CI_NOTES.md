@@ -22,18 +22,23 @@ Per Anselm's directive: every CI-relevant removal or alteration documented in de
   job) to install wasm-pack if absent — keeps the fix in one place instead of
   per-workflow steps. Pin a version for reproducibility.
 
-## FIX (not a CI change): 8 jazz-tools unit tests broken by tonight's
+## FIX (not a CI change): 8 jazz-tools unit tests — pre-existing rot exposed by CI
 
-anonymization commit `f84151180`
+Initially attributed to tonight's anonymization commit; disproven by running the
+failing suite at the pre-cleanup HEAD (`215689e45`) — same failures. Root cause
+of the lead failure: `f037d1625` (Jul 12) fixed uuid-literal coercion in runtime
+lowering but the server-side `public_schema_convert` path never received the
+same rule, so converted policy filters carry `Literal(String("<uuid>"))` where
+the byte-stable fixture has `Literal(Uuid(...))`. Each of the 8 gets an
+individual root-cause verdict (repair lane report).
 
-- `converts_policy_graph_perf_public_schema_to_native_fixture_byte_stably` and
-  friends byte-snapshot the policy-graph-perf fixture, whose two metadata
-  strings were anonymized; snapshots regenerate to match the new strings.
-- `offline_persistent_client_rehydrates_rows_from_core_storage` references the
-  renamed trace env/log prefix (`JAZZ_CUSTOMER_TRACE_REHYDRATE` →
-  `JAZZ_REHYDRATE_TRACE`); references aligned.
-- The anonymization itself is kept: it removed, among other things, a
-  split-string evasion of the sensitive-data gate in the jazz-sim bench.
+**Why local gates missed six days of red**: gate invocations piped cargo test
+through `grep`/`tail`, which (a) replaces cargo's exit code with the pipe
+tail's and (b) surfaces only the final `test result:` line — the doctest
+suite's `ok`. CI runs the command unpiped and was the first honest reporter.
+Remedy: gate commands now check `$?` unpiped; lane mandates updated.
+The anonymization commit itself is kept — among other things it removed a
+split-string evasion of the sensitive-data gate in the jazz-sim bench.
 
 ## OBSERVATION: local canonical gate vs CI shape
 
