@@ -72,3 +72,14 @@ before altering ci.yml.
   `ERR_DLOPEN_FAILED` on Linux for the jazz-napi binding in this example's
   browser-mode global setup — verify it disappears once the schema publish
   succeeds; if not, it is a separate Linux napi loading issue to fix.
+
+## ALTER (updated 2026-07-19 00:30): auth example exclusions — narrowed cause
+
+Progression: SessionInList support landed (`c41368d7d`), example tests
+modernized (async insert handles awaited; UUID JWT subjects per core session
+requirement) — the admin grant path now passes end-to-end. Remaining failure:
+the two _denial_ tests time out because a permission-denied write never rejects
+`wait({tier})` — recorded as 🔶 "Write-denial surfacing to clients" in
+`crates/jazz/SPEC/7_authorization.md`. Both `auth-simple-chat` and
+`auth-workos-chat` tests stay excluded from CI until that lands; exit criteria:
+implement write-denial rejection, un-exclude, delete this entry.

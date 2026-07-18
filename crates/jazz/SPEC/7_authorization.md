@@ -219,6 +219,12 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   upstream permission-scope subscriptions (ch. 9). The current contract is
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
   future policy for cache lifetime, not a source of permission truth here.
+- 🔶 **Write-denial surfacing to clients.** A permission-denied write currently
+  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
+  instead of rejecting. Clients need a deterministic rejection signal (analogous
+  to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
+  by the auth example denial tests (both auth examples excluded from CI until
+  this lands; see `dev/CI_NOTES.md` 2026-07-19).
 - 🔶 **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
