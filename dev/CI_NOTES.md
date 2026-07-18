@@ -98,7 +98,7 @@ Excluded example/tool tests, each with cause + exit criteria:
 | auth-simple-chat, auth-workos-chat | write-denial never rejects `wait({tier})` (spec 🔶) | denial surfacing lands |
 | auth-betterauth-chat | `session.authMode` unsupported in policy conversion (spec 🔶) | session-attribute decision |
 | chat-react | 2/7 fail on `inherits` attachment policy chain — likely same family as closure bug | closure fix, then re-test |
-| world-tour, todo-client-localfirst-{ts,ts-docs,solid} | render/flow timeouts vs new runtime; not yet root-caused | examples-restoration pass |
+| world-tour, todo-client-localfirst-{ts,ts-docs,solid} | render/flow failures vs new runtime; several pass locally on darwin but fail on Linux CI — family excluded wholesale, root-cause in restoration pass | examples-restoration pass |
 | todo-server-ts | policy-denied inserts + `invalid uuid undefined` id expectations | examples-restoration pass |
 | todo-server-ts-docs | REAL BUG CANDIDATE: RocksDB `LOCK: No locks available` on server restart within process | fix lock release on restart, then un-exclude |
 | create-jazz | scaffold integration 120s timeout (environment/network-shaped) | root-cause in CI env |
