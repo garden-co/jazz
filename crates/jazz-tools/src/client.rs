@@ -2142,7 +2142,10 @@ impl JazzClient {
                     self.core_query(&query)?,
                     opts,
                     query.table.as_str().to_string(),
-                    durability_tier.is_some(),
+                    matches!(
+                        durability_tier,
+                        Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
+                    ),
                 )
                 .await?;
             let mut rows = self.core_rows_to_public(&query, rows)?;
