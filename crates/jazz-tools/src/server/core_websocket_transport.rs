@@ -174,10 +174,11 @@ impl WireTransport for WebSocketTransport {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         let mut inbound = self.inbound.lock().ok()?;
+        #[cfg(feature = "sync-autopsy")]
         let before = inbound.len();
         let frame = inbound.pop_front();
+        #[cfg(feature = "sync-autopsy")]
         if let Some(frame) = &frame {
-            #[cfg(feature = "sync-autopsy")]
             jazz::db::sync_autopsy::record(format!(
                 "client websocket pop inbound before={before} after={} bytes={}",
                 inbound.len(),
@@ -280,7 +281,9 @@ async fn run_ws_pump(
                 let Ok(mut queue) = inbound.lock() else {
                     return;
                 };
+                #[cfg(feature = "sync-autopsy")]
                 let before = queue.len();
+                #[cfg(feature = "sync-autopsy")]
                 let frame_count = frames.len();
                 queue.extend(frames);
                 #[cfg(feature = "sync-autopsy")]
