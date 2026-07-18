@@ -46,6 +46,20 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     this.owner = acquireSharedBrowserWorkerOwner(config);
   }
 
+  async all<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): Promise<T[]> {
+    const db = await this.owner.db();
+    return db.__withRuntimeOperationContext({ session }, () => db.all(query, options));
+  }
+
+  async one<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T | null> {
+    const db = await this.owner.db();
+    return db.__withRuntimeOperationContext({ session }, () => db.one(query, options));
+  }
+
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: SubscriptionChannelCallback<T>,
@@ -177,6 +191,14 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
   async updateAuthToken(token: string | null): Promise<void> {
     const db = await this.owner.db();
     db.updateAuthToken(token);
+  }
+
+  async getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    const db = await this.owner.db();
+    return db.getLocalFirstIdentityProof(options);
   }
 
   async getConfig(): Promise<DbConfig> {

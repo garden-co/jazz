@@ -8,8 +8,10 @@ Pass a pre-created client or a promise that resolves to one.
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
 
+	type SvelteJazzClient = JazzClient<false>;
+
 	interface Props {
-		client: JazzClient | Promise<JazzClient>;
+		client: SvelteJazzClient | Promise<SvelteJazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
 	}
@@ -21,7 +23,7 @@ Pass a pre-created client or a promise that resolves to one.
 
 	$effect(() => {
 		let cancelled = false;
-		let resolvedClient: JazzClient | null = null;
+		let resolvedClient: SvelteJazzClient | null = null;
 		let stopSessionSync: (() => void) | null = null;
 
 		error = null;

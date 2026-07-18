@@ -18,7 +18,10 @@ import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
 let importCounter = 0;
-const localJazzToolsEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
+const localJazzToolsSourceEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
+const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
+  ? localJazzToolsSourceEntry
+  : fileURLToPath(new URL("./index.js", import.meta.url));
 
 export interface LoadedSchemaProject {
   rootDir: string;

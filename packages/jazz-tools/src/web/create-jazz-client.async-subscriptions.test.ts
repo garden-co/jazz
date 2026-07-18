@@ -357,8 +357,8 @@ async function typeSurfaceChecks(channel: SubscriptionChannel) {
     appId: "types-async",
     subscriptionChannel: channel,
   });
-  // @ts-expect-error asyncSubscriptionsOnly defaults to true and does not expose sync Db APIs.
-  void asyncClient.db.all(query);
+  const asyncRows: Promise<TestRow[]> = asyncClient.db.all(query);
+  void asyncRows;
   void asyncClient.db.insert(table, { value: "ok" });
 
   const explicitAsyncClient = await createJazzClient({
@@ -366,8 +366,8 @@ async function typeSurfaceChecks(channel: SubscriptionChannel) {
     asyncSubscriptionsOnly: true,
     subscriptionChannel: channel,
   });
-  // @ts-expect-error explicit async-only clients do not expose sync Db APIs.
-  void explicitAsyncClient.db.one(query);
+  const asyncOne: Promise<TestRow | null> = explicitAsyncClient.db.one(query);
+  void asyncOne;
 
   const syncClient = await createJazzClient({
     appId: "types-sync",

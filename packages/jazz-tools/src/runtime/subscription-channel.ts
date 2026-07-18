@@ -36,6 +36,12 @@ export interface SubscriptionRowCodec<T extends { id: string }> {
 }
 
 export interface SubscriptionChannel {
+  all?<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): MaybePromise<T[]>;
+  one?<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): MaybePromise<T | null>;
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: SubscriptionChannelCallback<T>,
@@ -80,6 +86,10 @@ export interface SubscriptionChannel {
   getAuthState(): MaybePromise<AuthState>;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
   updateAuthToken(token: string | null): MaybePromise<void>;
+  getLocalFirstIdentityProof?(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): MaybePromise<string | null>;
   getConfig(): MaybePromise<DbConfig>;
   createFileFromBlob<TApp extends BinaryLargeValueFileApp<any, any>>(
     app: TApp,
@@ -107,6 +117,24 @@ export type SubscriptionChannelTarget = SubscriptionChannel;
 
 export class InProcessSubscriptionChannel implements SubscriptionChannel {
   constructor(private readonly target: SubscriptionChannelTarget) {}
+
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): MaybePromise<T[]> {
+    if (!this.target.all) {
+      throw new Error("Subscription channel does not support one-shot reads.");
+    }
+    return this.target.all(query, options, session);
+  }
+
+  one<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): MaybePromise<T | null> {
+    if (!this.target.one) {
+      throw new Error("Subscription channel does not support one-shot reads.");
+    }
+    return this.target.one(query, options, session);
+  }
 
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
@@ -184,6 +212,13 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
 
   updateAuthToken(token: string | null): MaybePromise<void> {
     return this.target.updateAuthToken(token);
+  }
+
+  getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): MaybePromise<string | null> {
+    return this.target.getLocalFirstIdentityProof?.(options) ?? null;
   }
 
   getConfig(): MaybePromise<DbConfig> {

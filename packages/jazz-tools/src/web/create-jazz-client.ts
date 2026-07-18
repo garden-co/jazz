@@ -61,9 +61,15 @@ type ChannelBackedClient = AsyncOnlyJazzClient & {
 };
 
 export interface AsyncChannelDb {
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
+  one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null>;
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
   updateAuthToken(token: string | null): void;
+  getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): string | null | Promise<string | null>;
   getConfig(): DbConfig;
   insert<T, Init>(
     table: TableProxy<T, Init>,
@@ -137,6 +143,20 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
     return this.authState;
   }
 
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    if (!this.channel.all) {
+      throw new Error("Subscription channel does not support one-shot reads.");
+    }
+    return Promise.resolve(this.channel.all(query, options, this.authState.session ?? undefined));
+  }
+
+  one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    if (!this.channel.one) {
+      throw new Error("Subscription channel does not support one-shot reads.");
+    }
+    return Promise.resolve(this.channel.one(query, options, this.authState.session ?? undefined));
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
     const unsubscribe = this.channel.onAuthChanged((state) => {
       this.authState = state;
@@ -148,6 +168,13 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
 
   updateAuthToken(token: string | null): void {
     void this.channel.updateAuthToken(token);
+  }
+
+  getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    return Promise.resolve(this.channel.getLocalFirstIdentityProof?.(options) ?? null);
   }
 
   getConfig(): DbConfig {
