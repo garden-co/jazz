@@ -9,7 +9,7 @@
 
 export type Value =
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint | number }
   | { type: "Double"; value: number }
   | { type: "Boolean"; value: boolean }
   | { type: "Text"; value: string }

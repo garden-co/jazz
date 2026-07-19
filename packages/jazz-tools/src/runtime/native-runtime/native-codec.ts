@@ -147,7 +147,7 @@ export function queryWhereStringContains(
 export type QueryLiteral =
   | { type: "Boolean"; value: boolean }
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint }
   | { type: "Double"; value: number }
   | { type: "Timestamp"; value: number }
   | { type: "Text"; value: string }
@@ -447,7 +447,12 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     writer.u64((value.value ^ 0x80000000) >>> 0);
     return;
   }
-  if (value.type === "BigInt" || value.type === "Timestamp") {
+  if (value.type === "BigInt") {
+    writer.u64(13); // groove::records::Value::I64
+    writer.i64(value.value);
+    return;
+  }
+  if (value.type === "Timestamp") {
     if (!Number.isSafeInteger(value.value) || value.value < 0) {
       throw new Error(`${value.type} value must be a non-negative safe integer`);
     }
@@ -518,6 +523,22 @@ export class PostcardWriter {
       if (remaining !== 0) byte |= 0x80;
       this.chunks.push(byte);
     } while (remaining !== 0);
+  }
+
+  i64(value: bigint | number): void {
+    const bigintValue = BigInt(value);
+    const encoded = bigintValue < 0n ? (-bigintValue << 1n) - 1n : bigintValue << 1n;
+    this.u64Big(encoded);
+  }
+
+  private u64Big(value: bigint): void {
+    let remaining = value;
+    do {
+      let byte = Number(remaining & 0x7fn);
+      remaining >>= 7n;
+      if (remaining !== 0n) byte |= 0x80;
+      this.chunks.push(byte);
+    } while (remaining !== 0n);
   }
 
   u32Le(value: number): void {
@@ -592,6 +613,19 @@ export class PostcardReader {
       result += (byte & 0x7f) * 2 ** shift;
       if ((byte & 0x80) === 0) return result;
       shift += 7;
+    }
+  }
+
+  i64(): bigint {
+    let result = 0n;
+    let shift = 0n;
+    while (true) {
+      const byte = this.readByte();
+      result += BigInt(byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) {
+        return (result & 1n) === 0n ? result >> 1n : -((result + 1n) >> 1n);
+      }
+      shift += 7n;
     }
   }
 

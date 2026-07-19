@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
-import { createRecord, PostcardReader, PostcardWriter, writeDescriptor } from "./native-codec.js";
+import {
+  createRecord,
+  PostcardReader,
+  PostcardWriter,
+  queryWithPredicates,
+  writeDescriptor,
+} from "./native-codec.js";
 import {
   decodeWebSocketFrameBatch,
   encodeWebSocketPrelude,
@@ -1541,6 +1547,18 @@ describe("NativeRuntimeAdapter server transport", () => {
       literalTag: 2,
       value: 0x7fffffff,
     });
+  });
+
+  it("encodes BIGINT query literals as signed i64 values", () => {
+    const query = queryWithPredicates("metrics", [
+      { column: "largeCount", op: "Gt", value: { type: "BigInt", value: 9007199254740993n } },
+      { column: "largeCount", op: "Lt", value: { type: "BigInt", value: -5n } },
+    ]);
+
+    expect(readPreparedComparisonLiterals(query)).toEqual([
+      { predicateTag: 6, column: "largeCount", literal: { tag: 13, value: 9007199254740993n } },
+      { predicateTag: 8, column: "largeCount", literal: { tag: 13, value: -5n } },
+    ]);
   });
 
   it("materializes array subquery relation snapshots for subscriptions", async () => {
@@ -4326,7 +4344,7 @@ function readPreparedUuidIn(query: Uint8Array): {
 
 function readPreparedInLiterals(
   query: Uint8Array,
-): Array<{ column: string; literals: Array<{ tag: number; value: number }> }> {
+): Array<{ column: string; literals: Array<{ tag: number; value: number | bigint }> }> {
   const reader = new PostcardReader(query);
   reader.string();
   return reader.readVec((predicateReader) => {
@@ -4341,9 +4359,11 @@ function readPreparedInLiterals(
   });
 }
 
-function readPreparedComparisonLiterals(
-  query: Uint8Array,
-): Array<{ predicateTag: number; column: string; literal: { tag: number; value: number } }> {
+function readPreparedComparisonLiterals(query: Uint8Array): Array<{
+  predicateTag: number;
+  column: string;
+  literal: { tag: number; value: number | bigint };
+}> {
   const reader = new PostcardReader(query);
   reader.string();
   return reader.readVec((predicateReader) => {
@@ -4355,7 +4375,10 @@ function readPreparedComparisonLiterals(
   });
 }
 
-function readPreparedNumericLiteral(reader: PostcardReader): { tag: number; value: number } {
+function readPreparedNumericLiteral(reader: PostcardReader): {
+  tag: number;
+  value: number | bigint;
+} {
   const tag = reader.u64();
   switch (tag) {
     case 2:
@@ -4363,6 +4386,8 @@ function readPreparedNumericLiteral(reader: PostcardReader): { tag: number; valu
       return { tag, value: reader.u64() };
     case 4:
       return { tag, value: reader.f64Le() };
+    case 13:
+      return { tag, value: reader.i64() };
     default:
       throw new Error(`expected numeric prepared literal tag, got ${tag}`);
   }
@@ -4413,6 +4438,9 @@ function skipPreparedLiteral(reader: PostcardReader): void {
       return;
     case 4:
       reader.f64Le();
+      return;
+    case 13:
+      reader.i64();
       return;
     case 5:
       reader.bool();
@@ -4525,7 +4553,7 @@ function readPreparedFirstLiteral(query: Uint8Array): {
   const column = reader.string();
   expect(reader.u64()).toBe(3);
   const literalTag = reader.u64();
-  const value = reader.u64();
+  const value = literalTag === 13 ? Number(reader.i64()) : reader.u64();
   return { column, opTag, literalTag, value };
 }
 
@@ -4936,6 +4964,9 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
     const literalTag = reader.u64();
     if (literalTag === 2 || literalTag === 3) {
       return { tag, literalTag, value: reader.u64() };
+    }
+    if (literalTag === 13) {
+      return { tag, literalTag, value: reader.i64() };
     }
     if (literalTag === 4) {
       return { tag, literalTag, value: reader.bytes() };

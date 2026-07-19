@@ -37,9 +37,9 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe(42);
   });
 
-  it("unwraps BigInt to number", () => {
-    const v: WasmValue = { type: "BigInt", value: 9007199254740991 };
-    expect(unwrapValue(v)).toBe(9007199254740991);
+  it("unwraps BigInt to bigint", () => {
+    const v: WasmValue = { type: "BigInt", value: 9007199254740993n };
+    expect(unwrapValue(v)).toBe(9007199254740993n);
   });
 
   it("unwraps Timestamp to Date", () => {

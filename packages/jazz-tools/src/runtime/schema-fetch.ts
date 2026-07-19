@@ -336,7 +336,7 @@ export async function fetchSchemaConnectivity(
 
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint | string | number }
   | { type: "Double"; value: number }
   | { type: "Boolean"; value: boolean }
   | { type: "Text"; value: string }
@@ -384,6 +384,11 @@ export interface PublishStoredMigrationOptions {
 
 export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrationValue {
   switch (value.type) {
+    case "BigInt":
+      return {
+        type: "BigInt",
+        value: value.value.toString(),
+      };
     case "Bytea":
       return {
         type: "Bytea",

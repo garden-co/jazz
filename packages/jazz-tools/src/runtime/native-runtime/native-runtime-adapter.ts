@@ -3027,7 +3027,7 @@ function coerceLiteralForColumnType(
     return { type: "Double", value: value.value };
   }
   if (columnType?.type === "BigInt" && value.type === "Integer") {
-    return { type: "BigInt", value: value.value };
+    return { type: "BigInt", value: BigInt(value.value) };
   }
   if (columnType?.type === "Timestamp" && value.type === "Integer") {
     return { type: "Timestamp", value: value.value };
@@ -3175,6 +3175,7 @@ function valueToQueryLiteral(value: unknown): QueryLiteral {
   if (typeof value === "boolean") return { type: "Boolean", value };
   if (typeof value === "number" && Number.isSafeInteger(value)) return { type: "Integer", value };
   if (typeof value === "number" && Number.isFinite(value)) return { type: "Double", value };
+  if (typeof value === "bigint") return { type: "BigInt", value };
   if (typeof value === "string")
     return isUuidString(value) ? { type: "Uuid", value } : { type: "Text", value };
   if (value instanceof Uint8Array) return { type: "Bytea", value };
@@ -3224,10 +3225,10 @@ function readLiteral(value: unknown): QueryLiteral | null {
   }
   if (
     record.type === "BigInt" &&
-    typeof record.value === "number" &&
-    Number.isSafeInteger(record.value)
+    (typeof record.value === "bigint" ||
+      (typeof record.value === "number" && Number.isSafeInteger(record.value)))
   ) {
-    return { type: "BigInt", value: record.value };
+    return { type: "BigInt", value: BigInt(record.value) };
   }
   if (
     record.type === "Timestamp" &&
@@ -3369,9 +3370,12 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Integer":
       view.setUint32(0, encodeSignedI32ForCore(expectI32(value, "Integer")), true);
       return new Uint8Array(view.buffer, 0, 4);
-    case "BigInt":
     case "Timestamp":
       view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
+      return new Uint8Array(view.buffer);
+    case "BigInt":
+      if (value.type !== "BigInt") throw new Error("expected BigInt value");
+      view.setBigInt64(0, BigInt(value.value), true);
       return new Uint8Array(view.buffer);
     case "Double":
       view.setFloat64(0, expectNumber(value, "Double"), true);
@@ -3429,6 +3433,7 @@ function fixedValueSize(valueType: ValueType): number | undefined {
     case 2:
       return 4;
     case 3:
+    case 13:
     case 4:
       return 8;
     case 8:
@@ -3452,10 +3457,7 @@ function fixedValueSize(valueType: ValueType): number | undefined {
 
 function expectNumber(value: Value, type: string): number {
   if (
-    (value.type === "Integer" ||
-      value.type === "BigInt" ||
-      value.type === "Double" ||
-      value.type === "Timestamp") &&
+    (value.type === "Integer" || value.type === "Double" || value.type === "Timestamp") &&
     typeof value.value === "number"
   ) {
     return value.value;
@@ -3952,7 +3954,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Integer":
       return { type: "Integer", value: decodeSignedI32FromCore(view.getUint32(0, true)) };
     case "BigInt":
-      return { type: "BigInt", value: Number(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -4286,9 +4288,13 @@ function compareQueryValues(left: Value | undefined, right: Value | undefined): 
     case "Row":
       return String(left.value).localeCompare(String((right as typeof left).value));
     case "Integer":
-    case "BigInt":
     case "Double":
       return Number(left.value) - Number((right as typeof left).value);
+    case "BigInt": {
+      const leftValue = BigInt(left.value);
+      const rightValue = BigInt((right as typeof left).value);
+      return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+    }
     case "Null":
       return 0;
     case "Bytea":

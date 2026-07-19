@@ -39,7 +39,10 @@ describe("toValue", () => {
 
   it("converts BigInt values", () => {
     const colType: ColumnType = { type: "BigInt" };
-    expect(toValue(9007199254740991, colType)).toEqual({ type: "BigInt", value: 9007199254740991 });
+    expect(toValue(9007199254740993n, colType)).toEqual({
+      type: "BigInt",
+      value: 9007199254740993n,
+    });
   });
 
   it("converts Timestamp values", () => {

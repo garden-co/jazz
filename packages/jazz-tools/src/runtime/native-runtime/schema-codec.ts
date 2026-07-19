@@ -158,6 +158,7 @@ export function columnTypeToValueType(type: ColumnType): ValueType {
     case "Integer":
       return { tag: 2 };
     case "BigInt":
+      return { tag: 13 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
@@ -333,10 +334,13 @@ function writePolicyLiteral(writer: PostcardWriter, value: Value): void {
       writer.bool(value.value);
       return;
     case "Integer":
-      writer.u64(2); // groove::records::Value::I64
+      writer.u64(2); // groove::records::Value::U32
       writer.u64(value.value);
       return;
     case "BigInt":
+      writer.u64(13); // groove::records::Value::I64
+      writer.i64(value.value);
+      return;
     case "Timestamp":
       writer.u64(3); // groove::records::Value::U64
       writer.u64(value.value);

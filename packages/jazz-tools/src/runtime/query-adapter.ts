@@ -157,13 +157,21 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
     if (columnType?.type === "Timestamp") {
       return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
     }
-    if (
-      columnType.type === "Double" ||
-      columnType.type === "BigInt" ||
-      columnType.type === "Integer"
-    ) {
+    if (columnType.type === "BigInt") {
+      if (!Number.isSafeInteger(value)) {
+        throw new Error("BIGINT query values must be bigint or safe integer numbers");
+      }
+      return { type: "BigInt", value: BigInt(value) };
+    }
+    if (columnType.type === "Double" || columnType.type === "Integer") {
       return { type: columnType.type, value };
     }
+  }
+  if (typeof value === "bigint") {
+    if (columnType.type !== "BigInt") {
+      throw new Error("Unexpected bigint value for non-BIGINT column");
+    }
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {

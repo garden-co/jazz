@@ -429,16 +429,18 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       new DataView(bytes.buffer).setUint32(0, (value.value ^ 0x80000000) >>> 0, true);
       return bytes;
     }
-    case "BigInt":
     case "Timestamp": {
-      if (
-        (value.type !== "BigInt" && value.type !== "Timestamp") ||
-        !Number.isSafeInteger(value.value)
-      ) {
+      if (value.type !== "Timestamp" || !Number.isSafeInteger(value.value)) {
         throw new Error(`expected ${type.type} value`);
       }
       const bytes = new Uint8Array(8);
       new DataView(bytes.buffer).setBigUint64(0, BigInt(value.value), true);
+      return bytes;
+    }
+    case "BigInt": {
+      if (value.type !== "BigInt") throw new Error("expected BigInt value");
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setBigInt64(0, BigInt(value.value), true);
       return bytes;
     }
     case "Double": {
@@ -531,6 +533,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Integer":
       return { tag: 2 };
     case "BigInt":
+      return { tag: 13 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
@@ -558,7 +561,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Integer":
       return { type: "Integer", value: decodeSignedI32FromCore(view.getUint32(0, true)) };
     case "BigInt":
-      return { type: "BigInt", value: Number(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -703,6 +706,7 @@ function fixedSize(valueType: ValueType): number | undefined {
     case 2:
       return 4;
     case 3:
+    case 13:
     case 4:
       return 8;
     case 8:

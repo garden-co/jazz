@@ -79,7 +79,18 @@ function normalizeLegacyTaggedValue(type: string, value: unknown): WasmValue {
           value instanceof Uint8Array ? value : new Uint8Array(Array.isArray(value) ? value : []),
       };
     case "Integer":
+      if (typeof value === "bigint") {
+        return { type: "BigInt", value };
+      }
+      return { type, value } as WasmValue;
     case "BigInt":
+      if (typeof value === "number" && Number.isSafeInteger(value)) {
+        return { type: "BigInt", value: BigInt(value) };
+      }
+      if (typeof value === "bigint") {
+        return { type: "BigInt", value };
+      }
+      return { type, value } as WasmValue;
     case "Double":
     case "Boolean":
     case "Text":
@@ -115,16 +126,12 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
       return { type: "Integer", value };
     }
     if (Number.isSafeInteger(value)) {
-      return { type: "BigInt", value };
+      return { type: "BigInt", value: BigInt(value) };
     }
     return { type: "Double", value };
   }
   if (typeof value === "bigint") {
-    const asNumber = Number(value);
-    if (!Number.isSafeInteger(asNumber)) {
-      throw new Error("Permissions bigint literals must fit into a safe JavaScript integer.");
-    }
-    return { type: "BigInt", value: asNumber };
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     return UUID_LIKE_RE.test(value) ? { type: "Uuid", value } : { type: "Text", value };

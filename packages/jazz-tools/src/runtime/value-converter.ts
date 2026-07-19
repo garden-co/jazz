@@ -8,6 +8,25 @@
 import type { WasmSchema, ColumnType, Value as WasmValue, InsertValues } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+
+function toBigInt64(value: unknown): bigint {
+  const bigintValue =
+    typeof value === "bigint"
+      ? value
+      : typeof value === "number" && Number.isSafeInteger(value)
+        ? BigInt(value)
+        : null;
+  if (bigintValue == null) {
+    throw new Error("Invalid BigInt value. Expected bigint or safe integer number.");
+  }
+  if (bigintValue < I64_MIN || bigintValue > I64_MAX) {
+    throw new Error("Invalid BigInt value. Expected signed 64-bit integer range.");
+  }
+  return bigintValue;
+}
+
 function toTimestampMs(value: unknown): number {
   const numeric = value instanceof Date ? value.getTime() : Number(value);
   if (!Number.isFinite(numeric)) {
@@ -51,7 +70,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Integer":
       return { type: "Integer", value: Number(value) };
     case "BigInt":
-      return { type: "BigInt", value: Number(value) };
+      return { type: "BigInt", value: toBigInt64(value) };
     case "Double":
       return { type: "Double", value: Number(value) };
     case "Timestamp":
