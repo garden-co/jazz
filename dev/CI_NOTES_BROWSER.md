@@ -65,3 +65,11 @@ Post-fix full browser run:
 - Environment caveat: local shell uses Node `v20.13.1`; package metadata wants `>=22.12`. The suite runs but pnpm prints engine warnings.
 
 Tooling-friction: a browser-suite failure reporter that groups by root error text and records server/transport frame counts per test would have saved most of the websocket wall-clock.
+
+## Flake watch (2026-07-19 ~11:15)
+
+`napi.integration.test.ts > serves policy graph holder queries after importing
+data and reopening the local server route` failed once in a full turbo run,
+passes isolated and on rerun — suspected port/db-path contention with the new
+close/reopen path under suite parallelism. Watch on CI; if it recurs, serialize
+that file or isolate its server fixture.
