@@ -68,19 +68,21 @@ const schema = {
 };
 ```
 
-For typed `Db` row-creation calls, defaults are applied before the write reaches
-the runtime adapter:
+For typed `Db` row-creation calls, defaulted fields may be omitted from the
+TypeScript input object, but the TypeScript layer does not materialize the
+default:
 
-- `db.insert(...)` and `tx.insert(...)` expand omitted defaulted columns into
-  explicit runtime-facing cells.
+- `db.insert(...)` and `tx.insert(...)` pass omitted defaulted columns through
+  as omitted cells.
 - `db.restore(...)` and `tx.restore(...)` use the same row-creation rule.
 - Explicit values are stored as provided.
 - Explicit `null` is distinct from omission: nullable columns store `null`, and
   non-nullable columns reject `null`.
 
-Core schema conversion preserves strict core semantics. Defaults remain public
-schema metadata and are not evaluated by `jazz::schema::JazzSchema` or by core
-insert validation.
+Core schema conversion carries defaults into `jazz::schema::ColumnSchema`. Core
+applies literal defaults at the write origin before policy checks and before
+sealing the mutation record, giving all bindings one implementation while keeping
+sealed transactions self-contained and wire payloads explicit.
 
 🔶 Open question: dynamic defaults such as `now()` are not specified. The current
 surface only applies literal defaults already present in schema metadata.

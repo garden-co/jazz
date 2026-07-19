@@ -24,19 +24,20 @@ The gate should be used by:
 
 ## Default Lowering Boundary
 
-Column defaults are accepted public schema metadata. They are not represented in
-`jazz::schema::JazzSchema`, and the core runtime does not evaluate them during
-insert validation.
+Column defaults are accepted public schema metadata and lower into
+`jazz::schema::ColumnSchema`. Core applies literal defaults at the write origin
+for row-creation writes before policy dry-runs and before sealing the mutation
+record. The sealed transaction remains self-contained: omitted defaulted columns
+become explicit cells in the committed row/version payload, so the wire and
+storage layers do not need an implicit-default rule.
 
-For the TypeScript public DSL, literal column defaults are applied by the typed
-client row-creation path before submission to the native/WASM runtime. An omitted
-column with `s.<type>().default(value)` is expanded into an explicit cell in the
-runtime-facing write record. Explicit values are preserved. Explicit `null` is
-preserved for nullable columns and still rejected for non-nullable columns.
+The TypeScript public DSL keeps the type-level insert surface where defaulted
+columns may be omitted, but it does not expand defaults itself. The same core
+implementation therefore covers typed TS inserts, direct NAPI/WASM consumers,
+server-side inserts, importers, and future bindings.
 
-This keeps the wire/storage write explicit and keeps core validation strict:
-core validates the cells it receives, but does not invent cells from public schema
-metadata.
+Explicit values are preserved. Explicit `null` is distinct from omission:
+nullable columns store `null`, and non-nullable columns reject `null`.
 
 🔶 Open question: dynamic defaults such as `now()` are not part of the current
 literal default surface. If added, the spec must choose their evaluation point and
