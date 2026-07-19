@@ -6,7 +6,7 @@ export const app = {
           name: "largeCount",
           column_type: { type: "BigInt" },
           nullable: false,
-          default: { type: "BigInt", value: 9007199254740991 },
+          default: { type: "BigInt", value: 9007199254740993n },
         },
       ],
     },

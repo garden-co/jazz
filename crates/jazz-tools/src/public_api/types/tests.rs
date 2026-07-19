@@ -156,6 +156,26 @@ fn value_column_type() {
 }
 
 #[test]
+fn value_bigint_json_round_trips_losslessly_as_decimal_string() {
+    let json =
+        serde_json::to_value(Value::BigInt(9_007_199_254_740_993)).expect("serialize bigint value");
+
+    assert_eq!(json["type"], "BigInt");
+    assert_eq!(json["value"], "9007199254740993");
+
+    let value: Value = serde_json::from_value(json).expect("deserialize bigint value");
+    assert_eq!(value, Value::BigInt(9_007_199_254_740_993));
+}
+
+#[test]
+fn value_bigint_deserializes_legacy_numeric_json() {
+    let value: Value = serde_json::from_str(r#"{"type":"BigInt","value":42}"#)
+        .expect("deserialize numeric bigint value");
+
+    assert_eq!(value, Value::BigInt(42));
+}
+
+#[test]
 fn value_deserializes_timestamp_from_integral_float() {
     let value: Value = serde_json::from_str(r#"{"type":"Timestamp","value":1773285322816.0}"#)
         .expect("deserialize timestamp");

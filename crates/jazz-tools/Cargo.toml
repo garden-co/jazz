@@ -221,6 +221,10 @@ name = "edge_server_mode"
 required-features = ["test"]
 
 [[test]]
+name = "bigint_integration"
+required-features = ["test"]
+
+[[test]]
 name = "policy_branch_closure"
 required-features = ["test"]
 

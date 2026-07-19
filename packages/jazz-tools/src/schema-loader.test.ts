@@ -53,6 +53,6 @@ describe("loadCompiledSchema", () => {
     const counters = loaded.schema.tables.find((table) => table.name === "counters");
     const largeCount = counters?.columns.find((column) => column.name === "largeCount");
     expect(largeCount?.sqlType).toBe("BIGINT");
-    expect(largeCount?.default).toBe(9007199254740991);
+    expect(largeCount?.default).toBe(9007199254740993n);
   });
 });

@@ -42,11 +42,27 @@ metadata.
 literal default surface. If added, the spec must choose their evaluation point and
 clock/session semantics before exposing them in public schema metadata.
 
+## BIGINT Representation
+
+Public `BIGINT` is executable as a signed 64-bit integer, matching PostgreSQL
+`bigint` range semantics (`-9223372036854775808` through
+`9223372036854775807`). The core storage value is `I64`; TypeScript client
+values round-trip as JavaScript `bigint` when read from native row codecs, so
+values outside `Number.MAX_SAFE_INTEGER` stay lossless.
+
+Unsigned `U64` remains a distinct core type for timestamps and internal counters.
+Public `BIGINT` must not lower to `U64`, and negative values are valid unless a
+schema/policy constraint rejects them.
+
+🔶 Open question: arbitrary-precision integer columns are not part of the
+current executable subset. If needed later, they require a separate public type
+and explicit storage, ordering, and wire semantics instead of widening
+`BIGINT`.
+
 ## Known Unsupported Runtime Features
 
 The subset currently excludes at least:
 
-- `BigInt`
 - `BatchId`
 - `Json`
 - nested `Row`
