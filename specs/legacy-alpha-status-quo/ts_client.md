@@ -55,6 +55,36 @@ db.insert(app.todos, { title: "Ship docs", done: false });
 
 The table handle is the shared entry point for reads, writes, and subscriptions.
 
+## Column Defaults
+
+The public schema DSL lets a column carry a literal default:
+
+```ts
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+  }),
+};
+```
+
+For typed `Db` row-creation calls, defaults are applied before the write reaches
+the runtime adapter:
+
+- `db.insert(...)` and `tx.insert(...)` expand omitted defaulted columns into
+  explicit runtime-facing cells.
+- `db.restore(...)` and `tx.restore(...)` use the same row-creation rule.
+- Explicit values are stored as provided.
+- Explicit `null` is distinct from omission: nullable columns store `null`, and
+  non-nullable columns reject `null`.
+
+Core schema conversion preserves strict core semantics. Defaults remain public
+schema metadata and are not evaluated by `jazz::schema::JazzSchema` or by core
+insert validation.
+
+🔶 Open question: dynamic defaults such as `now()` are not specified. The current
+surface only applies literal defaults already present in schema metadata.
+
 ## The Normal App Workflow
 
 ```ts

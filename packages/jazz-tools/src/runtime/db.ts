@@ -13,6 +13,8 @@
 import type {
   ColumnDescriptor,
   ColumnType,
+  InsertValues,
+  Value,
   WasmSchema,
   WasmRow,
   StorageDriver,
@@ -412,6 +414,53 @@ function toWriteRecordForOperation(
   }
 }
 
+function cloneWasmValue(value: Value): Value {
+  switch (value.type) {
+    case "Bytea":
+      return { type: "Bytea", value: new Uint8Array(value.value) };
+    case "Array":
+      return { type: "Array", value: value.value.map(cloneWasmValue) };
+    case "Row":
+      return {
+        type: "Row",
+        value: {
+          ...(value.value.id === undefined ? {} : { id: value.value.id }),
+          values: value.value.values.map(cloneWasmValue),
+        },
+      };
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+    case "Text":
+    case "Timestamp":
+    case "Uuid":
+    case "Null":
+      return { ...value };
+  }
+}
+
+function applyColumnDefaultsForRowCreate(
+  values: InsertValues,
+  schema: WasmSchema,
+  tableName: string,
+): InsertValues {
+  const table = schema[tableName];
+  if (!table) {
+    return values;
+  }
+
+  let expanded: InsertValues | undefined;
+  for (const column of table.columns) {
+    if (Object.hasOwn(values, column.name) || column.default === undefined) {
+      continue;
+    }
+    expanded ??= { ...values };
+    expanded[column.name] = cloneWasmValue(column.default);
+  }
+  return expanded ?? values;
+}
+
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
 }
@@ -758,10 +807,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
+    const valuesWithDefaults = applyColumnDefaultsForRowCreate(values, table._schema, table._table);
     const { client, transactionId, session, attribution } = this.requireBinding("insert");
     const row = client.insertInternal(
       table._table,
-      values,
+      valuesWithDefaults,
       options,
       session,
       attribution,
@@ -790,11 +840,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       table._schema,
       table._table,
     );
+    const valuesWithDefaults = applyColumnDefaultsForRowCreate(values, table._schema, table._table);
     const { client, transactionId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
       id,
-      values,
+      valuesWithDefaults,
       options,
       session,
       attribution,
@@ -1223,10 +1274,11 @@ export class Db {
       table._schema,
       table._table,
     );
+    const valuesWithDefaults = applyColumnDefaultsForRowCreate(values, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     const inserted = client.insert(
       table._table,
-      values,
+      valuesWithDefaults,
       options,
       context?.session,
       context?.attribution,
@@ -1255,11 +1307,12 @@ export class Db {
       table._schema,
       table._table,
     );
+    const valuesWithDefaults = applyColumnDefaultsForRowCreate(values, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
     const restored = client.restore(
       table._table,
       id,
-      values,
+      valuesWithDefaults,
       options,
       context?.session,
       context?.attribution,
@@ -1341,8 +1394,9 @@ export class Db {
       table._schema,
       table._table,
     );
+    const valuesWithDefaults = applyColumnDefaultsForRowCreate(values, table._schema, table._table);
     const context = this.getRuntimeOperationContext();
-    return client.canInsert(table._table, values, context?.session);
+    return client.canInsert(table._table, valuesWithDefaults, context?.session);
   }
 
   canRead<T, Init>(table: TableProxy<T, Init>, id: string): boolean {

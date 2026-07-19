@@ -122,7 +122,10 @@ export type TypedColumnBuilder<
   readonly __jazzHasDefault: HasDefault;
   readonly __jazzValue: Value;
   /**
-   * Set the default value for the column
+   * Set the default value for the column.
+   *
+   * `db.insert(...)` and `db.restore(...)` apply this literal when the column is omitted before
+   * submitting the write to the runtime. Explicit `null` on nullable columns is preserved.
    */
   default(
     value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,

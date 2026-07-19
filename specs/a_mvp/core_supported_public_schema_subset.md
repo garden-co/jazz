@@ -22,11 +22,30 @@ The gate should be used by:
 - native/WASM runtime open
 - server public-schema conversion
 
+## Default Lowering Boundary
+
+Column defaults are accepted public schema metadata. They are not represented in
+`jazz::schema::JazzSchema`, and the core runtime does not evaluate them during
+insert validation.
+
+For the TypeScript public DSL, literal column defaults are applied by the typed
+client row-creation path before submission to the native/WASM runtime. An omitted
+column with `s.<type>().default(value)` is expanded into an explicit cell in the
+runtime-facing write record. Explicit values are preserved. Explicit `null` is
+preserved for nullable columns and still rejected for non-nullable columns.
+
+This keeps the wire/storage write explicit and keeps core validation strict:
+core validates the cells it receives, but does not invent cells from public schema
+metadata.
+
+🔶 Open question: dynamic defaults such as `now()` are not part of the current
+literal default surface. If added, the spec must choose their evaluation point and
+clock/session semantics before exposing them in public schema metadata.
+
 ## Known Unsupported Runtime Features
 
 The subset currently excludes at least:
 
-- column defaults
 - `BigInt`
 - `BatchId`
 - `Json`
