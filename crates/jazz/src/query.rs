@@ -242,6 +242,7 @@ struct RelationFacadePlan {
     offset: usize,
 }
 
+#[derive(Clone, Debug)]
 struct RelationFacadeJoin {
     left_scope: String,
     left_column: String,
@@ -254,7 +255,7 @@ struct RelationFacadeJoin {
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
     let mut plan = RelationFacadePlan::default();
     collect_relation_facade(&query.rel, &mut plan)?;
-    let output_scope = plan.output_scope.ok_or_else(|| {
+    let output_scope = plan.output_scope.clone().ok_or_else(|| {
         relation_unification_error("relation query must end in a project over one output table")
     })?;
     let output_table = plan
@@ -272,27 +273,9 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         query = query.filter(filter);
     }
 
-    let mut joins = Vec::new();
-    for join in plan.joins {
-        let (join_scope, join_column, root_column) = if join.left_scope == output_scope {
-            (join.right_scope, join.right_column, join.left_column)
-        } else if join.right_scope == output_scope {
-            (join.left_scope, join.left_column, join.right_column)
-        } else {
-            return Err(relation_unification_error(
-                "relation query joins must connect directly to the output scope in this slice",
-            ));
-        };
-        let join_table = plan
-            .tables_by_scope
-            .get(&join_scope)
-            .cloned()
-            .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
-        let filters = plan
-            .filters_by_scope
-            .remove(&join_scope)
-            .unwrap_or_default();
-        joins.push((join_table, join_column, root_column, filters));
+    if !plan.joins.is_empty() {
+        let join = relation_path_join_from_output(&mut plan, &output_scope)?;
+        query.joins.push(join);
     }
 
     if !plan.filters_by_scope.is_empty() {
@@ -300,15 +283,7 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
             "relation query filters on non-adjacent scopes are not unified yet",
         ));
     }
-    if joins.len() > 1 {
-        return Err(relation_unification_error(
-            "multi-hop relation query lowering is not unified yet",
-        ));
-    }
 
-    for (join_table, join_column, root_column, filters) in joins {
-        query = query.join_via_column(join_table, join_column, root_column, filters);
-    }
     for (column, direction) in plan.order_by {
         query = query.order_by(column, direction);
     }
@@ -323,6 +298,116 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
 
 fn relation_unification_error(message: impl Into<String>) -> QueryError {
     QueryError::UnsupportedRelationQuery(message.into())
+}
+
+fn relation_path_join_from_output(
+    plan: &mut RelationFacadePlan,
+    output_scope: &str,
+) -> Result<JoinVia, QueryError> {
+    let mut path = Vec::<(String, RelationFacadeJoin)>::new();
+    let mut current = output_scope.to_owned();
+    let mut previous = None::<String>;
+
+    loop {
+        let incident = plan
+            .joins
+            .iter()
+            .filter(|join| join.left_scope == current || join.right_scope == current)
+            .filter(|join| {
+                previous.as_ref().is_none_or(|previous| {
+                    join.left_scope != *previous && join.right_scope != *previous
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match incident.as_slice() {
+            [] => break,
+            [join] => {
+                let next = if join.left_scope == current {
+                    join.right_scope.clone()
+                } else {
+                    join.left_scope.clone()
+                };
+                path.push((next.clone(), join.clone()));
+                previous = Some(current);
+                current = next;
+            }
+            _ => {
+                return Err(relation_unification_error(
+                    "relation query joins must form one output-rooted path in this slice",
+                ));
+            }
+        }
+    }
+
+    if path.len() != plan.joins.len() {
+        return Err(relation_unification_error(
+            "relation query joins must connect directly to the output scope in this slice",
+        ));
+    }
+    if path.is_empty() {
+        return Err(relation_unification_error(
+            "relation query join path is empty",
+        ));
+    }
+
+    build_relation_path_join(plan, output_scope, &path, 0)
+}
+
+fn build_relation_path_join(
+    plan: &mut RelationFacadePlan,
+    left_scope: &str,
+    path: &[(String, RelationFacadeJoin)],
+    index: usize,
+) -> Result<JoinVia, QueryError> {
+    let (right_scope, relation_join) = path
+        .get(index)
+        .ok_or_else(|| relation_unification_error("relation query join path ended unexpectedly"))?;
+    let (left_column, right_column) =
+        relation_join_columns(relation_join, left_scope, right_scope)?;
+    let join_table = plan
+        .tables_by_scope
+        .get(right_scope)
+        .cloned()
+        .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
+    let mut join = JoinVia {
+        table: join_table,
+        on_column: right_column,
+        target: JoinTarget::Column,
+        source_column: (left_column != "id").then_some(left_column),
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters: plan
+            .filters_by_scope
+            .remove(right_scope)
+            .unwrap_or_default(),
+        nested_joins: Vec::new(),
+    };
+    if index + 1 < path.len() {
+        join.nested_joins.push(build_relation_path_join(
+            plan,
+            right_scope,
+            path,
+            index + 1,
+        )?);
+    }
+    Ok(join)
+}
+
+fn relation_join_columns(
+    join: &RelationFacadeJoin,
+    left_scope: &str,
+    right_scope: &str,
+) -> Result<(String, String), QueryError> {
+    if join.left_scope == left_scope && join.right_scope == right_scope {
+        Ok((join.left_column.clone(), join.right_column.clone()))
+    } else if join.right_scope == left_scope && join.left_scope == right_scope {
+        Ok((join.right_column.clone(), join.left_column.clone()))
+    } else {
+        Err(relation_unification_error(
+            "relation query join path contains a non-adjacent edge",
+        ))
+    }
 }
 
 fn collect_relation_facade(

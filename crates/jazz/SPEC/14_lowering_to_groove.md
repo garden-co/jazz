@@ -139,6 +139,48 @@ whose semantics are not represented by seeded reachability. Other gather shapes
 stay on the legacy lowering path and must fail closed if they cannot be
 represented safely.
 
+Relation facade unification is staged. The alpha-compatible public
+`hopTo`/`gather` query surface arrives at the core as relation IR
+(`TableScan`, `Filter`, `Join`, `Project`, `Union`, `Gather`, `Distinct`,
+`OrderBy`, `Offset`, `Limit`) and must normalize into the same row-set program
+vocabulary used by ordinary queries. The contained v1 slice accepts runtime
+value-envelope literals such as `{ type: "Uuid", value: ... }` in relation
+predicates and maps scalar acyclic hop paths whose projected output is the path
+terminal onto existing `JoinVia`/nested-join shapes. That preserves the lowered
+plan shape for already-supported single-hop relation queries while covering the
+browser scalar `users -> teams -> orgs` relation shape.
+
+The remaining relation IR operators require first-class row-set lowering rather
+than more facade rewrites:
+
+- `Union` should lower to a row-set `Union` with explicit source alternatives
+  and a result identity that either preserves branch/source discriminators or
+  proves all alternatives are the same logical real-row domain before
+  deduplication.
+- `Distinct` should lower after the relation input that creates duplicates,
+  with stable dedupe keys carried into replacement facts so maintained views can
+  retract exactly the affected membership row.
+- `Gather` should lower to a recursive relation node whose seed and step are
+  ordinary row-set subplans, with frontier keys, dedupe keys, max-depth, depth
+  output, and path facts all represented explicitly. It must not be encoded as a
+  root-table `reachable` filter when the output row set changes from the seed.
+- Array-valued foreign-key hops need membership join semantics
+  (`array_contains(left_key, right_row_id)` / `ContainsField`-like lowering) or
+  an equivalent path edge operator. Rewriting them as scalar equality joins is
+  unsound and would miss multi-valued membership changes.
+
+Maintained subscriptions for those operators must preserve `INV-INC-1`: relation
+membership changes must be scale-independent in unrelated rows. In practice that
+means union alternatives, distinct groups, recursive frontier rows, and
+array-membership path edges all need terminal facts with enough identity to
+route updates to the exact subscribed binding/result member. A staged plan is:
+first normalize relation IR into row-set nodes without changing execution;
+second lower union/distinct as maintained groove fragments with explicit
+identity/retraction facts; third lower recursive gather using the seeded
+frontier machinery and depth/dedupe facts; fourth add array-membership join
+facts and extend the incremental-delivery canaries to cover scalar-hop,
+array-hop, union/dedup, and recursive-gather single-row updates.
+
 The current implementation split is explicit. Read policy now lowers through the
 `node/query_engine` path described above. Write-time acceptance still evaluates
 policy predicates directly in `node/policy.rs`: the ingest/dry-run path enters
