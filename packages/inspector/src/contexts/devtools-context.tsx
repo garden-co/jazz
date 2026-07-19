@@ -1,14 +1,12 @@
-import type { QueryPropagation, StoredPermissionsResponse, WasmSchema } from "jazz-tools";
-import { createContext, useContext, useState, type PropsWithChildren } from "react";
+import type { StoredPermissionsResponse, WasmSchema } from "jazz-tools";
+import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
-export type InspectorRuntime = "standalone" | "extension";
+export type InspectorRuntime = "standalone" | "overlay";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
   storedPermissions: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
-  queryPropagation: QueryPropagation;
-  setQueryPropagation: (value: QueryPropagation) => void;
 }
 
 export const DevtoolsContext = createContext<DevtoolsContextValue | null>(null);
@@ -18,35 +16,16 @@ export function DevtoolsProvider({
   wasmSchema,
   storedPermissions = null,
   runtime,
-  queryPropagation,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
   storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
-  queryPropagation?: QueryPropagation;
 }>) {
-  const [extensionQueryPropagation, setExtensionQueryPropagation] = useState<QueryPropagation>(
-    queryPropagation ?? "local-only",
+  const value = useMemo(
+    () => ({ wasmSchema, storedPermissions, runtime }),
+    [wasmSchema, storedPermissions, runtime],
   );
-  const resolvedPropagation = runtime === "standalone" ? "full" : extensionQueryPropagation;
-  const setQueryPropagation = (value: QueryPropagation) => {
-    if (runtime === "standalone") return;
-    setExtensionQueryPropagation(value);
-  };
-
-  return (
-    <DevtoolsContext.Provider
-      value={{
-        wasmSchema,
-        storedPermissions,
-        runtime,
-        queryPropagation: resolvedPropagation,
-        setQueryPropagation,
-      }}
-    >
-      {children}
-    </DevtoolsContext.Provider>
-  );
+  return <DevtoolsContext.Provider value={value}>{children}</DevtoolsContext.Provider>;
 }
 
 export function useDevtoolsContext(): DevtoolsContextValue {

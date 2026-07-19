@@ -616,44 +616,29 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use crate::server::ShutdownPhase;
-
     use super::*;
 
     #[tokio::test]
-    async fn internal_shutdown_stops_jazz_server() {
+    async fn explicit_shutdown_stops_jazz_server() {
         let server = JazzServer::start().await;
         let base_url = server.base_url();
-        let admin_secret = server.admin_secret().to_string();
         let client = reqwest::Client::new();
 
-        let response = client
-            .post(format!("{base_url}/internal/shutdown"))
-            .header("X-Jazz-Admin-Secret", admin_secret)
-            .send()
-            .await
-            .expect("shutdown request");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        server.shutdown().await;
 
-        let mut saw_unavailable = false;
         for _ in 0..80 {
-            match client.get(format!("{base_url}/health")).send().await {
-                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
-                    saw_unavailable = true;
-                }
-                Err(_) if saw_unavailable => {
-                    assert_eq!(
-                        server.server_state().shutdown.phase(),
-                        ShutdownPhase::StorageClosed
-                    );
-                    return;
-                }
-                _ => {}
+            if client
+                .get(format!("{base_url}/health"))
+                .send()
+                .await
+                .is_err()
+            {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        panic!("jazz server did not stop after internal shutdown");
+        panic!("jazz server did not stop after explicit shutdown");
     }
 
     #[tokio::test]

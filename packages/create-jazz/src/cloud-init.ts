@@ -101,7 +101,8 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
         `  ${envKeys.adminSecret}=${adminSecret}`,
         `  ${envKeys.backendSecret}=${backendSecret}`,
         "",
-        "Visit https://v2.dashboard.jazz.tools to sign up and claim your app!",
+        "Claim this app in the dashboard within 14 days: https://v2.dashboard.jazz.tools",
+        "Unclaimed apps are automatically deleted after 14 days.",
       ].join("\n"),
     );
   } catch (err) {

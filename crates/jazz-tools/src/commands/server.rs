@@ -6,7 +6,8 @@ use std::time::Duration;
 use jazz::node::EdgeCacheBudget;
 use jazz_tools::AppId;
 use jazz_tools::middleware::AuthConfig;
-use jazz_tools::server::{ServerBuilder, ShutdownPhase, StorageBackend};
+use jazz_tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
+use tokio::task::JoinHandle;
 use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
@@ -92,6 +93,7 @@ pub async fn run(
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
+    let mut sigterm_task = spawn_sigterm_shutdown_task(shutdown.clone())?;
     let (serve_shutdown_tx, serve_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut shutdown_task = tokio::spawn(async move {
         state.shutdown.wait_requested().await;
@@ -129,19 +131,20 @@ pub async fn run(
         Ok(result) => result,
         Err(error) if forced_shutdown && error.is_cancelled() => Ok(()),
         Err(error) => {
-            shutdown_task.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+            abort_task(&mut shutdown_task).await;
+            abort_task(&mut sigterm_task).await;
             return Err(Box::new(error));
         }
     };
 
     if let Err(error) = serve_result {
-        shutdown_task.abort();
-        let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+        abort_task(&mut shutdown_task).await;
+        abort_task(&mut sigterm_task).await;
         return Err(Box::new(error));
     }
 
     if forced_shutdown {
+        abort_task(&mut sigterm_task).await;
         return Err("server shutdown timed out while waiting for active requests to finish".into());
     }
 
@@ -149,21 +152,56 @@ pub async fn run(
         let final_phase =
             match tokio::time::timeout(Duration::from_secs(5), &mut shutdown_task).await {
                 Ok(Ok(phase)) => phase,
-                Ok(Err(error)) => return Err(Box::new(error)),
+                Ok(Err(error)) => {
+                    abort_task(&mut sigterm_task).await;
+                    return Err(Box::new(error));
+                }
                 Err(_) => {
-                    shutdown_task.abort();
+                    abort_task(&mut shutdown_task).await;
+                    abort_task(&mut sigterm_task).await;
                     return Err("server shutdown finalization did not finish".into());
                 }
             };
         if final_phase == ShutdownPhase::Failed {
+            abort_task(&mut sigterm_task).await;
             return Err("server shutdown finalization failed".into());
         }
     } else {
-        shutdown_task.abort();
-        let _ = tokio::time::timeout(Duration::from_millis(50), shutdown_task).await;
+        abort_task(&mut shutdown_task).await;
     }
+    abort_task(&mut sigterm_task).await;
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_sigterm_shutdown_task(
+    shutdown: ShutdownController,
+) -> Result<JoinHandle<()>, std::io::Error> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    Ok(tokio::spawn(async move {
+        if sigterm.recv().await.is_some() {
+            if shutdown.request_shutdown() {
+                info!("Received SIGTERM; starting controlled shutdown");
+            } else {
+                info!("Received SIGTERM; controlled shutdown is already in progress");
+            }
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+fn spawn_sigterm_shutdown_task(
+    _shutdown: ShutdownController,
+) -> Result<JoinHandle<()>, std::io::Error> {
+    Ok(tokio::spawn(async move {
+        std::future::pending::<()>().await;
+    }))
+}
+
+async fn abort_task<T>(task: &mut JoinHandle<T>) {
+    task.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
 }
 
 fn build_inspector_link(port: u16, app_id: &str) -> String {

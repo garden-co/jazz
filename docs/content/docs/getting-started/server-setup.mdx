@@ -1,14 +1,14 @@
 ---
 title: Server Setup
 description: Hosted and self-hosted database server configuration, app provisioning, and backend context setup.
-reviewedAt: "22485728"
+reviewedAt: "3384730e1"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
 ## Hosted database server
 
-Your app ID namespaces your data for storage and sync. Click below to generate one on the Jazz hosted cloud&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later.
+Your app ID namespaces your data for storage and sync. Click below to generate one on the Jazz hosted cloud&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are automatically deleted after 14 days.
 
 <GenerateAppId />
 
@@ -20,27 +20,32 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 `jazz-tools@alpha server <APP_ID>` currently supports:
 
-| Option                              | Purpose                                                                                                                                  | Environment variable          | Default                   |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
-| `<APP_ID>` (positional)             | App namespace identifier (required)                                                                                                      | -                             | -                         |
-| `-p, --port <PORT>`                 | Listen port                                                                                                                              | -                             | `1625`                    |
-| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                                                                                             | -                             | `./data`                  |
-| `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                              | -                             | off                       |
-| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                                                                                                | `JAZZ_JWKS_URL`               | unset                     |
-| `--jwt-public-key <JWT_PUBLIC_KEY>` | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                   | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
-| `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
-| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
-| `--admin-secret <ADMIN_SECRET>`     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
-| `--upstream-url <UPSTREAM_URL>`     | Edge upstream sync is temporarily unsupported while server-to-server sync is migrated to the core engine.                                | `JAZZ_UPSTREAM_URL`           | unset                     |
+| Option                                  | Purpose                                                                                                                                                      | Environment variable          | Default                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------- | ------------------------- |
+| `<APP_ID>` (positional)                 | App namespace identifier (required)                                                                                                                          | -                             | -                         |
+| `-p, --port <PORT>`                     | Listen port                                                                                                                                                  | -                             | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`             | Persistent storage directory                                                                                                                                 | -                             | `./data`                  |
+| `--in-memory`                           | Use in-memory storage instead of files; data is lost when the process exits                                                                                  | -                             | off                       |
+| `--jwks-url <JWKS_URL>`                 | JWKS endpoint for external JWT validation                                                                                                                    | `JAZZ_JWKS_URL`               | unset                     |
+| `--jwt-public-key <JWT_PUBLIC_KEY>`     | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                                       | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
+| `--auth-cookie-name <AUTH_COOKIE_NAME>` | Cookie name to read for browser authentication during WebSocket upgrades                                                                                     | `JAZZ_AUTH_COOKIE_NAME`       | unset                     |
+| `--allow-local-first-auth`              | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                                      | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>`     | Enable backend session impersonation                                                                                                                         | `JAZZ_BACKEND_SECRET`         | unset                     |
+| `--admin-secret <ADMIN_SECRET>`         | Required for `deploy`, `migrations push`, schema catalogue reads, and edge upstream sync. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
+| `--upstream-url <UPSTREAM_URL>`         | Run as an edge server connected to the upstream core server. Requires `--admin-secret`.                                                                      | `JAZZ_UPSTREAM_URL`           | unset                     |
+| `--shutdown-timeout-secs <SECONDS>`     | Graceful shutdown network-drain timeout in seconds                                                                                                           | `JAZZ_SHUTDOWN_TIMEOUT_SECS`  | `30`                      |
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
-Servers currently refuse to start when `--upstream-url` or `JAZZ_UPSTREAM_URL` is set. This prevents edge deployments from silently using the legacy alpha WebSocket sync transport.
+Edge mode is enabled by `--upstream-url`; when set, provide `--admin-secret` or `JAZZ_ADMIN_SECRET`. The edge uses that admin secret for its upstream WebSocket connection.
 
-There is no separate Jazz server CLI flag for cookie-based auth. The sync server validates bearer
-JWTs, local-first bearer JWTs, or backend impersonation headers. If your app uses an HttpOnly cookie,
-resolve that cookie in your own app server and either exchange it for a bearer JWT before creating
-the Jazz client, or pass a mirrored `cookieSession` to the browser client while the cookie remains
-the transport credential.
+Cookie-based WebSocket auth is enabled with `--auth-cookie-name` or `JAZZ_AUTH_COOKIE_NAME`. When no
+explicit auth credential is supplied, the sync server reads that named cookie and validates the JWT
+it contains. If your app uses a separate application session cookie, resolve it in your own app server
+and call `context.forSession(session)`, or pass a mirrored `cookieSession` to the browser client while
+the application cookie remains the transport credential.
+
+If you prefer to start the database server programmatically, you can use `startLocalJazzServer` from `jazz-tools/dev`.
+It expects similar arguments as the CLI.
 
 ## Backend context setup
 
@@ -48,12 +53,12 @@ Every backend needs an app ID, typed schema, and usually a permissions bundle. I
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
-    <include cwd lang="ts">
+    <include cwd lang="ts" meta='title="main.ts"'>
       ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
     </include>
   </Tab>
   <Tab value="Rust">
-    <include cwd lang="rs">
+    <include cwd lang="rs" meta='title="main.rs"'>
       ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
     </include>
   </Tab>
@@ -94,12 +99,12 @@ Pass `req` to run queries as the authenticated user, with all permission policie
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
-    <include cwd lang="ts">
+    <include cwd lang="ts" meta='title="request-context.ts"'>
       ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
     </include>
   </Tab>
   <Tab value="Rust">
-    <include cwd lang="rs">
+    <include cwd lang="rs" meta='title="request-context.rs"'>
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
     </include>
   </Tab>

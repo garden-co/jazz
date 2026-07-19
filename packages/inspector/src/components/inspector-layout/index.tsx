@@ -1,10 +1,13 @@
 import { NavLink, Outlet, useLocation } from "react-router";
+import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
+import { requestCloseOverlay } from "../../utility/overlay-settings.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
+import { Tooltip } from "../tooltip/Tooltip.js";
 import styles from "./index.module.css";
 
 const TABLES_PANEL_OPEN_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesPanelOpen";
@@ -33,7 +36,26 @@ function TablesPanelIcon({ direction }: TablesPanelIconProps) {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
 export function InspectorLayout() {
+  const { runtime } = useDevtoolsContext();
+  const isOverlay = runtime === "overlay";
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
@@ -76,8 +98,18 @@ export function InspectorLayout() {
               `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
             }
           >
-            Live Query
+            Subscriptions
           </NavLink>
+          {isOverlay ? (
+            <NavLink
+              to="/settings"
+              className={({ isActive }) =>
+                `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
+              }
+            >
+              Settings
+            </NavLink>
+          ) : null}
         </nav>
         <div className={styles.topBarActions}>
           {standaloneContext ? (
@@ -96,6 +128,18 @@ export function InspectorLayout() {
                 Connections
               </button>
             </>
+          ) : null}
+          {isOverlay ? (
+            <Tooltip label="Close (Esc)">
+              <button
+                type="button"
+                onClick={requestCloseOverlay}
+                className={styles.iconButton}
+                aria-label="Close inspector"
+              >
+                <CloseIcon />
+              </button>
+            </Tooltip>
           ) : null}
         </div>
       </header>

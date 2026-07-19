@@ -88,7 +88,7 @@ export function TodoList() {
     setQueryTimeMs(null);
   }, [queryMode, filterTitle, showDoneOnly]);
 
-  const results = useAll(query) ?? [];
+  const { data: results = [] } = useAll(query);
 
   // Measure time when results first arrive after a query change
   useEffect(() => {

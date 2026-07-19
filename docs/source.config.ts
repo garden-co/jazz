@@ -1,7 +1,23 @@
 import { defineCollections, defineConfig, defineDocs } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
 import { z } from "zod";
-import { rehypeCodeDefaultOptions } from "fumadocs-core/mdx-plugins";
+import { parseCodeBlockAttributes, rehypeCodeDefaultOptions } from "fumadocs-core/mdx-plugins";
+
+type ParseMetaString = NonNullable<typeof rehypeCodeDefaultOptions.parseMetaString>;
+
+const parseCodeBlockMetaString: ParseMetaString = (meta, code, lang) => {
+  const data = rehypeCodeDefaultOptions.parseMetaString?.(meta, code, lang) ?? {};
+  const record = data as Record<string, unknown>;
+  const raw = typeof record.__parsed_raw === "string" ? record.__parsed_raw : meta;
+  const parsed = parseCodeBlockAttributes(raw, ["custom"]);
+
+  if ("custom" in parsed.attributes) {
+    record.custom = parsed.attributes.custom;
+    record.__parsed_raw = parsed.rest;
+  }
+
+  return data;
+};
 
 // You can customise Zod schemas for frontmatter and `meta.json` here
 // see https://fumadocs.dev/docs/mdx/collections
@@ -39,6 +55,7 @@ export default defineConfig({
   mdxOptions: {
     rehypeCodeOptions: {
       ...rehypeCodeDefaultOptions,
+      parseMetaString: parseCodeBlockMetaString,
       icon: {
         extend: {
           rs: {

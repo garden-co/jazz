@@ -6,12 +6,13 @@
  * pages are tracked in a Map keyed by label (e.g. "b").
  */
 
-import { join } from "node:path";
 import { createServer } from "node:net";
 import type { BrowserCommand } from "vitest/node";
 import type { BrowserContext, ConsoleMessage, Page } from "playwright";
 import type {} from "@vitest/browser-playwright";
 import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -240,12 +241,12 @@ export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx
     adminSecret: FRESH_ADMIN_SECRET,
   });
 
-  const schemaDir = join(import.meta.dirname, "../..");
   await deploy({
     serverUrl: handle.url,
     appId: FRESH_APP_ID,
     adminSecret: FRESH_ADMIN_SECRET,
-    schemaDir,
+    schema: app,
+    permissions,
   });
 
   freshServers.set(label, handle);

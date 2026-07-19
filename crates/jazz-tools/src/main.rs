@@ -111,7 +111,7 @@ enum Commands {
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
 
-        /// Use in-memory storage instead of Fjall-backed files.
+        /// Use in-memory storage instead of persistent files.
         #[arg(long)]
         in_memory: bool,
 

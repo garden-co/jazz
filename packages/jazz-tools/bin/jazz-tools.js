@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const BINARIES = {
   "darwin-arm64": "jazz-tools-darwin-arm64",
@@ -128,7 +128,7 @@ if (!command || command === "--help" || command === "-h") {
   printWrapperHelp();
 } else if (command === "mcp") {
   const mcpPath = join(here, "..", "dist", "mcp", "server.js");
-  const { runServer } = await import(mcpPath);
+  const { runServer } = await import(pathToFileURL(mcpPath).href);
   await runServer();
   // runServer resolves when stdin closes; process exits naturally.
 } else if (command === "build") {

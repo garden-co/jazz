@@ -10,7 +10,7 @@ Local-first todo app on React + Vite, anonymous auth via `useLocalFirstAuth`, OP
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `sonner`.
 - OPFS-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
 - `JazzProvider` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
-- DevTools integration via `attachDevTools`.
+- In-app Inspector overlay during development via the Jazz Vite plugin.
 
 ## Schema
 

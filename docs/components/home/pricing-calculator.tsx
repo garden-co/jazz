@@ -24,10 +24,10 @@ const mauTicks = [
 ] as const;
 
 const frequencyTicks = [
-  { value: 0, label: "Multi-daily" },
-  { value: 1, label: "Daily" },
-  { value: 2, label: "Weekly" },
-  { value: 3, label: "Monthly" },
+  { value: 0, label: "Monthly" },
+  { value: 1, label: "Weekly" },
+  { value: 2, label: "Daily" },
+  { value: 3, label: "Multi-daily" },
 ] as const;
 
 const realtimeTicks = [
@@ -37,6 +37,7 @@ const realtimeTicks = [
 ] as const;
 
 function formatCurrency(value: number) {
+  if (value === 0) return "$0";
   if (value >= 1000)
     return compactFormatter
       .format(value)
@@ -58,25 +59,6 @@ function formatCount(value: number) {
   if (value >= 1_000) {
     return trimTrailingZero(`${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`);
   }
-  return `${Math.round(value)}`;
-}
-
-function formatOps(value: number) {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${Math.round(value)}`;
-}
-
-function formatData(value: number) {
-  if (value >= 100) return `${value.toFixed(0)} GB`;
-  if (value >= 10) return `${value.toFixed(1)} GB`;
-  if (value >= 1) return `${value.toFixed(2)} GB`;
-  return `${(value * 1024).toFixed(0)} MB`;
-}
-
-function formatIops(value: number) {
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
   return `${Math.round(value)}`;
 }
 
@@ -145,7 +127,7 @@ function TickSlider({
 
 export function PricingCalculator() {
   const [mauLogValue, setMauLogValue] = useState(3);
-  const [frequencyIndex, setFrequencyIndex] = useState(1);
+  const [frequencyIndex, setFrequencyIndex] = useState(2);
   const [realtimeIndex, setRealtimeIndex] = useState(0);
   const [blobStoragePerUserMb, setBlobStoragePerUserMb] = useState(32);
 
@@ -153,7 +135,7 @@ export function PricingCalculator() {
   const frequency = frequencyOptions[frequencyIndex]?.value ?? "daily";
   const realtime = realtimeOptions[realtimeIndex]?.value ?? "mostly-form-like";
   const selectedFrequency =
-    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[1];
+    frequencyOptions.find((option) => option.value === frequency) ?? frequencyOptions[2];
   const selectedRealtime =
     realtimeOptions.find((option) => option.value === realtime) ?? realtimeOptions[0];
 
@@ -215,18 +197,18 @@ export function PricingCalculator() {
         </div>
         <div className="grid gap-4 text-sm leading-relaxed text-fd-muted-foreground sm:grid-cols-2">
           <p>
-            {selectedFrequency.label} assumes about{" "}
-            {(selectedFrequency.activeDaysPerMonth * selectedFrequency.activeMinutesPerActiveDay) /
-              60}{" "}
-            active hours per user each month.
+            {selectedFrequency.label} estimates about {selectedFrequency.visitsPerUserPerMonth}{" "}
+            visits per monthly active user across {selectedFrequency.activeDaysPerMonth} active{" "}
+            {selectedFrequency.activeDaysPerMonth === 1 ? "day" : "days"} each month.
           </p>
           <p>
-            {selectedRealtime.label} assumes {selectedRealtime.cadenceLabel}
+            {selectedRealtime.label} assumes {selectedRealtime.sessionLabel}, plus a short idle
+            shutdown grace period.
           </p>
         </div>
         <div className="space-y-8 border-t pt-8">
-          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-end">
-            <div className="pt-4">
+          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] md:items-start">
+            <div>
               <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
                 Cost per user / mo
               </p>
@@ -244,58 +226,17 @@ export function PricingCalculator() {
               <p className="font-display text-5xl font-black tracking-[-0.06em]">
                 {formatCurrency(estimate.totalMonthlyCost)}
               </p>
+              {estimate.isWithinFreeTier ? (
+                <p className="mt-2 text-sm leading-relaxed text-fd-muted-foreground">
+                  Includes the free monthly allowance.
+                </p>
+              ) : null}
             </div>
           </div>
           <p className="max-w-[24rem] text-sm leading-relaxed text-fd-muted-foreground">
             Rough self-serve estimate based on the draft public meters on this page. Enterprise
             contracts can still diverge.
           </p>
-          {/* <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Monthly I/O
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatOps(estimate.monthlyIoOperations)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.ioCost)} at $0.15 per 1M ops
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Stored data
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatData(estimate.storageGbMonth)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.storageCost)} at $0.45 per GB-month
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Egress
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatData(estimate.egressGb)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                {formatCurrency(estimate.egressCost)} at $0.09 per GB out
-              </p>
-            </div>
-            <div className="border-t pt-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Rough peak IOPS
-              </p>
-              <p className="mt-2 text-3xl font-black tracking-[-0.05em]">
-                {formatIops(estimate.peakIops)}
-              </p>
-              <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-                Planning signal only, not billed
-              </p>
-            </div>
-          </div>*/}
         </div>
       </div>
     </div>

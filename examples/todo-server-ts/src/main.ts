@@ -59,7 +59,7 @@ export interface RunningServer extends TodoServer {
 /**
  * Create a todo server.
  *
- * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
+ * @param dataPath Optional path to local SQLite database file. If omitted, uses a temp directory.
  * @returns TodoServer with app, db, and shutdown function
  */
 export async function createServer(dataPath?: string): Promise<TodoServer> {

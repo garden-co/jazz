@@ -79,13 +79,13 @@ export function resolveTelemetryCollectorUrl(
 // property name are literal in the source — computed keys, aliased env
 // objects, and dynamic indexing all defeat static replacement.
 export function resolveTelemetryCollectorUrlFromEnv(): string | undefined {
-  const hasProcess = typeof process !== "undefined";
-  return (
-    trim(hasProcess ? process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
-    trim(hasProcess ? process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
-    trim(hasProcess ? process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
-    trim(hasProcess ? process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
-    trim((import.meta as ImportMetaWithEnv).env?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL)
+  return trim(
+    typeof process !== "undefined"
+      ? (process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL ??
+          process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL ??
+          process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL ??
+          process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL)
+      : (import.meta as ImportMetaWithEnv).env?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL,
   );
 }
 

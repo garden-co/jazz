@@ -1,5 +1,5 @@
-import { join } from "node:path";
-import { deploy, startLocalJazzServer } from "jazz-tools/testing";
+import { startLocalJazzServer } from "jazz-tools/testing";
+import { deploy } from "jazz-tools/dev";
 import {
   ADMIN_SECRET,
   APP_ID,
@@ -23,7 +23,8 @@ export default async function runServer() {
     serverUrl: serverHandle.url,
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
-    schemaDir: join(import.meta.dirname, "../tests/browser"),
+    schema: app,
+    permissions,
   });
 
   const context = createJazzContext({

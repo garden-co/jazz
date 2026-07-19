@@ -1,7 +1,7 @@
 ---
 title: Authentication
 description: "How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
-reviewedAt: "2e983ef11"
+reviewedAt: "3384730e1"
 ---
 
 Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
@@ -230,7 +230,7 @@ When the server receives a request, it tries each auth method in priority order 
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both. Cookie-based app auth is resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from a cookie, use `context.forSession(session)`.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both. Application session cookies are resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from an application cookie, use `context.forSession(session)`. If the sync server should authenticate WebSocket upgrades from a Jazz JWT cookie, configure `--auth-cookie-name` / `JAZZ_AUTH_COOKIE_NAME` as described in [Server Setup](/docs/getting-started/server-setup).
 
 ### Upgrading to external auth
 

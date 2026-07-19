@@ -24,7 +24,9 @@ export function useMyProfile(): Profile | null {
     [db],
   );
 
-  const profiles = useAll(app.profiles.where({ userId: userId ?? "__none__" }));
+  const { data: profiles = [] } = useAll(
+    userId !== null ? app.profiles.where({ userId }) : undefined,
+  );
 
   // Deterministic: always pick the first profile by ID
   const sorted = profiles ? [...profiles].sort((a, b) => a.id.localeCompare(b.id)) : [];
@@ -36,7 +38,7 @@ export function useMyProfile(): Profile | null {
     (profile && (profile.id === confirmedProfileId || profile.id !== localProfile?.id));
 
   useEffect(() => {
-    if (!userId || !profiles || profiles.length > 0 || createdForUser.has(userId)) return;
+    if (!userId || profiles.length > 0 || createdForUser.has(userId)) return;
     createdForUser.add(userId);
 
     void (async () => {

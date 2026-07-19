@@ -293,7 +293,7 @@ Each reaction is a row. The query is live; toggling one is a synchronous insert 
 **[`src/components/chat/ChatReactions.tsx`](../src/components/chat/ChatReactions.tsx)**
 
 ```typescript
-const reactions = useAll(app.reactions.where({ messageId })) ?? [];
+const { data: reactions = [] } = useAll(app.reactions.where({ messageId }));
 
 const handleToggle = (emoji: string) => {
   const mine = reactions.find((r) => r.emoji === emoji && r.userId === userId);
@@ -341,7 +341,7 @@ Each chat can host shared drawing canvases. Strokes are rows synced in real time
 
 ```typescript
 // Live — re-renders whenever any stroke is added or removed
-const allStrokes = useAll(app.strokes.where({ canvasId })) ?? [];
+const { data: allStrokes = [] } = useAll(app.strokes.where({ canvasId }));
 
 // Clear your own strokes — policy enforces ownerId check server-side
 for (const s of allStrokes.filter((s) => s.ownerId === userId)) {

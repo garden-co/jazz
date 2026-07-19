@@ -184,8 +184,14 @@ function UseAllProbe<T extends { id: string }>({
   options?: QueryOptions;
   pick: (row: T) => string;
 }) {
-  const rows = useAll(query, options);
-  const text = rows ? rows.map(pick).join("|") : "pending";
+  const result = useAll(query, options);
+  const text = result.error
+    ? `error:${result.error.message}`
+    : result.data
+      ? result.data.map(pick).join("|")
+      : result.isLoading
+        ? "pending"
+        : "no result";
   return <div data-testid="rows">{text}</div>;
 }
 
@@ -674,7 +680,7 @@ describe("useAll browser integration", () => {
       const query = makeQuery<Todo>("todos", {
         conditions: [{ column: "done", op: "eq", value: showDone }],
       });
-      const rows = useAll(query);
+      const { data: rows } = useAll(query);
       return (
         <>
           <button data-testid="toggle-query" onClick={() => setShowDone((value) => !value)}>
@@ -708,7 +714,7 @@ describe("useAll browser integration", () => {
     );
   });
 
-  it("returns undefined when query is missing and a result when the query is provided later", async () => {
+  it("returns no result when query is missing and a result when the query is provided later", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("missing-query"),
@@ -744,9 +750,9 @@ describe("useAll browser integration", () => {
     );
 
     await waitForCondition(
-      () => getText("rows") === "pending",
+      () => getText("rows") === "no result",
       5000,
-      "expected pending text when query is missing",
+      "expected no result text when query is missing",
     );
 
     const setQueryButton = container?.querySelector('[data-testid="set-query"]');

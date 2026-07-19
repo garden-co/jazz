@@ -14,10 +14,11 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
   const session = useSession();
   const userId = session?.user_id ?? null;
 
-  const members = useAll(app.chatMembers.where({ chatId })) ?? [];
-  const allProfiles = useAll(app.profiles) ?? [];
-  const messages =
-    useAll(app.messages.where({ chatId }).orderBy("createdAt", "asc").limit(1)) ?? [];
+  const { data: members = [] } = useAll(app.chatMembers.where({ chatId }));
+  const { data: allProfiles = [] } = useAll(app.profiles);
+  const { data: messages = [] } = useAll(
+    app.messages.where({ chatId }).orderBy("createdAt", "asc").limit(1),
+  );
 
   if (chatName) return chatName;
 

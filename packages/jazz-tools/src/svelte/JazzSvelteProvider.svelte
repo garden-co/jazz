@@ -7,6 +7,7 @@ Pass a pre-created client or a promise that resolves to one.
 	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
+	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 
 	type SvelteJazzClient = JazzClient<false>;
 
@@ -14,9 +15,10 @@ Pass a pre-created client or a promise that resolves to one.
 		client: SvelteJazzClient | Promise<SvelteJazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
+		autoAttachDevTools?: boolean;
 	}
 
-	let { client, children, fallback }: Props = $props();
+	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
@@ -49,6 +51,10 @@ Pass a pre-created client or a promise that resolves to one.
 
 					ctx.session = session ?? null;
 				});
+
+				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
+					startInspectorOnce(resolved.db);
+				}
 			})
 			.catch((reason) => {
 				if (cancelled) {

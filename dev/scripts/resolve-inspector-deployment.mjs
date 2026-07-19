@@ -16,11 +16,12 @@ function requireEnv(env) {
 }
 
 export function buildDeploymentsUrl(env) {
+  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
   const params = new URLSearchParams({
     projectId: env.VERCEL_PROJECT_ID,
     target: "production",
     state: "READY",
-    branch: "main",
+    branch,
     limit: "20",
     teamId: env.VERCEL_ORG_ID,
   });
@@ -112,7 +113,9 @@ export async function resolveInspectorDeployment({
       return result;
     }
 
-    log(`No staged inspector production deployment on main yet (${attempt}/${attempts}).`);
+    log(
+      `No staged inspector production deployment on ${env.VERCEL_DEPLOY_BRANCH || "main"} yet (${attempt}/${attempts}).`,
+    );
 
     if (lastDeployments.length > 0) {
       log("Matching READY production deployments:");
@@ -126,10 +129,11 @@ export async function resolveInspectorDeployment({
     }
   }
 
+  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
   throw new Error(
     [
-      "No staged inspector production deployment found on main.",
-      "Make sure the inspector Vercel project has a ready production deployment from main and has auto-assign custom production domains disabled.",
+      `No staged inspector production deployment found on ${branch}.`,
+      "Make sure the inspector Vercel project has a ready production deployment from the target branch and has auto-assign custom production domains disabled.",
       lastDeployments.length > 0
         ? `Last matching deployments:\n${lastDeployments
             .map((deployment) => `- ${describeDeployment(deployment)}`)

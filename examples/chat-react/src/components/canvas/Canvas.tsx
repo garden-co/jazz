@@ -40,10 +40,10 @@ export function CollaborativeCanvas({
   const myColor = userId ? colorFromUserId(userId) : "#000000";
 
   // Subscribe to the canvas row so it's present in the local runtime for FK checks
-  const canvasRows = useAll(app.canvases.where({ id: canvasId })) ?? [];
+  const { data: canvasRows = [] } = useAll(app.canvases.where({ id: canvasId }));
   const canvasReady = canvasRows.length > 0;
 
-  const profiles = useAll(app.profiles) ?? [];
+  const { data: profiles = [] } = useAll(app.profiles);
   const profileNameByUserId = useMemo(() => {
     const map = new Map<string, string>();
     const sorted = [...profiles].sort((a, b) => a.id.localeCompare(b.id));
@@ -56,7 +56,7 @@ export function CollaborativeCanvas({
   }, [profiles]);
 
   // Fetch all strokes for this canvas
-  const allStrokes = useAll(app.strokes.where({ canvasId })) ?? [];
+  const { data: allStrokes = [] } = useAll(app.strokes.where({ canvasId }));
 
   // Group strokes by ownerId
   const strokesByOwner: Record<string, StrokeData[]> = {};

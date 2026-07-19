@@ -1,11 +1,7 @@
-import {
-  fetchServerSubscriptions,
-  getActiveQuerySubscriptions,
-  onActiveQuerySubscriptionsChange,
-} from "jazz-tools";
+import { fetchServerSubscriptions } from "jazz-tools";
 import type {
-  ActiveQuerySubscriptionTrace,
   DurabilityTier,
+  InspectorSubscription,
   IntrospectionSubscriptionGroup,
 } from "jazz-tools";
 import {
@@ -19,6 +15,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
+import { useHostSubscriptions } from "../../contexts/host-link.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
 import styles from "./index.module.css";
@@ -87,16 +84,6 @@ function buildExplorerUrl(table: string, queryJson: string): string {
   return base;
 }
 
-function getUserStackSummary(stack: string | undefined): string {
-  if (!stack) {
-    return "n/a";
-  }
-
-  const lines = stack.split("\n").slice(1);
-  const firstUserFrame = lines.find((line) => line.includes("/src/"));
-  return firstUserFrame?.trim() ?? lines[0]?.trim() ?? "n/a";
-}
-
 function formatTime(value: string | number): string {
   return new Date(value).toLocaleTimeString();
 }
@@ -112,33 +99,15 @@ function tierRank(tier: DurabilityTier): number {
   }
 }
 
-function useActiveSubscriptions(runtime: "standalone" | "extension") {
-  const [subscriptions, setSubscriptions] = useState(() => getActiveQuerySubscriptions());
-
-  useEffect(() => {
-    if (runtime !== "extension") {
-      setSubscriptions([]);
-      return;
-    }
-
-    setSubscriptions(getActiveQuerySubscriptions());
-    return onActiveQuerySubscriptionsChange((nextSubscriptions) => {
-      setSubscriptions([...nextSubscriptions]);
-    });
-  }, [runtime]);
-
-  return subscriptions;
-}
-
-function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
+function useServerSubscriptionTelemetry() {
   const standaloneContext = useStandaloneContext();
   const [queries, setQueries] = useState<IntrospectionSubscriptionGroup[]>([]);
   const [generatedAt, setGeneratedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(runtime === "standalone");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    if (runtime !== "standalone" || !standaloneContext) {
+    if (!standaloneContext) {
       setQueries([]);
       setGeneratedAt(null);
       setError(null);
@@ -186,7 +155,6 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
       window.clearInterval(intervalId);
     };
   }, [
-    runtime,
     standaloneContext?.connection.adminSecret,
     standaloneContext?.connection.appId,
     standaloneContext?.connection.serverUrl,
@@ -195,9 +163,11 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
   return { queries, generatedAt, error, isLoading };
 }
 
-function ExtensionLiveQuery() {
-  const { runtime, wasmSchema } = useDevtoolsContext();
-  const subscriptions = useActiveSubscriptions(runtime);
+function OverlayLiveQuery() {
+  const { wasmSchema } = useDevtoolsContext();
+  // The host pushes on every active-query change; subscribing here (the only
+  // consumer) keeps those pushes from re-rendering the rest of the inspector.
+  const subscriptions = useHostSubscriptions();
   const [selectedTable, setSelectedTable] = useState("");
   const [selectedTier, setSelectedTier] = useState("");
   const [sorting, setSorting] = useState<SortingState>([
@@ -218,7 +188,7 @@ function ExtensionLiveQuery() {
     });
   }, [selectedTable, selectedTier, subscriptions]);
 
-  const columns = useMemo<ColumnDef<ActiveQuerySubscriptionTrace>[]>(
+  const columns = useMemo<ColumnDef<InspectorSubscription>[]>(
     () => [
       {
         accessorKey: "table",
@@ -262,19 +232,6 @@ function ExtensionLiveQuery() {
         enableSorting: false,
         cell: ({ row }) => <pre className={styles.codeBlock}>{row.original.query}</pre>,
       },
-      {
-        id: "stack",
-        header: "Stack",
-        enableSorting: false,
-        cell: ({ row }) => (
-          <details className={styles.stackDetails}>
-            <summary className={styles.stackSummary}>
-              {getUserStackSummary(row.original.stack)}
-            </summary>
-            <pre className={styles.codeBlock}>{row.original.stack ?? "n/a"}</pre>
-          </details>
-        ),
-      },
     ],
     [],
   );
@@ -292,7 +249,7 @@ function ExtensionLiveQuery() {
     <section className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1 className={styles.title}>Live Query</h1>
+          <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
             Active `Db.subscribeAll(...)` subscriptions captured from the inspected page runtime.
           </p>
@@ -309,7 +266,7 @@ function ExtensionLiveQuery() {
         <section className={styles.emptyState}>
           <p className={styles.emptyTitle}>No active subscriptions</p>
           <p className={styles.emptyText}>
-            Open a page with `devMode: true` and create a live query to see it here.
+            Create a live query in the inspected page to see it here.
           </p>
         </section>
       ) : (
@@ -357,7 +314,7 @@ function ExtensionLiveQuery() {
 }
 
 function StandaloneLiveQuery() {
-  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry("standalone");
+  const { queries, generatedAt, error, isLoading } = useServerSubscriptionTelemetry();
   const [selectedTable, setSelectedTable] = useState("");
 
   const availableTables = useMemo(() => {
@@ -371,7 +328,7 @@ function StandaloneLiveQuery() {
     <section className={styles.container}>
       <header className={styles.header}>
         <div>
-          <h1 className={styles.title}>Live Query</h1>
+          <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
             Grouped active server-managed subscriptions for the connected Jazz server.
           </p>
@@ -454,5 +411,5 @@ export function LiveQuery() {
     return <StandaloneLiveQuery />;
   }
 
-  return <ExtensionLiveQuery />;
+  return <OverlayLiveQuery />;
 }
