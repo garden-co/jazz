@@ -2083,12 +2083,16 @@ impl JazzClient {
             .columns
             .iter()
             .map(|column| {
-                values.get(column.name.as_str()).cloned().ok_or_else(|| {
-                    JazzError::Write(format!(
-                        "core insert missing required column {}",
-                        column.name.as_str()
-                    ))
-                })
+                values
+                    .get(column.name.as_str())
+                    .cloned()
+                    .or_else(|| column.default.clone())
+                    .ok_or_else(|| {
+                        JazzError::Write(format!(
+                            "core insert missing required column {}",
+                            column.name.as_str()
+                        ))
+                    })
             })
             .collect()
     }

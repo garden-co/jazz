@@ -20,6 +20,7 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
 use futures_core::Stream;
 use groove::records::Value;
+use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
 use web_time::Instant;
@@ -197,6 +198,16 @@ type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
+
+fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
+    match (column_type, default) {
+        (GrooveColumnType::Nullable(_), Value::Nullable(_)) => default.clone(),
+        (GrooveColumnType::Nullable(_), default) => {
+            Value::Nullable(Some(Box::new(default.clone())))
+        }
+        _ => default.clone(),
+    }
+}
 
 struct WriteStateWaiter {
     id: u64,
@@ -409,6 +420,7 @@ where
         made_by: AuthorId,
         cells: RowCells,
     ) -> Result<TxId, Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
         let tx_id = self.node.node.borrow_mut().commit_mergeable(
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(made_by)
@@ -1285,6 +1297,7 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         let allowed = self
             .node
             .node
@@ -1323,6 +1336,7 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         let allowed = self
             .node
             .node
@@ -1371,7 +1385,7 @@ where
         cells: RowCells,
         identity: AuthorId,
     ) -> Result<bool, Error> {
-        self.table_schema(table)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
@@ -2032,6 +2046,7 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
@@ -2116,7 +2131,7 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        self.table_schema(table)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.node.node.borrow_mut();
@@ -2162,7 +2177,7 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        self.table_schema(table)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.node.node.borrow_mut();
@@ -2231,7 +2246,7 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        self.table_schema(table)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
         let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
@@ -2267,7 +2282,7 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        self.table_schema(table)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
         let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
@@ -2332,6 +2347,11 @@ where
             "INSERT"
         } else {
             "UPDATE"
+        };
+        let cells = if operation == "INSERT" {
+            self.apply_insert_defaults(table, cells)?
+        } else {
+            cells
         };
         let mut commit = MergeableCommit::new(table, row, now_ms)
             .made_by(made_by)
@@ -2438,6 +2458,21 @@ where
             .iter()
             .find(|candidate| candidate.name == table)
             .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
+    }
+
+    fn apply_insert_defaults(&self, table: &str, mut cells: RowCells) -> Result<RowCells, Error> {
+        let table_schema = self.table_schema(table)?;
+        for column in &table_schema.columns {
+            if !cells.contains_key(&column.name) {
+                if let Some(default) = &column.default {
+                    cells.insert(
+                        column.name.clone(),
+                        default_cell_for_column_type(&column.column_type, default),
+                    );
+                }
+            }
+        }
+        Ok(cells)
     }
 
     fn local_row(&self, table: &str, row: RowUuid) -> Result<Option<CurrentRow>, Error> {
@@ -6271,7 +6306,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        self.db.table_schema(table)?;
+        let cells = self.db.apply_insert_defaults(table, cells)?;
         self.stage_value_write(PendingMergeableWrite {
             table: table.to_owned(),
             row_uuid: row,
@@ -6365,7 +6400,7 @@ where
         if cells.is_empty() {
             return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
         }
-        self.db.table_schema(table)?;
+        let cells = self.db.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.db.node.node.borrow_mut();
             let content_parents = node
@@ -6527,6 +6562,7 @@ where
 
     /// Stage an insert with a caller-supplied row id.
     pub fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        let cells = self.db.apply_insert_defaults(table, cells)?;
         self.db
             .node
             .node

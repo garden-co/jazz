@@ -505,6 +505,9 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if let Some(default) = &column.default {
+        converted.default = Some(convert_column_default(table, column, default)?);
+    }
     if let Some(kind) = column.large_value {
         if column.column_type != ColumnType::Bytea {
             return Err(err(
@@ -518,6 +521,64 @@ fn convert_column(
         });
     }
     Ok(converted)
+}
+
+fn convert_column_default(
+    table: &TableName,
+    column: &ColumnDescriptor,
+    value: &Value,
+) -> Result<GrooveValue, SchemaConversionError> {
+    if matches!(value, Value::Null) {
+        return Ok(GrooveValue::Nullable(None));
+    }
+    let default =
+        convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?;
+    if column.nullable {
+        Ok(GrooveValue::Nullable(Some(Box::new(default))))
+    } else {
+        Ok(default)
+    }
+}
+
+fn convert_default_for_column_type(
+    table: &TableName,
+    column: &str,
+    column_type: &ColumnType,
+    value: &Value,
+) -> Result<GrooveValue, SchemaConversionError> {
+    match (column_type, value) {
+        (ColumnType::Boolean, Value::Boolean(value)) => Ok(GrooveValue::Bool(*value)),
+        (
+            ColumnType::Text | ColumnType::Json { .. } | ColumnType::Enum { .. },
+            Value::Text(value),
+        ) => Ok(GrooveValue::String(value.clone())),
+        (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(GrooveValue::U64(*value)),
+        (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
+        (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
+        (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
+        (ColumnType::Integer, Value::Integer(value)) => {
+            Ok(GrooveValue::U32(encode_signed_i32_for_core(*value)))
+        }
+        (ColumnType::Integer, Value::BigInt(value)) => i32::try_from(*value)
+            .map(|value| GrooveValue::U32(encode_signed_i32_for_core(value)))
+            .map_err(|_| {
+                err(
+                    format!("$.{}.{}", table.as_str(), column),
+                    format!("BIGINT default {value} is outside INTEGER range"),
+                )
+            }),
+        (ColumnType::BigInt, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
+        (ColumnType::BigInt, Value::BigInt(value)) => Ok(GrooveValue::I64(*value)),
+        (ColumnType::Array { element }, Value::Array(values)) => values
+            .iter()
+            .map(|value| convert_default_for_column_type(table, column, element.as_ref(), value))
+            .collect::<Result<Vec<_>, _>>()
+            .map(GrooveValue::Array),
+        _ => Err(err(
+            format!("$.{}.{}", table.as_str(), column),
+            format!("default {value:?} does not match column type {column_type:?}"),
+        )),
+    }
 }
 
 fn convert_column_type(
@@ -2276,7 +2337,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_core_u32_and_ignores_defaults() {
+    fn converts_public_integer_as_core_u32_and_column_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
@@ -2343,6 +2404,15 @@ mod tests {
                 .unwrap()
                 .column_type,
             GrooveColumnType::String
+        );
+        assert_eq!(
+            default_table
+                .columns
+                .iter()
+                .find(|column| column.name == "title")
+                .unwrap()
+                .default,
+            Some(GrooveValue::String("x".to_owned()))
         );
     }
 

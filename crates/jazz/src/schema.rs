@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::{EnumSchema, RecordDescriptor, ValueType};
+use groove::records::{EnumSchema, RecordDescriptor, Value, ValueType};
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
     DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
@@ -517,6 +517,9 @@ pub struct ColumnSchema {
     /// Optional rung-3 strategy spec for text-document columns.
     #[serde(default)]
     pub text_merge_spec: Option<TextMergeSpec>,
+    /// Literal value used when an insert omits this column.
+    #[serde(default)]
+    pub default: Option<Value>,
 }
 
 impl ColumnSchema {
@@ -527,6 +530,7 @@ impl ColumnSchema {
             column_type,
             large_value: None,
             text_merge_spec: None,
+            default: None,
         }
     }
 
@@ -537,6 +541,7 @@ impl ColumnSchema {
             column_type: GrooveColumnType::Bytes,
             large_value: Some(LargeValueKind::Text),
             text_merge_spec: None,
+            default: None,
         }
     }
 
@@ -547,12 +552,19 @@ impl ColumnSchema {
             column_type: GrooveColumnType::Bytes,
             large_value: Some(LargeValueKind::Blob),
             text_merge_spec: None,
+            default: None,
         }
     }
 
     /// Attach a rung-3 text merge strategy spec to this text-document column.
     pub fn with_text_merge_spec(mut self, spec: TextMergeSpec) -> Self {
         self.text_merge_spec = Some(spec);
+        self
+    }
+
+    /// Attach a literal insert default to this column.
+    pub fn with_default(mut self, value: Value) -> Self {
+        self.default = Some(value);
         self
     }
 }
@@ -564,6 +576,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
             column_type: column.column_type,
             large_value: None,
             text_merge_spec: None,
+            default: None,
         }
     }
 }
