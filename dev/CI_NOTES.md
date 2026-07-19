@@ -129,7 +129,7 @@ Restoration is a tracked work item; exclusions are not permanent.
   examples that consume built `jazz-tools` package exports.
 - **Verification**: all seven scoped `cd <pkg> && pnpm test` runs returned
   `EXIT_CODE:0` after rebuilding `jazz-tools`.
-- **Commit ref**: `080775e1b`.
+- **Commit refs**: `080775e1b`, `bffd69ff2`.
 
 ## RESOLVED (2026-07-19): create-jazz test restored with hosted provisioning env-gated
 
