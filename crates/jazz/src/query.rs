@@ -591,8 +591,103 @@ fn json_value_to_record_value(value: &serde_json::Value) -> Result<Value, QueryE
                 .map(json_value_to_record_value)
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        serde_json::Value::Object(_) => Err(relation_unification_error(
-            "object relation literals are not supported by query predicates",
+        serde_json::Value::Object(map) => runtime_value_object_to_record_value(map),
+    }
+}
+
+fn runtime_value_object_to_record_value(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Value, QueryError> {
+    let Some(serde_json::Value::String(value_type)) = map.get("type") else {
+        return Err(relation_unification_error(
+            "object relation literals must use the runtime value envelope",
+        ));
+    };
+    let value = map.get("value");
+    match value_type.as_str() {
+        "Null" => Ok(Value::Nullable(None)),
+        "Boolean" => Ok(Value::Bool(runtime_bool_value(value)?)),
+        "Text" => Ok(Value::String(runtime_string_value(value)?.to_owned())),
+        "Uuid" => uuid::Uuid::parse_str(runtime_string_value(value)?)
+            .map(Value::Uuid)
+            .map_err(|_| relation_unification_error("invalid Uuid relation literal")),
+        "Bytea" => Ok(Value::Bytes(runtime_bytea_value(value)?)),
+        "Integer" | "BigInt" | "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
+        "Double" => Ok(Value::F64(runtime_f64_value(value)?)),
+        "Array" => {
+            let Some(serde_json::Value::Array(values)) = value else {
+                return Err(relation_unification_error(
+                    "Array relation literal requires an array value",
+                ));
+            };
+            Ok(Value::Array(
+                values
+                    .iter()
+                    .map(json_value_to_record_value)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))
+        }
+        _ => Err(relation_unification_error(format!(
+            "unsupported runtime relation literal type {value_type}"
+        ))),
+    }
+}
+
+fn runtime_bool_value(value: Option<&serde_json::Value>) -> Result<bool, QueryError> {
+    match value {
+        Some(serde_json::Value::Bool(value)) => Ok(*value),
+        _ => Err(relation_unification_error(
+            "Boolean relation literal requires a boolean value",
+        )),
+    }
+}
+
+fn runtime_string_value(value: Option<&serde_json::Value>) -> Result<&str, QueryError> {
+    match value {
+        Some(serde_json::Value::String(value)) => Ok(value),
+        _ => Err(relation_unification_error(
+            "string relation literal requires a string value",
+        )),
+    }
+}
+
+fn runtime_bytea_value(value: Option<&serde_json::Value>) -> Result<Vec<u8>, QueryError> {
+    let Some(serde_json::Value::Array(values)) = value else {
+        return Err(relation_unification_error(
+            "Bytea relation literal requires an array value",
+        ));
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or_else(|| {
+                    relation_unification_error("Bytea relation literal values must be bytes")
+                })
+        })
+        .collect()
+}
+
+fn runtime_u64_value(value: Option<&serde_json::Value>) -> Result<u64, QueryError> {
+    match value {
+        Some(serde_json::Value::Number(value)) => value.as_u64().ok_or_else(|| {
+            relation_unification_error("integer relation literal must be non-negative")
+        }),
+        _ => Err(relation_unification_error(
+            "integer relation literal requires a numeric value",
+        )),
+    }
+}
+
+fn runtime_f64_value(value: Option<&serde_json::Value>) -> Result<f64, QueryError> {
+    match value {
+        Some(serde_json::Value::Number(value)) => value
+            .as_f64()
+            .ok_or_else(|| relation_unification_error("double relation literal must be finite")),
+        _ => Err(relation_unification_error(
+            "double relation literal requires a numeric value",
         )),
     }
 }
