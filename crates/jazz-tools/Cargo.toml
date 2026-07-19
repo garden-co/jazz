@@ -131,9 +131,6 @@ lz4_flex = "0.13.1"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 jazz-server = { workspace = true }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-gloo-timers = { version = "0.3", features = ["futures"] }
-
 [dev-dependencies]
 # Test-only: exposes `InMemoryMetricExporter` for asserting observed metric
 # values. Scoped to dev-dependencies so the `testing` feature never reaches a
