@@ -1,13 +1,13 @@
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
 
-const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
+const EXAMPLE_TASK_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 
 // #region oneshot-react
 export async function readTodosOneshot(db: Db) {
   const todos = await db.all(app.todos.where({ done: false }));
-  const todo = await db.one(app.todos.where({ id: EXAMPLE_TODO_ID }));
+  const todo = await db.one(app.todos.where({ id: EXAMPLE_TASK_ID }));
   return { todos, todo };
 }
 // #endregion oneshot-react

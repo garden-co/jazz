@@ -79,7 +79,7 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
 
   const handleAvatarRemove = () => {
     if (!myProfile) return;
-    // TODO remove cast once https://github.com/garden-co/jazz2/pull/349 is merged
+    // Caveat: avatar is typed as string in this example schema, so clearing it needs an explicit null cast.
     fireAndReport(
       db.update(app.profiles, myProfile.id, { avatar: null as unknown as string }),
       "failed to remove avatar",
