@@ -1,11 +1,17 @@
 # jazz — Specification · 17. Integrability roadmap
 
+## Overview
+
 This chapter is the implementation roadmap for making jazz easy to embed from
 TypeScript, WebAssembly, native Node, and server deployments while preserving the
 normative contracts in chapters 2–16. It is an index of milestones and ownership:
 operational details live in the chapters that own the semantics.
 
-## 17.1 Target outcome
+Invariant digest: no `INV-*` ids are defined or cited by this chapter.
+
+## Details
+
+### 17.1 Target outcome
 
 The target is one coherent product surface:
 
@@ -20,7 +26,7 @@ This roadmap does not redefine jazz semantics. When there is tension, the data
 model, transaction, sync, topology, API, lowering, branch, lens, and maintained
 subscription chapters win.
 
-## 17.2 P0 — lock the integration contract
+### 17.2 P0 — lock the integration contract
 
 Milestone: **one runnable local app can use the public TypeScript API through
 WASM or NAPI against a server shell without semantic forks.**
@@ -48,7 +54,7 @@ WASM or NAPI against a server shell without semantic forks.**
 - **Lens/branch facades** — ch. 10 and ch. 11 own the schema-lens and branch
   lifecycle semantics; ch. 13 owns their product-facing API placement.
 
-### 17.2.1 NAPI status and next practical step
+#### 17.2.1 NAPI status and next practical step
 
 `jazz-napi` exists as a workspace `cdylib` crate and Node package sibling to
 `jazz-wasm`. It is built with napi-rs for Linux x64 gnu, Windows x64 MSVC, macOS
@@ -71,7 +77,7 @@ create/update/delete/query flows, exposes one subscription as a host
 stream/callback, proves the row-record decoder shape used by WASM examples, and
 exercises the same WebSocket/server boundary as the browser worker gate.
 
-## 17.3 P1 — harden deployability
+### 17.3 P1 — harden deployability
 
 Milestone: **a browser client, Node client, edge node, and core node can run the
 same conformance scenarios with topology-specific configuration only.**
@@ -98,7 +104,7 @@ same conformance scenarios with topology-specific configuration only.**
 - **Packaging.** Publish reproducible browser, Node, and server artifacts with
   matching protocol/API versions and a compatibility policy.
 
-## 17.4 P2 — polish and ecosystem fit
+### 17.4 P2 — polish and ecosystem fit
 
 Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
@@ -113,7 +119,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 - **Compatibility gates.** Require release checks that compare API capabilities,
   protocol fixtures, storage contract fixtures, and conformance scenarios.
 
-## 17.5 Milestone order
+### 17.5 Milestone order
 
 1. **Boundary sketch** — write the TS/WASM/NAPI direct-object binding shape,
    cross-binding capability matrix, row DTO fixtures, and wire envelope
@@ -147,7 +153,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 8. **Release slice** — package artifacts, version compatibility checks, docs,
    and operational diagnostics for integrators.
 
-## 17.6 Open questions
+### 17.6 Open questions
 
 - ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
   conformance matrix covers the canonical topology's backends — in-memory
@@ -157,17 +163,24 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
   the RN environment. It is deliberately scheduled last because it is pure
   tooling — a clean additional `OrderedKvStorage` backend behind the existing
   storage contract, with no design decisions attached.
+
+## Open Questions
+
 - 🔶 What is the alpha replacement packaging line for the server shell: a
   dedicated crate/package with stable config types, a reference executable over
   unstable internals, or both?
+
 - 🔶 Which auth/session admission inputs are mandatory for the first shell:
   bearer claims, signed `Hello` claims, injected test identity, or a pluggable
   verifier owned by ch. 7 and ch. 8?
+
 - 🔶 Which operational endpoints are required for alpha replacement: liveness,
   readiness, storage migration state, sync lag, active session count, protocol
   version mismatch counters, and graceful-drain status?
+
 - 🔶 How much listener policy belongs in config versus code: WebSocket paths,
   TLS termination assumptions, max frame/connection limits, backpressure
   thresholds, and allowed role/profile combinations?
+
 - 🔶 Which TypeScript framework adapter, if any, should be the first blessed
   adapter after the core cross-binding capability gate passes?

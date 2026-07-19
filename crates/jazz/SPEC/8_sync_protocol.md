@@ -1,5 +1,7 @@
 # jazz — Specification · 8. Sync protocol
 
+## Overview
+
 One protocol carries everything between nodes. This chapter defines that peer
 protocol: how writes travel up as commit units, how fates and query-driven view
 updates travel down, how payloads are deduplicated and rehydrated, and how
@@ -7,7 +9,40 @@ mergeable vs exclusive transactions are delivered. It ties together transactions
 (ch. 3), history (ch. 4), queries (ch. 6), and authorization (ch. 7); the
 deployment roles are chapter 9.
 
-## 8.1 One protocol, roles not code
+Invariant digest:
+
+- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move globalseq backward and MUST raise observed durability only by a supplied Some(DurabilityTier) claim using monotone max...
+- `INV-SYNC-7`: A ViewUpdate result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a t...
+- `INV-SYNC-8`: A view server MUST use peerpayloadinventory.completetxpayloads only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-sc...
+- `INV-SYNC-9`: A receiver MUST reject a ViewUpdate that names a peerpayloadinventory.completetxpayloads, add, or remove transaction it lacks enough tx existence, row-version payload,...
+- `INV-SYNC-10`: A reset-result-set ViewUpdate MUST set resetresultset = true; applying it MUST clear the receiver's settled subscription result set before applying the replacement res...
+- `INV-SYNC-11`: Reset-result-set ViewUpdates MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
+- `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
+- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, complete tx payload refs, or content extents.
+- `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
+- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only...
+- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for tx.ntotalwrites.
+- `INV-SYNC-17`: ViewUpdate emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
+- `INV-SYNC-19`: FetchContentExtent handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
+- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a sin...
+- `INV-SYNC-21`: Wire TxId and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
+- `INV-SYNC-22`: An edge's upstream permission-scope subscriptions MUST be deduplicated at the sync level: identical or covering (policyshape, writerclaim) scopes share one upstream su...
+- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
+- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies, never result membership, program facts, or inventory refs; a body may be omitted only under the skip rule — be...
+- `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
+- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those (table, rowuuid, txtime, txnodeid) payloads, and the server MUST serve...
+- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates...
+- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as Fate::Pending with DurabilityTier::Local and emit exactly one SyncMessage::CommitUnit.
+- `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
+- `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
+- `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
+- `INV-TX-11`: Accepted authority commits MUST receive the next GlobalSeq, advance the allocator/watermark, and report DurabilityTier::Global.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
+
+## Details
+
+### 8.1 One protocol, roles not code
 
 Sync uses one peer protocol everywhere in the deployment. UI, worker, edge, and
 core links all exchange the same `SyncMessage` vocabulary; a tier's behavior is
@@ -81,7 +116,7 @@ exclusive transaction complete for this subscription view. A bundle whose
 `versions.len() == tx.n_total_writes` is also a complete transaction payload and
 may enter the peer's complete-transaction-payload inventory for later dedup.
 
-## 8.2 Upstream: commit units
+### 8.2 Upstream: commit units
 
 Upstream sync moves committed history, not in-progress edits. A committed
 transaction travels as one atomic commit unit
@@ -101,7 +136,7 @@ waits for a `FateUpdate`; it must not accept the unit, assign global sequence, o
 create merge versions from it (`INV-TX-23`). Only a structurally wired fate
 authority path may decide fate (ch. 3 §3.6, ch. 9).
 
-## 8.3 Fates downstream
+### 8.3 Fates downstream
 
 Downstream fate messages tell peers how an already-submitted transaction has
 settled. A verdict travels as
@@ -114,7 +149,7 @@ backward (`INV-SYNC-5`). When an authority accepts a commit, it assigns a
 monotone `GlobalSeq` that advances the allocator and watermark (ch. 3,
 `INV-TX-11`) and maintains the global-current tables and change stream (ch. 4).
 
-## 8.4 Downstream: query-driven view updates
+### 8.4 Downstream: query-driven view updates
 
 Downstream sync is driven by subscriptions rather than by raw transaction
 broadcasts (ch. 6). Each view update applies to one
@@ -194,7 +229,7 @@ deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
 reset `ViewUpdate` for the same canonical program instance (ch. 6).
 
-## 8.5 Subscription Attach, Reset, And Detach
+### 8.5 Subscription Attach, Reset, And Detach
 
 `Subscribe` attaches one usage-site subscription id to a registered shape and a
 binding value vector. A peer may register the same `shape_id` under multiple
@@ -227,7 +262,7 @@ subscription for a canonical program instance detaches, the serving side may dro
 the shared maintained view and its runtime subscription state. Per-peer payload dedup
 survives view reset and detach while peer state survives (`INV-SYNC-11`).
 
-## 8.6 Policy narrowing in sync
+### 8.6 Policy narrowing in sync
 
 Sync never emits view material before applying the receiving peer's read policy.
 During view construction, the peer identity's policy is checked before any result
@@ -235,7 +270,7 @@ entry, bundle, ref, or content extent is emitted (`INV-SYNC-13`, ch. 7).
 Revocation affects future delivery: it removes a row from future settled result
 sets but never redacts an already-delivered local copy (`INV-SYNC-14`).
 
-## 8.7 Partial vs atomic delivery
+### 8.7 Partial vs atomic delivery
 
 Downstream delivery preserves view visibility, not transport completeness. A
 mergeable transaction may be delivered and applied **partially**: each visible
@@ -255,7 +290,7 @@ design (§8.11), which retires this inventory rather than extending it.
 The postcard `WireFrame`/`WireEnvelope` format and groove row `Record` encoding
 do not change when future inventory fields are added.
 
-## 8.8 Protocol size limits
+### 8.8 Protocol size limits
 
 Protocol size limits are enforced at the layer that can recover correctly:
 
@@ -307,7 +342,7 @@ feature is compiled in. WASM/browser artifacts keep transport compression
 opt-in so bundle-size trade-offs stay explicit; reconnect resets the compression
 context and relies on known-state redelivery for correctness.
 
-## 8.9 Edge mergeable fate deferral and permission-scope subscriptions
+### 8.9 Edge mergeable fate deferral and permission-scope subscriptions
 
 An edge that acts as mergeable fate authority needs the relevant policy data
 before it can decide a write's fate. It therefore must defer fate assignment
@@ -330,7 +365,7 @@ covering relation says it does. This is the same per-peer payload dedup machiner
 (§8.4) applied to the edge's own upstream reads. The full edge-tier semantics —
 staleness horizon, rehydration, eviction — are chapter 9.
 
-## 8.10 Content extents and catalogue lanes
+### 8.10 Content extents and catalogue lanes
 
 Large-value content uses a bulk lane rather than being forced through ordinary
 view payloads. A `FetchContentExtent` request is authorized against row context
@@ -342,7 +377,7 @@ this protocol lane; their semantics are chapter 10.
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
 
-## 8.11 Known state: reconnect declarations and payload dedup
+### 8.11 Known state: reconnect declarations and payload dedup
 
 Steady-state and reconnect payload dedup is built on three properties the
 protocol already has: the **client is the sole authority on what it durably
@@ -421,7 +456,9 @@ no eviction; eviction invalidates the persisted fact. Persisting slow exact
 declarations is intentionally not part of v1; they are derived from the
 receiver's current local store when needed.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Receiver storage transaction surface.** The receiver boundary currently
   uses the core staged-batch seam. The end state is an `OrderedKvStorage`

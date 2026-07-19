@@ -1,5 +1,7 @@
 # jazz — Specification · 13. The high-level `Db` API
 
+## Overview
+
 `Db<S>` is the product-facing, runtime-typed API that applications and language
 bindings call. It presents the local database as a small client facade: apps open
 a database, read materialized query results, subscribe to query changes, and
@@ -8,7 +10,39 @@ chapter depends on
 the model established in the preceding chapters, but app builders reading
 non-sequentially can start here (ch. 1, §1.1).
 
-## 13.1 Two audiences
+Invariant digest:
+
+- `INV-API-1`: Db MUST be the high-level runtime-typed client facade — a thin wrapper over a participant Node (which owns the NodeState engine, connections, and serving) — and it MUS...
+- `INV-API-2`: Db is a client only and has no role: Db::open MUST construct a non-history-complete client NodeState. A history-complete, fate-deciding authority is a core Node opened...
+- `INV-API-3`: Db::read and Db::one MUST be synchronous local reads and MUST NOT wait for upstream sync; Db::all MUST use ReadOpts to choose the effective durability tier.
+- `INV-API-4`: When ReadOpts.localupdates == LocalUpdates::Immediate, the effective read tier MUST be at least DurabilityTier::Local; when it is Deferred, the effective read tier MUS...
+- `INV-API-5`: ReadOpts::default() MUST be { tier: DurabilityTier::Local, localupdates: LocalUpdates::Immediate, propagation: Propagation::Full }.
+- `INV-API-6`: Db::subscribe MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the no...
+- `INV-API-8`: Db::insert MUST generate the row id using its configured RowIdSource; Db::insertwithid MUST use the caller-supplied RowUuid.
+- `INV-API-9`: Db::update MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
+- `INV-API-10`: Db::upsert MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
+- `INV-API-11`: Db::delete MUST lower to a mergeable commit with DeletionEvent::Deleted and make the row absent from current reads after local application.
+- `INV-API-12`: Db::restore MUST reject empty cell data with ErrorCode::Schema and MUST lower a non-empty restore to content write plus DeletionEvent::Restored.
+- `INV-API-13`: Every local write method MUST return a WriteHandle carrying the affected RowUuid, backing TxId, and local durability tier.
+- `INV-API-14`: A local write on a Db MUST be DurabilityTier::Local and queued for upstream upload; a Db (always a client) MUST NOT self-finalize. Self-finalization to Accepted/Global...
+- `INV-API-15`: WriteHandle::wait(tier) MUST return the handle TxId when the requested tier is locally satisfied, MUST return ErrorCode::WriteRejected for rejected fates, and MUST ret...
+- `INV-API-16`: Transport implementations MUST be non-blocking; tryrecv() == None MUST mean no inbound message is currently staged and MUST NOT be interpreted by Db as disconnect.
+- `INV-API-17`: Db::connectupstream MUST carry already-registered facade subscriptions upstream immediately by placing their (ValidatedQuery, Binding) pairs into the connection's pend...
+- `INV-API-18`: Db::subscribe MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
+- `INV-API-19`: An upstream PeerConnection::tick MUST send each unannounced usage-site subscription by first sending SyncMessage::RegisterShape once per shape and then SyncMessage::Su...
+- `INV-API-20`: An upstream PeerConnection::tick MUST upload each locally-authored TxId at most once per connection by reading commitunitfor(txid), sending it, and marking it uploaded.
+- `INV-API-21`: A subscriber PeerConnection::tick MUST serve subscriptions under the AuthorId passed to Node::acceptsubscriber, not under the serving node's own identity.
+- `INV-API-22`: Db::tick() MUST service every registered PeerConnection exactly once by calling PeerConnection::tick.
+- `INV-API-24`: The query builder exposed through Db::table MUST support OR/AND/NOT predicates, contains, inlist, isnull, includes with JoinMode::Holes, required includes, select, lim...
+- `INV-API-25`: TextEdit operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to LargeValueEditOp::Insert/LargeValueEditOp::Delete.
+- `INV-API-26`: Db::mergeabletx() MUST group multiple facade writes under one mergeable TxId, and the produced commit unit MUST set Transaction.ntotalwrites to the number of grouped v...
+- `INV-API-27`: Db::exclusivetx() MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning WriteRejected when authority validation detect...
+- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
+- `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
+
+## Details
+
+### 13.1 Two audiences
 
 The facade separates application concerns from synchronization concerns. An app
 consumer works with the mutation API and the query subscription API, with no sync
@@ -81,7 +115,7 @@ added by handing the same `Db` to a binding that wires a `Transport` and calls
 `tick` (§13.5); the application read, subscribe, and write code does not change
 when an upstream is attached.
 
-## 13.2 Opening a `Db`
+### 13.2 Opening a `Db`
 
 Opening a database binds a schema, storage backend, identity, and row-id source
 into one client facade. `Db::open(DbConfig<S>)` is async and takes a
@@ -114,7 +148,7 @@ client uploads its backlog and settles through the ordinary client path with no
 API change. It is its own "authority" only in the trivial sense that there is no
 one else; there is no separate role for it.
 
-## 13.3 Reads and subscriptions
+### 13.3 Reads and subscriptions
 
 Reads start from a schema-validated query builder. `Db::table(name)` returns a
 runtime-typed `Query` (ch. 6) with `filter`, `join_via`, `reachable_via`,
@@ -172,7 +206,7 @@ staging debt rather than a semantic exception (`INV-API-6`). Binding ABIs must
 keep subscription delivery as a thin event bridge over the core subscription
 surface (§13.7), not a second facade-side diff engine.
 
-## 13.4 Writes
+### 13.4 Writes
 
 Writes enter the local lane first and return a `WriteHandle<S>`. The mutation
 surface consists of `insert`, `insert_with_id`, `update`, `upsert`, `delete`,
@@ -221,7 +255,7 @@ Dry-run permission probes (`can_insert`, `can_read`, `can_update`,
 `can_delete`) evaluate the same current-identity policy path as the corresponding
 operation without ingesting versions or changing local rows (`INV-API-28`, ch. 7).
 
-## 13.5 The sync/serve surface (binding-facing)
+### 13.5 The sync/serve surface (binding-facing)
 
 Synchronization is explicit and binding-facing. A `Db` embeds no runtime or
 socket; the async boundary stays between nodes. The binding supplies a
@@ -266,7 +300,7 @@ not by sharing one `Db`. A pure-Rust server with no sync-UI constraint layers it
 own sharing strategy, such as a `Mutex` or an actor adapter, on top; the core does
 not impose the actor model.
 
-## 13.6 Errors and what's callable today
+### 13.6 Errors and what's callable today
 
 Facade errors carry an `ErrorCode` plus a message:
 
@@ -289,7 +323,7 @@ the `Db` facade yet. The initial binding ABI design is below; remaining
 **designed but not yet on the facade** surface stays in the Open questions
 section.
 
-## 13.7 Initial TS/WASM/NAPI Binding Surface
+### 13.7 Initial TS/WASM/NAPI Binding Surface
 
 The binding surface is a thin host-language wrapper around Rust-owned `Db`,
 transaction, subscription, and selected serving `Node` objects. It is not a
@@ -334,7 +368,7 @@ decode `SyncMessage` as product API. Catalogue, branch, lens, and large-value
 APIs should be added only when their core runtime APIs and binding ergonomics are
 settled.
 
-### 13.7.1 Binding Responsibilities
+#### 13.7.1 Binding Responsibilities
 
 | responsibility        | binding contract                                                                                          |
 | --------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -345,7 +379,7 @@ settled.
 | transport byte queues | move encoded `WireFrame` bytes through host sockets/workers without inventing an app-level sync API       |
 | errors                | translate core `Error`/`WireError` into host-native exceptions or rejected promises                       |
 
-### 13.7.2 Binding Payloads
+#### 13.7.2 Binding Payloads
 
 Binding payloads use core types directly:
 
@@ -365,7 +399,7 @@ the core `Fate::Rejected(RejectionReason)` variant, preserving
 causality, and malformed-commit detail without a second field that can drift
 from the transaction fate.
 
-### 13.7.3 Byte transport calls
+#### 13.7.3 Byte transport calls
 
 Bindings never decode `SyncMessage` as their primary sync API. The only portable
 byte transport payload is an encoded `WireFrame`; when the frame is
@@ -384,7 +418,7 @@ Backpressure is explicit: send operations may return `Backpressure` with retry
 guidance, and receive operations may accept max frame and byte budgets. A host
 transport close does not imply `Db` close.
 
-### 13.7.4 Error shape
+#### 13.7.4 Error shape
 
 Binding-facing errors use stable machine codes plus structured context. Messages
 are diagnostics, not compatibility keys.
@@ -411,7 +445,7 @@ Initial `ErrorCode` values are:
 Wire transport errors use `WireError { code: WireErrorCode, retry: WireRetry,
 message }`.
 
-### 13.7.5 Cross-binding capability matrix
+#### 13.7.5 Cross-binding capability matrix
 
 Legend: `Y` implemented or required for the first cross-binding gate; `P`
 partial or designed with known gaps; `N` intentionally absent from that layer;
@@ -463,7 +497,9 @@ batches, and a headless Chromium smoke gate. `db_read_at` and
 `db_edit_text` remain typed/API-surface-only in the TS harness until there is a
 serving-node or stable large-value setup for those paths.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 These are designed but not landed:
 

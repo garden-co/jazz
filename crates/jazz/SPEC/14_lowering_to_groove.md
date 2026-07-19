@@ -1,5 +1,7 @@
 # jazz — Specification · 14. Lowering to groove
 
+## Overview
+
 jazz's first design principle (ch. 1) is that everything lowers to groove. This
 chapter defines that boundary: how jazz schemas, persisted rows, current-row
 maintenance, query shapes, sync result sets, and RLS policies are represented as
@@ -12,7 +14,37 @@ subscription view target: the protocol-facing serving path should be a groove
 subscription over a maintained subscription terminal stream, not an independent
 semantic scan.
 
-## 14.1 The boundary
+Invariant digest:
+
+- `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
+- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `INV-LOWER-1`: Jazz schemas MUST be lowered into a groove::schema::DatabaseSchema before opening the node's groove::db::Database.
+- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key (rowuuid, txtime, txnodeid).
+- `INV-LOWER-3`: Node-local aliases in jazznodes.id and jazzschemaversions.id MUST NOT be wire identities; wire tx/schema references MUST use NodeUuid and SchemaVersionId.
+- `INV-LOWER-4`: Content versions MUST lower to jazz{table}history; deletion-register versions MUST lower to jazz{table}register; a single lowered version row MUST NOT contain both use...
+- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where deletion == deleted.
+- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove argmaxby over (txtime, txnodeid) per rowuuid for both content and deletion-register tables.
+- `INV-LOWER-7`: Global current-row reads MUST use jazz{table}globalcurrent and jazz{table}registerglobalcurrent, not scan full history, and MUST exclude rows whose register global-cur...
+- `INV-LOWER-8`: jazzglobalchanges MUST be keyed by (tablename, rowuuid, layer, globalseq) and MUST expose index byglobalseq(globalseq, tablename, rowuuid, layer) for global-base probes.
+- `INV-LOWER-9`: Query lowering MUST begin from visiblecurrentgraph and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
+- `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name jazz-query:<shapeid>, then executed through Database::bindshape; ma...
+- `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
+- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST bypass prepared groove lowering; supported root current reads MUST evaluate from proj...
+- `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
+- `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses,...
+- `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match...
+- `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at basesnapshot.globalbase to...
+- `INV-LOWER-17`: ColumnSchema::text and ColumnSchema::blob MUST lower user cell storage to nullable GrooveColumnType::Bytes.
+- `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable, non-integer, or large-value columns.
+- `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
+- `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
+- `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation...
+- `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equalit...
+- `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the ful...
+
+## Details
+
+### 14.1 The boundary
 
 The lowering boundary keeps jazz's data model on a single storage and query
 substrate. jazz lowers storage, current-row maintenance, and query/sync
@@ -33,7 +65,7 @@ materialize those handles by pulling authorized content extents and folding
 op-log extents at the access boundary; encoded ops and content handles do not
 escape as application cell bytes.
 
-## 14.2 Schema → groove
+### 14.2 Schema → groove
 
 A jazz schema lowers to a complete groove schema
 (`JazzSchema::lower_to_groove`, or `…_with_partitions` when partitions are in
@@ -54,7 +86,7 @@ _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content lowers to
 columns. `INV-LOWER-19` — lowered record-wrapper field indices match the groove
 descriptors (debug-asserted).
 
-## 14.3 Current rows → groove
+### 14.3 Current rows → groove
 
 Current-row visibility is the point where content and deletion history become
 the row set seen by queries and sync. Visible current rows are computed in groove
@@ -66,7 +98,7 @@ is `Deleted`, rather than scanning history (`INV-LOWER-7`). The
 `jazz_global_changes` index (`by_global_seq`) backs global-base probes
 (`INV-LOWER-8`, ch. 5).
 
-## 14.4 Queries → groove
+### 14.4 Queries → groove
 
 Query evaluation starts from the same visibility model as current-row reads:
 lowering **begins from `visible_current_graph(table, tier)`**, so deletion
@@ -229,7 +261,7 @@ still requires source-aware reachable lowering. These staged source gaps must no
 create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 
-## 14.5 Sync views & exclusive validation → groove
+### 14.5 Sync views & exclusive validation → groove
 
 Sync view maintenance shares the same lowered query machinery as ordinary reads.
 The target peer-serving path consumes maintained terminal facts for result
@@ -253,7 +285,7 @@ the custom encoded record bytes. Relation/path lowering emits non-lossy path
 facts rather than hiding edge kind, versions, depth, branch alternative, order,
 role, or hole state in opaque revisions.
 
-## 14.6 Access-path selection
+### 14.6 Access-path selection
 
 The source resolver selects access paths by deterministic rule, never by cost
 model or statistics:
@@ -274,7 +306,9 @@ by a sound static path; the fallback is a counted full scan, not a different
 semantic evaluator. Prepared-shape steady-state probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - ✅ **Policy lowering** (`INV-LOWER-20`). Read policy now lowers through
   `node/query_engine` as part of the policy-composed query graph. Write-time

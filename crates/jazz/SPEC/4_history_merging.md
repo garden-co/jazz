@@ -1,5 +1,7 @@
 # jazz — Specification · 4. History, domination & merging
 
+## Overview
+
 jazz keeps full edit history. A row's stored state is a DAG of immutable versions,
 and its "current" value is computed from the versions a node knows. This chapter
 defines that version DAG, the domination rule that selects current content,
@@ -7,7 +9,28 @@ the merge semantics for concurrent writes, and the separate deletion layer. It
 builds on the transaction lifecycle of chapter 3 and supplies the currentness
 model used by reads (ch. 5) and sync (ch. 8).
 
-## 4.1 The version DAG
+Invariant digest:
+
+- `INV-HIST-1`: A row version that lists a parent MUST dominate that parent for content-current selection when both versions are present in the same layer.
+- `INV-HIST-2`: Among content heads not dominated by known parents, the current content version MUST be the head with the greatest made-at/TxId sort key.
+- `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, un...
+- `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
+- `INV-HIST-7`: A merge version's transaction time MUST be strictly after the maximum made-at time of the observed heads.
+- `INV-HIST-8`: For MergeStrategy::Lww, a merged column MUST take the value from the highest made-at/TxId head that sets the column, and if no head sets it, from the highest made-at/T...
+- `INV-HIST-9`: MergeStrategy::Counter MUST be declared only on non-nullable integer user columns and MUST NOT be declared on large-value columns.
+- `INV-HIST-10`: For MergeStrategy::Counter, concurrent integer deltas from their observed parent bases MUST be summed exactly.
+- `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current DeletionEvent::Deleted MUST hide the content-cu...
+- `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in jazz{table}globalcurrent or jazz{table}registerglobalcurrent.
+- `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
+- `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
+- `INV-HIST-15`: Merge strategy behavior MUST be deterministic, grouping-insensitive over the parent/head set, and non-wedging at merge time: registered strategy failure degrades to th...
+- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold t...
+- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
+- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
+
+## Details
+
+### 4.1 The version DAG
 
 A row's history is modeled as a directed acyclic graph of **row versions**. Each
 version is identified by the `TxId` that wrote it and names zero or more direct
@@ -23,7 +46,7 @@ A version **dominates** the parents it lists, and by transitivity it dominates
 their ancestors. When both a version and its parent are present in the same
 layer, the parent is not a content head (`INV-HIST-1`).
 
-## 4.2 Selecting the current content version
+### 4.2 Selecting the current content version
 
 Current content is selected from the frontier of known, non-dominated content
 versions. These frontier versions are the **content heads**: versions that are
@@ -47,7 +70,7 @@ current rows, not proportional to history depth. The overlay still applies the
 same known-history domination and argmax rules (`INV-HIST-1`, `INV-HIST-2`); it
 is a bounded currentness computation over the ahead set, not a history scan.
 
-## 4.3 Merging concurrent heads
+### 4.3 Merging concurrent heads
 
 Concurrent writes are reconciled by adding a version that records the frontier it
 merged. When an **upstream** node (edge or core — never a client) observes two or
@@ -92,7 +115,7 @@ merge-strategy output is deterministic and grouping-insensitive over the
 head/parent set, with no wall-clock or node-local state in merged values (partial
 coverage).
 
-## 4.3.1 Merge strategies and text merge
+### 4.3.1 Merge strategies and text merge
 
 A merge strategy is a deterministic function from a column's raw concurrent
 heads, their parent context, and the column's declared strategy metadata to one
@@ -144,7 +167,7 @@ the union would have produced (`INV-HIST-16`). Reconciliation re-folds the
 underlying versions, deltas, and ops, which are replicated history and so always
 on hand.
 
-## 4.4 Deletion as a separate layer
+### 4.4 Deletion as a separate layer
 
 Deletion is modeled separately from content so that hiding and restoring a row do
 not rewrite its content history. Deletion events live in their own register layer
@@ -155,7 +178,7 @@ writes never touch the register (`INV-HIST-11`). A row's _visible_ current state
 is therefore the content-current winner (§4.2) gated by the register-current
 event.
 
-## 4.5 Global-current as derived state
+### 4.5 Global-current as derived state
 
 Immutable history versions are the replicated source material. The per-layer
 **global-current** winner tables are node-local derived state (ch. 2), so they
@@ -175,7 +198,9 @@ version rows in a different order is idempotent and conflict-free. `INV-HIST-14`
 rejected transactions never appear as accepted history and never participate in
 currentness or domination.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **External strategy surface.** The deterministic, non-wedging
   `MergeStrategy` contract is normative. The external plugin/registry surface

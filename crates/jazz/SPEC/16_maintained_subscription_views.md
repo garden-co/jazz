@@ -1,5 +1,7 @@
 # jazz — Specification · 16. Maintained subscription views
 
+## Overview
+
 This chapter names the target serving architecture for query-driven sync:
 **every live peer subscription is maintained by groove**. A serving node should
 not have a second production query engine for subscriptions. It may keep semantic
@@ -10,7 +12,15 @@ contains enough information to produce `ViewUpdate`s incrementally.
 The old implementation name for the current prototype is not product
 terminology. The intended abstraction is a **maintained subscription view**.
 
-## 16.1 Contract
+Invariant digest:
+
+- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
+- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
+
+## Details
+
+### 16.1 Contract
 
 For a peer identity, query shape, and binding, a maintained subscription view
 MUST lower to a groove graph whose terminal rows describe:
@@ -59,7 +69,7 @@ facts as needed, then maps those terminal rows to subscription or sync events.
 App-row projection and internal fact emission are separate outputs of the same
 program; projection must not become a second diffing path.
 
-## 16.1.1 Application subscription delta contract
+### 16.1.1 Application subscription delta contract
 
 The application-facing subscription stream is a stream of result deltas. A
 delta contains row additions, row updates, row removals, ordered-position data
@@ -83,7 +93,7 @@ and add/update changes even when the entering row's stored cells did not change.
 Per-event work is expected to be O(changed rows), not O(result set); this is the
 application-surface form of `INV-INC-1`.
 
-## 16.2 Policy composition
+### 16.2 Policy composition
 
 For non-system peers, the maintained graph begins from the shared
 policy-composed lowered-query core from ch. 14: the user query intersected with
@@ -100,7 +110,7 @@ Maintained subscription views are augmentations over that core: they add
 terminal membership rows, version/replacement witnesses, and peer-facing
 dedup/reset semantics, rather than defining a separate query evaluator.
 
-## 16.3 Recursive reachability
+### 16.3 Recursive reachability
 
 `ReachableVia` clauses lower to groove recursive graphs everywhere they appear:
 user queries, read policies, write permission scopes, matched-path witnesses,
@@ -108,7 +118,7 @@ and replacement witnesses. Jazz does not branch on groove's internal recursive
 execution strategy. Groove owns the choice between incremental recursion and
 full recomputation when non-monotone deltas appear.
 
-## 16.4 Production fallback boundary
+### 16.4 Production fallback boundary
 
 Full-recompute paths are explicit test/oracle debt, not an alternate production
 semantics. Once a shape has been accepted as a supported maintained
@@ -147,7 +157,7 @@ protocol reason `UnsupportedShapeCapability`; detailed lowering reports stay
 internal compiler vocabulary and are mapped to human-readable diagnostics at
 the serving boundary (`INV-SYNC-23`).
 
-## 16.5 Current known gaps
+### 16.5 Current known gaps
 
 The current maintained-subscription surface supports ordinary live query
 subscriptions whose lowered policy-composed shape can be maintained by groove,
@@ -221,7 +231,7 @@ maintained subscription error/reset, or remain documented as an explicit
 non-subscription/read-only surface. Production peers must not mask these gaps
 with semantic full-recompute repairs.
 
-## 16.6 Aggressive maintained support: ordered windows and `Aggregate`
+### 16.6 Aggressive maintained support: ordered windows and `Aggregate`
 
 The next maintained-subscription expansion should be expressed as new groove
 operators or maintained graph fragments, not as Jazz-side refresh/diff loops.
@@ -282,7 +292,7 @@ same-tick enter/leave churn consolidates before `ViewUpdate`, deterministic ties
 make replay byte-stable, and reset-result-set `ViewUpdate`s remain explicit
 attach/rebuild outputs rather than the normal maintenance strategy.
 
-## 16.7 Binding event bridge
+### 16.7 Binding event bridge
 
 The TypeScript/WASM/NAPI subscription surface should be a thin event bridge over
 maintained subscription terminal deltas, not a second diff engine. The bridge
@@ -299,6 +309,10 @@ ABI must expose enough structured deltas for UI stores to maintain identity,
 loading state, and optimistic/settled transitions without cloning entire result
 sets on every tick.
 
-## 16.8 Open questions
+### 16.8 Open questions
 
 None at this time.
+
+## Open Questions
+
+None.

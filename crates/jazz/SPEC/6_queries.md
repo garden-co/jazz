@@ -1,5 +1,7 @@
 # jazz — Specification · 6. Queries
 
+## Overview
+
 A jazz query is a content-addressed **shape** plus a **binding**, evaluated to a
 result set that includes matched include paths and join witnesses, and synced
 incrementally. This chapter defines the query AST, shape/binding identity, the
@@ -8,7 +10,36 @@ Queries lower onto groove
 prepared shapes (ch. 14), and provide the substrate used by authorization
 (ch. 7) and sync (ch. 8).
 
-## 6.1 The query AST
+Invariant digest:
+
+- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
+- `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
+- `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
+- `INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
+- `INV-QUERY-3`: FilterOp MUST emit exactly the input deltas whose records satisfy its PredicateExpr, preserving record bytes and weights, for the supported predicate surface including...
+- `INV-QUERY-4`: SQL predicate lowering MUST reject unsupported or ill-typed predicate expressions instead of lowering them approximately.
+- `INV-QUERY-5`: MapProjectOp MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
+- `INV-QUERY-6`: UnwrapNullableOp MUST drop Nullable(None) input deltas, unwrap Nullable(Some()) to the inner value, and preserve the original delta weight.
+- `INV-QUERY-7`: Union MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (UNION ALL semantics).
+- `INV-QUERY-8`: An inner JoinOp MUST require equal-length left and right key vectors.
+- `INV-QUERY-9`: An inner JoinOp MUST emit joined records with weight leftweight \* rightweight for matching keys, including matches produced by changes arriving on either side.
+- `INV-QUERY-10`: An inner JoinOp MUST NOT double-count pairs where both matching sides changed in the same logical tick.
+- `INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
+- `INV-QUERY-12`: AntiJoin MUST output left rows only when the total right-side multiplicity for the join key is zero.
+- `INV-QUERY-13`: AntiJoin MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
+- `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as t...
+- `INV-QUERY-15`: SQL planquery MUST reject query parameters; parameterized SQL MUST go through planpreparedshape/prepared binding flow.
+- `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form column = $parameter or $parameter = column as binding predicates.
+- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
+- `INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
+- `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
+- `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
+- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+
+## Details
+
+### 6.1 The query AST
 
 The query AST is jazz's stable vocabulary for describing rows, relationships,
 projections, ordering, aggregation, and windowing. It is lowered to groove rather
@@ -41,7 +72,7 @@ subquery joins until their semantics are specified. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
-## 6.2 Shapes: validated, content-addressed, schema-stamped
+### 6.2 Shapes: validated, content-addressed, schema-stamped
 
 A shape is the validated, schema-stamped identity of a query. Validation
 normalizes the AST, infers `params`, records the `schema_version` used for
@@ -63,7 +94,7 @@ rejects unknown tables/columns, bad include paths, join/reference
 incompatibility, operand and parameter type conflicts, and aggregate/order-by
 misuse.
 
-## 6.3 Bindings and claims
+### 6.3 Bindings and claims
 
 A binding supplies the values for the `Operand::Param` holes inferred during
 validation. Its identity is content-addressed independently of the shape:
@@ -79,7 +110,7 @@ authenticated `AuthorId`; additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 
-## 6.4 Result sets, include paths, and relation payloads
+### 6.4 Result sets, include paths, and relation payloads
 
 A result set is the authoritative membership for a canonical
 `ProgramInstanceKey = (ShapeId, ResolvedReadKey, PolicySharingKey, BindingId)`.
@@ -133,7 +164,7 @@ or validation engine. Multi-hop traversal and `gather` remain explicit
 unsupported relation operators until they can be normalized into the same program
 family with matching maintained semantics.
 
-## 6.4.1 Default result ordering
+### 6.4.1 Default result ordering
 
 Decision, Anselm 2026-07-18: when a relation-valued result has no explicit
 `order_by`, its default order is ascending row id (`RowUuid`). This applies at
@@ -173,7 +204,7 @@ immutable id, a single-row content update that does not change membership must
 not reorder neighboring rows, and a single-row insert must publish its ordered
 position without scanning or diffing the accumulated relation state.
 
-## 6.5 Query-driven sync
+### 6.5 Query-driven sync
 
 A subscription binds a shape to one binding in one read view and is addressed by
 `SubscriptionKey { shape_id, binding_id, read_view }`. `RegisterShapeOptions`
@@ -224,7 +255,7 @@ usage-site subscription's settled subscription result set. `INV-QUERY-6` —
 usage-site subscription to the coverage group and answer with a reset
 `ViewUpdate`.
 
-## 6.6 Reads, settled and local
+### 6.6 Reads, settled and local
 
 A query read is either local/unsettled or settled. A local/unsettled read returns
 rows complete only relative to the node's own visible-current knowledge
@@ -251,7 +282,7 @@ materializing them as row fields. Dry-run policy APIs return a concrete
 allow/deny result or an explicit indeterminate result when the probe lacks
 required input, such as a row id for a row-id-sensitive insert policy.
 
-## 6.7 Conformance test plan
+### 6.7 Conformance test plan
 
 Default result ordering is a conformance requirement for every public query
 surface, but implementation work is deferred until after 2026-07-19. The test
@@ -287,7 +318,9 @@ plan below records the intended coverage without changing tests now.
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Local one-shot reads vs. settled coverage reads.** Ordinary one-shot
   `all`/`one` reads are local-source reads: at tier `global` they evaluate over

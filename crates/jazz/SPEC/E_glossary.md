@@ -1,5 +1,7 @@
 # jazz — Specification · Appendix E. Glossary
 
+## Overview
+
 _Non-normative (guidance)._ This appendix is a dependency-ordered terminology
 index. Each entry gives a compact gloss and points to the chapter that _owns_
 the term; this appendix is never the source of truth for behavior. Code spelling
@@ -10,7 +12,13 @@ lowering onto **groove**, the storage and incremental-view-maintenance engine
 beneath it, which has its own specification. jazz is not a second query engine
 (ch. 1, ch. 14).
 
-## Identity (ch. 2)
+This chapter is compact reference material; the glossary entries remain together in Details, with unresolved terminology work collected below.
+
+Invariant digest: no `INV-*` ids are defined or cited by this chapter.
+
+## Details
+
+### Identity (ch. 2)
 
 - **`NodeUuid` / `RowUuid` / `AuthorId` / `SchemaVersionId` / `MigrationLensId` /
   `BranchId`** — wire-stable UUID identities.
@@ -18,13 +26,13 @@ beneath it, which has its own specification. jazz is not a second query engine
   never on the wire (ch. 14).
 - **`AuthorId::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
 
-## Time & order (ch. 2–4)
+### Time & order (ch. 2–4)
 
 - **`TxTime`** — packed HLC time: 48-bit ms + 16-bit counter.
 - **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
 - **`GlobalSeq`** — the core-assigned serialization position ("seq").
 
-## Schema (ch. 2, ch. 10)
+### Schema (ch. 2, ch. 10)
 
 - **`JazzSchema` / `TableSchema` / `ColumnSchema`** — the logical schema.
 - **`MergeStrategy::{Lww, Counter}`** · **`LargeValueKind::{Text, Blob}`**.
@@ -34,7 +42,7 @@ beneath it, which has its own specification. jazz is not a second query engine
   pointer; **schema-version storage partition** — the physical per-version
   table.
 
-## Transactions (ch. 3)
+### Transactions (ch. 3)
 
 - **mergeable transaction** (`TxKind::Mergeable`) — an eventually-consistent
   column-LWW write; the high-level facade spelling is _batch_ (ch. 13).
@@ -47,7 +55,7 @@ beneath it, which has its own specification. jazz is not a second query engine
   write has settled. _Fate and durability are separate axes._
 - **snapshot** (`Snapshot`) · **read sets** (`RowRead`/`AbsentRead`/`PredicateRead`).
 
-## History & merge (ch. 4)
+### History & merge (ch. 4)
 
 - **version / parents** — a row version and its DAG edges; **frontier / heads** —
   the undominated versions; **argmax history** — current is the
@@ -58,7 +66,7 @@ beneath it, which has its own specification. jazz is not a second query engine
 Restored}`) · **global-current overwrite table** — node-local derived current
   state · **merge version** — an upstream-created merge of concurrent heads.
 
-## Reads & queries (ch. 5–6)
+### Reads & queries (ch. 5–6)
 
 - **settled read** vs **local read**; **historical / settled-history read** at a
   `GlobalSeq` (ch. 11).
@@ -74,7 +82,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `maintained_subscription_views` and the subscriber-side settled result set
   share the entry shape but play different roles.
 
-## Sync & topology (ch. 8–9)
+### Sync & topology (ch. 8–9)
 
 - **`SyncMessage`** — the one wire vocabulary (`CommitUnit`, `FateUpdate`,
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
@@ -95,7 +103,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   versions". Add row-version or maintained-view-complete coverage facts only if
   partial payload dedup needs them · **deferred edge fate**.
 
-## API & branches (ch. 13, ch. 11)
+### API & branches (ch. 13, ch. 11)
 
 - **`Db` / `DbIdentity`** — the client-side application facade: no role, always
   a synced client over a `NodeState`. **`NodeState`** (local engine) / **`Node`**
@@ -107,7 +115,9 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 - **snapshot-base branch** (`BranchRecord`, `BranchState`) · **branch overlay** ·
   **root branch**.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Flat index.** Keep this dependency-ordered grouping, or add a flat
   alphabetical index for lookup as well?

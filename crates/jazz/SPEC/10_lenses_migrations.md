@@ -1,5 +1,7 @@
 # jazz — Specification · 10. Schema evolution: lenses & migrations
 
+## Overview
+
 Multiple schema versions coexist in one database, and migration lenses translate
 between them without rewriting history. This is one of jazz's most novel
 properties. This chapter defines the catalogue, per-version storage,
@@ -7,7 +9,32 @@ copy-on-write-into-current writes, and lens-projected reads. It builds on schema
 identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 (ch. 8).
 
-## 10.1 The model
+Invariant digest:
+
+- `INV-LENS-1`: A published SchemaVersion MUST have schema.id == schema.schema.versionid().
+- `INV-LENS-2`: A published MigrationLens MUST have lens.id == lens.contentid() and both lens.source and lens.target MUST be known SchemaVersionIds; contentid() MUST hash the canonica...
+- `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
+- `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire VersionRecord MUST expose the full SchemaVersionId.
+- `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding SchemaVersion catalogue value arrives.
+- `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
+- `INV-LENS-7`: CurrentWriteSchema updates MUST be monotone by revision; stale revisions MUST leave currentwriteschema unchanged.
+- `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, and per-version partitions MUST survive node restart.
+- `INV-LENS-9`: A current-write-schema pointer flip to a schema with new tables MUST create/reopen per-version history and register storage tables before writes/read scans use them.
+- `INV-LENS-10`: New local writes MUST store versions under currentwriteschema.schema, using the base table only when it equals the node's base schema and a partition table otherwise.
+- `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema partition at ingest.
+- `INV-LENS-12`: Natural lens reads MUST fan out across registered per-version tables and project rows into the requested schema after schema-agnostic winner selection.
+- `INV-LENS-13`: Natural forward/reverse lens projection MUST implement RenameColumn, CopyColumn, AddColumn, and DropColumn.backwardsdefault deterministically, and MUST reject Transfor...
+- `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
+- `INV-LENS-15`: ShapeId MUST include the authored SchemaVersionId; identical canonical query bytes against different schema versions MUST produce different shape ids.
+- `INV-LENS-16`: RejectSourceDelta on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
+- `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving; the current registry is identity/no-op only.
+- `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
+- `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
+- `INV-LENS-20`: Per-version tables MUST NOT be automatically garbage-collected; background durable migration may compact current winners but MUST NOT delete historical tables automati...
+
+## Details
+
+### 10.1 The model
 
 Schema evolution is modeled as immutable catalogue data plus explicit
 translations between versions. A `SchemaVersion` names one content-addressed
@@ -30,7 +57,7 @@ ordered lens ops, and recursively tagged default values. The embedded
 `MigrationLens.id` field is excluded from that encoding, and catalogue ingest
 rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 
-## 10.2 The catalogue
+### 10.2 The catalogue
 
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
@@ -46,7 +73,7 @@ A commit unit or shape registration that names an unknown schema version cannot
 be interpreted yet, so it **parks** as a catalogue orphan. The orphan drains when
 that `SchemaVersion` arrives (`INV-LENS-5`, `INV-LENS-6`, ch. 8).
 
-## 10.3 Per-version storage
+### 10.3 Per-version storage
 
 Physical storage preserves the version under which data was stored. Every stored
 content/register row carries a `schema_version` ref, represented locally as a
@@ -63,7 +90,7 @@ _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, and per-version partitions survive node restart
 (recovered in a catalogue stage before the groove database is constructed).
 
-## 10.4 Writes: copy-on-write into current
+### 10.4 Writes: copy-on-write into current
 
 Writes converge on the schema selected by the current write pointer. New local
 writes are stored under `current_write_schema.schema`: the base table when that
@@ -83,7 +110,7 @@ catalogue write (§10.2), and it **never invalidates in-flight work**: a
 transaction admitted under the previous pointer translates forward at ingest
 like any other old-schema write.
 
-## 10.5 Reads: fan-out, then project
+### 10.5 Reads: fan-out, then project
 
 Reads begin from storage reality, then project into the requested schema. A read
 against schema S unions the visible-current rows from every registered
@@ -130,7 +157,7 @@ against `v2` unions the `v1` table and the `v2` partition, picks the winner by
 (`INV-LENS-12`). Writes are single-partition, using the current partition; reads
 are multi-partition, spanning all partitions.
 
-## 10.6 The lens op surface
+### 10.6 The lens op surface
 
 The lens operation surface is deliberately small and resolved before it reaches
 the core. The supported operations are `LensOp::{RenameTable, RenameColumn,
@@ -150,7 +177,9 @@ receives resolved lenses**: a draft lens, such as an ambiguous diff where a
 drop+add might be a rename, is a product/tooling concept, and the validation tool
 refuses unresolved drafts upstream.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Binding-facing lens facade.** TS/WASM/NAPI should expose published
   schemas, migration lenses, current-write-schema movement, and catalogue acks

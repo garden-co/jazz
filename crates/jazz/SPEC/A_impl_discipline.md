@@ -1,12 +1,31 @@
 # jazz — Specification · Appendix A. Implementation discipline
 
+## Overview
+
 _Non-normative (guidance)._ This appendix records the engineering disciplines
 that keep the implementation aligned with the specification. The `INV-DISC-*`
 entries are audit anchors for code structure and tests, not
 application-visible semantic law. Application semantics live in the numbered
 chapters, and the SPEC, not the README, is the contract.
 
-## A.1 Simulation-first node core
+Invariant digest:
+
+- `INV-DISC-1`: node-core work must remain simulation-first. Load-bearing rule: production node semantics are exercised through deterministic inputs and explicit method/event surfaces...
+- `INV-DISC-2`: all cross-node sync must use exhaustive serializable message enums, and every concept must be reachable through protocol messages, node storage, or both. Current SyncM...
+- `INV-DISC-3`: relays and peers are roles over the same node/message vocabulary, not separate semantic implementations. Node::ingestrelaycommitunit stores pending local units without...
+- `INV-DISC-4`: commit/fate/view ingestion must be idempotent and conflict-detecting. Duplicate relay commit units compare transaction payload and canonical versions, then no-op if id...
+- `INV-DISC-5`: time-like and state-lattice domains must use distinct types and monotone transitions. Identifiers: GlobalSeq, TxTime, Fate, DurabilityTier. GlobalSeq::next is explicit...
+- `INV-DISC-6`: the implementation must preserve structural column taxonomy. Wire payloads carry VersionRecord data and not local/global-derived currentness (protocol.rs lines 110-140...
+- `INV-DISC-7`: oracle-first testing is part of implementation discipline. The oracle is independent of groove (oracle.rs lines 1-24); seeded M3 runs compare core/global/current/subsc...
+- `INV-DISC-8`: out-of-order, duplicate, restart, and rehydrate hazards must be first-class seeded-test actions. The M3 harness duplicates upstream/fate/view messages, delivers child...
+- `INV-DISC-9`: parked work must be observable and drained at quiescence. SyncMetrics currently tracks parkedorphans, parkedorphansresolved, parkedincomplete, parkedincompleteresolved...
+- `INV-DISC-10`: crash/restart recovery must rebuild in-memory node discipline state from storage, not from transport/session state. recoverfromstorage rebuilds aliases, schema aliases...
+- `INV-DISC-11`: peer-level complete-tx payload inventory and deterministic counters are implementation artifacts, not semantic state. PeerState owns shippedcompletetxpayloads, per-sub...
+- `INV-DISC-12`: benchmarks are discipline gates that report deterministic counters plus timing ratios, but appendix A should not quote dirty-tree numbers. Sync benchmark emits JSON fi...
+
+## Details
+
+### A.1 Simulation-first node core
 
 The node core is designed to be simulated directly. Its behavior must be
 deterministic, with no hidden dependence on transport, threads, clocks, or
@@ -16,7 +35,7 @@ randomness. Time enters only as an explicit `now_ms` parameter
 Threading and channels belong only to integration drivers
 (`threaded_four_tier`), never to node logic.
 
-## A.2 Everything reachable through messages or storage
+### A.2 Everything reachable through messages or storage
 
 Every cross-node concept must have an explicit place in the protocol, storage,
 or both. The implementation style that supports that rule is deliberately
@@ -30,7 +49,7 @@ node storage, or both (`INV-DISC-2`). The `SyncMessage` set is `CommitUnit`,
 `PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`,
 `ViewUpdate`, `FetchContentExtent`, and `ContentExtents`.
 
-## A.3 Roles, not separate implementations
+### A.3 Roles, not separate implementations
 
 Relay, edge, and core are roles over a shared node model, not separate semantic
 implementations (`INV-DISC-3`, ch. 9). The same `Node` + `PeerState` machinery
@@ -38,14 +57,14 @@ serves all tiers: relay ingest stores pending units without assigning fate,
 `PeerRole` controls link identity and read narrowing, and the four-tier tests
 run every tier through the same types.
 
-## A.4 Idempotent, conflict-detecting ingestion
+### A.4 Idempotent, conflict-detecting ingestion
 
 Ingestion must tolerate replay without hiding divergence. Commit, fate, and
 view ingestion are idempotent and conflict-detecting (`INV-DISC-4`): a duplicate
 unit with matching payload no-ops or returns the known fate, a conflicting
 payload errors, and a stale `Pending` never regresses an `Accepted` fate.
 
-## A.5 Typed, monotone state
+### A.5 Typed, monotone state
 
 State that has ordering semantics must make those semantics visible in its
 types. Time-like and lattice domains use distinct types with monotone
@@ -56,7 +75,7 @@ backward or conflicting transitions surface as `NonMonotoneState` /
 wire payloads carry only replicated-immutable data, derived currentness is
 recomputed, and upstream state lives on the transaction record (`INV-DISC-6`).
 
-## A.6 Oracle-first testing and seeded hazards
+### A.6 Oracle-first testing and seeded hazards
 
 Correctness tests are anchored by an independent truth model. The brute-force
 `Oracle` is complete-history and groove-independent, and tests compare behavior
@@ -74,7 +93,7 @@ a test bug, not a valid simplification. Recovery rebuilds node state (aliases,
 catalogue/branch metadata, HLC/global-seq, pending edges, rejected headers) from
 storage, never from transport/session state (`INV-DISC-10`).
 
-## A.7 Counters and benchmarks as gates
+### A.7 Counters and benchmarks as gates
 
 Operational counters are gates for discipline, not part of application
 semantics. Per-peer complete-tx payload inventory and deterministic counters
@@ -87,7 +106,7 @@ report deterministic counters plus timing ratios as discipline gates
 results. Metrics are _not_ one unified struct: they are split across
 `SyncMetrics`, `PeerMetrics`, and benchmark-computed values.
 
-## A.8 Canonical gates
+### A.8 Canonical gates
 
 The canonical Rust gate set is part of implementation discipline. A branch that
 changes Rust/core behavior should be able to pass:
@@ -116,7 +135,7 @@ This discipline was added after four concrete misses:
 - Adding `SyncMessage::SubscribeRejected` broke jazz-sim bench compilation and
   was caught two steps late.
 
-## A.9 Structural discipline
+### A.9 Structural discipline
 
 Structure should make the design easy to audit. Large implementation concepts
 should be immediately findable, algorithms should read as large steps before
@@ -143,7 +162,9 @@ Durable style rules:
 3. No wrapper without semantics: forwarding-only types and value round-trips are
    debt by definition.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Canonical step API.** Should the discipline require the literal `step(&mut
 NodeState, Event) -> Vec<OutboxMessage>` dispatcher (`Event`/`OutboxMessage`

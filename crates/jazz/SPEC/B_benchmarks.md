@@ -1,11 +1,27 @@
 # jazz — Specification · Appendix B. Benchmarks
 
+## Overview
+
 _Non-normative (guidance)._ The vision-level, end-to-end benchmark suite that
 measures product claims (complementing per-milestone micro-benchmarks).
 `INV-BENCH-*` ids are auditability anchors, not conformance law. Retained timings
 are directional; only anchored headline artifacts become claims.
 
-## B.1 The scenarios
+Invariant digest:
+
+- `INV-BENCH-1`: a scenario that can only run on one driver is incomplete. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-2`: compared systems and retained runs use identical declared link profiles. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-3`: headline metrics are reported against at least one floor/ceiling/reference anchor. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-4`: every emitted retained line includes scenario, driver, seed, profile, gitsha, gitdirty, hostname, knobs. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-5`: deterministic scenario runs must assert oracle equality or explicit security counters before reporting success. This is a guidance/process anchor, not runtime conforma...
+- `INV-BENCH-6`: forbidden rows/deltas delivered to an unauthorized client must be exactly zero. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-7`: accepted jazz schedules replayed against SQLite must produce identical final state for S4 reference runs. This is a guidance/process anchor, not runtime conformance.
+- `INV-BENCH-8`: S5 must model append streams as full content: bytes rewrites in streamDocs, not a userland event log, and compare against fsync append-log, SQLite WAL, and zstd anchor...
+- `INV-PERF-2`: INV-PERF-2 correctness is part of benchmark validity: deterministic counters/oracle checks are hard gates, and a benchmark that gets fast by changing results must fail...
+
+## Details
+
+### B.1 The scenarios
 
 In dependency order: **S0** micro primitives (HLC, domination, deletion
 resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
@@ -16,7 +32,7 @@ query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 _implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
 
-## B.2 Methodology
+### B.2 Methodology
 
 - **Seeded, simulation-first.** A scenario has a deterministic correctness run
   and (where applicable) a threaded timing run; a scenario that can only run on
@@ -34,7 +50,7 @@ harness]`).
   `seed`, `profile`, `git_sha`, `git_dirty`, `hostname`, and knobs, under
   `benchmarks/results/jazz` (`INV-BENCH-4`).
 
-## B.3 Correctness oracles
+### B.3 Correctness oracles
 
 A deterministic scenario run asserts oracle equality (or explicit security
 counters) before reporting success — a fast-but-wrong run fails (`INV-BENCH-5`).
@@ -45,7 +61,7 @@ accepted jazz schedule, replayed against SQLite, produces identical final state
 exactly (`INV-BENCH-8`); S9 injected races equal double-advance rejects with zero
 double-advances.
 
-## B.4 Honesty rules (the meta-learnings)
+### B.4 Honesty rules (the meta-learnings)
 
 - **Measure the generality tax, don't hide it.** S5/S6 model append streams and
   text as _full-value rewrites_ (`content: bytes`), not hand-modeled app logs or
@@ -62,7 +78,7 @@ double-advances.
   scales with affected subscribers/streams and relevant rows, not total
   workspace size.
 
-## B.5 Systems tier and reporting
+### B.5 Systems tier and reporting
 
 The systems tier is distinct: docker-composed competitors over real localhost
 transports, wall-clock only, spot-check correctness, same logical workloads, with
@@ -71,20 +87,7 @@ durability — the labels keep comparisons honest). Reporting renders only
 per-scenario headline artifacts into claims, always showing floor / jazz /
 ceiling-or-reference and deterministic-counter equality.
 
-## Open questions
-
-- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5/S6)
-  have Db-surface smoke/summary paths while others remain peer-layer; state it
-  per-scenario rather than as a blanket "blocked."
-- 🔶 **S7 is smoke-sized**; define the retained-run fields and matrix it must
-  emit to graduate from an interactive harness to a reporting benchmark.
-- 🔶 **Dirty-tree retention.** `git_dirty` is recorded but a dirty run is still
-  appendable when retention is on — decide whether tooling should refuse to quote
-  dirty-tree results or rely on author discipline.
-
----
-
-## In flight & operational detail (non-normative)
+### In flight & operational detail (non-normative)
 
 _B.1–B.6 above are the durable benchmark methodology. The following is the full
 operational detail — per-scenario fixtures, axes, metrics, gates, systems-tier
@@ -106,7 +109,7 @@ the per-milestone benchmarks that gate individual features.
 
 A micro tier (scenario 0) covers the primitive costs underneath all of them.
 
-## Overview: phase-level coverage audit
+### Overview: phase-level coverage audit
 
 Evidence checked 2026-06-14: `jazz-sim/benches/*.rs`,
 `jazz-sim/src/{lib,fixture}.rs`, `jazz/benches/*.rs`,
@@ -286,7 +289,7 @@ Landed capabilities were retired from the gate list; git history is the record.
 | `[needs: text-merge]`        | FUTURE | `jazz/src/node/text_oplog.rs` exists, but current S6 scenario semantics are still whole-value HLC-LWW; no rich-text three-way merge strategy is wired into the phase.                                                              |
 | `[needs: eviction]`          | FUTURE | S5's evicted-prefix resumer phase is specified but no eviction/resume benchmark path was found.                                                                                                                                    |
 
-### Existing infrastructure inventory
+#### Existing infrastructure inventory
 
 - **Harness pattern.** `jazz-sim/src/lib.rs` provides deterministic and
   threaded drivers, `PeerProfile`, scenario metadata, and `emit_json_line`.
@@ -324,7 +327,7 @@ Landed capabilities were retired from the gate list; git history is the record.
   makes `INV-PERF-2` gates uniform across phase benches; and a retained-run
   validator that refuses or labels dirty-tree claim artifacts consistently.
 
-### Prioritized benchmark gaps, excluding S8
+#### Prioritized benchmark gaps, excluding S8
 
 0. **HARNESS (topmost): convert every scenario to the `client↔edge↔core`
    topology through the `Db` facade.** This is now the only supported topology
@@ -373,7 +376,7 @@ Landed capabilities were retired from the gate list; git history is the record.
 15. **HARNESS:** make S9 crash/restart a distinct failure phase, separate from
     cold reattach.
 
-## Shared setup and rules
+### Shared setup and rules
 
 These rules exist because benchmarks without them produced misleading numbers
 in previous experiments (groove's benchmark history is the case law).
@@ -450,7 +453,7 @@ the one applications run.
 
 ---
 
-## 0. Micro tier
+### 0. Micro tier
 
 _Motivation: every scenario cost decomposes into a handful of primitives;
 when a scenario regresses, this tier localizes it._
@@ -469,14 +472,14 @@ bytes:
 
 ---
 
-## 1. SaaS app (Linear-style task tracking)
+### 1. SaaS app (Linear-style task tracking)
 
 _Motivation: the core partial-sync claim — a client syncs what its queries
 need, not the workspace; the server's cost grows with affected subscribers,
 not with subscriber count. This is groove's headline curve, lifted to the
 full protocol._
 
-### Schema
+#### Schema
 
 ```ts
 orgs:                   { name: string }
@@ -504,14 +507,14 @@ issueTags: { issue: ref(issues), tag: ref(tags) }
 Note: "updated time" is _derived_ — it is the `made_at` of a row's current
 version; no column needed.
 
-### Fixture (seeded, Zipf-skewed activity)
+#### Fixture (seeded, Zipf-skewed activity)
 
 20 orgs × 10 teams × 50 users; 5,000 issues/org; 30 tags; 200 projects; 100
 milestones; issue↔tag and membership edges at realistic densities; ongoing
 write stream of issue edits/creations at a configurable rate, authorship
 Zipf-distributed.
 
-### Client states and axes
+#### Client states and axes
 
 - **cold**: empty store, subscribe, measure to first complete page;
 - **warm**: fully synced, measure local read;
@@ -548,7 +551,7 @@ Zipf-distributed.
   because the burst-of-rows-plus-fates-during-hydration pattern is
   where naive clients degrade to repeated broad scans.
 
-### Queries
+#### Queries
 
 1. `[base]` issues where `assignee = $user` and `state != done` and
    `cycle = active` (unordered set; ordered-page phase adds
@@ -558,7 +561,7 @@ Zipf-distributed.
 3. aggregate milestone page (phase pending): milestones + dependent milestones +
    open-issue counts
 
-### Metrics
+#### Metrics
 
 cold-load time and **bytes vs. bytes-floor and refetch ceiling** · warm-read
 latency · reconnect catch-up time/bytes vs. offline window · per-commit core
@@ -566,7 +569,7 @@ tick time vs. subscriber count · notification bytes per commit · local store
 size after full sync · counters: versions shipped vs. referenced (peer dedup
 ratio), prepared-shape count, binding count.
 
-### Correctness (oracle, deterministic mode)
+#### Correctness (oracle, deterministic mode)
 
 local pages == core-evaluated results at the requested settled tier ·
 clients receive no rows/deltas outside their subscriptions · reconnecting
@@ -574,13 +577,13 @@ client converges to identical state as a never-disconnected client.
 
 ---
 
-## 2. Realtime canvas
+### 2. Realtime canvas
 
 _Motivation: mergeable transactions under super-realtime concurrent writes —
 convergence, merge behavior, history growth, and the cost of passive
 observers. Also the suite's failure-injection home._
 
-### Schema
+#### Schema
 
 ```ts
 canvases:      { name: string }
@@ -593,7 +596,7 @@ One canvas, 200 shapes. RLS: a user reads/writes a canvas iff invited
 (makes the scenario exercise permission-filtered realtime sync, not raw
 broadcast).
 
-### Phase 1 — live collaboration `[base]`
+#### Phase 1 — live collaboration `[base]`
 
 - 5 active participants, each moving shapes at **120 mergeable commits/sec**
   (x/y cell writes; text excluded); shape choice Zipf-skewed so concurrent
@@ -623,7 +626,7 @@ a compressed blob with O(history) replay reads would win the ratio and lose
 the product; the pair is the claim ("compact history _and_ fast time-travel
 lookup"), so the pair is the artifact.
 
-### Phase 2 — loading `[base except where tagged]`
+#### Phase 2 — loading `[base except where tagged]`
 
 A fresh invited user loads: current state only · current + full history ·
 historical state at 25/50/75% of phase-1 duration.
@@ -631,14 +634,14 @@ Additionally, **history-depth read cost**: current-row read latency as
 versions-per-row grows (10 / 1k / 18k versions on hot shapes — phase 1
 produces these naturally).
 
-### Phase 3 — failure injection `[base]`
+#### Phase 3 — failure injection `[base]`
 
 During a phase-1 run: disconnect/reconnect 2 participants mid-run; crash and
 restart one participant (recover from local store); kill the core and
 restart it (recover from durable storage). Measure recovery time; assert
 convergence after quiescence.
 
-### Correctness
+#### Correctness
 
 all participants converge to identical canvas state at quiescence ·
 current-only load == full-history load's derived current state ·
@@ -647,7 +650,7 @@ prefix · non-invited spy client receives nothing.
 
 ---
 
-## 3. Offline-first app with complex permissions
+### 3. Offline-first app with complex permissions
 
 _Motivation: recursive RLS (team nesting × access edges) over partial
 replicas — correctness of permission-filtered sync and, above all, the **cost
@@ -662,7 +665,7 @@ revocation path is retained as a recursive-retraction correctness-and-cost
 check (the known recompute cliff), not as the headline. Both fixtures below —
 the org fixture and the block-tree variant — are equally important._
 
-### Schema
+#### Schema
 
 ```ts
 orgs:                { name: string }
@@ -675,7 +678,7 @@ resourceAccess:      { resource: ref(resources), team: ref(teams),
                        adminsOnly: boolean, permission: enum[read|write|delete] }
 ```
 
-### Fixture
+#### Fixture
 
 20 orgs · 100 teams/org, team→team nesting up to 5 deep · 40,000
 resources/org · 10 resourceAccess edges per resource. Permission rule:
@@ -701,7 +704,7 @@ at an inner block reflowing exactly its subtree's visibility is retained as the
 because caches and granular permissions are traditionally at war; the
 policy-composed-graph design claims they aren't.
 
-### Phases
+#### Phases
 
 1. **Cold load** `[base]` — _primary_: full org-visible data for simple vs.
    admin user. Measures permission evaluation over a persona's whole visible
@@ -736,7 +739,7 @@ policy-composed-graph design claims they aren't.
    that forces the edge to acquire a permission subscription) vs. already-hydrated
    acceptance.
 
-### Metrics
+#### Metrics
 
 cold-load time/bytes per persona vs. bytes floor · permission-evaluation
 time at core (later edge) · **permission-view sizes** (rows required to
@@ -745,7 +748,7 @@ and revocation latencies as above · local store size per persona · counters:
 forbidden-delivery (must be 0), recursive recompute count, recompute row
 volume.
 
-### Correctness
+#### Correctness
 
 simple user holds exactly the oracle-computed visible set, at every
 quiescent point · admin sees all 40,000 via explicit evidence · grant and
@@ -755,7 +758,7 @@ subscriptions are settled.
 
 ---
 
-## 4. Globally consistent order processing (TPC-C derived)
+### 4. Globally consistent order processing (TPC-C derived)
 
 _Motivation: jazz used deliberately against its grain — no partial
 replication, no offline, all writes `exclusive`, clients wait for `global`
@@ -764,13 +767,13 @@ evaluation over prepared shapes) makes jazz competitive as a classical
 serializable database — and surfaces the OCC hot-row problem on purpose, so
 the mergeable-counters answer to it can be measured rather than asserted._
 
-### Schema
+#### Schema
 
 As in the prior experiment (warehouses, districts, customers, items, stock,
 orders, orderLines, payments — TPC-C shapes with jazz types). Unchanged
 except terminology: "local store size", not "SQLite size".
 
-### Scale discipline (anti-gaming, kept verbatim in spirit)
+#### Scale discipline (anti-gaming, kept verbatim in spirit)
 
 - scale factor = number of warehouses; each warehouse owns a fixed logical
   data volume (10 districts, 3,000 customers/district, one stock row per
@@ -785,7 +788,7 @@ except terminology: "local store size", not "SQLite size".
 - report data volume, warehouse count, and per-warehouse throughput
   alongside aggregate throughput.
 
-### Transaction shapes `[base]`
+#### Transaction shapes `[base]`
 
 - **new order**: read customer/district/item/stock rows; increment
   `district.nextOrderNumber`; decrement stock; insert order + lines.
@@ -798,7 +801,7 @@ except terminology: "local store size", not "SQLite size".
 - **stock level**: read recent orders in a district; count referenced stock
   rows below threshold.
 
-### Runs
+#### Runs
 
 1. **Scale-out** `[base]`: grow scale factor at bounded per-warehouse rate.
 2. **Contention** `[base]`: small fixed scale factor with deliberately hot
@@ -812,7 +815,7 @@ except terminology: "local store size", not "SQLite size".
    design); this variant is jazz's intended answer. The side-by-side is the
    scenario's second headline.
 
-### Metrics
+#### Metrics
 
 committed exclusive tx/sec · max sustained scale factor within SLO ·
 per-warehouse throughput · p50/p95/p99 submission→global settlement ·
@@ -822,7 +825,7 @@ validation vs. materialization · store sizes after a fixed committed count ·
 **ratio vs. the reference SQLite implementation** running the same logical
 mix under the same durability setting.
 
-### Correctness
+#### Correctness
 
 no duplicate `orderNumber` per district · stock quantities/counters reconcile
 with committed order lines · payment/revenue totals reconcile · delivery
@@ -833,7 +836,7 @@ produces identical final state.
 
 ---
 
-## 5. Durable stream (LLM-agent append log)
+### 5. Durable stream (LLM-agent append log)
 
 _Motivation: agents appending tokens to durable streams, with listeners
 tailing live or resuming from their last known point, is a workload entire
@@ -849,7 +852,7 @@ itself** (at 100 tokens/s, transaction/version metadata can dwarf the
 payload). Today's numbers are the baseline `[needs: column-delta]` must
 beat._
 
-### Schema
+#### Schema
 
 ```ts
 streams:    { name: string }
@@ -863,7 +866,7 @@ sharing, on disk and on the wire) toward what the bespoke systems below
 achieve with explicit append logs, while the app code stays a one-line
 column write.
 
-### Workload `[base]`
+#### Workload `[base]`
 
 - one writer per stream appending at **100 tokens/s** (~4 bytes/token),
   batching axis: 1 / 10 / 100 tokens per commit;
@@ -876,7 +879,7 @@ column write.
   with binding-set aggregation is the mechanism under test, as in scenario
   1's subscriber sweep.
 
-### Adversarial comparisons
+#### Adversarial comparisons
 
 - **floor**: an fsync-disciplined append-only log file with length-prefixed,
   zstd-framed records, tail via in-process notification — the minimal
@@ -890,7 +893,7 @@ seq)` pk) with a notify/poll tailer.
   the suite: operationally heavy, different durability envelopes; revisit
   only if a marketing claim ever needs them.
 
-### Metrics
+#### Metrics
 
 append→tail-delivery p50/p99 at tier `none` vs. link floor · sustained
 appends/sec per stream and aggregate vs. stream count · resume time/bytes
@@ -903,7 +906,7 @@ value; `[needs: column-delta]` must collapse both) · prefix-sharing ratio
 (stored bytes / logical unique bytes; re-measured when column-delta lands) ·
 core CPU per append · local store size at tailers vs. resumers.
 
-### Correctness
+#### Correctness
 
 every tailer observes a strictly prefix-monotone sequence of content
 versions and converges to the final content, byte-exact · resumer state ==
@@ -912,14 +915,14 @@ full-replay state, byte-exact · a late resumer over an evicted prefix
 
 ---
 
-## 6. Collaborative text editing (real editing trace)
+### 6. Collaborative text editing (real editing trace)
 
 _Motivation: large documents in a text column, edited as linear runs at
 random positions — the same value-versioning pressure as scenario 5 but with
 mid-value edits instead of appends. This is the arena where jazz competes
 directly with CRDT libraries, on their own canonical benchmark._
 
-### The trace
+#### The trace
 
 The [automerge-perf editing trace](https://github.com/automerge/automerge-perf):
 Martin Kleppmann's keystroke-by-keystroke recording of writing the LaTeX
@@ -928,7 +931,7 @@ Beresford) — **182,315 single-character insertions and 77,463 deletions
 (259,778 edit operations)** producing a ~100KB final document; CC-BY-4.0;
 the standard benchmark for Automerge, Yjs, diamond-types, Loro, et al.
 
-### Trace catalog (eg-walker superset)
+#### Trace catalog (eg-walker superset)
 
 We adopt the [eg-walker evaluation set](https://arxiv.org/abs/2409.14252)
 verbatim as the literature-comparable core — their published per-trace
@@ -977,7 +980,7 @@ single-author and sequential, so phases 1–4 are a fair fight on storage,
 throughput, and latency without merge semantics; the concurrent phase is
 specified now and activated with the feature.
 
-### Modeling — brainless dump only
+#### Modeling — brainless dump only
 
 One row per document, the full `text` column rewritten on every edit — the
 same thesis as scenario 5: no userland op-log modeling, no CRDT structures
@@ -985,7 +988,7 @@ in app code; jazz owns the efficiency problem (`[needs: column-delta]`) and,
 later, the merge problem (`[needs: text-merge]`). The adversaries below are
 the systems where humans did that work by hand.
 
-### Phases
+#### Phases
 
 1. **Trace replay** `[base]`: single writer replays all 259,778 edits as
    mergeable commits (batching axis: 1 / 32 / 256 edits per commit).
@@ -1004,7 +1007,7 @@ the systems where humans did that work by hand.
    trace as a _semantic_, not byte, comparison — the strategies legitimately
    differ).
 
-### Adversarial comparisons
+#### Adversarial comparisons
 
 Two explicitly-labeled tiers, because most CRDT libraries are in-memory and
 jazz is durable — the label _is_ the fairness mechanism:
@@ -1018,7 +1021,7 @@ jazz is durable — the label _is_ the fairness mechanism:
 - **storage anchors**: zstd (3 and 19) of the final document, and of the
   JSON edit-op log — the latter is the same anchor pattern as canvas.
 
-### Metrics
+#### Metrics
 
 trace replay throughput vs. in-memory floor · storage ratio vs. durable CRDT
 baseline and zstd anchors · synced bytes per edit per observer ·
@@ -1027,7 +1030,7 @@ cold-load time (current vs. full history) vs. durable CRDT load · memory ·
 point-in-time read latency (paired with storage, per
 the canvas rule).
 
-### Correctness
+#### Correctness
 
 final document byte-equals the reference string produced by directly
 applying the trace · every prefix replay equals the corresponding reference
@@ -1036,7 +1039,7 @@ spec, identical on every node.
 
 ---
 
-## 7. Parallel schema evolution (migration lenses)
+### 7. Parallel schema evolution (migration lenses)
 
 _Motivation: the no-stop-the-world migration claim — clients on different
 schema versions read and write concurrently through bidirectional
@@ -1044,7 +1047,7 @@ translation lenses, nothing on disk is rewritten, and offline clients
 that predate a schema change still sync in. The cost under test is the
 **lens tax**: translated reads and writes vs native ones._
 
-### Setup
+#### Setup
 
 The scenario-1 SaaS schema as v1; three published evolutions: v2 adds a
 column with default (naturally mappable), v3 renames a column + drops one
@@ -1052,7 +1055,7 @@ with a backwards default (naturally mappable), v4 applies a value
 transform (non-trivial lens). Lens chain v1↔v2↔v3↔v4; clients pinned per
 version.
 
-### Phases
+#### Phases
 
 1. **Mixed-version steady state**: clients on v1 and v4 concurrently
    write the S1 edit stream; every client subscribes to the same logical
@@ -1071,19 +1074,19 @@ version.
    v4 world; its queued v1 writes must land and translate. This is the
    scenario's headline correctness case.
 
-### Anchors
+#### Anchors
 
 The native single-version run is the floor; the naive alternative
 (stop-the-world rewrite) is described, not implemented.
 
-## 8. Branching `[needs: scenario harness]`
+### 8. Branching `[needs: scenario harness]`
 
 _Motivation: branches as a first-class database feature — isolated
 parallel lines of work over a shared base (sandboxing, drafts, staging,
 agent experimentation) with snapshot-base semantics, cheap creation, and
 storage shared with the base._
 
-### Workload (agent-sandbox shape)
+#### Workload (agent-sandbox shape)
 
 A large base database (S1 fixture scale). N concurrent short-lived
 branches (N = 1 / 10 / 100): each branch is created off current main,
@@ -1092,7 +1095,7 @@ serves reads (queries spanning branch-local + base-visible state), then
 is either merged back or discarded. Meanwhile main keeps receiving its
 own write stream.
 
-### Metrics
+#### Metrics
 
 branch creation cost (target: O(1) snapshot capture, independent of base
 size) · branch read overhead vs main reads (the overlay tax) · storage
@@ -1102,14 +1105,14 @@ behavior across branches (a subscriber on main must see nothing from
 unmerged branches — counter, must be 0; branch subscribers see
 base+overlay consistently).
 
-### Correctness
+#### Correctness
 
 branch reads == base-snapshot-plus-overlay oracle · main is bit-identical
 whether or not discarded branches ever existed · merge-back equals the
 equivalent direct-on-main write sequence under the same merge strategies
 · two branches never observe each other.
 
-## 9. Durable execution backend
+### 9. Durable execution backend
 
 _Motivation: workflow/durable-execution engines need exactly the pair
 jazz claims to unify — append-heavy per-instance step logs with live
@@ -1122,7 +1125,7 @@ ordinary rows and transactions. Mostly reuses S4 (exclusive validation,
 scale-out ladder) and S5 (append streams, tailers) machinery under a
 workflow-shaped fixture._
 
-### Schema
+#### Schema
 
 ```ts
 workflows:  { name: string, definition: json }
@@ -1135,7 +1138,7 @@ steps:      { instance: ref(instances), seq: int, kind: string,
 events:     { instance: ref(instances), seq: int, payload: bytes }
 ```
 
-### Workload `[base]`
+#### Workload `[base]`
 
 - N concurrent workflow instances (ladder: 100 / 1k / 10k), each
   advancing through K steps; step execution simulated, persistence
@@ -1153,7 +1156,7 @@ events:     { instance: ref(instances), seq: int, payload: bytes }
   step history from a cold node — `[base]` full rehydrate,
   `[needs: payload-inventory]` delta resubscribe.
 
-### Metrics
+#### Metrics
 
 step transitions/sec aggregate and per instance · max concurrent
 instances within SLO (p95 transition settle ≤ 10× link RTT) ·
@@ -1162,21 +1165,21 @@ worker re-attach time vs instance history depth · dashboard
 subscription cost vs instance count · history+metadata bytes per step
 vs the S5 log-file floor · store size after a fixed step count.
 
-### Correctness
+#### Correctness
 
 every instance's step sequence is gap-free and monotone · no instance
 ever double-advances (oracle replays the accepted schedule) · resumed
 worker state == continuous-worker state, byte-exact · dashboard view
 matches oracle at quiescence.
 
-### Anchors
+#### Anchors
 
 S5's fsync-disciplined log file (floor for the append side) · SQLite
 WAL transactional baseline running the same logical schedule (floor for
 the transition side) · the partitioned-KV incumbent is described, not
 implemented (operationally heavy; revisit per the systems-tier rule).
 
-## Systems tier (whole-system competitors)
+### Systems tier (whole-system competitors)
 
 The scenarios above compare against floors, anchors, and same-process
 references because that is what can be held to identical durability and
@@ -1216,10 +1219,25 @@ Sequencing: after the suite's own completeness items (TRACKS.md backlog);
 first cell is **S1 vs Zero**. Integration cost is one TS driver + one
 service per system — each cell ships independently.
 
-## Reporting
+### Reporting
 
 Each scenario emits one JSONL stream per run (metadata-enriched, retained
 under `benchmarks/results/` when baseline-worthy). A summary tool renders
 the per-scenario headline artifacts; comparisons always show: floor,
 jazz, ceiling/reference, and the deterministic-counter equality column. The
 headline artifacts — and only those — are what end up in README-level claims.
+
+## Open Questions
+
+### Open questions
+
+- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5/S6)
+  have Db-surface smoke/summary paths while others remain peer-layer; state it
+  per-scenario rather than as a blanket "blocked."
+- 🔶 **S7 is smoke-sized**; define the retained-run fields and matrix it must
+  emit to graduate from an interactive harness to a reporting benchmark.
+- 🔶 **Dirty-tree retention.** `git_dirty` is recorded but a dirty run is still
+  appendable when retention is on — decide whether tooling should refuse to quote
+  dirty-tree results or rely on author discipline.
+
+---

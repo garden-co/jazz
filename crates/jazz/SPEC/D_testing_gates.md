@@ -1,12 +1,23 @@
 # jazz — Specification · Appendix D. Testing & gates
 
+## Overview
+
 _Non-normative (guidance)._ This appendix defines the verification tiers, the
 local gate stack, and the simulation-first testing discipline used to keep the
 system reproducible under review. `INV-TEST-*` entries are process anchors.
 Benchmark scenario detail lives in appendix B; this appendix links to that
 detail rather than duplicating it.
 
-## D.1 The local gate stack
+Invariant digest:
+
+- `INV-TEST-1`: m3seededrunisdeterministicforfixedseed proves bit-for-bit replay; lensparallelmaterializationoraclematchesenginereadsseeded is the schema/lens seeded oracle gate.
+- `INV-TEST-2`: Node-core simulation must be deterministic: time, randomness, and delivery order are injected by drivers, and failure to replay bit-for-bit is a bug. This is a guidanc...
+- `INV-TEST-3`: Every consistency claim gets randomized oracle coverage; the oracle suite covers domination, merge convergence, exclusive validation, and sync convergence.
+- `INV-TEST-4`: Jazz gates (cargo test -p jazz, scenario smoke, workspace clippy, seeded sync sweep) are local-only until CI closes the groove-only gap. This is a guidance/process anc...
+
+## Details
+
+### D.1 The local gate stack
 
 The local gate stack is ordered so cheap, broad failures surface before more
 specialized simulation checks. From the repository root, run:
@@ -23,7 +34,7 @@ specialized simulation checks. From the repository root, run:
 8. `JAZZ_SEED_COUNT=<n> cargo test -p jazz m3_seeded_sync` when widening the
    seeded sync sweep beyond the fixed default crate-test coverage
 
-## D.2 The tiers
+### D.2 The tiers
 
 - **Crate tests** — unit tests and `tests/` integration tests for `groove` and
   `jazz`.
@@ -83,7 +94,7 @@ specialized simulation checks. From the repository root, run:
   `WireFrame` bytes, and the test proves writer-to-reader sync through the
   socket boundary.
 
-## D.3 Simulation-first discipline
+### D.3 Simulation-first discipline
 
 Deterministic simulation is a design constraint, not a test afterthought. The
 node core is modeled as a pure state machine over explicit events; time,
@@ -98,7 +109,7 @@ duplication/reordering/redelivery, and **threaded** runs exercise load realism.
 Wide soaks run `--release` (e.g. `JAZZ_SEED_COUNT=1000 cargo test --release -p
 jazz m3_seeded_sync`).
 
-## D.4 Oracle norm and public-surface preference
+### D.4 Oracle norm and public-surface preference
 
 Every consistency claim gets randomized oracle coverage. The coverage includes
 domination, merge convergence, exclusive validation, and sync convergence
@@ -111,7 +122,7 @@ query/subscription results against a local oracle. Internal hooks are reserved f
 behavior that cannot be observed through the public surface, or for narrow
 lower-level tests that best pin an invariant.
 
-## D.5 Current CI gap
+### D.5 Current CI gap
 
 The required local gates and the GitHub Actions workflow are not equivalent yet.
 GitHub Actions runs rustfmt, groove clippy/tests/bench-smoke, jazz crate tests
@@ -122,7 +133,9 @@ the TS/WASM binding harness are still local pre-merge discipline
 (`INV-TEST-4` would require closing that gap fully). The default jazz crate test
 run includes the fixed-seed sync sweep.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **CI scope.** Should CI run workspace clippy, or keep it as pre-merge
   discipline?

@@ -1,5 +1,7 @@
 # jazz — Specification · 7. Authorization (RLS)
 
+## Overview
+
 jazz authorization is row-level security expressed as queries. Policies describe
 which authenticated identities may read or write rows; the fate authority applies
 write policy before accepting data, and upstream nodes apply read policy before
@@ -7,7 +9,33 @@ shipping data to a peer. This chapter defines the policy model, write
 authorization, read narrowing, and policy composition. It builds on queries
 (ch. 6) and the transaction/fate machinery (ch. 3).
 
-## 7.1 Policies are shapes
+Invariant digest:
+
+- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
+- `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
+- `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
+- `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
+- `INV-RLS-2`: AuthorId::SYSTEM MUST bypass both read and write policy checks.
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("sub"), where claim("sub") is bound from the authenticated AuthorId, not from caller-provided q...
+- `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
+- `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
+- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
+- `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
+- `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
+- `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
+- `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
+- `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
+- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
+- `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
+- `INV-RLS-14`: Policy predicate direct evaluation in the node policy engine MUST treat unsupported predicate/operator forms and unresolved operands as denial, not allowance.
+- `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
+- `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
+- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
+- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+
+## Details
+
+### 7.1 Policies are shapes
 
 Each table may define a read policy and operation-specific write policies. A
 policy is an optional `Query` (ch. 6) over the protected row's columns and the
@@ -47,7 +75,7 @@ values: [...] }` lowers to a scalar claim membership check equivalent to an
 for these predicates; deeper claim paths and non-scalar session predicates remain
 unsupported at this boundary.
 
-## 7.2 Write authorization
+### 7.2 Write authorization
 
 Write policy is an acceptance gate, not a post-acceptance filter. The fate
 authority evaluates the relevant operation-specific clause **before acceptance**
@@ -99,7 +127,7 @@ authenticated identity`. This prevents a client from forging another user's
 provenance while still allowing a trusted core backend to evaluate policy as
 itself and store user attribution (`INV-RLS-17`, `INV-API-29`).
 
-## 7.3 Read narrowing
+### 7.3 Read narrowing
 
 Read policy is enforced at the point where data leaves an upstream node. For
 each peer identity, the upstream node narrows what it emits before producing any
@@ -120,7 +148,7 @@ session may see branch overlay/base data only if it can read the branch metadata
 row, and ordinary table read policy is then evaluated inside the branch view
 (ch. 11, `INV-BRANCH-15`).
 
-## 7.4 Policy composition for query-driven sync
+### 7.4 Policy composition for query-driven sync
 
 Query-driven sync must preserve row-level security while evaluating subscribed
 shapes. It composes the root table's read policy into the subscribed shape and
@@ -177,7 +205,7 @@ the read policy for that identity. `INV-RLS-16` — a large-value content extent
 visible to an identity only when referenced by a version whose content row passes
 that identity's read policy (ch. 12).
 
-## 7.5 Exclusive atomicity and historical reads
+### 7.5 Exclusive atomicity and historical reads
 
 Exclusive transaction view shipping protects recipients from seeing an incomplete
 policy-visible fragment for the maintained subscription view. It is
@@ -192,7 +220,9 @@ Historical/as-of reads served for a link evaluate read policy **at the requested
 cut**. An ownership change across cuts therefore changes visibility at those
 cuts (`INV-RLS-13`, ch. 5, ch. 11).
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Session/auth model for bindings.** `AuthorId` is currently the runtime
   permission subject and `claim("sub")` value, but the product boundary needs

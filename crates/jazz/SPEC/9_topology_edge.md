@@ -1,5 +1,7 @@
 # jazz — Specification · 9. Topology & the edge tier
 
+## Overview
+
 Tiers in jazz are roles within the single sync protocol defined in ch. 8. They
 are distinguished by trust: which node may assign fates, enforce permissions, and
 stand behind durability. This chapter defines that trust ladder and the topology
@@ -13,7 +15,33 @@ ordinary sync application path remains a non-authority receiver for that unit:
 it stages or parks the unit pending a remote fate and does not create merge
 versions merely because it has the payload (`INV-TX-23`).
 
-## 9.1 The role ladder
+Invariant digest:
+
+- `INV-EDGE-1`: A PeerRole::Relay link MUST use AuthorId::SYSTEM as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-2`: A relay MUST store/forward TxKind::Mergeable and TxKind::Exclusive commit units as Fate::Pending with DurabilityTier::Local and MUST NOT assign an authority fate.
+- `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as PeerRole::EdgeClient { identity }, and downstream reads on that link MUST use that identity fo...
+- `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST rema...
+- `INV-EDGE-5`: Edge-local fate assignment MUST support only TxKind::Mergeable; an edge MUST NOT use the edge mergeable path to assign fate for TxKind::Exclusive.
+- `INV-EDGE-6`: TxKind::Exclusive acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
+- `INV-EDGE-7`: Once a transaction reaches Fate::Accepted, later stale Fate::Pending updates MUST NOT regress its fate.
+- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
+- `INV-EDGE-9`: A cancelled or missing permission scope MUST NOT satisfy the edge permission gate; after restart, deferred edge-fate gates and retained scope refs are absent until cli...
+- `INV-EDGE-10`: After a permission scope has first settled, an edge MAY continue accepting mergeables against stale scope state unless a configured staleness horizon says otherwise; t...
+- `INV-EDGE-11`: Fate and durability MUST remain separate axes: edge-accepted does not imply DurabilityTier::Global; receivers MUST raise observed durability only from explicit durabil...
+- `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
+- `INV-EDGE-13`: Resubmitting the same commit unit through another edge MUST be idempotent by TxId when the payload matches, and conflicting payloads with the same TxId MUST be rejecte...
+- `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, large-value op metadata, or edge-a...
+- `INV-EDGE-15`: Edge refetch after eviction MUST use payload-inventory resubscribe rather than assuming the edge has complete history.
+- `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them...
+- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by (policyshape, writerclaim) — the write policy's query shape bound to the writer's claim("sub") — and MUST NOT hy...
+- `INV-EDGE-18`: Overlapping (policyshape, writerclaim) scopes MUST resolve to a single upstream subscription whose settled result satisfies every acceptance gate that depends on it; t...
+- `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
+- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
+
+## Details
+
+### 9.1 The role ladder
 
 Trust is the axis:
 
@@ -29,7 +57,7 @@ Only the core is history-complete. Every downstream node (relay, edge, client)
 may hold partial or evicted history, and no protocol step may assume otherwise
 (ch. 1, principle 4).
 
-## 9.2 Topology
+### 9.2 Topology
 
 The topology separates responsibility by placing trusted edge service between
 clients and the history-complete core. Clients connect to a relay or edge for
@@ -71,7 +99,7 @@ benches may collapse this into in-process nodes while preserving the same role
 boundaries; browser OPFS and worker ownership are integrability concerns, not
 alternate semantics.
 
-## 9.3 Relays
+### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with identity `AuthorId::SYSTEM` (`INV-EDGE-1`) and forwards
@@ -84,7 +112,7 @@ permissions and never accepts or rejects a transaction. The default browser
 architecture is a shared-worker relay, where one worker relays for all tabs in
 the browser. Server-deployed relays are the exception.
 
-## 9.4 The edge-client boundary
+### 9.4 The edge-client boundary
 
 The edge-client boundary is where the system binds a link to a user identity and
 applies the last-hop policy view. An edge-client link terminates exactly one
@@ -98,7 +126,7 @@ evaluated under the backend link identity and `made_by` is stored only as
 attribution (`INV-RLS-18`, ch. 7). This is where per-user read narrowing happens:
 the last hop to the client.
 
-## 9.5 Mergeable fate authority
+### 9.5 Mergeable fate authority
 
 Mergeable transactions are decided at the first upstream trusted edge. Before an
 edge assigns a fate for `TxKind::Mergeable`, it must have enough policy data to
@@ -146,7 +174,7 @@ data and is exactly the pathological cost this tier exists to avoid.
 > authorization or re-judge the merge (`INV-EDGE-8`; `INV-EDGE-5`
 > mergeable-only).
 
-## 9.6 Fate and durability are separate (across tiers)
+### 9.6 Fate and durability are separate (across tiers)
 
 Acceptance answers whether a transaction has a final fate; durability answers
 where the accepted data is safely stored. Edge acceptance is therefore not the
@@ -156,7 +184,7 @@ write reached core/global durability (`INV-EDGE-11`, ch. 3).
 Fate finality and storage durability are independent. An edge-final write can
 still be lost if edge storage is destroyed before it syncs upstream.
 
-## 9.7 Star topology
+### 9.7 Star topology
 
 Edges form a star around core. They connect to core and do not sync with each
 other (`INV-EDGE-12`, target). Client mobility across edges needs nothing
@@ -172,7 +200,7 @@ re-merging the merged values, so `Counter` never double-counts a shared ancestor
 of edge↔edge sync at the transport layer; the star is a deployment contract, not
 a wire check.
 
-## 9.8 Eviction and refetch
+### 9.8 Eviction and refetch
 
 An edge is a cache, so it may shed cold state — but only the regenerable kind.
 Cold globally-accepted row versions, large-value content extent bytes, and
@@ -191,7 +219,9 @@ approximation: least-recently-written unpinned row versions first. Direct
 large-value content/checkpoint bytes remain regenerable cold content under the
 same budget, while metadata and all pin roots survive.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Server shell responsibilities.** The production server should be a small
   shell around `Node`: listener setup, auth admission, storage configuration,

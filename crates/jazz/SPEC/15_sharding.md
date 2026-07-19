@@ -1,11 +1,27 @@
 # jazz — Specification · 15. Sharding
 
+## Overview
+
 Sharding is **exploratory**. This chapter establishes vocabulary, sketches the
 intended design shape, and records the questions that must be answered before
 shard ownership becomes part of the committed architecture. It does not specify
 implemented shard behavior (`INV-SHARD-1`).
 
-## 15.1 "Partition" is already taken
+Invariant digest:
+
+- `INV-SHARD-1`: Chapter 15 MUST NOT describe sharded core as implemented; conforming current implementations MUST treat sharding as an exploratory/open design area. This is a guidance...
+- `INV-SHARD-7`: A future sharded v1 MUST assign every non-global row to a schema-declared shard partition key, and MUST specify behavior for rows without a natural root and rows whose...
+- `INV-SHARD-8`: Future v1 exclusive transactions MUST be single-shard unless a cross-shard serialization mechanism is explicitly specified.
+- `INV-SHARD-9`: A cross-shard exclusive transaction MUST NOT be accepted without validation evidence for every shard touched by its row and predicate read-sets.
+- `INV-SHARD-10`: A future sharded design MUST keep a global catalogue/sequencer for schema versions, lenses, policy bundles, and the partition-ownership map unless this chapter explici...
+- `INV-SHARD-11`: A future sharded design MUST define settled positions as per-shard positions or vectors, and MUST specify how at(position) and attime(t) resolve across shards.
+- `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
+- `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends...
+- `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protoc...
+
+## Details
+
+### 15.1 "Partition" is already taken
 
 The term _partition_ already has a precise meaning in jazz: it names a physical,
 per-logical-table / per-schema-version groove storage table used by migration
@@ -21,7 +37,7 @@ not use the bare word _partition_ for shard placement. The existing partition
 machinery is useful analogy and support, but it is not itself shard placement
 (its invariants live in ch. 10 / ch. 11).
 
-## 15.2 The likely-v1 sketch (not committed)
+### 15.2 The likely-v1 sketch (not committed)
 
 The likely first sharded design assigns ordinary data to shard ownership
 partitions while keeping the globally shared coordination surface small. The
@@ -49,7 +65,9 @@ probable shape is:
   flip ownership in the catalogue" — no in-place state surgery. Ownership must not
   flip before the new owner can serve it, and in-flight work must drain.
 
-## Open questions (the actual deliverable)
+## Open Questions
+
+### Open questions (the actual deliverable)
 
 The whole design is open, and demand should be validated before committing to
 it. A possible **S10-shaped benchmark** is a multi-shard scale-out of the S1/S4

@@ -1,5 +1,7 @@
 # jazz — Specification · 2. Data model & identity
 
+## Overview
+
 This chapter defines the logical shape of jazz data: the schema model, the
 identities that name durable objects, the layout of rows and row versions, and
 the lowering from application schema to groove storage. It is limited to
@@ -8,7 +10,33 @@ _identity and shape_. Transaction semantics (ch. 3), history and merging
 (ch. 10), branches (ch. 11), and large-value op-logs (ch. 12) all build on the
 names defined here, but their behavior is specified in those chapters.
 
-## 2.1 Column classes (the principle that drives sync)
+Invariant digest:
+
+- `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
+- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (NodeUuid, RowUuid, SchemaVersionId, MigrationLensId, BranchId, AuthorId) in wire byte order; node-local alias t...
+- `INV-DATA-2`: NodeAlias and SchemaVersionAlias MUST be node-local storage aliases allocated in jazznodes and jazzschemaversions; all egress from stored rows MUST resolve aliases bac...
+- `INV-DATA-3`: AuthorId::SYSTEM MUST equal the UUIDv5 derivation Uuid::newv5(&Uuid::NAMESPACEOID, b"jazz:system-author").
+- `INV-DATA-4`: TxTime MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
+- `INV-DATA-5`: A TxId MUST identify a transaction as (time: TxTime, node: NodeUuid); stored transaction rows MUST use primary key (time, nodeid) where nodeid is the local alias for t...
+- `INV-DATA-6`: SchemaVersionId MUST be UUIDv5 over JazzSchema::canonicalbytes() in namespace SCHEMAVERSIONNAMESPACE.
+- `INV-DATA-7`: Canonical schema identity MUST change when a column's MergeStrategy changes.
+- `INV-DATA-8`: Canonical schema identity MUST distinguish plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob.
+- `INV-DATA-9`: A declared MergeStrategy::Counter MUST be accepted only on non-nullable integer columns of type U8, U16, U32, or U64.
+- `INV-DATA-10`: A declared MergeStrategy::Counter MUST NOT be used with a large-value column.
+- `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing TableSchema.
+- `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete JazzSchema.
+- `INV-DATA-13`: ColumnSchema::text and ColumnSchema::blob MUST lower to nullable groove Bytes user cells in history storage.
+- `INV-DATA-14`: jazz{table}history MUST have primary key (rowuuid, txtime, txnodeid), include schemaversion, parents, nullable user{col} cells, and have bytx(txtime, txnodeid, rowuuid).
+- `INV-DATA-15`: jazz{table}register MUST have primary key (rowuuid, txtime, txnodeid), include schemaversion, parents, and non-null deletion, and have bytx(txtime, txnodeid, rowuuid).
+- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only rowuuid, parents, nullable deletion, and nullable user{col} cells; receiver-local currentness and...
+- `INV-DATA-17`: A stored row version MUST belong to exactly one layer: content versions in jazz{table}history with user cells, deletion-register versions in jazz{table}register with d...
+- `INV-DATA-18`: Per-layer global-current tables MUST be keyed by rowuuid; content global-current MUST carry all user columns and index only references plus explicitly indexed columns.
+- `INV-DATA-19`: jazzglobalchanges MUST be keyed by (tablename, rowuuid, layer, globalseq) and MUST expose index byglobalseq(globalseq, tablename, rowuuid, layer).
+- `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
+
+## Details
+
+### 2.1 Column classes (the principle that drives sync)
 
 Sync behavior is determined by what kind of state a stored column represents.
 Every stored column belongs to exactly one of three classes, and that class
@@ -35,7 +63,7 @@ carried on a separate content channel and stored in the raw `jazz_content`
 store. Chapter 12 owns that content channel and defines the term "auxiliary
 content payload".
 
-## 2.2 Identity types
+### 2.2 Identity types
 
 Cross-node identity is stable because every durable name is a wire-stable UUID
 newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
@@ -55,7 +83,7 @@ the wire resolves its alias back to the corresponding `NodeUuid` or
 `SchemaVersionId` (`INV-DATA-1`, `INV-DATA-2`). Aliases are rebuilt on recovery.
 The exact `TxTime` bit-packing and the `SYSTEM` literal are in §2.7.
 
-## 2.3 Application schema
+### 2.3 Application schema
 
 An application schema declares the logical tables, columns, references, access
 policies, indexes, and merge behavior that jazz stores. In the reference model,
@@ -79,7 +107,7 @@ existing user column. `INV-DATA-12` — a table policy validates against the who
 schema. `INV-DATA-13` — `text`/`blob` columns lower to nullable groove `Bytes`
 cells.
 
-## 2.4 Schema identity is content-addressed
+### 2.4 Schema identity is content-addressed
 
 Schema identity is derived from schema content so independently observed copies
 of the same storage shape name the same version, while any storage-shape change
@@ -98,7 +126,7 @@ _Further invariants._ `INV-DATA-7`, `INV-DATA-8` — `SchemaVersionId` changes w
 a column's merge strategy changes, and when a column switches among `Bytes` /
 `Text` / `Blob`.
 
-## 2.5 Rows, versions, and layers
+### 2.5 Rows, versions, and layers
 
 Rows have stable identity across history. A `RowUuid` names the logical row and
 is shared by every historical version of that row. A **row version** is
@@ -115,7 +143,7 @@ replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
-## 2.6 Storage lowering
+### 2.6 Storage lowering
 
 Storage lowering gives the logical schema a fixed groove representation
 (`JazzSchema::lower_to_groove()`, `INV-DATA-20`). The lowered schema consists of
@@ -129,7 +157,7 @@ tables are node-local derived state (§2.1): they are maintained from accepted
 fates and never shipped. The exact table set, primary keys, and indexes are the
 reference in §2.7.
 
-## 2.7 Reference: identity encoding & storage lowering
+### 2.7 Reference: identity encoding & storage lowering
 
 This section is the normative identity and storage-format detail referenced by
 §2.2 and §2.6. It is intended for implementers and for debugging
@@ -161,7 +189,9 @@ tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
   `by_global_seq(global_seq, table_name, row_uuid, layer)` (`INV-DATA-19`);
 - _content_ — the raw ordered KV store `jazz_content` (ch. 12).
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **`jazz_nodes.uuid` uniqueness.** The README states the interned node UUID
   is unique, but `schema.rs::nodes_table` declares only the `id` primary key with

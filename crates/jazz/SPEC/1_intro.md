@@ -1,5 +1,7 @@
 # jazz — Specification · 1. Introduction
 
+## Overview
+
 jazz is a local-first, distributed, real-time database with full edit history,
 RLS-authorized sync, and two transaction kinds: eventually-consistent
 `mergeable` transactions and serializable `exclusive` transactions. Its query
@@ -9,7 +11,16 @@ engine. jazz adds distribution, history, and authorization around that engine;
 it is not a second query engine. This document is both the design and the
 contract.
 
-## 1.1 How to read this document
+Invariant digest:
+
+- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
+- `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
+- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `INV-TX-1`: A transaction MUST NOT expose open writes to ordinary reads or subscriptions before commit.
+
+## Details
+
+### 1.1 How to read this document
 
 This SPEC is **the contract**, ordered so that the concepts needed to understand
 jazz appear before the mechanisms that rely on them. It has two kinds of file:
@@ -21,17 +32,15 @@ jazz appear before the mechanisms that rely on them. It has two kinds of file:
   performance levers, meta-learnings, and testing. They may change without
   changing the contract.
 
-**One home for every decision.** Within a chapter, normative content comes
-first. Non-normative material follows in clearly marked trailing sections:
-`## Open questions` for unresolved decisions (most chapters have one), and
-`## In flight` for operational detail still in progress, such as benchmark
-specifics, measured findings, or slice plans. A chapter carries an `## In
-flight` section only while it has such material; several chapters have none.
-Guidance appendices are entirely non-normative. This is the single placement
-rule for the system: as work settles, it moves _upward_ — in-flight detail into
-the normative body, and open questions into resolved prose. A chapter is "done"
-when it has no `## In flight` section left. Nothing about the system lives
-outside the spec.
+**One home for every decision.** Every chapter uses the same top-level shape:
+`## Overview`, `## Details`, then `## Open Questions`. The overview is the
+team-onboarding entry point; details hold the normative body plus any clearly
+marked in-flight operational material such as benchmark specifics, measured
+findings, or slice plans; open questions hold unresolved decisions. Guidance
+appendices are entirely non-normative. This is the single placement rule for the
+system: as work settles, it moves _upward_ — in-flight detail into the normative
+body, and open questions into resolved prose. A chapter is "done" when it has no
+in-flight detail left. Nothing about the system lives outside the spec.
 
 **Chapter map**
 
@@ -67,7 +76,7 @@ for a local app is ch. 1, 13, §2.3, §7.1; add §3.3 / §5.1 / §8.1 / §9.2 fo
 client–server sync; add §12.1–12.4 for `text`/`blob` columns. To operate a
 deployment, read ch. 3, 8, and 9.
 
-## 1.2 Design principles
+### 1.2 Design principles
 
 The following principles define the shape of jazz before any individual
 mechanism is specified. They are normative intent, not mechanism.
@@ -100,7 +109,7 @@ mechanism is specified. They are normative intent, not mechanism.
    authority), or \_node-local derived state* (currency, global-current; never
    shipped) (ch. 2–3).
 
-## 1.3 Conventions
+### 1.3 Conventions
 
 **Normative keywords.** MUST / MUST NOT / SHOULD / MAY carry their
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) meaning. They are used only
@@ -152,7 +161,7 @@ written with its spec name. For example, a Groove-owned id is written as groove
 `INV-SHAPE-16`; it points into `groove/SPEC/INVARIANTS.md` and is exempt from
 Jazz's local-row rule.
 
-**Open questions are localized.** Each chapter ends with an `## Open questions`
+**Open questions are localized.** Each chapter ends with an `## Open Questions`
 section holding only that chapter's unresolved decisions, each tagged `🔶`.
 There is no central TODO; an open edge lives beside the thing it qualifies. A
 `🔶` bullet flags an open _work item_, which may be an undecided design, an
@@ -161,7 +170,7 @@ marker is distinct from the design-status axis above: an invariant id appearing
 under `🔶` with no status tag is still `now` (the open work is its coverage or
 enforcement, not its standing).
 
-## 1.4 Terminology
+### 1.4 Terminology
 
 Terms are defined where they are introduced. The load-bearing terms needed
 up front are listed here; the full set is in appendix E:
@@ -177,3 +186,7 @@ up front are listed here; the full set is in appendix E:
 - **policy** — an RLS read/write rule expressed as a shape, claim-bound to an
   identity (ch. 7).
 - **node roles** — client / relay / edge / core, the trust ladder (ch. 9).
+
+## Open Questions
+
+None.

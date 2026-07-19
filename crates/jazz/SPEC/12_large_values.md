@@ -1,5 +1,7 @@
 # jazz — Specification · 12. Large values (`text` and `blob`)
 
+## Overview
+
 `text` and `blob` columns are edit-oriented, op-log-backed values, distinct
 from the replace-whole-value `string` and `bytes` columns. Their content bytes
 travel through a separate content channel instead of being carried directly in
@@ -7,7 +9,36 @@ the row-version cell. This chapter specifies the column kinds, op-log,
 write/materialization paths, content channel, and checkpoint model. It builds on
 the schema (ch. 2), history/merge (ch. 4), and the sync content lane (ch. 8).
 
-## 12.1 What `text` and `blob` are
+Invariant digest:
+
+- `INV-API-25`: TextEdit operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to LargeValueEditOp::Insert/LargeValueEditOp::Delete.
+- `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, un...
+- `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
+- `INV-HIST-15`: Merge strategy behavior MUST be deterministic, grouping-insensitive over the parent/head set, and non-wedging at merge time: registered strategy failure degrades to th...
+- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold t...
+- `INV-LVAL-1`: text and blob columns MUST be represented as Jazz-level LargeValueKind::{Text, Blob} and MUST lower to groove ColumnType::Bytes, not to a groove text/blob type.
+- `INV-LVAL-2`: Changing a column between plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob MUST change the Jazz schema identity.
+- `INV-LVAL-3`: A large-value column MUST NOT use MergeStrategy::Counter.
+- `INV-LVAL-4`: A stored large-value version payload MUST be a deterministic textoplog op batch containing Op::Insert and/or Op::Delete records.
+- `INV-LVAL-5`: Stored insert ops for locally authored large-value commits MUST store inserted bytes in the content store and encode TextContent::Ref(Extent) in the version payload.
+- `INV-LVAL-6`: Content streams MUST be append-only per (writer,row,column), and appended extents MUST be assigned monotonically increasing offsets.
+- `INV-LVAL-7`: Re-ingesting an already-present extent with identical bytes MUST be idempotent, and conflicting bytes for the same extent MUST be rejected.
+- `INV-LVAL-8`: A content extent read MUST fail closed if any byte range in the requested extent is missing or gapped.
+- `INV-LVAL-9`: A whole-value write to a large-value column MUST be stored as the diff from the materialized parent value, not as app-visible bytes verbatim in the history cell.
+- `INV-LVAL-10`: Explicit large-value edits MUST reject empty op batches and MUST target a text or blob column.
+- `INV-LVAL-11`: Explicit large-value edit positions MUST be byte offsets valid against the current parent value.
+- `INV-LVAL-12`: Query/sync result rows MAY carry large-value handles, but any value-returning API MUST materialize the handle into Value::Bytes; encoded op payloads and raw extent han...
+- `INV-LVAL-13`: Large-value materialization MUST follow a single primary-parent chain; for a multi-parent merge version, the primary parent MUST be the highest-sort-key parent.
+- `INV-LVAL-14`: A node MUST park or refuse to drain commit units whose large-value op payloads reference content extents not present locally.
+- `INV-LVAL-15`: Content fetch responses MUST NOT return bytes unless the requested Extent.row matches the request row and the extent is visible/member-authorized for that row.
+- `INV-LVAL-16`: Local checkpoints MUST be versioned by (table,row,column,TxId) and survive reopen without becoming canonical replicated row state.
+- `INV-LVAL-17`: text/blob columns MUST NOT be accepted in filters, joins, ordering, or other query-planner predicates.
+- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
+- `INV-LVAL-19`: Large-value checkpoint placement MUST be opportunistic local derived state: once accepted ingestion or materialization observes at least the configured replay-op inter...
+
+## Details
+
+### 12.1 What `text` and `blob` are
 
 `text` and `blob` express schema-level editing semantics, not a size threshold.
 A five-byte `text` value and a multi-gigabyte `blob` both use the large-value
@@ -26,7 +57,7 @@ Unicode-position semantics is open.
 The query carve-out is part of the column contract: `text` and `blob` are not
 filter, join, or order columns. Enforcement status is tracked in Open questions.
 
-## 12.2 The op-log
+### 12.2 The op-log
 
 The op-log is the canonical replicated representation of a large-value version.
 It records the edit the author made, not a replacement copy of the whole value.
@@ -42,7 +73,7 @@ increasing offsets (`INV-LVAL-6`). After extent-backing, a stored insert
 references those bytes as `TextContent::Ref(Extent)`; inline bytes are only an
 internal diff/replay form (`INV-LVAL-5`).
 
-## 12.3 Write paths
+### 12.3 Write paths
 
 Large-value writes have a single history shape: they become operation batches.
 When an application writes a whole value, Jazz stores the **diff against the
@@ -63,7 +94,7 @@ and must target a `text`/`blob` column. `INV-LVAL-13` — materialization follow
 a single primary-parent chain; for a multi-parent merge version, the primary
 parent is the highest-sort-key parent.
 
-## 12.4 Materialization
+### 12.4 Materialization
 
 Query and sync result rows carry **large-value handles**, not bodies. A handle
 names the large-value kind, materialized logical length, and the extent refs
@@ -80,7 +111,7 @@ and extent handles never escape a value-returning API as cell bytes
 local checkpoint when one is present, otherwise from origin, along the single
 primary-parent chain (`INV-LVAL-13`).
 
-## 12.4.1 Authority merge versions
+### 12.4.1 Authority merge versions
 
 Authority merge versions preserve concurrent edits in the large-value op-log
 rather than selecting one visible head by the default LWW cell rule. When an
@@ -105,7 +136,7 @@ the merge version. Client-side/non-upstream conflict handling is unchanged: it
 argmax/LWW-selects a visible head and does not expose the authority op-merged
 value until it receives such a merge version.
 
-## 12.5 The content channel
+### 12.5 The content channel
 
 The content channel carries the bytes named by op-log extents. These extents are
 an **auxiliary content payload** (ch. 2 §2.1), not one of the three stored-column
@@ -128,7 +159,7 @@ _Further invariants._ `INV-LVAL-7` — re-ingesting an extent with identical byt
 is idempotent; conflicting bytes for the same extent are rejected. `INV-LVAL-8` —
 an extent read fails closed if any requested byte range is missing or gapped.
 
-## 12.6 Checkpoints
+### 12.6 Checkpoints
 
 Checkpoints are replay accelerators, not replicated truth. They are **local
 derived state** in the content store, versioned by `(table, row, column,
@@ -147,46 +178,7 @@ Large-value columns are materialized for reads, but they are not planner keys:
 `text`/`blob` columns are rejected in filters, joins, ordering, and other
 query-planner predicates (`INV-LVAL-17`).
 
-## Open questions
-
-- 🔶 **`text` vs `blob` semantics.** Both are byte-oriented; decide whether
-  `text` gains Unicode-position semantics or stays byte-identical to `blob` modulo
-  schema identity.
-- 🔶 **Planner enforcement.** The design rejects `text`/`blob` columns in
-  filters, joins, ordering, and other query-planner predicates; the planner path
-  still sees them as `Bytes` in some places, so enforcement is not yet complete.
-- 🔶 **Op-log design status.** §12.2–12.6 specify the op-log design. Byte-offset
-  edits, materialize-by-replay, large-value-aware authority merge semantics
-  (`INV-LVAL-18`), and checkpoint placement paths are built; other detailed
-  mechanisms remain staged as described in In flight.
-- 🔶 **Column-delta status.** A column-delta encoding for keystroke text was
-  prototyped and parked because it pays for large single values, not keystrokes;
-  the measured findings remain in In flight.
-- 🔶 **Same-`(row, column)` ref scope.** Load-bearing for GC in the design;
-  local extent-backing creates same-row/column refs, but inbound ref enforcement
-  is visibility-based, not a schema-level same-row/column validator.
-- 🔶 **Future/gated.** Chunk index, bundles, truncation/GC horizon, hash-based
-  checkpoint hydration, cross-row dedup, and `[needs: text-merge]` rich-text
-  three-way merge are designed but unimplemented beyond the first engine path.
-- ✅ **File rows use ordinary blob columns.** The replacement core deliberately
-  diverges from alpha's historical `files`/`file_parts` convention. File helpers
-  are ordinary userland rows containing a binary large value, with `mime_type`
-  and `data` as the conventional column names. Permissions, sync, subscriptions,
-  persistence, and helpers must therefore behave exactly like normal table/row
-  behavior for that file row; there is no privileged file-parts side table.
-- 🔶 **Serving topology.** The content-channel design serves content from edges;
-  the implementation path serves from core until edge serving is built.
-- 🔶 **Ops as a native groove column type.** The op-log uses a custom byte
-  encoding for its ops (§12.2–12.6). If groove supported variable-width members
-  inside a tuple — reusing groove's record encoding (groove §2.7) within the tuple
-  — an op could be a _true groove column type_ rather than a jazz-private encoding,
-  folding op storage (and potentially op merge) into the normal record/column path
-  instead of a parallel mechanism. Blocked on the enabling groove feature
-  (variable-width tuple members; groove ch. 2 open questions).
-
----
-
-## In flight & detailed design (non-normative)
+### In flight & detailed design (non-normative)
 
 _The §12.1–12.6 contract above is normative. The following is the full
 large-value working design — op-log detail, derived structures, worked example,
@@ -200,7 +192,7 @@ modeling. The normative semantics live in §12.1–12.6 above; scenarios 5 and 6
 [B_benchmarks.md](B_benchmarks.md) are the workloads this design must win. Informed by the eg-walker paper (arXiv 2409.14252) and the
 WiscKey/Badger key–value-separation lineage; see Related work.
 
-## Thesis
+### Thesis
 
 **The op log is the only canonical structure. Everything else is an index.**
 
@@ -220,7 +212,7 @@ The application-facing promise is **brainless dumping**: apps may write whole
 values into a column and jazz derives the ops; apps that want O(change) cost
 use the edit API. Both produce identical history.
 
-## Column types
+### Column types
 
 | type              | semantics | storage                     | merge                                                                   | queryable                        |
 | ----------------- | --------- | --------------------------- | ----------------------------------------------------------------------- | -------------------------------- |
@@ -246,9 +238,9 @@ with op-log storage (violates the taxonomy, risks ordinary string
 semantics). So adding `text` is: a new jazz schema column kind that
 lowers to groove `Bytes`, plus jazz-side op-log encode/materialize.
 
-## The op log (canonical, class 1)
+### The op log (canonical, class 1)
 
-### Operations
+#### Operations
 
 A `text`/`blob` version's payload is an op list applied against the parent
 version's content:
@@ -284,7 +276,7 @@ Content = Literal | Ref(extent)         // extent-only; ops never speak hashes
   only target the same `(row, column)`'s history.** Cross-row refs are
   future work behind a refcounting design; see Truncation & GC.
 
-### Encoding
+#### Encoding
 
 Ops are **not** stored as a separately-compressed columnar stream (eg-walker's
 intra-log RLE of op types/positions/lengths). They live in **normal row
@@ -302,7 +294,7 @@ codec:
 
 (One-op-per-version is also what yields per-transaction op provenance for free.)
 
-### Write paths
+#### Write paths
 
 - **Edit API** (`insert/delete/append` on a handle): emits ops directly.
   O(change) CPU, storage, and wire. The handle's in-memory state is the
@@ -315,7 +307,7 @@ codec:
   (Wikipedia-style revisions, 10Hz stream snapshots), wrong for 120Hz
   keystrokes — that's what the edit API is for.
 
-## Merges and the effective chain
+### Merges and the effective chain
 
 Row-level machinery creates **merge versions** for concurrent mergeable
 heads. For op-log columns, merge versions are **zero-content**: they carry
@@ -356,9 +348,9 @@ single path, so every version on the current chain is a valid checkpoint
 site; checkpoint placement becomes more interesting under replay strategies
 (see Open questions).
 
-## Derived structures (class 3: local, disposable, rebuildable)
+### Derived structures (class 3: local, disposable, rebuildable)
 
-### 1. Materialized value
+#### 1. Materialized value
 
 The current value, for reads. Small values: plain bytes. Large values: a
 **piece tree** — a balanced tree of extents/chunk references providing
@@ -367,7 +359,7 @@ plus a few extent fetches, no full materialization). Rebuilt by replay from
 the nearest checkpoint. This is cache, not format: nothing replicated ever
 references a piece tree.
 
-### 2. Checkpoints
+#### 2. Checkpoints
 
 Materialized snapshots at **critical versions** — DAG cuts where everything
 before happened-before everything after (eg-walker's rule; cheap to detect
@@ -379,7 +371,7 @@ hydrate a cold client (descriptor + lazily-fetched extents); no cross-node
 canonicity is required. Density is a config knob; `history: shallow` sync ≈
 latest checkpoint + ops since.
 
-### 3. Chunk index
+#### 3. Chunk index
 
 A content-addressed index over **stable content**: content-defined chunking
 (FastCDC-style) over the materialized value's settled regions, yielding
@@ -415,7 +407,7 @@ Properties:
   cold-load and rehydration byte counts say it pays — a benchmark gate
   like everything else.
 
-## Worked example (condensed)
+### Worked example (condensed)
 
 ```text
 Alice types "Shopping: milk, eggs" into note1.text:
@@ -435,7 +427,7 @@ Dave reverts to v7's content via dump: chunker emits h1,h2 — both already
   indexed → resolved to extents → v10 = Ref(extent) ops, zero new bytes.
 ```
 
-## Identity and naming
+### Identity and naming
 
 - **Hot path: `(writer, int)` everywhere** — ops, extents, streams. Same
   scheme as transaction ids; varint-friendly through node-alias interning;
@@ -447,9 +439,9 @@ Dave reverts to v7's content via dump: chunker emits h1,h2 — both already
   fetches are authorized by row context at fetch time (below). Unguessable
   is not revocable, and infrastructure leaks names.
 
-## Sync and serving
+### Sync and serving
 
-### Column-taxonomy class 4: content payload
+#### Column-taxonomy class 4: content payload
 
 Op _metadata_ is class-1 version payload (tiny, ships with the commit unit).
 Class 4 is the **generic lane for immutable, content-addressed payloads that
@@ -471,7 +463,7 @@ Peer dedup state per hop: shipped chunk hashes + per-stream high-water
 marks. (This generalizes the version-level dedup already in the protocol —
 same mechanism, finer granularity.)
 
-### The content channel
+#### The content channel
 
 A separate channel beside sync (bulk must not head-of-line-block fate
 messages). Request/response, unordered:
@@ -506,13 +498,13 @@ Revocation therefore acts at fetch granularity with zero token machinery.
 (A public-content CDN path with presigned grants is possible later as a
 special case; it is not the foundation.)
 
-### Hazards (inherits the jazz hazard list)
+#### Hazards (inherits the jazz hazard list)
 
 A version can arrive before its content bytes (lazy class 4): parked-orphan
 handling extends to content references, with a counter. Idempotency: content
 ingestion is keyed by extent — re-delivery is a no-op.
 
-## Relationship to groove (the carve-out)
+### Relationship to groove (the carve-out)
 
 This is the first feature to _amend_ the "everything lowers to groove"
 principle rather than extend it, and the amendment is deliberate. The
@@ -547,7 +539,7 @@ content bundles, which are never queried by construction. (This
 supersedes the packed-cold-history direction from the earlier
 specification lineage.)
 
-## Bundles (private cold storage)
+### Bundles (private cold storage)
 
 Nodes pack committed stream ranges into **bundles** (e.g. S3 objects), with
 a local **manifest**: `extent range → (bundle, offset)`. Rules:
@@ -559,7 +551,7 @@ a local **manifest**: `extent range → (bundle, offset)`. Rules:
 - serving reads are ranged GETs into bundles, amortized by local caching —
   the client never talks to object storage directly.
 
-## Truncation and GC
+### Truncation and GC
 
 Hard deletion of history (truncation) is a **core-authored, monotone
 truncation horizon** per value, propagated like a fate. The horizon ships
@@ -589,7 +581,7 @@ Downstream nodes obey mechanically. Then:
   **No compactor exists until truncation ships** — without truncation,
   nothing dies.
 
-### Eviction vs. truncation (glossary)
+#### Eviction vs. truncation (glossary)
 
 - **eviction**: node-local, reversible, refetch-by-name; requires no
   protocol and no bookkeeping beyond the fetch path;
@@ -597,7 +589,7 @@ Downstream nodes obey mechanically. Then:
 
 They share no machinery.
 
-## Configuration
+### Configuration
 
 | knob                  | default (initial)                        | notes                                       |
 | --------------------- | ---------------------------------------- | ------------------------------------------- |
@@ -610,7 +602,7 @@ They share no machinery.
 | bundle GC threshold   | < 40% live                               |                                             |
 | bundle delete grace   | 2× max fetch timeout                     |                                             |
 
-## Counters (deterministic; benchmark gates)
+### Counters (deterministic; benchmark gates)
 
 ops in/out, RLE ratio · content bytes shipped vs. referenced per link ·
 indexed-prefix lag per stream · write-time dedup hits (Ref ops emitted) ·
@@ -621,7 +613,7 @@ bytes at core (the cross-row-dedup tripwire) · client steady-state memory
 for a synced document (must be ~document + indexes, independent of history
 depth).
 
-## Benchmark predictions (pre-registered; scenarios 5 & 6 check them)
+### Benchmark predictions (pre-registered; scenarios 5 & 6 check them)
 
 1. Stream live tail: **synced bytes/token ≈ payload**; storage ≈ payload +
    RLE'd op metadata + LSM compression.
@@ -638,7 +630,7 @@ depth).
    concurrency (the eg-walker property, inherited structurally — asserted,
    not assumed).
 
-## Measured findings (2026-06-13) — the column-delta de-risking
+### Measured findings (2026-06-13) — the column-delta de-risking
 
 A column-delta prototype (text op-log + anchor/replace) was measured
 against the String baseline on the three S6 sequential traces across
@@ -676,7 +668,7 @@ RecordSet encoding (transport, needs design); cold-load-memory lever =
 checkpointing; text-merge prerequisite = per-op provenance in the
 op-log (eg-walker). column-delta sits behind all of these.
 
-## Implementation slices (sequencing, 2026-06-13)
+### Implementation slices (sequencing, 2026-06-13)
 
 1. _(done)_ `text`/`blob` column kinds → opaque groove `Bytes`, whole-value
    LWW (no op-log yet).
@@ -699,7 +691,7 @@ op-log (eg-walker). column-delta sits behind all of these.
 Later (gated): chunk index / cross-row dedup; `text-merge` (eg-walker replay
 since LCA).
 
-## Resolved notes
+### Resolved notes
 
 - Merge/effective-chain handling is covered by `Merges and the effective chain`.
 - Checkpoint placement is an opportunistic, format-independent heuristic
@@ -712,7 +704,7 @@ since LCA).
   must hold the row's op log to answer the membership check; ops are never
   evicted on serving nodes, only content bytes are.
 
-## In-flight TODOs (not yet decided)
+### In-flight TODOs (not yet decided)
 
 1. _(decided 2026-06-13 — settled boundary = globally-accepted, pending
    hot-write validation.)_ The chunk index's determinism anchors to the
@@ -723,7 +715,7 @@ since LCA).
    durable high-water. Only matters once the chunk index ships (staged
    overlay; see Chunk index: severable).
 
-## Related work
+### Related work
 
 - **eg-walker** (Gentle & Kleppmann, arXiv 2409.14252): event graph as the
   persistent format; columnar RLE op encoding; transient merge state;
@@ -739,7 +731,7 @@ since LCA).
   format to derived index, which removes their hardest constraint (the
   chunker as a compatibility contract).
 
-## Text storage after windowed encoding (target simplification, 2026-07-03)
+### Text storage after windowed encoding (target simplification, 2026-07-03)
 
 Groove ch. 2 §2.9 (windowed record encoding) retro-simplifies the text stack.
 These are committed design consequences, gated on the window codec landing;
@@ -770,7 +762,7 @@ until then the current mechanisms remain in force.
    hundred edits and verifies materialization at every boundary — the
    affordable core of state-addressed versions.
 
-## Future work (gated)
+### Future work (gated)
 
 - `[needs: text-merge]`: eg-walker replay since LCA at the merging node;
   maximal non-interleaving as the tested property; rich-text (formatting
@@ -780,3 +772,44 @@ until then the current mechanisms remain in force.
 - CDN/public serving via presigned grants (special case, not foundation).
 - Streaming materialization for very large dumps; compression of op
   metadata beyond RLE if scenario 6 shows headroom vs. eg-walker's format.
+
+## Open Questions
+
+### Open questions
+
+- 🔶 **`text` vs `blob` semantics.** Both are byte-oriented; decide whether
+  `text` gains Unicode-position semantics or stays byte-identical to `blob` modulo
+  schema identity.
+- 🔶 **Planner enforcement.** The design rejects `text`/`blob` columns in
+  filters, joins, ordering, and other query-planner predicates; the planner path
+  still sees them as `Bytes` in some places, so enforcement is not yet complete.
+- 🔶 **Op-log design status.** §12.2–12.6 specify the op-log design. Byte-offset
+  edits, materialize-by-replay, large-value-aware authority merge semantics
+  (`INV-LVAL-18`), and checkpoint placement paths are built; other detailed
+  mechanisms remain staged as described in In flight.
+- 🔶 **Column-delta status.** A column-delta encoding for keystroke text was
+  prototyped and parked because it pays for large single values, not keystrokes;
+  the measured findings remain in In flight.
+- 🔶 **Same-`(row, column)` ref scope.** Load-bearing for GC in the design;
+  local extent-backing creates same-row/column refs, but inbound ref enforcement
+  is visibility-based, not a schema-level same-row/column validator.
+- 🔶 **Future/gated.** Chunk index, bundles, truncation/GC horizon, hash-based
+  checkpoint hydration, cross-row dedup, and `[needs: text-merge]` rich-text
+  three-way merge are designed but unimplemented beyond the first engine path.
+- ✅ **File rows use ordinary blob columns.** The replacement core deliberately
+  diverges from alpha's historical `files`/`file_parts` convention. File helpers
+  are ordinary userland rows containing a binary large value, with `mime_type`
+  and `data` as the conventional column names. Permissions, sync, subscriptions,
+  persistence, and helpers must therefore behave exactly like normal table/row
+  behavior for that file row; there is no privileged file-parts side table.
+- 🔶 **Serving topology.** The content-channel design serves content from edges;
+  the implementation path serves from core until edge serving is built.
+- 🔶 **Ops as a native groove column type.** The op-log uses a custom byte
+  encoding for its ops (§12.2–12.6). If groove supported variable-width members
+  inside a tuple — reusing groove's record encoding (groove §2.7) within the tuple
+  — an op could be a _true groove column type_ rather than a jazz-private encoding,
+  folding op storage (and potentially op merge) into the normal record/column path
+  instead of a parallel mechanism. Blocked on the enabling groove feature
+  (variable-width tuple members; groove ch. 2 open questions).
+
+---

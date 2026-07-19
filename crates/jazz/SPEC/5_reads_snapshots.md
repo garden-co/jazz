@@ -1,5 +1,7 @@
 # jazz — Specification · 5. Reads & snapshots
 
+## Overview
+
 A read resolves the version DAG (ch. 4) against a deliberately chosen frontier:
 either the current state at a durability tier, a fixed transaction snapshot, or a
 historical global position. This chapter defines those read frontiers, the
@@ -8,7 +10,24 @@ transactions stable reads, and historical (as-of) reads. It builds on the
 currency and deletion semantics of chapter 4 and feeds queries (ch. 6) and the
 `Db` read API (ch. 13).
 
-## 5.1 Read tiers
+Invariant digest:
+
+- `INV-READ-1`: Opening an exclusive transaction MUST capture a Snapshot whose owner is the node UUID, whose globalbase is the node's contiguous appliedglobalwatermark, whose localbas...
+- `INV-READ-2`: A snapshot MUST cover exactly transactions with stored globalseq <= Snapshot.globalbase, transactions from Snapshot.owner with txid.time <= Snapshot.localbase, or tran...
+- `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per VersionLayer and MUST NOT observe later uncovered curr...
+- `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
+- `INV-READ-5`: txread MUST record a RowRead for a present snapshot-visible row and an AbsentRead for an absent snapshot-visible row.
+- `INV-READ-6`: txcurrentrows and txquery MUST record predicate reads as PredicateRead values carrying table, shapeid, shape, bindingid, and bindingvalues; whole-table transaction rea...
+- `INV-READ-7`: Local current-row reads MUST use argmax TxId currency per (rowuuid, VersionLayer) over held non-rejected versions, independent of sender arrival order.
+- `INV-READ-8`: Global current-row reads MUST use per-layer global-current tables and MUST exclude rows whose global-current deletion-register winner is DeletionEvent::Deleted.
+- `INV-READ-9`: Global as-of reads at GlobalSeq MUST choose per-layer winners from jazzglobalchanges at or before the requested globalbase and apply deletion anti-join before returnin...
+- `INV-READ-10`: Current-row visibility MUST be content-layer current rows anti-joined with the current deletion-register winner; content writes alone MUST NOT restore a deleted row, w...
+- `INV-READ-11`: A local-tier read on the writer node MUST include the node's own pending committed transaction, while a global-tier read MUST exclude it until global fate/current stat...
+- `INV-READ-12`: Per-layer global-current tables MUST equal accepted argmax winners over stored versions and remain consistent after reopen.
+
+## Details
+
+### 5.1 Read tiers
 
 Read tiers let callers choose how much durability a current read must have
 before it is visible. The base derived state for a node is its **currency**: the
@@ -28,7 +47,7 @@ globally accepted** (`INV-READ-11`). An `edge` read occupies the tier between
 state an edge has finally judged (ch. 9 §9.5) but that has not necessarily
 reached global durability. Chapter 9 defines the full `edge` semantics.
 
-## 5.2 Current-row visibility
+### 5.2 Current-row visibility
 
 Current-row reads return content only when the deletion register permits it. A
 visible current row is the content-layer current winner **anti-joined with the
@@ -41,7 +60,7 @@ perform the deletion anti-join over the global-current tables (`INV-READ-8`).
 Those tables equal the accepted argmax winners and stay consistent across reopen
 (`INV-READ-12`).
 
-## 5.3 Snapshots
+### 5.3 Snapshots
 
 Snapshots give an exclusive transaction a stable read frontier. A snapshot
 (`Snapshot { owner: NodeUuid, global_base: GlobalSeq, local_base: TxTime, dots:
@@ -66,7 +85,7 @@ snapshot owner. Sync payload dedup and reconnect state are separate from this
 read-frontier model (ch. 8); they must not overload `Snapshot.dots` to mean
 "payloads already known by a peer."
 
-## 5.4 Reads inside an exclusive transaction
+### 5.4 Reads inside an exclusive transaction
 
 Inside an exclusive transaction, reads are stable by construction. The read first
 computes the domination winner among the **snapshot-covered** versions per layer,
@@ -86,7 +105,7 @@ for a present snapshot-visible row, an `AbsentRead` otherwise. `INV-READ-6` —
 `tx_current_rows`/`tx_query` record a `PredicateRead` carrying the inline shape;
 whole-table reads are degenerate query shapes.
 
-## 5.5 Historical (as-of) reads
+### 5.5 Historical (as-of) reads
 
 A historical read asks what was visible at a past global position. For a read at
 a past `GlobalSeq`, the system chooses the per-layer winner from
@@ -95,6 +114,8 @@ deletion anti-join before returning visible content (`INV-READ-9`). Time-travel
 and snapshot-base branches build on this mechanism (ch. 11), and read policy is
 evaluated at the historical cut (ch. 7).
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 None.
