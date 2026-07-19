@@ -85,6 +85,10 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
+    if (sseConnections.size === 0) {
+      return;
+    }
+
     const todos = await db.all(schemaApp.todos);
     const data = `data: ${JSON.stringify(todos)}\n\n`;
 
