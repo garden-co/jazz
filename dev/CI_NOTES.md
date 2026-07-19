@@ -104,3 +104,12 @@ Excluded example/tool tests, each with cause + exit criteria:
 | create-jazz | scaffold integration 120s timeout (environment/network-shaped) | root-cause in CI env |
 
 Restoration is a tracked work item; exclusions are not permanent.
+
+## ADD (2026-07-19 ~02:15): jazz-napi binding guard in test-ts job
+
+Turbo cache hits on `jazz-napi#build` reproducibly restored the package without
+a loadable `.node` binding (32 `Cannot find native binding` failures, repeated
+on rerun), while cache-miss builds work. Until the cache/output interaction is
+root-caused, the test-ts job verifies `require('./crates/jazz-napi')` after
+`build:ci` and force-rebuilds jazz-napi on failure. Self-healing, no coverage
+lost; remove once the turbo cache issue is understood.
