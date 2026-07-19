@@ -2000,7 +2000,6 @@ dependencies = [
  "automerge",
  "backtrace",
  "diamond-types",
- "futures-core",
  "hdrhistogram",
  "jazz",
  "libc",

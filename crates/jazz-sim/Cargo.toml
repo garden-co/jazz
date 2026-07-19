@@ -15,7 +15,6 @@ transport-compression-zstd = ["jazz/transport-compression-zstd"]
 automerge = "0.10.0"
 backtrace = { version = "0.3", optional = true }
 diamond-types = "1.0.0"
-futures-core = "0.3.32"
 hdrhistogram = "7.5.4"
 jazz = { path = "../jazz", features = ["testing"] }
 libc = "0.2"
