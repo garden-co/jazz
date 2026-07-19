@@ -4,7 +4,9 @@ Distributed, local-first relational database. Rust core, TypeScript client layer
 
 ## Specs
 
-Architecture docs live in `specs/`. Status-quo specs describe what's built;
+Architecture docs live in `crates/jazz/SPEC/` and `crates/groove/SPEC/`.
+`specs/` is only a top-level routing stub plus temporary `jazz-private` move
+candidates; use crate SPEC chapters as the status-quo source of truth.
 
 ## Work style
 
