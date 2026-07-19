@@ -232,6 +232,13 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
 - 🔶 **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
+- 🔶 **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
+  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
+  predicate is used from another table and has no equality against the outer row
+  (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
+  checks are valid policy atoms, how to bound them, and how to lower them
+  without creating accidental whole-table authority scans. Exposed by
+  `world-tour`'s band-member policy.
 - ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
   columns cannot express _can-insert_ or richer probes; a dry-run is policy
   evaluation _without ingest_ — the write-validation machinery applied

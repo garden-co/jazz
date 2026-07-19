@@ -98,12 +98,63 @@ Excluded example/tool tests, each with cause + exit criteria:
 | auth-simple-chat, auth-workos-chat | write-denial never rejects `wait({tier})` (spec 🔶) | denial surfacing lands |
 | auth-betterauth-chat | `session.authMode` unsupported in policy conversion (spec 🔶) | session-attribute decision |
 | chat-react | 2/7 fail on `inherits` attachment policy chain — likely same family as closure bug | closure fix, then re-test |
-| world-tour, todo-client-localfirst-{ts,ts-docs,solid} | render/flow failures vs new runtime; several pass locally on darwin but fail on Linux CI — family excluded wholesale, root-cause in restoration pass | examples-restoration pass |
-| todo-server-ts | policy-denied inserts + `invalid uuid undefined` id expectations | examples-restoration pass |
-| todo-server-ts-docs | REAL BUG CANDIDATE: RocksDB `LOCK: No locks available` on server restart within process | fix lock release on restart, then un-exclude |
-| create-jazz | scaffold integration 120s timeout (environment/network-shaped) | root-cause in CI env |
+| world-tour | server-shell policy conversion rejects uncorrelated `EXISTS` in the band-member policy (spec 🔶) | uncorrelated policy-`EXISTS` decision/lowering lands |
 
 Restoration is a tracked work item; exclusions are not permanent.
+
+## RESOLVED (2026-07-19): todo server examples restored
+
+- **Packages un-excluded**: `todo-server-ts`, `todo-server-ts-docs`.
+- **Fixes**: server writes now use backend-scoped DB handles instead of the
+  unauthenticated root DB; insert routes preserve `WriteResult.value` while
+  awaiting durability; local-only waits use `tier: "local"`; tests use UUID
+  session subjects for policy-owned rows; async SSE broadcasts are awaited.
+- **RocksDB lock verdict**: real NAPI shutdown bug. `NapiDb.close()` now calls
+  core `Db::close()`, and `Transport.close()` drops its DB-owning inner handle
+  after detaching the connection so an in-process restart can reopen the same
+  RocksDB path. Covered by a focused `jazz-tools` NAPI integration regression.
+- **Verification**: `cd examples/todo-server-ts && pnpm test` → `EXIT_CODE:0`;
+  `cd examples/docs/todo-server-ts && pnpm test` → `EXIT_CODE:0`.
+- **Commit ref**: `8fb461f46`.
+
+## RESOLVED (2026-07-19): todo client local-first family restored
+
+- **Packages un-excluded**: `todo-client-localfirst-ts`,
+  `todo-client-localfirst-ts-docs`, `todo-client-localfirst-solid`,
+  `todo-client-localfirst-svelte`, `todo-client-localfirst-vue`,
+  `todo-client-localfirst-react`, `todo-client-localfirst-react-docs`.
+- **Fixes**: the only code change needed was in the shared Solid binding:
+  `createSolidJazzClientInternal` now reattaches the non-enumerable
+  subscription-store symbol after wrapping the raw client, so `useAll` works in
+  examples that consume built `jazz-tools` package exports.
+- **Verification**: all seven scoped `cd <pkg> && pnpm test` runs returned
+  `EXIT_CODE:0` after rebuilding `jazz-tools`.
+- **Commit ref**: `080775e1b`.
+
+## RESOLVED (2026-07-19): create-jazz test restored with hosted provisioning env-gated
+
+- **Package un-excluded**: `create-jazz`.
+- **Root cause**: the 120s timeout was local git signing, not package-registry
+  install; `git commit -m "Initial commit"` inherited `commit.gpgsign` and
+  blocked in `gpg`. The default hosted-provisioning path is also now explicit:
+  always-on CLI coverage uses `--hosting selfhosted`, while the hosted Jazz Cloud
+  provisioning test is opt-in via `CREATE_JAZZ_HOSTED_E2E=1`.
+- **Fixes**: scaffolded initial commits pass `--no-gpg-sign`; hosted CLI e2e is
+  env-gated instead of deleted.
+- **Verification**: `cd packages/create-jazz && pnpm test` → `EXIT_CODE:0`
+  (`70 passed | 1 skipped`).
+- **Commit ref**: `25efcf2f2`.
+
+## ALTER (2026-07-19): world-tour remains excluded with narrowed cause
+
+- **What changed**: `world-tour` was enumerated directly. It fails before browser
+  tests run because publishing `permissions.ts` returns `400 Bad Request`:
+  server-shell policy conversion requires `EXISTS` predicates used from another
+  table to include equality against `__jazz_outer_row`.
+- **Spec**: recorded as 🔶 "Uncorrelated policy `EXISTS`" in
+  `crates/jazz/SPEC/7_authorization.md`.
+- **Exit criteria**: decide/lower bounded uncorrelated membership checks, then
+  rerun and un-exclude `world-tour`.
 
 ## ADD (2026-07-19 ~02:15): jazz-napi binding guard in test-ts job
 
