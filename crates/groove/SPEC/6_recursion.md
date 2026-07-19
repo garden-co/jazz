@@ -1,12 +1,34 @@
 # groove — Specification · 6. Recursion & fixpoint
 
+## Overview
+
 groove evaluates recursive (transitive-closure-style) queries by running a
 bounded fixpoint _inside_ a single tick. This chapter defines the recursive
 operator, its monotone set semantics, and the recompute fallback for
 retractions. It builds directly on the tick and arrangement machinery of
 chapter 4.
 
-## 6.1 The recursive operator
+Invariant digest:
+
+- `INV-REC-1`: A recursive graph MUST have a seed child and a step child whose output RecordDescriptors are identical; otherwise subscription/compilation MUST fail with GraphOutputMi...
+- `INV-REC-2`: FrontierSourceOp MUST read only the RecordDeltas bound for its FrontierName in the current EvalContext; when absent it MUST yield an empty weighted record set with the...
+- `INV-REC-3`: Recursive facts MUST use set semantics: an encoded fact already present in RecursiveState::accumulated MUST NOT be emitted again or have its weight increased by duplic...
+- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight 1; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
+- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with IvmRuntimeError::UnsupportedNonMonotoneRecursion.
+- `INV-REC-6`: A recursive fixpoint MUST stop when the accepted frontier is empty and MUST converge on cyclic inputs by deduplicating against accumulated facts.
+- `INV-REC-7`: Recursive evaluation MUST fail with IvmRuntimeError::RecursiveIterationLimit { node, maxiters } when the number of step iterations exceeds RecursiveOp::maxiters.
+- `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
+- `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
+- `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by ScopePath and recursive subtick; root-scope arrangements MUST use subtick = 0 and MUST absorb a public tick's...
+- `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for ex...
+- `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
+- `INV-REC-13`: argmaxby MUST NOT be accepted inside recursive graph seed or step graphs.
+- `INV-REC-14`: SQL WITH RECURSIVE queries MUST NOT be lowered until recursive SQL planning is designed; planner MUST return PlannerError::UnsupportedQuery("recursive CTE lowering is...
+- `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
+
+## Details
+
+### 6.1 The recursive operator
 
 Recursive queries are expressed as an explicit graph construct. A recursive
 node pairs an initial derivation with an iterative derivation, and the iterative
@@ -33,7 +55,7 @@ permitted inside a recursive seed or step graph (`INV-REC-13`). Nested recursive
 graphs are rejected at graph validation/compilation time rather than accepted
 under ambiguous recursive scope (`INV-REC-15`).
 
-## 6.2 Monotone set semantics and the fixpoint
+### 6.2 Monotone set semantics and the fixpoint
 
 Recursive evaluation produces a set, not a multiset. The accumulated recursive
 result (`RecursiveState::accumulated` in the reference implementation) follows
@@ -64,7 +86,7 @@ non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone
 change is handled by recompute (§6.3), not by propagating negative frontiers
 through the loop.
 
-## 6.3 Retractions: recompute and diff
+### 6.3 Retractions: recompute and diff
 
 Recursive maintenance does not propagate negative frontiers through the loop.
 When a change retracts recursive facts, such as a base-table delete or an
@@ -79,7 +101,7 @@ minimal diff (`INV-REC-8`). After a recompute, the recursive step arrangements
 are hydrated from the full table snapshots and the full accumulated weighted
 record set before any later positive-incremental use (`INV-REC-9`).
 
-## 6.4 Scope and logical time
+### 6.4 Scope and logical time
 
 Recursive sub-iterations use logical time (ch. 4). Frontier-dependent graph
 fragments are scoped under the recursive node and use the recursive `sub_tick`.
@@ -93,7 +115,9 @@ does not consume or suppress future tick deltas for existing subscribers
 _Further invariants._ `INV-REC-12` — recursive recompute does not persist
 per-context child operator state in the runtime state maps after it completes.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - ✅ **Insert-only incrementality.** After a recompute hydrates recursive step
   arrangements, the next insert-only commit over recursion inputs uses the

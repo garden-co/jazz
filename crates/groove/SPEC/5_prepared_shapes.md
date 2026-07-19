@@ -1,5 +1,7 @@
 # groove — Specification · 5. Prepared shapes & bindings-as-data
 
+## Overview
+
 A prepared shape is a parameterized query whose parameters are _data flowing
 through the graph_, not literals baked into graph identity. This is groove's
 work-sharing mechanism: thousands of bound instances of one shape share a single
@@ -19,7 +21,30 @@ For a shape `posts WHERE author_id = $author`, the binding source name might be
 `"by_author"`; `author_id = "u7"` is a binding; and two UI panes both watching
 u7's posts are two bound subscriptions sharing that one binding.
 
-## 5.1 What a prepared shape is
+Invariant digest:
+
+- `INV-SHAPE-1`: Graphs containing BindingSource MUST NOT be evaluated through ordinary querysnapshot, subscribe, or subscribequery; they MUST be evaluated only through prepared-shape...
+- `INV-SHAPE-2`: Database::preparequery MUST reject queries without parameters and MUST lower only equality column = parameter / parameter = column predicates into binding joins.
+- `INV-SHAPE-3`: A prepared-query internal graph output MUST include every binding key column needed for routing, while PreparedShape::output and bound subscription rows MUST expose on...
+- `INV-SHAPE-4`: Graph-level prepare MUST reject any outputkeyfields entry absent from the graph output descriptor.
+- `INV-SHAPE-5`: A binding source weighted record set MUST expose set semantics: for each active BindingKey, evaluation snapshots contain exactly one row with weight +1, regardless of...
+- `INV-SHAPE-6`: Binding a key whose refcount transitions 0 -> 1 MUST inject exactly one +1 BindingDelta in a table-delta-free tick before serving the subscriber snapshot.
+- `INV-SHAPE-7`: Binding an already-active key MUST NOT inject another binding-source delta, and MUST serve the new subscriber from the per-key materialized snapshot.
+- `INV-SHAPE-8`: Shape deltas MUST be routed by projecting the prepared output record through outputkeyfields, or the explicit routing graph output through routingkeyfields, into the b...
+- `INV-SHAPE-9`: A prepared binding's materialized snapshot MUST be maintained as a weighted multiset where deltas that bring a record weight to zero remove that record.
+- `INV-SHAPE-10`: Unsubscribing a shape subscription MUST decrement the binding refcount and MUST inject a -1 binding delta only when the last reference is removed.
+- `INV-SHAPE-11`: Binding retractions discovered via dropped receivers during notification MUST be queued, then drained before subsequent user table/binding deltas and before prepare/bi...
+- `INV-SHAPE-12`: Preparing an identical shape over an already-active binding source MUST NOT replace shared arrangements with an empty binding snapshot or otherwise wipe existing bindi...
+- `INV-SHAPE-13`: During shape graph hydration, BindingSource nodes in ArrangementUpdateMode::Replace MUST read current binding snapshots, not pending/incremental binding deltas.
+- `INV-SHAPE-14`: Database::bind MUST accept exactly one value for each prepared parameter name, MUST reject missing/duplicate/unknown names, and MUST pass values to bindshape in prepar...
+- `INV-SHAPE-15`: Binding values MUST conform to the prepared shape's bindingdescriptor; mismatched type/arity MUST fail before subscription hydration.
+- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `INV-SHAPE-17`: A BindingSource tick in normal accumulate mode MUST emit only BindingDeltas whose shape matches the source's BindingSourceOp.shape and whose descriptor matches the nod...
+- `INV-SHAPE-18`: Prepared recursive shapes MUST route retractions caused by base-table deletes or anti-join changes to the correct bound subscriber result.
+
+## Details
+
+### 5.1 What a prepared shape is
 
 A prepared shape separates a query's reusable structure from the parameter
 values that select one bound result. The shape is a graph containing one or more
@@ -42,7 +67,7 @@ Shape identity is structural. Graphs are hash-consed by `NodeDescriptor`
 defined for structurally identical graphs; the status of one binding source name
 shared by two _different_ graphs is the open question recorded below.
 
-## 5.2 The APIs
+### 5.2 The APIs
 
 Prepared shapes can be registered either from an already-built graph or from a
 parameterized query. At the graph level,
@@ -78,7 +103,7 @@ internally; callers with separate clean and routed graphs can instead use
 `output_key_fields` entry absent from the graph output descriptor
 (`ShapeKeyFieldNotFound`).
 
-## 5.3 The binding lifecycle
+### 5.3 The binding lifecycle
 
 A binding source represents active parameter tuples, not subscriber identities.
 Its weighted record set therefore has **set semantics**: for each active
@@ -101,7 +126,7 @@ any subsequent table or binding deltas and before any prepare or bind hydration
 snapshot (`INV-SHAPE-11`). This prevents a dead subscriber's pending retraction
 from corrupting a freshly hydrated sibling that shares the same binding source.
 
-## 5.4 Output routing
+### 5.4 Output routing
 
 The shared graph computes rows for all active bindings, so each output delta
 must be routed back to the binding that owns it. Each shape output row is
@@ -129,7 +154,7 @@ whose `shape` matches the source and whose descriptor matches the node output.
 `INV-SHAPE-18` — prepared recursive shapes route retractions (from base deletes
 or anti-join changes) to the correct bound subscriber.
 
-## 5.5 Hydration, sharing, and composition
+### 5.5 Hydration, sharing, and composition
 
 Hydration establishes the arrangements that a prepared shape will share across
 its bindings. Shape-graph hydration reads full table snapshots plus current
@@ -147,7 +172,9 @@ in this chapter, a binding source is simply another input weighted record set.
 Prepared shapes are retained for the lifetime of the database (`INV-SHAPE-16`);
 the API does not define shape drop.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **Same-name binding sources across distinct shapes.** The README calls
   sharing one `binding_source_shape` string across _identical_ graphs a sharp

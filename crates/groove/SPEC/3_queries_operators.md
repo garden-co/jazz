@@ -1,12 +1,41 @@
 # groove — Specification · 3. Queries & operators
 
+## Overview
+
 Queries in groove describe incremental views. They implement a subset of SQL
 semantics, but the durable contract is not an execution plan in the traditional
 database sense. A query becomes a graph of _operators_ that defines how weighted
 row changes move through the view. This chapter specifies the _what_ of
 evaluation; chapter 4 specifies the _how_ (the tick, arrangements, propagation).
 
-## 3.1 Queries become graphs that weighted deltas flow through
+Invariant digest:
+
+- `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
+- `INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
+- `INV-QUERY-3`: FilterOp MUST emit exactly the input deltas whose records satisfy its PredicateExpr, preserving record bytes and weights, for the supported predicate surface including...
+- `INV-QUERY-4`: SQL predicate lowering MUST reject unsupported or ill-typed predicate expressions instead of lowering them approximately.
+- `INV-QUERY-5`: MapProjectOp MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
+- `INV-QUERY-6`: UnwrapNullableOp MUST drop Nullable(None) input deltas, unwrap Nullable(Some()) to the inner value, and preserve the original delta weight.
+- `INV-QUERY-7`: Union MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (UNION ALL semantics).
+- `INV-QUERY-8`: An inner JoinOp MUST require equal-length left and right key vectors.
+- `INV-QUERY-9`: An inner JoinOp MUST emit joined records with weight leftweight \* rightweight for matching keys, including matches produced by changes arriving on either side.
+- `INV-QUERY-10`: An inner JoinOp MUST NOT double-count pairs where both matching sides changed in the same logical tick.
+- `INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
+- `INV-QUERY-12`: AntiJoin MUST output left rows only when the total right-side multiplicity for the join key is zero.
+- `INV-QUERY-13`: AntiJoin MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
+- `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as t...
+- `INV-QUERY-15`: SQL planquery MUST reject query parameters; parameterized SQL MUST go through planpreparedshape/prepared binding flow.
+- `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form column = $parameter or $parameter = column as binding predicates.
+- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
+- `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with AND forming multi-column join keys.
+- `INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
+- `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
+- `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
+- `INV-QUERY-22`: OpType::SemiJoin, OpType::Distinct, OpType::Negate, and OpType::Aggregate MUST NOT be advertised as executable query operators until runtime support exists.
+
+## Details
+
+### 3.1 Queries become graphs that weighted deltas flow through
 
 The query graph is the canonical form of a view. It is a DAG whose nodes are
 operators and whose edges carry weighted `RecordDelta`s; each input and output is
@@ -25,7 +54,7 @@ Before the runtime accepts a node, it validates the `NodeDescriptor` for operato
 input arity, input/output descriptor compatibility, join-key arity, and
 field-index bounds (`INV-QUERY-2`).
 
-## 3.2 Source operators
+### 3.2 Source operators
 
 Source operators introduce rows from outside a graph or from a boundary between
 query mechanisms. Each source has a distinct origin and participates in the same
@@ -54,7 +83,7 @@ the ch. 4 overlay-probe direction: binding side resident, deletions ride
 deltas, binding-delta probes read the durable boundary arrangement through the
 staged-write overlay so probes see post-tick state).
 
-## 3.3 Stateless operators
+### 3.3 Stateless operators
 
 Stateless operators transform or route deltas without keeping persistent
 operator state. They preserve weights while changing which rows pass through, how
@@ -85,7 +114,7 @@ _Further invariants._ `INV-QUERY-5` — `MapProject` copies only configured fiel
 and preserves the input weight. `INV-QUERY-6` — `UnwrapNullable` preserves the
 original delta weight.
 
-## 3.4 Joins
+### 3.4 Joins
 
 Joins combine or suppress rows by key. groove executes the **inner equi-join**
 and the **anti-join**.
@@ -120,7 +149,7 @@ logical-time delta at most once per arrangement key/scope (ch. 4).
 `INV-QUERY-13` — anti-join changes only when the right count crosses zero.
 `INV-QUERY-14` — same-tick arrivals suppress/emit a left row exactly once.
 
-## 3.5 `ArgMaxBy` / `ArgMinBy` (maintained per-group winners)
+### 3.5 `ArgMaxBy` / `ArgMinBy` (maintained per-group winners)
 
 Per-group winner selection maintains the current winning row for each group and
 emits only the winner changes for groups touched by an input change (`ArgMaxByOp`
@@ -146,7 +175,7 @@ set.
 _Further invariants._ `INV-QUERY-21` — `ArgMaxBy`/`ArgMinBy` suppress
 non-winner and net-zero group deltas.
 
-## 3.6 `TopBy` (maintained ordered windows)
+### 3.6 `TopBy` (maintained ordered windows)
 
 `TopBy` is the general maintained ordered-window operator. It is the intended
 replacement for ad hoc ordered `LIMIT`/`OFFSET` handling and for consumers that
@@ -193,7 +222,7 @@ retained suffixes are supported for consumers such as jazz maintained ordered
 subscriptions, but they can retain and diff a large portion of each partition.
 Use a finite limit when the consumer only needs a bounded window.
 
-## 3.7 `Aggregate` (maintained grouped summaries)
+### 3.7 `Aggregate` (maintained grouped summaries)
 
 `Aggregate` maintains per-group summary rows over a weighted input multiset. It
 has `group_cols`, a list of aggregate functions, and an output descriptor
@@ -233,7 +262,7 @@ and then encoded full-record bytes as the final order. Floating-point aggregate
 functions are not part of the maintained contract until their replay
 determinism is specified.
 
-## 3.8 Reserved (non-executable) operators
+### 3.8 Reserved (non-executable) operators
 
 Some operator descriptors are reserved names, not executable query behavior.
 They are therefore **not part of the query contract** until runtime support
@@ -242,7 +271,7 @@ lands: `Aggregate`, `SemiJoin`, `Distinct`, `Negate`, and the non-inner
 `Aggregate` semantics above are an implementation target; until runtime support
 exists it must not be advertised as executable (`INV-QUERY-22`).
 
-## 3.9 The SQL-lowerable subset
+### 3.9 The SQL-lowerable subset
 
 SQL lowering is intentionally conservative. The SQL `Query` AST is broader than
 the supported graph contract, so the planner rejects unsupported shapes instead
@@ -265,7 +294,9 @@ unsupported/ill-typed predicates rather than approximating them.
 `INV-QUERY-18` — SQL inner joins lower only equality predicates, with `AND`
 forming multi-column join keys.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 - 🔶 **`ArgMaxBy` terminology.** It lives under "Aggregate" in `op_types` but is
   source-backed and PK-constrained. Decide whether to rename it (e.g. a

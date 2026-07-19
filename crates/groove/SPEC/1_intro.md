@@ -1,5 +1,7 @@
 # groove — Specification · 1. Introduction
 
+## Overview
+
 groove is an embedded database built around incremental view maintenance
 (IVM). It supports both one-shot queries over stored data and subscriptions to
 maintained views; in both cases, common work is shared inside the engine rather
@@ -15,16 +17,21 @@ groove provides the local substrate for `jazz`, the distributed database (see
 jazz `SPEC/`, ch. 14). References to the jazz spec are motivational only; they
 are never required to understand or validate groove.
 
-## 1.1 How to read this document
+Invariant digest:
+
+- `INV-TICK-1`: A public commit tick MUST advance IvmRuntime.currenttick exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
+
+## Details
+
+### 1.1 How to read this document
 
 - **Numbered chapters (`1_`…`N_`) are normative**
 - **Letter-prefixed appendices (`A_`, `B_`…) are implementation guidance**
 
-**One home, settling over time.** Each chapter begins with the settled
-normative material. Non-normative material, when present, is kept in two
-clearly marked trailing sections: `## Open questions` for unresolved decisions
-(most chapters have one), and `## In flight` for operational detail still in
-progress.
+**One home, settling over time.** Every chapter uses the same top-level shape:
+`## Overview`, `## Details`, then `## Open Questions`. The overview is the
+team-onboarding entry point; details hold the normative body plus any clearly
+marked in-flight operational material; open questions hold unresolved decisions.
 
 **Chapter map**
 
@@ -41,7 +48,7 @@ progress.
 | B   | _guidance:_ benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings                          |
 | —   | _registry:_ `INVARIANTS.md`                          | out-of-band: every `INV-` id → test + impl                            |
 
-## 1.2 Conventions
+### 1.2 Conventions
 
 **Normative keywords.** MUST / MUST NOT / SHOULD / MAY carry their
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) meaning. We apply them to
@@ -68,7 +75,7 @@ Only non-`now` status appears inline in the chapters. The complete mapping from
 each id to its status, coverage, enforcing test, and implementation lives in
 the out-of-band registry (`SPEC/INVARIANTS.md`).
 
-## 1.3 Terminology
+### 1.3 Terminology
 
 Terms are defined where they are introduced. The load-bearing terms used
 throughout the specification are:
@@ -89,3 +96,7 @@ throughout the specification are:
   every affected subscription (ch. 4).
 - **`OrderedKvStorage`** — the ordered key/value interface groove is implemented
   over (RocksDB in production; an in-memory store in tests) (ch. 2).
+
+## Open Questions
+
+None.

@@ -1,10 +1,16 @@
 # groove — Specification · Appendix B. Benchmarks
 
+## Overview
+
 _Non-normative (guidance)._ How groove is measured, and how to read the numbers.
 Retained timings are developer-laptop, directional data — never read a p50 here
 as a promise.
 
-## B.1 The harnesses
+Invariant digest: no `INV-*` ids are defined or cited by this chapter.
+
+## Details
+
+### B.1 The harnesses
 
 Benchmarking separates system behavior from local overhead. Scenario benchmarks
 exercise stateful workloads in which each commit changes the database and the
@@ -19,7 +25,7 @@ stateless microbenchmark (`GROOVE_MICRO_ITERS`) over `record_encode_decode`,
 Microbenchmarks measure local overheads only — they have no oracle and must not
 outweigh scenario runs.
 
-## B.2 The validity contract
+### B.2 The validity contract
 
 Benchmark numbers are admissible only after correctness has been checked. A
 scenario run is **valid only if the harness-maintained materialized cache equals
@@ -28,7 +34,7 @@ its oracle after the run** — `expected_feed_rows` for social feed,
 the benchmark-side enforcement of the ch. 7 oracle property: a fast run that
 disagrees with recompute is a failed run, not a result.
 
-## B.3 Durability comparability
+### B.3 Durability comparability
 
 Benchmark comparisons record their durability assumptions explicitly. groove
 scenario runs use `Durability::WalNoSync` (WAL on, per-write sync off) and
@@ -36,7 +42,7 @@ report `"wal_no_sync"`; SQLite baselines use `journal_mode=WAL` +
 `synchronous=NORMAL` and report `"wal_normal"`. The labels travel in the JSON so
 comparisons stay honest about the durability setting.
 
-## B.4 Scenarios and engines
+### B.4 Scenarios and engines
 
 The scenario set is deliberately small: it covers a join-heavy subscription
 workload, a recursive authorization workload, and one-shot query overhead.
@@ -53,7 +59,7 @@ workload, a recursive authorization workload, and one-shot query overhead.
 - **oneshot** — latency for `groove_query`, `groove_subscribe`, and
   `groove_scan` (raw storage `scan_prefix`).
 
-## B.5 Counters and how to read them
+### B.5 Counters and how to read them
 
 The report combines noisy elapsed-time data with deterministic shape data. The
 JSON report carries timings (microsecond p50/p95/p99/max; `commit_us` wraps the
@@ -67,7 +73,7 @@ signals** (a change is a bug or an intended behavior change), while **timings ar
 directional** — compare by ratio or repeated medians. (`engine_records_processed`
 counts output deltas processed, not storage rows scanned.)
 
-## B.6 Retained-baseline workflow
+### B.6 Retained-baseline workflow
 
 `bench_run.py` writes JSONL enriched with git SHA, dirty state, host, rustc, and
 the active `GROOVE_*` knobs, under `benchmarks/results/` (not `target/`).
@@ -88,7 +94,7 @@ keeps laptop cost down while preserving a comparison target.
 
 ---
 
-## In flight & operational detail (non-normative)
+### In flight & operational detail (non-normative)
 
 _B.1–B.6 above are the durable methodology. The following is the operational
 detail — commands, knobs, the headline/ACL driver workflow, and retained
@@ -208,3 +214,7 @@ all subscribed principals:
 insert-series p50 is 65us for `groove_prepared` vs 10.2ms for `sqlite_indexed`;
 delete-series p50 is 11.8ms vs 9.3ms, which is the remaining recursive
 recompute cliff in measured form.
+
+## Open Questions
+
+None.

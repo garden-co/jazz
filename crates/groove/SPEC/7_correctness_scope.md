@@ -1,11 +1,23 @@
 # groove — Specification · 7. Correctness, determinism & scope
 
+## Overview
+
 This chapter defines what "correct" means for groove, what the system
 deliberately does _not_ promise, and where the correctness contract ends. It is
 the boundary defended by the oracle tests and the reference point for reviewing
 the system's semantic obligations.
 
-## 7.1 The oracle property
+Invariant digest:
+
+- `INV-OK-1`: For every subscription, initial snapshot plus the consolidated sum of all received deltas MUST equal a fresh one-shot recomputation of that query against current storage.
+- `INV-OK-3`: One-shot snapshot reads MUST NOT perturb retained subscription streams or consume future tick deltas.
+- `INV-OK-13`: Persisted schema index reads MUST match a full-scan oracle over committed base-table state.
+- `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
+- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
+
+## Details
+
+### 7.1 The oracle property
 
 The correctness contract reduces the entire engine to one equality. At each
 successful commit/tick boundary, every live subscription denotes the same
@@ -27,7 +39,7 @@ recompute-and-diff — serve this single equality. Oracle tests compare the engi
 with a naive recompute under seeded interleavings, and the benchmark harness
 (appendix B, non-normative) exercises the same property.
 
-## 7.2 Supported and unsupported scope
+### 7.2 Supported and unsupported scope
 
 groove exposes a full graph contract and a narrower SQL-lowerable contract. The
 distinction is intentional: graph execution defines the system's complete
@@ -47,7 +59,7 @@ exactly.
   tables, recursive CTEs, non-equality prepared parameters, and unsupported join
   keys.
 
-## 7.3 Concurrency, durability, and the atomicity bound
+### 7.3 Concurrency, durability, and the atomicity bound
 
 groove bounds atomicity around a single writer and synchronous ticks; it does
 not provide MVCC. Within a tick, base-table writes and durable index/view writes
@@ -58,7 +70,7 @@ consumers observe prior staged writes. If the final storage batch fails after
 in-memory state has advanced, the `Database` instance is poisoned and rejects
 subsequent operations rather than serving potentially torn state.
 
-## 7.4 Determinism
+### 7.4 Determinism
 
 Determinism makes the oracle property practical to test and reason about.
 Evaluation uses ordered state throughout (`BTreeMap`s in the reference
@@ -75,6 +87,8 @@ bug, never noise. Cross-operator delivery _order_ is reproducible but not itself
 a normative guarantee — depend on the consolidated result, not on the order
 deltas arrive in.
 
-## Open questions
+## Open Questions
+
+### Open questions
 
 No open questions in this chapter.

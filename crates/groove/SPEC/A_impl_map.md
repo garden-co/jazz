@@ -1,11 +1,17 @@
 # groove — Specification · Appendix A. Implementation map
 
+## Overview
+
 _Non-normative (guidance)._ This appendix maps the normative chapters to the
 implementation. It is a navigation aid, not a source of contract language: when
 the question is what the system guarantees, the normative chapters control; when
 the question is where an implementation concern lives, the source tree controls.
 
-## A.1 Where to start
+Invariant digest: no `INV-*` ids are defined or cited by this chapter.
+
+## Details
+
+### A.1 Where to start
 
 The implementation is easiest to read along the same path a query follows
 through the system. Start at the database facade (`db::Database`), continue
@@ -13,7 +19,7 @@ through SQL-to-graph lowering (`ivm::planner`), inspect the graph IR
 (`ivm::graph`), and then read the tick engine (`ivm::runtime`). This order
 matches `src/lib.rs`, and chapters 2–4 use the same spine.
 
-## A.2 Module layering
+### A.2 Module layering
 
 | module    | owns                                                                 | chapter |
 | --------- | -------------------------------------------------------------------- | ------- |
@@ -24,7 +30,7 @@ matches `src/lib.rs`, and chapters 2–4 use the same spine.
 | `ivm`     | `planner` / `graph` / `op_types` / `runtime`                         | 3–6     |
 | `db`      | ties schema + storage + commits + subscriptions + query APIs         | 1–7     |
 
-## A.3 The runtime
+### A.3 The runtime
 
 The runtime is the point where the graph becomes maintained state. Its central
 state (`IvmRuntime` in `ivm/runtime/mod.rs`) includes the `graph`,
@@ -57,7 +63,7 @@ Commits enter the maintained graph as table deltas. That path lives in
 `db/mod.rs`: `commit_batch`, table-delta construction, and
 `consolidate_table_deltas` (ch. 4).
 
-## A.4 Test map
+### A.4 Test map
 
 The tests are organized around the same conceptual boundaries as the
 implementation. Broad facade behavior lives in `src/db/tests.rs`; record
@@ -67,7 +73,7 @@ freshness, `prepared_binding_*`, `recursive_cycle_*`, and
 `snapshot_subscription_*` for hydration isolation. These are where the
 `INVARIANTS.md` registry's enforcing tests mostly live.
 
-## A.5 The optimization story, in code
+### A.5 The optimization story, in code
 
 Before the benchmarks in appendix B, the implementation exposes the main reasons
 the design is efficient. Node sharing removes duplicate graph work
@@ -80,7 +86,7 @@ Freshness failures are deliberately explicit. Shared and recursive state carries
 `AsOf` stamps, so stale or out-of-order reads surface as `StaleRuntimeState` or
 `OutOfOrderRuntimeState` rather than silently producing wrong rows.
 
-## A.6 Structural campaign — remaining work
+### A.6 Structural campaign — remaining work
 
 The remaining structural work is about readability and ownership before team
 onboarding: large concepts should be immediately findable, algorithms should
@@ -134,3 +140,7 @@ Style rules for future structure:
    different roles, the names must carry the roles.
 3. No wrapper without semantics: forwarding-only types and value round-trips are
    debt by definition.
+
+## Open Questions
+
+None.
