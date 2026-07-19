@@ -24,3 +24,7 @@ if ((result.status ?? 1) !== 0) {
   process.exit(result.status ?? 1);
 }
 process.exit(0);
+
+// Cache-salt 2026-07-19: a corrupt turbo cache archive for jazz-napi#build
+// reproducibly restored the package without a loadable .node on CI
+// (see dev/CI_NOTES.md). Changing this file busts the poisoned key.
