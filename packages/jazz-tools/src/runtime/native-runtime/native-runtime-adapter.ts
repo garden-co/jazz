@@ -237,6 +237,7 @@ type PendingTx = {
 type PendingTxWrite = {
   table: string;
   rowId: Uint8Array;
+  baseRow?: RowState;
   row?: RowState;
   deleted?: boolean;
 };
@@ -448,9 +449,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
+      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.writes.push({ table, rowId, baseRow, row });
       return {
         id: row.id,
         values: row.values,
@@ -479,9 +481,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
+      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.writes.push({ table, rowId, baseRow, row });
       return { id: row.id, values: row.values, transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
@@ -506,10 +509,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
+      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
+        baseRow,
         row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
       });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
@@ -544,13 +549,15 @@ export class NativeRuntimeAdapter implements Runtime {
         ? encodeCellsForPatch(definition, values)
         : encodeCellsForRow(definition, values, table);
     } catch (error) {
-      throw writeError("Upsert", errorMessage(error));
+      throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
+      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
+        baseRow,
         row: existing
           ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
           : this.rowStateFromValues(table, rowId, values),
@@ -574,8 +581,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
+      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
-      tx.writes.push({ table, rowId, deleted: true });
+      tx.writes.push({ table, rowId, baseRow, deleted: true });
       return { transactionId: txIdFromContext(writeContext) ?? "" };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
@@ -652,10 +660,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
-    const write = (pending.tx ?? this.txForKind(pending.kind)).commit();
-    this.writes.set(transactionId, write);
     this.pendingTxs.delete(transactionId);
     this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
+    if (!pending.tx) {
+      this.pumpSubscriptions();
+      return;
+    }
+    this.rejectMovedExclusiveParents(pending);
+    const write = pending.tx.commit();
+    this.writes.set(transactionId, write);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
   }
@@ -1386,7 +1399,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
     if (pending.kind === "exclusive") {
-      if (identity) {
+      if (identity && schemaHasPolicies(this.schema)) {
         throw new Error(
           "Native runtime cannot perform session-scoped exclusive transaction writes: " +
             "the native runtime exclusive transaction API has no identity-aware staging methods.",
@@ -1408,6 +1421,35 @@ export class NativeRuntimeAdapter implements Runtime {
       pending.tx = identity ? this.mergeableTxForIdentity(identity) : this.db.mergeableTx();
     }
     return pending.tx;
+  }
+
+  private baseRowForExclusiveWrite(
+    tx: PendingTx,
+    table: string,
+    rowId: Uint8Array,
+    identity: Uint8Array | undefined,
+  ): RowState | undefined {
+    if (tx.kind !== "exclusive") return undefined;
+    const id = formatUuid(rowId);
+    for (const write of tx.writes) {
+      if (write.table === table && formatUuid(write.rowId) === id) {
+        return write.baseRow;
+      }
+    }
+    return this.readRow(table, rowId, identity);
+  }
+
+  private rejectMovedExclusiveParents(tx: PendingTx): void {
+    if (tx.kind !== "exclusive") return;
+    for (const write of tx.writes) {
+      const current = this.readRowForWriteMerge(write.table, write.rowId);
+      if (rowsMatchForExclusiveParent(this.schema, write.table, current, write.baseRow)) {
+        continue;
+      }
+      throw new Error(
+        "(transaction_conflict): row visible parent changed since transaction write was staged",
+      );
+    }
   }
 
   private txForKind(kind: TransactionKind): Tx {
@@ -2380,6 +2422,14 @@ function writeError(
   return new Error(`${operation} failed: WriteError("${reason.replaceAll('"', '\\"')}")`);
 }
 
+function normalizeWriteSetupMessage(message: string): string {
+  const missingRequiredColumn = /^missing required column ([A-Za-z_$][\w$]*)$/.exec(message);
+  if (missingRequiredColumn) {
+    return `missing required field \`${missingRequiredColumn[1]}\``;
+  }
+  return message;
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object") {
@@ -2392,6 +2442,33 @@ function errorMessage(error: unknown): string {
     }
   }
   return String(error);
+}
+
+function schemaHasPolicies(schema: WasmSchema): boolean {
+  return Object.values(schema).some((table) => table.policies !== undefined);
+}
+
+function rowsMatchForExclusiveParent(
+  schema: WasmSchema,
+  table: string,
+  current: RowState | undefined,
+  base: RowState | undefined,
+): boolean {
+  if (!current || !base) return current === base;
+  if (current.id !== base.id || current.table !== base.table) return false;
+  const columns = schema[table]?.columns ?? [];
+  for (const column of columns) {
+    if (isInternalField(column.name) || isHiddenIncludeColumn(column.name)) continue;
+    if (
+      !valueEqual(
+        current.valuesByColumn?.get(column.name) ?? { type: "Null" },
+        base.valuesByColumn?.get(column.name) ?? { type: "Null" },
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function rejectionCode(message: string): string {

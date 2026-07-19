@@ -42,6 +42,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private readonly transactionRemoteIds = new Map<string, Promise<string>>();
   private readonly transactionWrites = new Map<string, Promise<string>[]>();
   private readonly completedTxs = new Map<string, CompletedTxState>();
+  private readonly readOnlyCommittedTxs = new Set<string>();
+  private readonly commitErrors = new Map<string, Error>();
   private readonly subscriptions = new Map<number, Function>();
   private readonly remoteSubscriptions = new Map<number, Promise<number>>();
   private authFailureCallback: ((reason: string) => void) | undefined;
@@ -137,7 +139,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): MutationResult {
-    encodeCellsForRow(tableDefinition(this.schema, table), values);
+    try {
+      encodeCellsForRow(tableDefinition(this.schema, table), values);
+    } catch (error) {
+      throw new Error(normalizeWriteSetupMessage(errorMessage(error)));
+    }
     const transactionId = this.writeId();
     this.queueWrite(transactionId, "upsert", table, objectId, values, writeContext);
     return { transactionId };
@@ -157,6 +163,13 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     }
     const pendingWrite = this.writes.get(transactionId);
     const workerTransactionId = pendingWrite ? await pendingWrite : transactionId;
+    const commitError = this.commitErrors.get(transactionId);
+    if (commitError) {
+      throw commitError;
+    }
+    if (this.readOnlyCommittedTxs.has(transactionId)) {
+      return;
+    }
     const wait = this.send("waitForTransaction", [workerTransactionId, tier]).then(() => undefined);
     let waits = this.settledWrites.get(transactionId);
     if (!waits) {
@@ -186,11 +199,22 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (!workerTransactionId) {
       throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
     }
+    const transactionWrites = this.transactionWrites.get(transactionId) ?? [];
+    if (transactionWrites.length === 0) {
+      this.readOnlyCommittedTxs.add(transactionId);
+    }
     const committed = workerTransactionId.then(async (remote) => {
-      await Promise.all(this.transactionWrites.get(transactionId) ?? []);
+      await Promise.all(transactionWrites);
       this.transactionWrites.delete(transactionId);
       this.transactionRemoteIds.delete(transactionId);
-      await this.send("commitTransaction", [remote]);
+      try {
+        await this.send("commitTransaction", [remote]);
+      } catch (error) {
+        this.commitErrors.set(
+          transactionId,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
       return remote;
     });
     this.writes.set(transactionId, committed);
@@ -392,6 +416,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     // worker's transaction id. The public Runtime API is synchronous, so the
     // result returned from insert/update/etc. is only a pending handle.
     const write = this.opened.then(async () => {
+      if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
+        return batchId;
+      }
       const translatedArgs = (await this.translateWriteArgs(
         method,
         args,
@@ -660,6 +687,23 @@ function transactionIdFromReadOptions(optionsJson: string | null | undefined): s
   } catch {
     return undefined;
   }
+}
+
+function normalizeWriteSetupMessage(message: string): string {
+  const missingRequiredColumn = /^missing required column ([A-Za-z_$][\w$]*)$/.exec(message);
+  if (missingRequiredColumn) {
+    return `missing required field \`${missingRequiredColumn[1]}\``;
+  }
+  return message;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return String(error);
 }
 
 function txStateMessage(
