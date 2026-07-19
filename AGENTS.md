@@ -31,8 +31,9 @@ For ordinary Rust/core work, the full gate set is:
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
   enforces `INV-INC-1` for relation/include delivery.
-- `dev/gates/no-sensitive-data.sh` to keep customer-specific fixture names,
-  domains, and IDs out of the public repository.
+- the sensitive-data guard (lives in `jazz-private/dev/gates/`, runs via the
+  optional lefthook hook) to keep customer-specific fixture names, domains,
+  and IDs out of the public repository.
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the
@@ -60,9 +61,9 @@ set. Two tiers make this concrete:
 - _Iteration tier_ (intra-batch, per lever): focused crate suites + the three
   incremental-delivery canaries + oracle at low seed count; skip smoke. ~fast.
 - _Landing tier_ (before push): the full canonical set below + smoke +
-  `dev/gates/no-sensitive-data.sh`.
+  the jazz-private sensitive-data guard.
 
-**Sensitive-data guard.** `dev/gates/no-sensitive-data.sh` (in lefthook pre-commit)
+**Sensitive-data guard.** the jazz-private sensitive-data guard (in lefthook pre-commit)
 fails on customer-identifying strings. Real customer schemas/data live ONLY in
 `jazz-private`; `jazz_core` uses anonymized, name-blind fixtures (perf/lowering
 gates are name-blind, so fidelity is preserved). Never commit real schema, dumps,
