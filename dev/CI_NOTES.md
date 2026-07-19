@@ -125,3 +125,15 @@ binding — masquerading first as cache corruption. CI now builds jazz-napi in
 release mode (env removed, timeout 15→20m). Monday follow-up: root-cause why
 debug cdylib dlopen fails on Linux (suspect debug section size / TLS model),
 then possibly restore debug builds for speed.
+
+## ROOT CAUSE, FINAL (2026-07-19 ~03:10): static TLS exhaustion
+
+The full dlopen error (surfaced by the rebuild-and-verify guard) is
+`cannot allocate memory in static TLS block` — glibc static TLS exhaustion
+loading jazz-napi's .node, in both debug and release profiles. Newer engine
+code carries a large initial-exec TLS segment; older cached artifacts predated
+it, which produced the misleading cache-corruption trail. CI fix:
+`GLIBC_TUNABLES=glibc.rtld.optional_static_tls=4194304` on the test-ts job.
+Engine follow-up (Monday queue): audit large `thread_local!` usage in
+jazz/groove and consider `-Z tls-model`/lazy allocation so consumers don't need
+the tunable.
