@@ -10,6 +10,7 @@
     "src/react-native/**/*.typecheck.tsx",
     "src/expo/**/*.typecheck.ts",
     "src/expo/**/*.typecheck.tsx",
+    "src/expo/vendor.d.ts",
     "src/dev/expo.typecheck.ts"
   ],
   "exclude": ["node_modules", "dist"]
