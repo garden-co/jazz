@@ -683,6 +683,7 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
         ColumnType::U16 => Value::U16(json_u64(value) as u16),
         ColumnType::U32 => Value::U32(json_u64(value) as u32),
         ColumnType::U64 => Value::U64(json_u64(value)),
+        ColumnType::I64 => Value::I64(json_i64(value)),
         ColumnType::F64 => Value::F64(json_f64(value)),
         ColumnType::Bool => Value::Bool(
             value
@@ -755,6 +756,14 @@ fn json_u64(value: &JsonValue) -> u64 {
                 .and_then(|value| value.parse::<u64>().ok().or_else(|| parse_iso_ms(value)))
         })
         .unwrap_or_else(|| panic!("expected unsigned integer cell, got {value:?}"))
+}
+
+fn json_i64(value: &JsonValue) -> i64 {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str().and_then(|value| value.parse::<i64>().ok()))
+        .unwrap_or_else(|| panic!("expected signed integer cell, got {value:?}"))
 }
 
 fn parse_iso_ms(value: &str) -> Option<u64> {
