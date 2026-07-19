@@ -65,3 +65,15 @@ export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirs
     return { secret, isLoading, login, signOut };
   };
 }
+
+const useLocalFirstAuthHooks = new WeakMap<AuthSecretStore, () => LocalFirstAuth>();
+
+export function useLocalFirstAuthWithStore(store: AuthSecretStore): LocalFirstAuth {
+  let useLocalFirstAuth = useLocalFirstAuthHooks.get(store);
+  if (!useLocalFirstAuth) {
+    useLocalFirstAuth = createUseLocalFirstAuth(store);
+    useLocalFirstAuthHooks.set(store, useLocalFirstAuth);
+  }
+
+  return useLocalFirstAuth();
+}

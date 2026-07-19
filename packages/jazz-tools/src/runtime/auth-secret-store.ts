@@ -31,6 +31,8 @@ function uint8ArrayToBase64url(bytes: Uint8Array): string {
 export interface BrowserAuthSecretStoreOptions {
   /** localStorage key name (default: "jazz-auth-secret") */
   key?: string;
+  /** @deprecated Use `key`. Kept for the mainline configurable-key surface. */
+  authSecretStorageKey?: string;
   /** Optional app identifier to namespace the default key. */
   appId?: string;
   /** Optional principal identifier to isolate secrets per user. */
@@ -55,8 +57,9 @@ function normalizeScopeSegment(value?: string | null): string | null {
 }
 
 function resolveBrowserAuthSecretKey(options: BrowserAuthSecretStoreOptions = {}): string {
-  if (options.key) {
-    return options.key;
+  const explicitKey = options.key ?? options.authSecretStorageKey;
+  if (explicitKey) {
+    return explicitKey;
   }
 
   const scopeSegments = [
