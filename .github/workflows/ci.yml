@@ -78,6 +78,11 @@ jobs:
           path: ${{ github.workspace }}/.turbo/cache
 
       - run: pnpm build:ci
+      # Turbo cache hits have reproducibly restored jazz-napi without a loadable
+      # .node binding (CI rounds 9/9-rerun, 2026-07-19); verify and force-rebuild
+      # if needed. See dev/CI_NOTES.md.
+      - name: Ensure jazz-napi native binding
+        run: node -e "require('./crates/jazz-napi')" || pnpm turbo run build --filter=jazz-napi --force
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
