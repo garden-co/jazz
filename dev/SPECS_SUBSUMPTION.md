@@ -160,3 +160,9 @@ separate approval. `KEEP-AT-TOP` files remain at the top level.
 | `specs/todo/projects/relational-row-history-engine/scopes.md`                 | MERGE-INTO-CRATE-SPEC  | `crates/jazz/SPEC/2_data_model_identity.md`, `crates/jazz/SPEC/3_transactions.md`, `crates/jazz/SPEC/11_branches_timetravel.md`      | Row-history scope ladder folded into data/transaction/branch chapters.                                                                            |
 | `specs/todo/projects/relational-row-history-engine/spec.md`                   | MERGE-INTO-CRATE-SPEC  | `crates/jazz/SPEC/2_data_model_identity.md`, `crates/jazz/SPEC/4_history_merging.md`, `crates/jazz/SPEC/5_reads_snapshots.md`        | Table-first row histories, visible state, and module boundaries folded into data/history/read chapters.                                           |
 | `specs/todo/projects/storage_physics.md`                                      | MERGE-INTO-CRATE-SPEC  | `crates/groove/SPEC/2_storage_model.md`, `crates/jazz/SPEC/C_performance.md`                                                         | Storage physical-layout/compression receipts folded into storage/performance.                                                                     |
+
+## Executed (2026-07-19 ~20:00)
+
+The 16 JAZZ-PRIVATE CANDIDATE files were approved by Anselm and moved to the
+jazz-private repo (`specs/` there); removed here. `specs/` now contains only
+the pointer README.
