@@ -362,7 +362,24 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
     writeColumnOperand(writer, predicate.column);
     return;
   }
-  writePredicateCmpLiteral(writer, predicate.column, predicate.op, predicate.value);
+  if (isQueryPredicateCmp(predicate)) {
+    writePredicateCmpLiteral(writer, predicate.column, predicate.op, predicate.value);
+    return;
+  }
+  throw new Error(`unsupported query predicate ${JSON.stringify(predicate)}`);
+}
+
+function isQueryPredicateCmp(
+  predicate: QueryPredicate,
+): predicate is Extract<QueryPredicate, { op: QueryPredicateOp }> {
+  return (
+    predicate.op === "Eq" ||
+    predicate.op === "Ne" ||
+    predicate.op === "Gt" ||
+    predicate.op === "Gte" ||
+    predicate.op === "Lt" ||
+    predicate.op === "Lte"
+  );
 }
 
 function writePredicateCmpLiteral(

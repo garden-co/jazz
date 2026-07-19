@@ -837,7 +837,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
     }
-    const snapshotRefresh = !usesNativeRelationApi;
+    const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -2712,11 +2712,40 @@ function coerceQueryPredicate(
       values: filter.values.map((value) => coerceQueryLiteral(table, filter.column, value, schema)),
     };
   }
+  if (filter.op === "Contains") {
+    const columnType =
+      filter.column === "id"
+        ? ({ type: "Uuid" } as const)
+        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+    return {
+      ...filter,
+      value:
+        columnType?.type === "Array"
+          ? coerceLiteralForColumnType(filter.value, columnType.element, false)
+          : coerceQueryLiteral(table, filter.column, filter.value, schema),
+    };
+  }
   if (filter.op === "IsNull" || filter.op === "IsNotNull") return filter;
-  return {
-    ...filter,
-    value: coerceQueryLiteral(table, filter.column, filter.value, schema),
-  };
+  if (isQueryPredicateCmp(filter)) {
+    return {
+      ...filter,
+      value: coerceQueryLiteral(table, filter.column, filter.value, schema),
+    };
+  }
+  throw new Error(`unsupported query predicate ${JSON.stringify(filter)}`);
+}
+
+function isQueryPredicateCmp(
+  predicate: QueryPredicate,
+): predicate is Extract<QueryPredicate, { op: QueryPredicateOp }> {
+  return (
+    predicate.op === "Eq" ||
+    predicate.op === "Ne" ||
+    predicate.op === "Gt" ||
+    predicate.op === "Gte" ||
+    predicate.op === "Lt" ||
+    predicate.op === "Lte"
+  );
 }
 
 function readSelectColumns(value: unknown): string[] | undefined {
