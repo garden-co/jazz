@@ -1701,10 +1701,15 @@ export class NativeRuntimeAdapter implements Runtime {
         this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else if (subscription.snapshotRefresh) {
         const previousRows = subscription.rows;
-        await this.refreshRowsFromEdge(
-          subscription.session,
-          rowsFromBatches(chunk.delta.updated, this.schema),
-        );
+        // Guarded so the argument never evaluates without a server transport:
+        // memory-backed chunks carry a different updated-payload shape and the
+        // callers swallow rejections, which silently killed delivery.
+        if (this.serverTransport) {
+          await this.refreshRowsFromEdge(
+            subscription.session,
+            rowsFromBatches(chunk.delta.updated, this.schema),
+          );
+        }
         subscription.rows = this.refreshPlainSubscriptionRows(subscription);
         subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
         subscription.opened = true;
