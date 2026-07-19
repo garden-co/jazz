@@ -13,7 +13,11 @@ import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
 import {
   getJazzServerInfo,
   unblockJazzServerNetwork,
@@ -74,11 +78,16 @@ describe("History & Conflict Management", () => {
     testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
     const { appId, serverUrl, adminSecret } = testingServer;
     await unblockJazzServerNetwork(serverUrl);
-    await deploy({
+    const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
       appId,
-      serverUrl,
       adminSecret,
       schema,
+    });
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
+    await publishStoredPermissions(serverUrl, {
+      appId,
+      adminSecret,
+      schemaHash,
       permissions: {
         todos: {
           select: { using: { type: "True" } },
@@ -90,6 +99,7 @@ describe("History & Conflict Management", () => {
           delete: { using: { type: "True" } },
         },
       },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
   });
 

@@ -78,10 +78,7 @@ describe("BrowserAuthSecretStore", () => {
   });
 
   it("uses custom key name", async () => {
-    const customStore = new BrowserAuthSecretStore({
-      storage,
-      authSecretStorageKey: "my-custom-key",
-    });
+    const customStore = new BrowserAuthSecretStore({ storage, key: "my-custom-key" });
     await customStore.saveSecret("test-secret");
     expect(storage.getItem("my-custom-key")).toBe("test-secret");
   });

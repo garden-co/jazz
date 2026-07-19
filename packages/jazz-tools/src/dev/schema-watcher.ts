@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from "node:fs";
 import { basename } from "node:path";
-import { deploy } from "./catalogue-project.js";
+import { deploy } from "./dev-server.js";
 
 export interface SchemaWatcherOptions {
   schemaDir: string;

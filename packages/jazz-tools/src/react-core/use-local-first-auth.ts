@@ -8,22 +8,7 @@ export interface LocalFirstAuth {
   signOut(): Promise<void>;
 }
 
-interface LocalFirstAuthStoreState {
-  subscribe(onChange: () => void): () => void;
-  getSnapshot(): number;
-  login(secret: string): Promise<void>;
-  signOut(): Promise<void>;
-}
-
-const storeStates = new WeakMap<AuthSecretStore, LocalFirstAuthStoreState>();
-const getServerSnapshot = (): number => 0;
-
-function getStoreState(store: AuthSecretStore): LocalFirstAuthStoreState {
-  const existing = storeStates.get(store);
-  if (existing) {
-    return existing;
-  }
-
+export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirstAuth {
   let version = 0;
   const listeners = new Set<() => void>();
 
@@ -40,6 +25,7 @@ function getStoreState(store: AuthSecretStore): LocalFirstAuthStoreState {
   };
 
   const getSnapshot = (): number => version;
+  const getServerSnapshot = (): number => 0;
 
   async function login(secret: string): Promise<void> {
     await store.saveSecret(secret);
@@ -51,40 +37,31 @@ function getStoreState(store: AuthSecretStore): LocalFirstAuthStoreState {
     notify();
   }
 
-  const state = { subscribe, getSnapshot, login, signOut };
-  storeStates.set(store, state);
-  return state;
-}
+  return function useLocalFirstAuth(): LocalFirstAuth {
+    const currentVersion = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+    const [secret, setSecret] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
 
-export function useLocalFirstAuthWithStore(store: AuthSecretStore): LocalFirstAuth {
-  const storeState = getStoreState(store);
-  const currentVersion = useSyncExternalStore(
-    storeState.subscribe,
-    storeState.getSnapshot,
-    getServerSnapshot,
-  );
-  const [secret, setSecret] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+    useEffect(() => {
+      let cancelled = false;
+      setIsLoading(true);
+      store
+        .getOrCreateSecret()
+        .then((resolved) => {
+          if (cancelled) return;
+          setSecret(resolved);
+          setIsLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setSecret(null);
+          setIsLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [currentVersion]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    store
-      .getOrCreateSecret()
-      .then((resolved) => {
-        if (cancelled) return;
-        setSecret(resolved);
-        setIsLoading(false);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSecret(null);
-        setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentVersion, store]);
-
-  return { secret, isLoading, login: storeState.login, signOut: storeState.signOut };
+    return { secret, isLoading, login, signOut };
+  };
 }

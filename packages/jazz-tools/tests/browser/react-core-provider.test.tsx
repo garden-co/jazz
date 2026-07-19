@@ -239,7 +239,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("db-session", "bob");
   });
 
-  it("RCB-B05: useAll returns loading state during pending phase", async () => {
+  it("RCB-B05: useAll returns undefined during pending phase", async () => {
     const manager = new ControlledManager();
     const entry = createEntry<Todo>();
     manager.register(BASE_QUERY, entry);
@@ -251,7 +251,7 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("rows", "loading");
+    await expectText("rows", "undefined");
   });
 
   it("RCB-B06: useAll transitions to data after first fulfillment", async () => {
@@ -266,7 +266,7 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("rows", "loading");
+    await expectText("rows", "undefined");
 
     entry.emitFulfilled([
       { id: "a", title: "Alpha" },
@@ -527,16 +527,9 @@ function DbAuthStateView() {
 }
 
 function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: QueryOptions }) {
-  const result = useAll(query, options);
-  const rows = result.data;
+  const rows = useAll(query, options);
   return (
-    <div data-testid="rows">
-      {rows
-        ? rows.map((row) => row.title).join("|")
-        : result.isLoading
-          ? "loading"
-          : result.error.message}
-    </div>
+    <div data-testid="rows">{rows ? rows.map((row) => row.title).join("|") : "undefined"}</div>
   );
 }
 

@@ -15,7 +15,7 @@ import {
   pushMigration as pushCatalogueMigration,
   shortSchemaHash,
   validateProject,
-} from "./dev/catalogue-project.js";
+} from "./dev/catalogue.js";
 import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {

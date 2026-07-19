@@ -1,4 +1,9 @@
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export {
+  createJazzClient,
+  createExtensionJazzClient,
+  type JazzClient,
+} from "./create-jazz-client.js";
+export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
 export {
   JazzProvider,
   type JazzProviderProps,
@@ -8,11 +13,7 @@ export {
   useJazzClient,
   useSession,
 } from "./provider.js";
-export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
-export {
-  useLocalFirstAuth,
-  type LocalFirstAuth,
-  type UseLocalFirstAuthOptions,
-} from "./use-local-first-auth.js";
+export { useAll, useAllSuspense } from "./use-all.js";
+export { useLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";

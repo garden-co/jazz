@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
 import { createTempRootTracker, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
-import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import { writeFile } from "node:fs/promises";
@@ -96,7 +95,7 @@ describe("ManagedDevRuntime", () => {
       backendSecret: "noninteractive-backend",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed());
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed());
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const runtime = makeRuntime();
@@ -122,7 +121,7 @@ describe("ManagedDevRuntime", () => {
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
     const startLocalJazzServer = vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(catalogueProject, "deploy").mockRejectedValue(makeFetchFailedError("ENOTFOUND"));
+    vi.spyOn(devServer, "deploy").mockRejectedValue(makeFetchFailedError("ENOTFOUND"));
     const watchSchema = vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({
       close: vi.fn(),
     });
@@ -163,7 +162,7 @@ describe("ManagedDevRuntime", () => {
     process.env.VITE_JAZZ_SERVER_URL = "https://v2.sync.jazz.tools/";
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
-    vi.spyOn(catalogueProject, "deploy").mockRejectedValue(
+    vi.spyOn(devServer, "deploy").mockRejectedValue(
       new Error("Schema publish failed: 401 Unauthorized"),
     );
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -181,7 +180,7 @@ describe("ManagedDevRuntime", () => {
     process.env.VITE_JAZZ_SERVER_URL = "https://v2.sync.jazz.tools/";
     process.env.JAZZ_ADMIN_SECRET = "cloud-admin-secret";
 
-    vi.spyOn(catalogueProject, "deploy").mockRejectedValue(
+    vi.spyOn(devServer, "deploy").mockRejectedValue(
       new Error("getaddrinfo ENOTFOUND v2.sync.jazz.tools"),
     );
     vi.spyOn(console, "error").mockImplementation(() => {});

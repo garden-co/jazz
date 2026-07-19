@@ -1025,16 +1025,6 @@ export class JazzClient {
   }
 
   /**
-   * Disconnect from the Jazz server without shutting down the local runtime.
-   *
-   * Local reads and writes can continue. Call {@link connectTransport} to
-   * reconnect the same runtime to a server later.
-   */
-  disconnectTransport(): void {
-    this.runtime.disconnect();
-  }
-
-  /**
    * Get the current schema.
    */
   getSchema(): WasmSchema {
