@@ -108,7 +108,9 @@ Restoration is a tracked work item; exclusions are not permanent.
 - **Fixes**: server writes now use backend-scoped DB handles instead of the
   unauthenticated root DB; insert routes preserve `WriteResult.value` while
   awaiting durability; local-only waits use `tier: "local"`; tests use UUID
-  session subjects for policy-owned rows; async SSE broadcasts are awaited.
+  session subjects for policy-owned rows; async SSE broadcasts are awaited and
+  skipped when no clients are connected; the docs package only rebuilds shared
+  native/tool artifacts when they are absent to avoid parallel test races.
 - **RocksDB lock verdict**: real NAPI shutdown bug. `NapiDb.close()` now calls
   core `Db::close()`, and `Transport.close()` drops its DB-owning inner handle
   after detaching the connection so an in-process restart can reopen the same
@@ -123,10 +125,11 @@ Restoration is a tracked work item; exclusions are not permanent.
   `todo-client-localfirst-ts-docs`, `todo-client-localfirst-solid`,
   `todo-client-localfirst-svelte`, `todo-client-localfirst-vue`,
   `todo-client-localfirst-react`, `todo-client-localfirst-react-docs`.
-- **Fixes**: the only code change needed was in the shared Solid binding:
-  `createSolidJazzClientInternal` now reattaches the non-enumerable
+- **Fixes**: `createSolidJazzClientInternal` now reattaches the non-enumerable
   subscription-store symbol after wrapping the raw client, so `useAll` works in
-  examples that consume built `jazz-tools` package exports.
+  examples that consume built `jazz-tools` package exports. Solid browser tests
+  also use a distinct local test port/app id so they can run beside Vue in the
+  reduced CI filter.
 - **Verification**: all seven scoped `cd <pkg> && pnpm test` runs returned
   `EXIT_CODE:0` after rebuilding `jazz-tools`.
 - **Commit refs**: `080775e1b`, `bffd69ff2`, `70556ac4f`.
