@@ -115,7 +115,7 @@ Restoration is a tracked work item; exclusions are not permanent.
   RocksDB path. Covered by a focused `jazz-tools` NAPI integration regression.
 - **Verification**: `cd examples/todo-server-ts && pnpm test` → `EXIT_CODE:0`;
   `cd examples/docs/todo-server-ts && pnpm test` → `EXIT_CODE:0`.
-- **Commit ref**: `8fb461f46`.
+- **Commit refs**: `8fb461f46`, `5a484b0af`, `f1ab7e3d3`.
 
 ## RESOLVED (2026-07-19): todo client local-first family restored
 
@@ -129,7 +129,7 @@ Restoration is a tracked work item; exclusions are not permanent.
   examples that consume built `jazz-tools` package exports.
 - **Verification**: all seven scoped `cd <pkg> && pnpm test` runs returned
   `EXIT_CODE:0` after rebuilding `jazz-tools`.
-- **Commit refs**: `080775e1b`, `bffd69ff2`.
+- **Commit refs**: `080775e1b`, `bffd69ff2`, `70556ac4f`.
 
 ## RESOLVED (2026-07-19): create-jazz test restored with hosted provisioning env-gated
 
