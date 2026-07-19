@@ -24,6 +24,7 @@ pub enum Value {
     Tuple(Vec<Value>),
     Array(Vec<Value>),
     Nullable(Option<Box<Value>>),
+    I64(i64),
 }
 
 impl From<u8> for Value {
@@ -47,6 +48,12 @@ impl From<u32> for Value {
 impl From<u64> for Value {
     fn from(value: u64) -> Self {
         Self::U64(value)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::I64(value)
     }
 }
 
@@ -169,6 +176,7 @@ pub enum ValueType {
     Tuple(Vec<ValueType>),
     Array(Box<ValueType>),
     Nullable(Box<ValueType>),
+    I64,
 }
 
 impl ValueType {
@@ -176,7 +184,7 @@ impl ValueType {
         match self {
             Self::U8 | Self::Bool => Some(1),
             Self::U16 => Some(2),
-            Self::U64 => Some(8),
+            Self::U64 | Self::I64 => Some(8),
             Self::U32 => Some(4),
             Self::F64 => Some(8),
             Self::Uuid => Some(16),
@@ -231,6 +239,7 @@ pub(super) fn encode_fixed_value(
         (Value::U16(value), ValueType::U16) => bytes.extend(value.to_le_bytes()),
         (Value::U32(value), ValueType::U32) => bytes.extend(value.to_le_bytes()),
         (Value::U64(value), ValueType::U64) => bytes.extend(value.to_le_bytes()),
+        (Value::I64(value), ValueType::I64) => bytes.extend(value.to_le_bytes()),
         (Value::F64(value), ValueType::F64) => {
             if value.is_nan() {
                 return Err(Error::InvalidF64NaN);
@@ -262,6 +271,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::U16 => Ok(Value::U16(u16::from_le_bytes(read_exact::<2>(bytes)?))),
         ValueType::U32 => Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?))),
         ValueType::U64 => Ok(Value::U64(u64::from_le_bytes(read_exact::<8>(bytes)?))),
+        ValueType::I64 => Ok(Value::I64(i64::from_le_bytes(read_exact::<8>(bytes)?))),
         ValueType::F64 => Ok(Value::F64(f64::from_le_bytes(read_exact::<8>(bytes)?))),
         ValueType::Bool => match read_exact::<1>(bytes)?[0] {
             0 => Ok(Value::Bool(false)),
@@ -412,6 +422,7 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
         | (Value::U16(_), ValueType::U16)
         | (Value::U32(_), ValueType::U32)
         | (Value::U64(_), ValueType::U64)
+        | (Value::I64(_), ValueType::I64)
         | (Value::Bool(_), ValueType::Bool)
         | (Value::String(_), ValueType::String)
         | (Value::Bytes(_), ValueType::Bytes)
@@ -494,6 +505,7 @@ fn encode_tuple_member(
         (Value::U16(value), ValueType::U16) => bytes.extend(value.to_be_bytes()),
         (Value::U32(value), ValueType::U32) => bytes.extend(value.to_be_bytes()),
         (Value::U64(value), ValueType::U64) => bytes.extend(value.to_be_bytes()),
+        (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
         (Value::String(value), ValueType::Enum(schema)) => bytes.push(schema.discriminant(value)?),
@@ -546,6 +558,9 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         ValueType::U16 => Ok(Value::U16(u16::from_be_bytes(read_exact::<2>(bytes)?))),
         ValueType::U32 => Ok(Value::U32(u32::from_be_bytes(read_exact::<4>(bytes)?))),
         ValueType::U64 => Ok(Value::U64(u64::from_be_bytes(read_exact::<8>(bytes)?))),
+        ValueType::I64 => Ok(Value::I64(i64_from_order_preserving(read_exact::<8>(
+            bytes,
+        )?))),
         ValueType::Bool => match read_exact::<1>(bytes)?[0] {
             0 => Ok(Value::Bool(false)),
             1 => Ok(Value::Bool(true)),
@@ -593,6 +608,14 @@ fn read_exact<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
         return Err(Error::UnexpectedEof);
     }
     bytes.try_into().map_err(|_| Error::UnexpectedEof)
+}
+
+fn order_preserving_i64(value: i64) -> [u8; 8] {
+    ((value as u64) ^ (1_u64 << 63)).to_be_bytes()
+}
+
+fn i64_from_order_preserving(bytes: [u8; 8]) -> i64 {
+    (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64
 }
 
 pub(super) fn write_u32(bytes: &mut Vec<u8>, value: u32) {

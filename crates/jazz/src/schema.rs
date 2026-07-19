@@ -423,6 +423,7 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
             | GrooveColumnType::U16
             | GrooveColumnType::U32
             | GrooveColumnType::U64
+            | GrooveColumnType::I64
     )
 }
 
@@ -1426,6 +1427,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
         GrooveColumnType::U16 => bytes.push(2),
         GrooveColumnType::U32 => bytes.push(3),
         GrooveColumnType::U64 => bytes.push(4),
+        GrooveColumnType::I64 => bytes.push(14),
         GrooveColumnType::F64 => bytes.push(5),
         GrooveColumnType::Bool => bytes.push(6),
         GrooveColumnType::String => bytes.push(7),

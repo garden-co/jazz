@@ -1443,6 +1443,10 @@ fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> 
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        RecordValue::I64(value) => {
+            key.push(13);
+            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
+        }
         RecordValue::Bool(value) => {
             key.push(5);
             key.push(u8::from(*value));
@@ -1505,6 +1509,16 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
                     .expect("slice has u64 length"),
             )))
         }
+        ValueType::I64 => {
+            expect_key_tag(bytes, 13)?;
+            Ok(RecordValue::I64(
+                (u64::from_be_bytes(
+                    take_key_bytes(bytes, 8)?
+                        .try_into()
+                        .expect("slice has i64 length"),
+                ) ^ (1_u64 << 63)) as i64,
+            ))
+        }
         ValueType::Bool => {
             expect_key_tag(bytes, 5)?;
             match take_key_bytes(bytes, 1)?[0] {
@@ -1542,6 +1556,10 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
             Error::InvalidStorageKey("unsupported window key type".to_owned()),
         ),
     }
+}
+
+fn order_preserving_i64_bits(value: i64) -> u64 {
+    (value as u64) ^ (1_u64 << 63)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {

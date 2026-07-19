@@ -3207,6 +3207,10 @@ fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) {
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        Value::I64(value) => {
+            key.push(13);
+            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
+        }
         Value::Bool(value) => {
             key.push(5);
             key.push(u8::from(*value));
@@ -3250,6 +3254,10 @@ fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.extend([0, 0]);
 }
 
+fn order_preserving_i64_bits(value: i64) -> u64 {
+    (value as u64) ^ (1_u64 << 63)
+}
+
 fn decode_primary_key_part(
     bytes: &mut &[u8],
     value_type: &records::ValueType,
@@ -3286,6 +3294,15 @@ fn decode_primary_key_part(
                     .expect("slice has u64 length"),
             );
             Ok(Value::U64(value))
+        }
+        records::ValueType::I64 => {
+            expect_key_tag(bytes, 13)?;
+            let value = u64::from_be_bytes(
+                take_key_bytes(bytes, 8)?
+                    .try_into()
+                    .expect("slice has i64 length"),
+            );
+            Ok(Value::I64((value ^ (1_u64 << 63)) as i64))
         }
         records::ValueType::Bool => {
             expect_key_tag(bytes, 5)?;
@@ -3364,6 +3381,16 @@ fn decode_index_key_part(
                     .try_into()
                     .expect("slice has u64 length"),
             )))
+        }
+        ColumnType::I64 => {
+            expect_persisted_index_key_tag(bytes, index_name, 13)?;
+            Ok(Value::I64(
+                (u64::from_be_bytes(
+                    take_persisted_index_key_bytes(bytes, index_name, 8)?
+                        .try_into()
+                        .expect("slice has i64 length"),
+                ) ^ (1_u64 << 63)) as i64,
+            ))
         }
         ColumnType::F64 => {
             expect_persisted_index_key_tag(bytes, index_name, 4)?;

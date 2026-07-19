@@ -559,6 +559,7 @@ fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
         ValueType::U16 => ColumnType::U16,
         ValueType::U32 => ColumnType::U32,
         ValueType::U64 => ColumnType::U64,
+        ValueType::I64 => ColumnType::I64,
         ValueType::F64 => ColumnType::F64,
         ValueType::Bool => ColumnType::Bool,
         ValueType::String => ColumnType::String,

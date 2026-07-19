@@ -1058,6 +1058,10 @@ pub(super) fn policy_value_key(value: &Value) -> Option<Vec<u8>> {
             bytes.push(3);
             bytes.extend(value.to_be_bytes());
         }
+        Value::I64(value) => {
+            bytes.push(14);
+            bytes.extend(value.to_be_bytes());
+        }
         Value::F64(value) if !value.is_nan() => {
             bytes.push(4);
             bytes.extend(value.to_bits().to_be_bytes());

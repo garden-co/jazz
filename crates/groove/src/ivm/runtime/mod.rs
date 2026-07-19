@@ -6816,6 +6816,11 @@ fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::I64 => {
+            key.push(13);
+            key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
+            Ok(())
+        }
         ValueType::F64 => {
             let value = borrowed.get_f64(field_idx)?;
             if value.is_nan() {
@@ -6857,6 +6862,17 @@ fn encode_record_field_key_part(
                     key.push(9);
                     key.push(3);
                     key.extend(value.to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I64) => {
+            match borrowed.get_nullable_i64(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(13);
+                    key.extend(order_preserving_i64_bits(value).to_be_bytes());
                 }
                 None => key.push(8),
             }
@@ -7040,6 +7056,9 @@ fn record_field_literal_ordering(
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
         }
+        (ValueType::I64, LiteralValue::I64(expected)) => {
+            Ok(ordering(&record.get_i64(field_idx)?, expected))
+        }
         (ValueType::F64, LiteralValue::F64(expected)) => {
             let expected = f64::from_bits(*expected);
             Ok(record
@@ -7083,6 +7102,10 @@ fn nullable_record_field_literal_ordering(
     match (inner, expected) {
         (ValueType::U64, LiteralValue::U64(expected)) => Ok(record
             .get_nullable_u64(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::I64, LiteralValue::I64(expected)) => Ok(record
+            .get_nullable_i64(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::F64, LiteralValue::F64(expected)) => {
@@ -7186,6 +7209,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
         (Value::Enum(left), Value::Enum(right)) => left.partial_cmp(right),
@@ -7249,6 +7273,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        Value::I64(value) => {
+            key.push(13);
+            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
+        }
         Value::F64(value) => {
             if value.is_nan() {
                 return Err(IvmRuntimeError::RecordEncoding(
@@ -7305,6 +7333,10 @@ fn order_preserving_f64_bits(value: f64) -> u64 {
     } else {
         !bits
     }
+}
+
+fn order_preserving_i64_bits(value: i64) -> u64 {
+    (value as u64) ^ (1_u64 << 63)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -7890,6 +7922,10 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I64(value) => {
+            key.push(13);
+            key.extend(order_preserving_i64_bits(*value).to_be_bytes());
         }
         Value::F64(value) => {
             key.push(4);

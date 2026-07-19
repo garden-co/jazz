@@ -2271,6 +2271,10 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(3);
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        Value::I64(value) => {
+            bytes.push(13);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
         Value::F64(value) => {
             bytes.push(4);
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());

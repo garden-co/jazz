@@ -661,12 +661,12 @@ fn json_value_to_record_value(value: &serde_json::Value) -> Result<Value, QueryE
         serde_json::Value::Number(value) => {
             if let Some(value) = value.as_u64() {
                 Ok(Value::U64(value))
+            } else if let Some(value) = value.as_i64() {
+                Ok(Value::I64(value))
             } else if let Some(value) = value.as_f64() {
                 Ok(Value::F64(value))
             } else {
-                Err(relation_unification_error(
-                    "negative integer relation literals are not supported by this slice",
-                ))
+                Err(relation_unification_error("relation literal is not finite"))
             }
         }
         serde_json::Value::String(value) => Ok(Value::String(value.clone())),
@@ -697,7 +697,8 @@ fn runtime_value_object_to_record_value(
             .map(Value::Uuid)
             .map_err(|_| relation_unification_error("invalid Uuid relation literal")),
         "Bytea" => Ok(Value::Bytes(runtime_bytea_value(value)?)),
-        "Integer" | "BigInt" | "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
+        "Integer" | "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
+        "BigInt" => Ok(Value::I64(runtime_i64_value(value)?)),
         "Double" => Ok(Value::F64(runtime_f64_value(value)?)),
         "Array" => {
             let Some(serde_json::Value::Array(values)) = value else {
@@ -762,6 +763,17 @@ fn runtime_u64_value(value: Option<&serde_json::Value>) -> Result<u64, QueryErro
         }),
         _ => Err(relation_unification_error(
             "integer relation literal requires a numeric value",
+        )),
+    }
+}
+
+fn runtime_i64_value(value: Option<&serde_json::Value>) -> Result<i64, QueryError> {
+    match value {
+        Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
+            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
+        }),
+        _ => Err(relation_unification_error(
+            "BigInt relation literal requires an integer value",
         )),
     }
 }
@@ -2818,6 +2830,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
             | ColumnType::U16
             | ColumnType::U32
             | ColumnType::U64
+            | ColumnType::I64
             | ColumnType::F64
             | ColumnType::Uuid
             | ColumnType::String
@@ -2874,7 +2887,12 @@ fn non_null_column_type(column_type: &ColumnType) -> ColumnType {
 fn is_numeric(column_type: &ColumnType) -> bool {
     matches!(
         column_type,
-        ColumnType::U8 | ColumnType::U16 | ColumnType::U32 | ColumnType::U64 | ColumnType::F64
+        ColumnType::U8
+            | ColumnType::U16
+            | ColumnType::U32
+            | ColumnType::U64
+            | ColumnType::I64
+            | ColumnType::F64
     )
 }
 
@@ -3504,6 +3522,7 @@ fn value_type(value: &Value) -> ColumnType {
         Value::U16(_) => ColumnType::U16,
         Value::U32(_) => ColumnType::U32,
         Value::U64(_) => ColumnType::U64,
+        Value::I64(_) => ColumnType::I64,
         Value::F64(_) => ColumnType::F64,
         Value::Bool(_) => ColumnType::Bool,
         Value::String(_) => ColumnType::String,
@@ -3526,6 +3545,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         | (Value::U16(_), ColumnType::U16)
         | (Value::U32(_), ColumnType::U32)
         | (Value::U64(_), ColumnType::U64)
+        | (Value::I64(_), ColumnType::I64)
         | (Value::F64(_), ColumnType::F64)
         | (Value::Bool(_), ColumnType::Bool)
         | (Value::String(_), ColumnType::String)
@@ -3566,6 +3586,10 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::U64(value) => {
             bytes.push(4);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::I64(value) => {
+            bytes.push(14);
             bytes.extend_from_slice(&value.to_be_bytes());
         }
         Value::F64(value) => {
@@ -3624,6 +3648,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         ColumnType::U16 => bytes.push(2),
         ColumnType::U32 => bytes.push(3),
         ColumnType::U64 => bytes.push(4),
+        ColumnType::I64 => bytes.push(14),
         ColumnType::F64 => bytes.push(5),
         ColumnType::Bool => bytes.push(6),
         ColumnType::String => bytes.push(7),

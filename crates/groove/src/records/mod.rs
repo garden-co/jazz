@@ -1113,6 +1113,11 @@ impl<'a> BorrowedRecord<'a> {
         read_exact_array::<8>(bytes).map(u64::from_le_bytes)
     }
 
+    pub fn get_i64(&self, field_idx: usize) -> Result<i64, Error> {
+        let bytes = self.field_bytes(field_idx, &ValueType::I64)?;
+        read_exact_array::<8>(bytes).map(i64::from_le_bytes)
+    }
+
     pub fn get_f64(&self, field_idx: usize) -> Result<f64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::F64)?;
         let value = read_exact_array::<8>(bytes).map(f64::from_le_bytes)?;
@@ -1193,6 +1198,12 @@ impl<'a> BorrowedRecord<'a> {
     pub fn get_nullable_u64(&self, field_idx: usize) -> Result<Option<u64>, Error> {
         self.nullable_field(field_idx, &ValueType::U64, |payload| {
             read_exact_array::<8>(payload).map(u64::from_le_bytes)
+        })
+    }
+
+    pub fn get_nullable_i64(&self, field_idx: usize) -> Result<Option<i64>, Error> {
+        self.nullable_field(field_idx, &ValueType::I64, |payload| {
+            read_exact_array::<8>(payload).map(i64::from_le_bytes)
         })
     }
 
