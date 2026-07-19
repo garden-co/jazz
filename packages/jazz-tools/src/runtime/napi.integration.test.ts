@@ -21,6 +21,11 @@ type RuntimeRowWithTransactionId = Row & {
   transactionId: string;
 };
 
+type TestRuntimeWithTransport = {
+  connect(url: string, authJson: string): void;
+  close?: () => void | Promise<void>;
+};
+
 type SimpleTodo = {
   id: string;
   title: string;
@@ -403,6 +408,49 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 }
 
 describe("NAPI integration", () => {
+  it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
+    const { wasmSchema } = await loadTodoServerProject();
+    const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");
+    const previousWebSocket = globalThis.WebSocket;
+    class OpenWebSocket {
+      readyState = 1;
+      addEventListener(): void {}
+      send(): void {}
+      close(): void {
+        this.readyState = 3;
+      }
+    }
+    (globalThis as typeof globalThis & { WebSocket: typeof WebSocket }).WebSocket =
+      OpenWebSocket as unknown as typeof WebSocket;
+
+    let first: TestRuntimeWithTransport | null = null;
+    let second: TestRuntimeWithTransport | null = null;
+    try {
+      first = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
+        appId: randomUUID(),
+        env: "test",
+        userBranch: "main",
+      })) as TestRuntimeWithTransport;
+
+      first.connect("ws://127.0.0.1/jazz/ws", "{}");
+      await first.close?.();
+      first = null;
+
+      second = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
+        appId: randomUUID(),
+        env: "test",
+        userBranch: "main",
+      })) as TestRuntimeWithTransport;
+      expect(second).toBeDefined();
+    } finally {
+      await first?.close?.();
+      await second?.close?.();
+      (globalThis as typeof globalThis & { WebSocket?: typeof WebSocket }).WebSocket =
+        previousWebSocket;
+      await cleanupTempRuntimeData(runtimeData);
+    }
+  });
+
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");

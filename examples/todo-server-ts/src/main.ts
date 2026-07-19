@@ -14,6 +14,8 @@ import { createJazzContext, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
+const DEFAULT_OWNER_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -72,7 +74,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     env: "dev",
     userBranch: "main",
   });
-  const db = context.db();
+  const db = context.asBackend();
 
   // Create Express app
   const app = express();
@@ -120,19 +122,18 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const todo = await db
-        .insert(schemaApp.todos, {
-          title: body.title,
-          done: false,
-          description: body.description?.trim(),
-          owner_id: body.owner_id ?? "unknown",
-        })
-        .wait({ tier: "edge" });
+      const inserted = db.insert(schemaApp.todos, {
+        title: body.title,
+        done: false,
+        description: body.description?.trim(),
+        owner_id: body.owner_id ?? DEFAULT_OWNER_ID,
+      });
+      await inserted.wait({ tier: "local" });
 
-      res.status(201).json(todo);
+      res.status(201).json(inserted.value);
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       next(e);
     }
@@ -225,7 +226,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       res.json(todo);
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       next(e);
     }
@@ -240,7 +241,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       res.status(204).send();
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       const error = e as Error;
       if (error.message?.includes("NotFound")) {

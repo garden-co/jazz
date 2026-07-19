@@ -151,18 +151,17 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      const todo = await db
-        .insert(schemaApp.todos, {
-          title: body.title,
-          done: false,
-          owner_id: body.owner_id ?? "anonymous",
-        })
-        .wait({ tier: writeTier });
+      const inserted = db.insert(schemaApp.todos, {
+        title: body.title,
+        done: false,
+        owner_id: body.owner_id ?? "93c209ee-dbae-5071-a90d-02f8c0bbcf6a",
+      });
+      await inserted.wait({ tier: writeTier });
 
-      res.status(201).json(todo);
+      res.status(201).json(inserted.value);
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       next(e);
     }
@@ -254,7 +253,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
       res.json(todo);
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       next(e);
     }
@@ -269,7 +268,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
       res.status(204).send();
 
       // Notify SSE connections
-      broadcastTodos();
+      await broadcastTodos();
     } catch (e) {
       const error = e as Error;
       if (error.message?.includes("NotFound")) {

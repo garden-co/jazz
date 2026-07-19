@@ -279,6 +279,7 @@ enum NapiTransportInner {
         db: Rc<CoreDb<CoreRocksDbStorage>>,
         connection: Option<Rc<RefCell<CorePeerConnection<CoreRocksDbStorage>>>>,
     },
+    Closed,
 }
 
 enum NapiSubscription {
@@ -390,24 +391,26 @@ impl Transport {
         match &self.inner {
             NapiTransportInner::Memory { connection, .. } => core_tick_connection(connection),
             NapiTransportInner::Persistent { connection, .. } => core_tick_connection(connection),
+            NapiTransportInner::Closed => Ok(0),
         }
     }
 
     #[napi]
     pub fn close(&mut self) -> bool {
-        match &mut self.inner {
+        match std::mem::replace(&mut self.inner, NapiTransportInner::Closed) {
             NapiTransportInner::Memory { db, connection } => {
-                let Some(connection) = connection.take() else {
+                let Some(connection) = connection else {
                     return false;
                 };
                 db.detach_connection(&connection)
             }
             NapiTransportInner::Persistent { db, connection } => {
-                let Some(connection) = connection.take() else {
+                let Some(connection) = connection else {
                     return false;
                 };
                 db.detach_connection(&connection)
             }
+            NapiTransportInner::Closed => false,
         }
     }
 }
@@ -1477,8 +1480,19 @@ impl NapiDb {
     }
 
     #[napi]
-    pub fn close(&self) {
-        self.inner.borrow_mut().take();
+    pub fn close(&self) -> napi::Result<()> {
+        let inner = self.inner.borrow_mut().take();
+        if let Some(inner) = inner {
+            match inner {
+                NapiDbInnerStorage::Memory(db) => db
+                    .close()
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                NapiDbInnerStorage::Persistent(db) => db
+                    .close()
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            }
+        }
+        Ok(())
     }
 }
 

@@ -246,6 +246,11 @@ type CompletedTx = {
   state: "committed" | "rolled_back";
 };
 
+type ServerTransportErrorWaiter = {
+  active: boolean;
+  reject: (error: Error) => void;
+};
+
 type RuntimeSession = {
   user_id: string;
   claims: Record<string, unknown>;
@@ -338,7 +343,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
-  private serverTransportErrorWaiters: Array<(error: Error) => void> = [];
+  private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
@@ -417,6 +422,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
+    this.clearServerTransportErrorWaiters();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
@@ -684,7 +690,11 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!isPendingWaitError(secondError)) throw secondError;
         }
         const transportError = this.waitForServerTransportError(tier);
-        await (transportError ? Promise.race([change, transportError]) : change);
+        try {
+          await (transportError ? Promise.race([change, transportError.promise]) : change);
+        } finally {
+          transportError?.cancel();
+        }
       }
     }
   }
@@ -895,12 +905,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
   }
 
-  disconnect(): void {
+  disconnect(options: { rejectWaiters?: boolean } = {}): void {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
     this.serverTransportError = null;
-    this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
+    if (options.rejectWaiters ?? true) {
+      this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
+    } else {
+      this.clearServerTransportErrorWaiters();
+    }
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverEndpointUrl = null;
@@ -1340,7 +1354,11 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!isPendingCoverageError(error)) throw error;
       }
       const transportError = this.waitForServerTransportError(tier);
-      await (transportError ? Promise.race([sleep(10), transportError]) : sleep(10));
+      try {
+        await (transportError ? Promise.race([sleep(10), transportError.promise]) : sleep(10));
+      } finally {
+        transportError?.cancel();
+      }
     }
     this.scheduleServerPump();
     throw new Error("Timed out waiting for edge query coverage");
@@ -1754,17 +1772,44 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private waitForServerTransportError(tier: string): Promise<never> | null {
+  private waitForServerTransportError(
+    tier: string,
+  ): { promise: Promise<never>; cancel: () => void } | null {
     if (tier !== "edge" && tier !== "global") return null;
-    if (this.serverTransportError) return Promise.reject(this.serverTransportError);
-    return new Promise((_, reject) => {
-      this.serverTransportErrorWaiters.push(reject);
+    if (this.serverTransportError) {
+      return {
+        promise: Promise.reject(this.serverTransportError),
+        cancel: () => {},
+      };
+    }
+    const waiter: ServerTransportErrorWaiter = {
+      active: true,
+      reject: () => {},
+    };
+    const promise = new Promise<never>((_, reject) => {
+      waiter.reject = reject;
     });
+    this.serverTransportErrorWaiters.push(waiter);
+    return {
+      promise,
+      cancel: () => {
+        waiter.active = false;
+      },
+    };
   }
 
   private resolveServerTransportErrorWaiters(error: Error): void {
     const waiters = this.serverTransportErrorWaiters.splice(0);
-    for (const reject of waiters) reject(error);
+    for (const waiter of waiters) {
+      if (waiter.active) waiter.reject(error);
+    }
+  }
+
+  private clearServerTransportErrorWaiters(): void {
+    for (const waiter of this.serverTransportErrorWaiters) {
+      waiter.active = false;
+    }
+    this.serverTransportErrorWaiters.length = 0;
   }
 }
 

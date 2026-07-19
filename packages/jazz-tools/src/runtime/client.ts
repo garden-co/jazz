@@ -86,7 +86,7 @@ export interface Runtime {
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
   /** Disconnect from the Jazz server and drop the transport handle. */
-  disconnect(): void;
+  disconnect(options?: { rejectWaiters?: boolean }): void;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -1060,11 +1060,11 @@ export class JazzClient {
     }
 
     this.shutdownPromise = (async () => {
-      this.runtime.disconnect();
-
       // Close runtime if it supports explicit shutdown.
       if (this.runtime.close) {
         await this.runtime.close();
+      } else {
+        this.runtime.disconnect({ rejectWaiters: false });
       }
     })();
 
