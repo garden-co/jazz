@@ -319,6 +319,9 @@ fn coerce_literal_for_column_type(
         (GrooveValue::String(value), GrooveColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(GrooveValue::Uuid)
             .unwrap_or(GrooveValue::String(value)),
+        (GrooveValue::U64(value), GrooveColumnType::I64) => i64::try_from(value)
+            .map(GrooveValue::I64)
+            .unwrap_or(GrooveValue::U64(value)),
         (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
             GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
                 *value, inner,
@@ -537,9 +540,8 @@ fn convert_column_type(
         // INTEGER columns are therefore represented as U32 and the
         // core write path rejects negative values.
         ColumnType::Integer => Ok(GrooveColumnType::U32),
-        // Core fixed-width cells are unsigned. Public BIGINT writes are
-        // accepted only for non-negative values by the client conversion path.
-        ColumnType::BigInt => Ok(GrooveColumnType::U64),
+        // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
+        ColumnType::BigInt => Ok(GrooveColumnType::I64),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "BatchId columns are not supported by core schema conversion yet",
@@ -2130,6 +2132,8 @@ fn convert_policy_literal(
         Value::Null => Ok(GrooveValue::Nullable(None)),
         Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
+        Value::Integer(value) => Ok(GrooveValue::U32(encode_signed_i32_for_core(*value))),
+        Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
@@ -2140,6 +2144,10 @@ fn convert_policy_literal(
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
     SchemaConversionError::new(path, message)
+}
+
+fn encode_signed_i32_for_core(value: i32) -> u32 {
+    (value as u32) ^ 0x8000_0000
 }
 
 #[cfg(test)]
@@ -2386,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_bigint_as_core_u64() {
+    fn converts_public_bigint_as_core_i64() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::BigInt))
             .build();
@@ -2404,7 +2412,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::U64
+            GrooveColumnType::I64
         );
     }
 

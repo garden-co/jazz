@@ -187,6 +187,11 @@ export type IntColumn<
   HasDefault extends boolean = false,
   Value = number,
 > = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
+export type BigIntColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = bigint,
+> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
@@ -269,20 +274,22 @@ export type ColumnAlias<
         ? BooleanColumn<Optional, HasDefault, Value>
         : Sql extends "INTEGER"
           ? IntColumn<Optional, HasDefault, Value>
-          : Sql extends "TIMESTAMP"
-            ? TimestampColumn<Optional, HasDefault, Value>
-            : Sql extends "REAL"
-              ? FloatColumn<Optional, HasDefault, Value>
-              : Sql extends "BYTEA"
-                ? BytesColumn<Optional, HasDefault, Value>
-                : Sql extends JsonSqlType<infer Output>
-                  ? JsonColumn<Output, Optional, HasDefault, Value>
-                  : Sql extends {
-                        kind: "ENUM";
-                        variants: infer Variants extends readonly string[];
-                      }
-                    ? EnumColumn<Variants, Optional, HasDefault, Value>
-                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
+          : Sql extends "BIGINT"
+            ? BigIntColumn<Optional, HasDefault, Value>
+            : Sql extends "TIMESTAMP"
+              ? TimestampColumn<Optional, HasDefault, Value>
+              : Sql extends "REAL"
+                ? FloatColumn<Optional, HasDefault, Value>
+                : Sql extends "BYTEA"
+                  ? BytesColumn<Optional, HasDefault, Value>
+                  : Sql extends JsonSqlType<infer Output>
+                    ? JsonColumn<Output, Optional, HasDefault, Value>
+                    : Sql extends {
+                          kind: "ENUM";
+                          variants: infer Variants extends readonly string[];
+                        }
+                      ? EnumColumn<Variants, Optional, HasDefault, Value>
+                      : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
@@ -625,6 +632,12 @@ class AddBuilder {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
+  bigint<const TDefault extends bigint | null>(opts: {
+    default: TDefault;
+  }): AddOp<"BIGINT", TDefault> {
+    return { _type: "add", sqlType: "BIGINT", default: opts.default };
+  }
+
   timestamp<const TDefault extends Date | number | null>(opts: {
     default: TDefault;
   }): AddOp<"TIMESTAMP", TDefault> {
@@ -721,6 +734,12 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
+  bigint<const TBackwardsDefault extends bigint | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<"BIGINT", TBackwardsDefault> {
+    return { _type: "drop", sqlType: "BIGINT", backwardsDefault: opts.backwardsDefault };
+  }
+
   timestamp<const TBackwardsDefault extends Date | number | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"TIMESTAMP", TBackwardsDefault> {
@@ -810,6 +829,7 @@ export const col = {
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
   int: () => new ScalarBuilder("INTEGER") as unknown as IntColumn,
+  bigint: () => new ScalarBuilder("BIGINT") as unknown as BigIntColumn,
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,

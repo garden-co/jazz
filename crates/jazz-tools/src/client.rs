@@ -8,10 +8,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::public_api::query::{
+    Condition as PublicCondition, SortDirection as PublicSortDirection,
+};
 use crate::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
 use crate::public_schema::Schema;
 use crate::public_schema::TableName;
-use crate::public_schema::{LargeValueHandle, Query, Session, Value, WriteContext};
+use crate::public_schema::{
+    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
+};
 use crate::public_schema::{OrderedRowDelta, Row};
 use crate::server::core_websocket_transport::WebSocketTransport;
 use crate::server::public_schema_convert::convert_public_schema;
@@ -1461,9 +1466,7 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
         Value::Integer(value) => Ok(CoreValue::U32(encode_signed_i32_for_core(value))),
-        Value::BigInt(value) => u64::try_from(value).map(CoreValue::U64).map_err(|_| {
-            JazzError::Write("negative BIGINT values are not supported by core".to_string())
-        }),
+        Value::BigInt(value) => Ok(CoreValue::I64(value)),
         Value::Double(value) => Ok(CoreValue::F64(value)),
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
         Value::Uuid(value) => Ok(CoreValue::Uuid(*value.uuid())),
@@ -1497,11 +1500,7 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
             } else if let Some(value) = value.as_i64() {
                 i32::try_from(value)
                     .map(|value| CoreValue::U32(encode_signed_i32_for_core(value)))
-                    .map_err(|_| {
-                        JazzError::Connection(format!(
-                            "signed JWT claim number {value} is outside supported i32 range"
-                        ))
-                    })
+                    .or(Ok(CoreValue::I64(value)))
             } else if let Some(value) = value.as_f64() {
                 Ok(CoreValue::F64(value))
             } else {
@@ -1575,6 +1574,7 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
         CoreValue::U32(value) => Ok(Value::Integer(decode_signed_i32_from_core(value))),
+        CoreValue::I64(value) => Ok(Value::BigInt(value)),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
@@ -1593,6 +1593,81 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             "client does not support core value {other:?}"
         ))),
     }
+}
+
+fn public_to_core_literal_for_column(value: &Value, column_type: &ColumnType) -> Result<CoreValue> {
+    match (value, column_type) {
+        (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(*value))),
+        (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(*value)),
+        (Value::BigInt(value), ColumnType::Integer) => i32::try_from(*value)
+            .map(|value| CoreValue::U32(encode_signed_i32_for_core(value)))
+            .map_err(|_| {
+                JazzError::Query(format!(
+                    "BIGINT literal {value} is outside INTEGER range for core query"
+                ))
+            }),
+        _ => public_to_core_value(value.clone()),
+    }
+}
+
+fn core_literal_operand(value: &Value, column_type: &ColumnType) -> Result<jazz::query::Operand> {
+    public_to_core_literal_for_column(value, column_type).map(jazz::query::Operand::Literal)
+}
+
+fn core_query_condition(
+    condition: &PublicCondition,
+    table_schema: &TableSchema,
+) -> Result<Vec<jazz::query::Predicate>> {
+    let column = condition.column();
+    let column_schema = table_schema
+        .columns
+        .columns
+        .iter()
+        .find(|schema| schema.name.as_str() == column)
+        .ok_or_else(|| JazzError::Query(format!("unknown column {column}")))?;
+    let column_operand = || jazz::query::Operand::Column(column.to_owned());
+    let literal_operand = |value: &Value| core_literal_operand(value, &column_schema.column_type);
+
+    let predicate = match condition {
+        PublicCondition::Eq { value, .. } if value.is_null() => {
+            jazz::query::is_null(column_operand())
+        }
+        PublicCondition::Ne { value, .. } if value.is_null() => {
+            jazz::query::not(jazz::query::is_null(column_operand()))
+        }
+        PublicCondition::Eq { value, .. } => {
+            jazz::query::eq(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Ne { value, .. } => {
+            jazz::query::ne(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Lt { value, .. } => {
+            jazz::query::lt(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Le { value, .. } => {
+            jazz::query::lte(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Gt { value, .. } => {
+            jazz::query::gt(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Ge { value, .. } => {
+            jazz::query::gte(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::Contains { value, .. } => {
+            jazz::query::contains(column_operand(), literal_operand(value)?)
+        }
+        PublicCondition::IsNull { .. } => jazz::query::is_null(column_operand()),
+        PublicCondition::IsNotNull { .. } => {
+            jazz::query::not(jazz::query::is_null(column_operand()))
+        }
+        PublicCondition::Between { min, max, .. } => {
+            return Ok(vec![
+                jazz::query::gte(column_operand(), literal_operand(min)?),
+                jazz::query::lte(column_operand(), literal_operand(max)?),
+            ]);
+        }
+    };
+    Ok(vec![predicate])
 }
 
 fn aggregate_public_values(query: &Query, row: &jazz::node::CurrentRow) -> Result<Vec<Value>> {
@@ -1691,13 +1766,9 @@ impl JazzClient {
     }
     fn core_query(&self, query: &Query) -> Result<jazz::query::Query> {
         if query.disjuncts.len() != 1
-            || !query.disjuncts[0].conditions.is_empty()
             || !query.joins.is_empty()
             || !query.array_subqueries.is_empty()
             || query.recursive.is_some()
-            || !query.order_by.is_empty()
-            || query.limit.is_some()
-            || query.offset != 0
             || query.include_deleted
             || query.result_element_index.is_some()
             || (query.aggregate.is_some() && query.select_columns.is_some())
@@ -1707,6 +1778,15 @@ impl JazzClient {
             ));
         }
         let mut core_query = jazz::query::Query::from(query.table.as_str());
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(query.table.as_str()))
+            .ok_or_else(|| JazzError::Query(format!("unknown table {}", query.table.as_str())))?;
+        for condition in &query.disjuncts[0].conditions {
+            for predicate in core_query_condition(condition, table_schema)? {
+                core_query = core_query.filter(predicate);
+            }
+        }
         if let Some(aggregate) = &query.aggregate {
             let outputs = aggregate
                 .outputs
@@ -1730,6 +1810,19 @@ impl JazzClient {
             }
         } else if let Some(columns) = query.select_columns.clone() {
             core_query = core_query.select(columns);
+        }
+        for (column, direction) in &query.order_by {
+            let direction = match direction {
+                PublicSortDirection::Ascending => jazz::query::OrderDirection::Asc,
+                PublicSortDirection::Descending => jazz::query::OrderDirection::Desc,
+            };
+            core_query = core_query.order_by(column.clone(), direction);
+        }
+        if let Some(limit) = query.limit {
+            core_query = core_query.limit(limit);
+        }
+        if query.offset != 0 {
+            core_query = core_query.offset(query.offset);
         }
         Ok(core_query)
     }

@@ -75,6 +75,9 @@ function literalToWasmValue(value: unknown): Value {
     if (value >= -2147483648 && value <= 2147483647) {
       return { type: "Integer", value };
     }
+    return { type: "BigInt", value: BigInt(value) };
+  }
+  if (typeof value === "bigint") {
     return { type: "BigInt", value };
   }
   if (Array.isArray(value)) {

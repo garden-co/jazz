@@ -62,7 +62,7 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
     : T extends "INTEGER"
       ? number
       : T extends "BIGINT"
-        ? number
+        ? bigint
         : T extends "REAL"
           ? number
           : T extends "TIMESTAMP"

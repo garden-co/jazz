@@ -61,7 +61,13 @@ impl LargeValueHandle {
 #[serde(tag = "type", content = "value")]
 enum ValueHuman {
     Integer(i32),
-    BigInt(i64),
+    BigInt(
+        #[serde(
+            serialize_with = "serialize_bigint_value",
+            deserialize_with = "deserialize_bigint_value"
+        )]
+        i64,
+    ),
     Double(f64),
     Boolean(bool),
     Text(String),
@@ -147,6 +153,57 @@ where
     }
 
     deserializer.deserialize_any(TimestampValueVisitor)
+}
+
+fn serialize_bigint_value<S>(value: &i64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_bigint_value<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BigIntValueVisitor;
+
+    impl Visitor<'_> for BigIntValueVisitor {
+        type Value = i64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a signed 64-bit integer or decimal string")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            i64::try_from(value).map_err(|_| E::custom("bigint is out of signed 64-bit range"))
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value
+                .parse::<i64>()
+                .map_err(|_| E::custom("bigint string must be a signed 64-bit integer"))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(BigIntValueVisitor)
 }
 
 impl From<&Value> for ValueHuman {
