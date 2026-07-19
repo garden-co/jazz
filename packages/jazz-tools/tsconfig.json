@@ -21,6 +21,8 @@
     "dist",
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
+    "src/**/*.typecheck.ts",
+    "src/**/*.typecheck.tsx",
     "src/solid/**/*",
     "src/dev/test-helpers.ts",
     "src/react-core/test-utils.ts",

@@ -35,6 +35,11 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./react-native": {
+      "types": "./dist/react-native/index.d.ts",
+      "react-native": "./dist/react-native/index.js",
+      "default": "./dist/react-native/index.js"
+    },
     "./solid": {
       "types": "./dist/solid/index.d.ts",
       "browser": "./dist/solid/index.js",
@@ -77,6 +82,10 @@
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
     },
+    "./dev/expo": {
+      "types": "./dist/dev/expo.d.ts",
+      "default": "./dist/dev/expo.js"
+    },
     "./dev/sveltekit": {
       "types": "./dist/dev/sveltekit.d.ts",
       "default": "./dist/dev/sveltekit.js"
@@ -85,6 +94,16 @@
       "types": "./dist/svelte/index.d.ts",
       "svelte": "./dist/svelte/index.js",
       "default": "./dist/svelte/index.js"
+    },
+    "./expo": {
+      "types": "./dist/expo/index.d.ts",
+      "react-native": "./dist/expo/index.js",
+      "default": "./dist/expo/index.js"
+    },
+    "./expo/polyfills": {
+      "types": "./dist/expo/polyfills.d.ts",
+      "react-native": "./dist/expo/polyfills.js",
+      "default": "./dist/expo/polyfills.js"
     },
     "./passphrase": {
       "types": "./dist/passphrase.d.ts",
@@ -105,10 +124,11 @@
     "build:runtime": "node scripts/clean-dist.mjs && tsc",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts && pnpm typecheck:react-native",
     "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
-    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
+    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:react-native",
+    "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
@@ -162,7 +182,12 @@
   },
   "peerDependencies": {
     "better-auth": "^1.5.5",
+    "expo": ">=54",
+    "expo-crypto": ">=14.0.0",
+    "expo-secure-store": ">=14.0.0",
+    "jazz-rn": "workspace:*",
     "react": ">=19",
+    "react-native": ">=0.76",
     "solid-js": ">=1.9.13",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"
@@ -171,7 +196,22 @@
     "better-auth": {
       "optional": true
     },
+    "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-secure-store": {
+      "optional": true
+    },
+    "jazz-rn": {
+      "optional": true
+    },
     "react": {
+      "optional": true
+    },
+    "react-native": {
       "optional": true
     },
     "solid-js": {

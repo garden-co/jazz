@@ -192,14 +192,6 @@ const removedBrowserRuntimePrefix = ["browser", "broker"].join("-");
 const removedPostMessagePathName = ["worker", "bridge"].join("-");
 const removedLeaderLockName = ["leader", "lock"].join("-");
 const removedBrowserRuntimeBuildArtifacts = [
-  "dev/expo.js",
-  "dev/expo.d.ts",
-  "expo/index.js",
-  "expo/index.d.ts",
-  "expo/polyfills.js",
-  "expo/polyfills.d.ts",
-  "react-native/index.js",
-  "react-native/index.d.ts",
   `runtime/${removedBrowserRuntimePrefix}-client.js`,
   `runtime/${removedBrowserRuntimePrefix}-client.d.ts`,
   `runtime/${removedBrowserRuntimePrefix}-errors.js`,
@@ -238,10 +230,7 @@ const removedBrowserRuntimeExportPathFragments = [
   "browser-broker",
   "broker-worker",
   ["direct", "wasm"].join("-"),
-  "/dev/expo",
-  "/expo",
   "leader-lock",
-  "/react-native",
   "sync-transport",
   "worker-bridge",
   "jazz-broker-worker",
@@ -397,6 +386,17 @@ describe("package root public API", () => {
     }
   });
 
+  it("publishes restored React Native and Expo entrypoints", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
+    ) as { exports: Record<string, unknown> };
+    const exportedSubpaths = new Set(Object.keys(packageJson.exports));
+
+    expect(Array.from(exportedSubpaths)).toEqual(
+      expect.arrayContaining(["./react-native", "./expo", "./expo/polyfills", "./dev/expo"]),
+    );
+  });
+
   it("keeps Expo example imports within published package boundaries", () => {
     const packageJson = JSON.parse(
       readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
@@ -406,6 +406,7 @@ describe("package root public API", () => {
     const exampleRoots = [
       join(repoRoot, "examples/todo-client-localfirst-expo"),
       join(repoRoot, "examples/docs/todo-client-localfirst-expo"),
+      join(repoRoot, "dev/stress-tests/stress-test-expo"),
     ];
     const missingExports: string[] = [];
 

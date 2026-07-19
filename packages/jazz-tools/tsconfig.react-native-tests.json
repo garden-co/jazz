@@ -1,0 +1,16 @@
+{
+  // Typecheck-only RN/Expo compile coverage. Vitest runtime configs do not
+  // include *.typecheck.* files.
+  "extends": "./tsconfig.tests.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "src/react-native/**/*.typecheck.ts",
+    "src/react-native/**/*.typecheck.tsx",
+    "src/expo/**/*.typecheck.ts",
+    "src/expo/**/*.typecheck.tsx",
+    "src/dev/expo.typecheck.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
