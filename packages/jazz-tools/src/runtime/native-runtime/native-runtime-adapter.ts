@@ -777,14 +777,18 @@ export class NativeRuntimeAdapter implements Runtime {
           relationMaterializationSpec(coreQueryJson, this.schema),
         );
       }
-      const rows = session
+      let rows = session
         ? this.db.allForIdentity(query, session.identity, opts)
         : this.db.all(query, opts);
-      return this.applyTransactionReadOverlay(
-        rowsFromBatches(readRowBatches(rows), this.schema),
-        coreQueryJson,
-        optionsJson,
-      );
+      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      if ((tier === "edge" || tier === "global") && rowStates.length > 0) {
+        await this.refreshRowsFromEdge(session, rowStates);
+        rows = session
+          ? this.db.allForIdentity(query, session.identity, opts)
+          : this.db.all(query, opts);
+        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      }
+      return this.applyTransactionReadOverlay(rowStates, coreQueryJson, optionsJson);
     } finally {
       if (attachment !== undefined) this.db.detachQuery?.(attachment);
     }
@@ -1221,6 +1225,37 @@ export class NativeRuntimeAdapter implements Runtime {
       ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
       : this.db.all(subscription.query, subscription.opts);
     return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
+  }
+
+  private async refreshRowsFromEdge(
+    session: RuntimeSession | null,
+    rows: RowState[],
+  ): Promise<void> {
+    if (!this.serverTransport || rows.length === 0) return;
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const key = rowKey(row.table, row.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const queryJson = JSON.stringify({
+        table: row.table,
+        conditions: [{ column: "id", op: "eq", value: row.id }],
+        array_subqueries: [],
+      });
+      const query = this.prepareQuery(queryJson);
+      let attachment: unknown;
+      try {
+        attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+        const opts = readOptions("edge", false, null);
+        if (session) {
+          this.db.allForIdentity(query, session.identity, opts);
+        } else {
+          this.db.all(query, opts);
+        }
+      } finally {
+        if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      }
+    }
   }
 
   private refreshNativeRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
@@ -1666,6 +1701,10 @@ export class NativeRuntimeAdapter implements Runtime {
         this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else if (subscription.snapshotRefresh) {
         const previousRows = subscription.rows;
+        await this.refreshRowsFromEdge(
+          subscription.session,
+          rowsFromBatches(chunk.delta.updated, this.schema),
+        );
         subscription.rows = this.refreshPlainSubscriptionRows(subscription);
         subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
         subscription.opened = true;
