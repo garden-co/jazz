@@ -12,8 +12,6 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
 import {
   createServer,
   startServer,
@@ -36,8 +34,7 @@ describe("Todo Server Integration", () => {
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
-      schema: app,
-      permissions,
+      schemaDir: join(import.meta.dirname, ".."),
     });
 
     // Create server with temp persistent storage plus an ephemeral upstream server.
@@ -209,8 +206,7 @@ describe("Todo Server Integration", () => {
         serverUrl: coldStartUpstream.url,
         appId: coldStartUpstream.appId,
         adminSecret: coldStartUpstream.adminSecret,
-        schema: app,
-        permissions,
+        schemaDir: join(import.meta.dirname, ".."),
       });
 
       // Use a shared data path so both server instances see the same Fjall file
@@ -290,8 +286,7 @@ describe("Todo Server Integration", () => {
         serverUrl: sseUpstream.url,
         appId: sseUpstream.appId,
         adminSecret: sseUpstream.adminSecret,
-        schema: app,
-        permissions,
+        schemaDir: join(import.meta.dirname, ".."),
       });
       const sseServer = await startServer(
         await createServer({

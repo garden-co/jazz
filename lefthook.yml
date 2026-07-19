@@ -3,7 +3,7 @@ pre-commit:
     no-sensitive-data:
       # Patterns live in jazz-private (cleartext there instead of decodable
       # base64 here); hook is a no-op on machines without that checkout.
-      run: sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh"; if [ -x "$GATE" ]; then "$GATE"; else exit 0; fi' 
+      run: sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh"; if [ -x "$GATE" ]; then "$GATE"; else exit 0; fi'
     rustfmt:
       glob: "*.rs"
       run: cargo fmt

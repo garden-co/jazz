@@ -64,11 +64,7 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
 // #region collab-subscribe
 export function ProjectTasks({ projectId }: { projectId: string }) {
   const db = useDb();
-  const {
-    data: tasks,
-    isLoading,
-    error,
-  } = useAll(app.tasks.where({ projectId, done: false }).orderBy("$createdAt", "desc"));
+  const tasks = useAll(app.tasks.where({ projectId, done: false }).orderBy("$createdAt", "desc"));
 
   function addTask(title: string) {
     db.insert(app.tasks, { title, done: false, projectId });
@@ -78,8 +74,7 @@ export function ProjectTasks({ projectId }: { projectId: string }) {
     db.update(app.tasks, taskId, { done: true });
   }
 
-  if (isLoading) return <p>Loading…</p>;
-  if (error) return <p>Something went wrong!</p>;
+  if (!tasks) return <p>Loading…</p>;
 
   return (
     <ul>

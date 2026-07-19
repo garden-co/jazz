@@ -14,6 +14,10 @@ import type { DbConfig } from "jazz-tools";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -31,20 +35,14 @@ describe("Vue Todo App E2E", () => {
   const mounts: Array<{ app: VueApp; container: HTMLDivElement }> = [];
 
   /** Mount the real App. Returns the container element. */
-  async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
+  async function mountApp(config: Partial<DbConfig>): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
     // Dynamic import so the Vue compiler processes the SFC
     const { default: App } = await import("../../src/App.vue");
 
-    const app = createApp(App, {
-      config: {
-        appId: config.appId ?? "test-app",
-        driver: { type: "persistent", dbName: crypto.randomUUID() },
-        ...config,
-      },
-    });
+    const app = createApp(App, { config: { appId: config.appId ?? "test-app", ...config } });
     app.mount(el);
     mounts.push({ app, container: el });
 
@@ -87,7 +85,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -99,7 +97,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -124,7 +122,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 
     // Add a todo first
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -158,7 +156,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
 
     // Add a todo
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -189,7 +187,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos with correct state", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -218,7 +216,7 @@ describe("Vue Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("persists todos across app unmount and remount (OPFS)", async () => {
-    const dbName = crypto.randomUUID();
+    const dbName = uniqueDbName("opfs");
 
     // First session: mount app, add a todo via the form
     const el1 = await mountApp({ driver: { type: "persistent", dbName } });
@@ -261,10 +259,12 @@ describe("Vue Todo App E2E", () => {
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
     });
     const el2 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
     });
 

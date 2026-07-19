@@ -740,7 +740,7 @@ async fn jwks_handler(
 ///
 /// NOTE: This tests "subscribe triggers sync, data eventually arrives" behavior.
 /// We do NOT currently have upstream confirmation - "complete" means local graph
-/// settled, not that we've received all server data. See crates/jazz/SPEC/8_sync_protocol.md
+/// settled, not that we've received all server data. See specs/sync_manager.md
 /// Future Work section.
 ///
 /// NOTE: The global-server lazy schema activation is tested in jazz's

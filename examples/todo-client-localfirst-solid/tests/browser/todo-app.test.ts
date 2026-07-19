@@ -10,6 +10,10 @@ import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -22,19 +26,12 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
 describe("Solid Todo App E2E", () => {
   const mounts: Array<{ dispose: () => void; container: HTMLDivElement }> = [];
 
-  async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
+  async function mountApp(config: Partial<DbConfig>): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
     const dispose = render(
-      () =>
-        App({
-          config: {
-            appId: config.appId ?? "test-app",
-            driver: { type: "persistent", dbName: crypto.randomUUID() },
-            ...config,
-          },
-        }),
+      () => App({ config: { appId: config.appId ?? "test-app", ...config } }),
       el,
     );
     mounts.push({ dispose, container: el });
@@ -71,7 +68,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -79,7 +76,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("adds a todo via the form", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -100,7 +97,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -128,7 +125,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -153,7 +150,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("renders multiple todos with correct state", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -176,7 +173,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("persists todos across app unmount and remount (OPFS)", async () => {
-    const dbName = crypto.randomUUID();
+    const dbName = uniqueDbName("opfs");
 
     const el1 = await mountApp({ driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -210,10 +207,12 @@ describe("Solid Todo App E2E", () => {
 
     const el1 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
     });
     const el2 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
     });
 

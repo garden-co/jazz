@@ -14,6 +14,10 @@ import { DbConfig } from "jazz-tools";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -54,10 +58,7 @@ describe("Vanilla TS Todo App E2E", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
-    const { destroy } = await startApp(el, {
-      driver: { type: "persistent", dbName: crypto.randomUUID() },
-      ...config,
-    });
+    const { destroy } = await startApp(el, config);
     instances.push({ container: el, destroy });
 
     // Wait for the app to render
@@ -102,7 +103,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mount();
+    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -114,7 +115,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mount();
+    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
 
     addTodo(el, "Buy milk");
 
@@ -130,7 +131,9 @@ describe("Vanilla TS Todo App E2E", () => {
   });
 
   it("renders child todos directly under their parent with nesting depth", async () => {
-    const el = await mount();
+    const el = await mount({
+      driver: { type: "persistent", dbName: uniqueDbName("parent-child") },
+    });
 
     addTodo(el, "Parent task");
 
@@ -160,7 +163,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mount();
+    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 
     addTodo(el, "Toggle me");
 
@@ -189,7 +192,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mount();
+    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
 
     addTodo(el, "Delete me");
 
@@ -214,7 +217,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos", async () => {
-    const el = await mount();
+    const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
 
     addTodo(el, "First");
     addTodo(el, "Second");
@@ -235,7 +238,7 @@ describe("Vanilla TS Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("persists todos across app destroy and remount (OPFS)", async () => {
-    const dbName = crypto.randomUUID();
+    const dbName = uniqueDbName("opfs");
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ driver: { type: "persistent", dbName } });
@@ -270,10 +273,12 @@ describe("Vanilla TS Todo App E2E", () => {
 
     const el1 = await mount({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
     });
     const el2 = await mount({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
     });
 
