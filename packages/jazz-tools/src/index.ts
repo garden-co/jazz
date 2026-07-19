@@ -224,3 +224,6 @@ export * from "./runtime/index.js";
 // Permissions DSL
 export * from "./permissions/index.js";
 export * from "./dev-tools/index.js";
+// Inspector overlay host contract (types + global); the runtime host bridge
+// itself is a needs-port item (see dev/MAIN_INTEGRATION_LEDGER.md).
+export * from "./dev/inspector-overlay/inspector-host-types.js";
