@@ -1,10 +1,10 @@
 import { Pressable, Text, View } from "react-native";
-import { useDb, useAll } from "jazz-tools/react-native";
+import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema";
 
 export function TodoItem({ id }: { id: string }) {
   const db = useDb();
-  const { data: todos = [] } = useAll(app.todos.where({ id }).limit(1));
+  const todos = useAll(app.todos.where({ id }).limit(1)) ?? [];
   const [todo] = todos;
 
   if (!todo) return null;

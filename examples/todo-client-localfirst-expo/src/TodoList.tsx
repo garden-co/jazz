@@ -9,7 +9,7 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react-native";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app, type Todo } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
@@ -42,7 +42,7 @@ export function TodoList() {
   }
 
   const db = useDb();
-  const { data: todos = [] } = useAll(todosQuery);
+  const todos = useAll(todosQuery) ?? [];
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 

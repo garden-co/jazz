@@ -1,5 +1,5 @@
 // #region context-setup-expo-minimal
-import { JazzProvider } from "jazz-tools/react-native";
+import { JazzProvider } from "jazz-tools/react";
 import { SafeAreaView, Text, View } from "react-native";
 import { TodoList } from "./TodoList";
 

@@ -1,7 +1,7 @@
 import { Text, View } from "react-native";
-import { JazzProvider } from "jazz-tools/react-native";
-import { useLocalFirstAuth } from "jazz-tools/expo";
+import { JazzProvider } from "jazz-tools/react";
 import { RecoveryPhrase } from "jazz-tools/passphrase";
+import { useExpoLocalFirstAuth } from "./expo-auth-secret-store";
 
 function TodoApp() {
   return null;
@@ -9,7 +9,7 @@ function TodoApp() {
 
 // #region auth-localfirst-expo
 export function LocalFirstAuthExpoApp() {
-  const { secret, isLoading } = useLocalFirstAuth();
+  const { secret, isLoading } = useExpoLocalFirstAuth();
 
   if (isLoading || !secret) return null;
 
@@ -34,7 +34,7 @@ export function useRecoveryPhraseBackup(): {
   isLoading: boolean;
   recoveryPhrase: string | null;
 } {
-  const { secret, isLoading } = useLocalFirstAuth();
+  const { secret, isLoading } = useExpoLocalFirstAuth();
 
   return {
     isLoading,
@@ -45,7 +45,7 @@ export function useRecoveryPhraseBackup(): {
 
 // #region auth-localfirst-expo-restore
 export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void> {
-  const { login } = useLocalFirstAuth();
+  const { login } = useExpoLocalFirstAuth();
 
   return async (userInput: string) => {
     const restoredSecret = RecoveryPhrase.toSecret(userInput);

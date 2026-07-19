@@ -1,18 +1,15 @@
 import { Text } from "react-native";
-import { useAll } from "jazz-tools/react-native";
+import { useAll } from "jazz-tools/react";
 import { app } from "../schema";
 
 // #region reading-loading-state-expo
 export function TodoList() {
-  const { data: todos, isLoading, error } = useAll(app.todos);
+  const todos = useAll(app.todos);
 
-  if (isLoading) {
+  if (!todos) {
     return <Text>Connecting…</Text>;
   }
-  if (error) {
-    return <Text>Something went wrong!</Text>;
-  }
-  // todos is now Todo[]; empty array means no rows, not "still loading"
+  // Empty array means no rows, not "still loading".
 
   return todos.map((todo) => <Text key={todo.id}>{todo.title}</Text>);
 }

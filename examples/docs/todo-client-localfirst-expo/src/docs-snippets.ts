@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools/react-native";
+import type { Db } from "jazz-tools";
 import { app } from "../schema";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
@@ -16,7 +16,7 @@ export async function readTodosOneshot(db: Db) {
 // #region subscribe-expo
 export function subscribeTodos(db: Db, onUpdate: (results: unknown[]) => void) {
   const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
-    onUpdate(all);
+    onUpdate(all ?? []);
   });
 
   return unsubscribe;
@@ -90,10 +90,14 @@ export async function combinedQuery(db: Db) {
 
 // #region reading-tier-expo
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), {
-    tier: "edge",
-    localUpdates: "immediate",
-  });
+  return db.subscribeAll(
+    app.todos.where({ done: false }),
+    ({ all }) => onCount((all ?? []).length),
+    {
+      tier: "edge",
+      localUpdates: "immediate",
+    },
+  );
 }
 // #endregion reading-tier-expo
 

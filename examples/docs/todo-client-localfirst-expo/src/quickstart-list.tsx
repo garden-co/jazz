@@ -1,11 +1,11 @@
 import { FlatList, View } from "react-native";
-import { useAll } from "jazz-tools/react-native";
+import { useAll } from "jazz-tools/react";
 import { app } from "../schema";
 import { TodoItem } from "./TodoItem";
 import { AddTodo } from "./AddTodo";
 
 export function TodoList() {
-  const { data: todos = [] } = useAll(app.todos);
+  const todos = useAll(app.todos) ?? [];
 
   return (
     <View style={{ flex: 1, gap: 12 }}>

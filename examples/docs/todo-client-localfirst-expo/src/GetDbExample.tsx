@@ -1,5 +1,9 @@
 // #region writing-get-db-expo
-import { useDb } from "jazz-tools/react-native";
+import { useDb } from "jazz-tools/react";
 
-const db = useDb();
+export function SaveButton() {
+  const db = useDb();
+  void db;
+  return null;
+}
 // #endregion writing-get-db-expo

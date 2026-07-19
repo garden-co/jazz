@@ -268,6 +268,8 @@ const testAndHelperBuildPathFragments = [
   "testing/relation-ir-test-helpers.",
 ] as const;
 
+const sourceFileExtensions = [".js", ".mjs", ".ts", ".tsx"] as const;
+
 function listDistFiles(dir: string, prefix = ""): string[] {
   const files: string[] = [];
 
@@ -279,6 +281,22 @@ function listDistFiles(dir: string, prefix = ""): string[] {
       files.push(...listDistFiles(absolutePath, relativePath));
     } else {
       files.push(relativePath);
+    }
+  }
+
+  return files;
+}
+
+function listSourceFiles(dir: string): string[] {
+  const files: string[] = [];
+
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const absolutePath = join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      files.push(...listSourceFiles(absolutePath));
+    } else if (sourceFileExtensions.some((extension) => entry.name.endsWith(extension))) {
+      files.push(absolutePath);
     }
   }
 
@@ -377,6 +395,36 @@ describe("package root public API", () => {
     ]) {
       expect(exportedPaths, removedPathFragment).not.toContain(removedPathFragment);
     }
+  });
+
+  it("keeps Expo example imports within published package boundaries", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRootDir, "..", "package.json"), "utf8"),
+    ) as { exports: Record<string, unknown> };
+    const exportedSubpaths = new Set(Object.keys(packageJson.exports));
+    const repoRoot = join(packageRootDir, "../../..");
+    const exampleRoots = [
+      join(repoRoot, "examples/todo-client-localfirst-expo"),
+      join(repoRoot, "examples/docs/todo-client-localfirst-expo"),
+    ];
+    const missingExports: string[] = [];
+
+    for (const filePath of exampleRoots.flatMap(listSourceFiles)) {
+      const source = readFileSync(filePath, "utf8");
+      const specifierPattern = /["'](jazz-tools(?:\/[^"']+)?)["']/g;
+
+      for (const match of source.matchAll(specifierPattern)) {
+        const specifier = match[1]!;
+        const exportPath =
+          specifier === "jazz-tools" ? "." : `.${specifier.slice("jazz-tools".length)}`;
+
+        if (!exportedSubpaths.has(exportPath)) {
+          missingExports.push(`${filePath}: ${specifier}`);
+        }
+      }
+    }
+
+    expect(missingExports).toEqual([]);
   });
 
   it("does not leave stale runtime build artifacts in the package surface", () => {
