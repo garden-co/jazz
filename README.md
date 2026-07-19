@@ -24,6 +24,10 @@ Or follow one of the setup guides:
 
 # Contributing
 
+## Architecture specs
+
+The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, lowering, API) and [`crates/groove/SPEC/`](crates/groove/SPEC/) (storage model, operators, incremental maintenance). Each chapter is structured as Overview (read this) / Details / Open Questions.
+
 ## Prerequisites
 
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) — install via `cargo install wasm-pack` or `curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh`
