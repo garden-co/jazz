@@ -73,3 +73,12 @@ data and reopening the local server route` failed once in a full turbo run,
 passes isolated and on rerun — suspected port/db-path contention with the new
 close/reopen path under suite parallelism. Watch on CI; if it recurs, serialize
 that file or isolate its server fixture.
+
+## DECISION (Anselm, 2026-07-19): relation-lowering reds stay red
+
+The ~9 relation-lowering tests (multi-hop, gather, object relation literals in
+the public browser query path) are intentionally left failing — the red
+test:browser step is the parity tracker for the engine-swap PR: it goes green
+exactly when the public query surface reaches parity. Do NOT marker, skip, or
+exclude them. The two bug-shaped families (websocket update convergence,
+include materialization) are being fixed, not tracked.
