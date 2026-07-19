@@ -130,9 +130,7 @@ mod tests {
     use crate::schema_lens::LensOp;
     use std::time::Duration;
 
-    use crate::public_api::types::{
-        ColumnType, Schema, SchemaBuilder, TableSchema, Value as QueryValue,
-    };
+    use crate::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
@@ -2023,7 +2021,7 @@ mod tests {
             close.code,
             tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
         );
-        assert_eq!(close.reason.as_ref(), "server shutting down");
+        assert_eq!(close.reason.as_str(), "server shutting down");
 
         tokio::time::timeout(Duration::from_secs(5), async {
             while state.shutdown.active_websockets() != 0 {
@@ -2052,7 +2050,9 @@ mod tests {
         let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
         ws.send(WsMessage::Binary(
-            br#"{"peer_identity":"0102030405060708090a0b0c0d0e0f10","auth":{"admin_secret":"admin-secret"}}"#.to_vec(),
+            br#"{"peer_identity":"0102030405060708090a0b0c0d0e0f10","auth":{"admin_secret":"admin-secret"}}"#
+                .to_vec()
+                .into(),
         ))
         .await
         .expect("send ws auth prelude");
@@ -2062,7 +2062,7 @@ mod tests {
         ));
         let encoded = vec![encode_frame(&hello).expect("encode hello")];
         let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
-        ws.send(WsMessage::Binary(batch))
+        ws.send(WsMessage::Binary(batch.into()))
             .await
             .expect("send ws hello");
 

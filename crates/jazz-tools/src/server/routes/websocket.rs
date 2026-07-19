@@ -1282,10 +1282,10 @@ mod tests {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
-        ws.send(WsMessage::Binary(prelude))
+        ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send websocket prelude");
-        ws.send(WsMessage::Binary(ws_client_hello_batch()))
+        ws.send(WsMessage::Binary(ws_client_hello_batch().into()))
             .await
             .expect("send websocket hello");
 
@@ -1541,7 +1541,7 @@ mod tests {
                 rounds <= 8,
                 "client kept producing follow-up websocket frames"
             );
-            ws.send(WsMessage::Binary(ws_frame_batch(&outbound)))
+            ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
                 .await
                 .expect("send client frames");
             sent += outbound.len();
@@ -1575,7 +1575,7 @@ mod tests {
                 rounds <= 8,
                 "client kept producing pushed follow-up websocket frames"
             );
-            ws.send(WsMessage::Binary(ws_frame_batch(&outbound)))
+            ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
                 .await
                 .expect("send client push follow-up frames");
             let inbound = try_receive_ws_encoded_frames(ws).await;
