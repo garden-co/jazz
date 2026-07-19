@@ -28,7 +28,11 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
-mimalloc-safe = "0.1"
+# local_dynamic_tls: a dlopen'd cdylib with mimalloc's default initial-exec
+# TLS exhausts glibc's static TLS reserve ("cannot allocate memory in static
+# TLS block") once enough other libraries load first. Dynamic TLS is the
+# supported mode for shared libraries; see dev/CI_NOTES.md (2026-07-19).
+mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls"] }
 
 [build-dependencies]
 napi-build = "2"

@@ -144,3 +144,17 @@ the tunable.
   CONFIRMED; no longer pending review.
 - Differential-gates CI step added to test-rust (canaries, both differential
   harnesses, oracle at JAZZ_SEED_COUNT=50).
+
+## ROOT CAUSE, ACTUAL (2026-07-19 ~10:30): mimalloc initial-exec TLS in jazz-napi
+
+The static-TLS exhaustion traces to `mimalloc-safe` as jazz-napi's global
+allocator: mimalloc's default initial-exec TLS in a dlopen'd cdylib exhausts
+glibc's static TLS reserve once enough other libraries load first (which is why
+only import-heavy vitest workers failed — dev/, better-auth-adapter, framework
+plugin suites — while light suites loaded fine, and why behavior varied with
+runner images). Fix: `local_dynamic_tls` feature (mimalloc's supported mode for
+shared libraries). The GLIBC_TUNABLES workaround is removed; the
+rebuild-and-verify guard stays (it isolated the root cause). Perf note: dynamic
+TLS adds a small per-access cost inside the napi cdylib only; jazz-sim bench
+receipts are unaffected (different binary); flag for a napi-path receipt if the
+allocator ever shows in profiles.
