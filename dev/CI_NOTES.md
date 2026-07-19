@@ -113,3 +113,15 @@ on rerun), while cache-miss builds work. Until the cache/output interaction is
 root-caused, the test-ts job verifies `require('./crates/jazz-napi')` after
 `build:ci` and force-rebuilds jazz-napi on failure. Self-healing, no coverage
 lost; remove once the turbo cache issue is understood.
+
+## ROOT CAUSE (2026-07-19 ~02:55) of the napi binding saga: debug builds
+
+The force-build + verify guard isolated it: a freshly built DEBUG-profile
+jazz-napi `.node` fails `dlopen` on the Linux runners (ERR_DLOPEN_FAILED),
+deterministically. The job's `JAZZ_NAPI_RELEASE: "0"` (debug for speed) was the
+trigger; the previously-working cache entry was an old release-mode artifact
+that got evicted, after which every debug rebuild produced an unloadable
+binding — masquerading first as cache corruption. CI now builds jazz-napi in
+release mode (env removed, timeout 15→20m). Monday follow-up: root-cause why
+debug cdylib dlopen fails on Linux (suspect debug section size / TLS model),
+then possibly restore debug builds for speed.
