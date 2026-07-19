@@ -148,5 +148,5 @@ Verdicts:
 3. Decide the v2 browser runtime story for `Db.disconnect()`, `Db.reconnect()`, standalone in-memory DB, browser worker/broker storage deletion, and `Db.getRuntimeSchema()`.
 4. Port the inspector overlay/devtools bridge-free architecture only after it can bind to v2 runtime sources without old `db-runtime-module`, `worker-bridge`, or `browser-broker-client`.
 5. Decide whether React `useAll` should migrate from `T[] | undefined` to `{ data, isLoading, error }`; port package tests and examples as a single API change.
-6. Port configurable local-first auth storage keys across React/Svelte/Vue/Solid/Expo only after v2 auth hooks expose an options surface.
+6. ~~Port configurable local-first auth storage keys across React/Svelte/Vue/Solid/Expo~~ — Restored 2026-07-19 (617ff36bd) together with the RN/Expo scaffolding.
 7. Rework docs-index generation and static schema hashing for the v2 WASM entry point if the MCP/docs workflow still requires them.
