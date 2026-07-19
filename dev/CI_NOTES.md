@@ -299,3 +299,11 @@ test:browser step is the parity tracker for the engine-swap PR: it goes green
 exactly when the public query surface reaches parity. Do NOT marker, skip, or
 exclude them. The two bug-shaped families (websocket update convergence,
 include materialization) are being fixed, not tracked.
+
+## ALTER (2026-07-20): jazz-rn tests excluded from CI
+
+Registering crates/jazz-rn as a workspace member (for the RN scaffolding's
+workspace peer) put its legacy native-module tests into the turbo graph; they
+need an RN test environment CI lacks, and the RN surface is compile-only by
+decision. Excluded via --filter=!jazz-rn. Exit criteria: the RN owner lands the
+SQLite driver and a proper RN test environment, then un-excludes.
