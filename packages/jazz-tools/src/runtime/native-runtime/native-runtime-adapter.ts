@@ -41,7 +41,7 @@ import {
   createRecord,
   createRecordValueDecoder,
 } from "./native-row-codec.js";
-import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -3551,8 +3551,43 @@ function rowsFromRelationSnapshot(
   schema: WasmSchema,
   materialization: RelationMaterializationSpec,
 ): RowState[] {
-  const rows = rowsFromBatches(snapshot.rows, schema);
+  const rows = stripRelationSnapshotMetadata(rowsFromBatches(snapshot.rows, schema), schema);
   return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
+}
+
+const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
+  "table",
+  "layer",
+  "schema_version",
+  "parents",
+  "created_by",
+  "created_at",
+  "updated_by",
+  "updated_at",
+]);
+
+function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): RowState[] {
+  return rows.map((row) => {
+    if (!row.valuesByColumn) return row;
+    const schemaColumns = new Set((schema[row.table]?.columns ?? []).map((column) => column.name));
+    const valuesByColumn = new Map(row.valuesByColumn);
+    const metadataValues = new Set<Value>();
+    for (const field of RELATION_SNAPSHOT_METADATA_FIELDS) {
+      if (schemaColumns.has(field)) continue;
+      const value = valuesByColumn.get(field);
+      if (!value) continue;
+      metadataValues.add(value);
+      valuesByColumn.delete(field);
+    }
+    if (metadataValues.size === 0) return row;
+    return withValuesByColumn(
+      {
+        ...row,
+        values: row.values.filter((value) => !metadataValues.has(value)),
+      },
+      valuesByColumn,
+    );
+  });
 }
 
 function materializeRelationRows(
@@ -3608,6 +3643,7 @@ function materializeRelationRow(
   materialized.set(rowKeyValue, row);
   const valuesByColumn = new Map(row.valuesByColumn ?? []);
   const relationValues: Value[] = [];
+  const relationPayloadValues = new Set<Value>();
   let satisfiesRequirements = true;
   for (const subquery of subqueries) {
     const key = relationKey(row.table, row.id, subquery.columnName);
@@ -3633,17 +3669,27 @@ function materializeRelationRow(
         value: rowValueWithValuesByColumn(child),
       })),
     } as Value;
-    valuesByColumn.set(subquery.columnName, value);
     const publicRelation = publicIncludeRelationName(subquery.columnName);
+    const hiddenRelation = hiddenIncludeColumnName(publicRelation);
+    for (const name of [subquery.columnName, publicRelation, hiddenRelation]) {
+      const payload = valuesByColumn.get(name);
+      if (payload) relationPayloadValues.add(payload);
+    }
+    valuesByColumn.set(subquery.columnName, value);
     if (publicRelation !== subquery.columnName) {
       valuesByColumn.set(publicRelation, value);
     }
+    valuesByColumn.set(hiddenRelation, value);
     relationValues.push(value);
   }
+  const baseValues =
+    relationPayloadValues.size === 0
+      ? row.values
+      : row.values.filter((value) => !relationPayloadValues.has(value));
   const next = withValuesByColumn(
     {
       ...row,
-      values: row.values.concat(relationValues),
+      values: baseValues.concat(relationValues),
     },
     valuesByColumn,
   );
