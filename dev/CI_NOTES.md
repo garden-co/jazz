@@ -137,3 +137,10 @@ it, which produced the misleading cache-corruption trail. CI fix:
 Engine follow-up (Monday queue): audit large `thread_local!` usage in
 jazz/groove and consider `-Z tls-model`/lazy allocation so consumers don't need
 the tunable.
+
+## RESOLVED decisions (Anselm, 2026-07-19 morning)
+
+- Async-channel facade `all`/`one` exposure (c2d24ffc6 + probe updates):
+  CONFIRMED; no longer pending review.
+- Differential-gates CI step added to test-rust (canaries, both differential
+  harnesses, oracle at JAZZ_SEED_COUNT=50).

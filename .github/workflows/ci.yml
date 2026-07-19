@@ -52,6 +52,16 @@ jobs:
         run: pnpm run ensure:rust-toolchain
 
       - run: cargo test --workspace --lib --bins --tests --features test
+      # The correctness story of the engine-swap PR, first-class in CI
+      # (Anselm-approved 2026-07-19): mechanism canaries, differential
+      # harnesses, and the maintained-vs-one-shot oracle at a CI-sized seed
+      # count. Builds reuse the workspace test build above.
+      - name: Differential gates
+        run: |
+          cargo test -p jazz --test incremental_delivery_canary
+          cargo test -p jazz --test shared_coverage_differential
+          cargo test -p jazz --test warm_reopen_differential
+          JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:
     runs-on: blacksmith-4vcpu-ubuntu-2404
