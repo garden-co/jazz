@@ -69,11 +69,6 @@ postcard = { version = "1", features = ["alloc"] }
 jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
-smolset = "1.3"
-web-time = "1.1"
-small-map = "0.1"
-bitvec = "1.0"
-ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
