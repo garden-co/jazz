@@ -81,13 +81,19 @@ jobs:
       # Turbo cache hits have reproducibly restored jazz-napi without a loadable
       # .node binding (CI rounds 9/9-rerun, 2026-07-19); verify and force-rebuild
       # if needed. See dev/CI_NOTES.md.
-      - name: Ensure jazz-napi native binding
-        run: node -e "require('./crates/jazz-napi')" || pnpm turbo run build --filter=jazz-napi --force
+      # Cached jazz-napi archives have restored .node files that fail dlopen
+      # (likely sticky-disk corruption across concurrent runs); build the
+      # binding fresh and verify it loads. Tests then run with --only so no
+      # turbo build dependency can restore a cached artifact over it.
+      - name: Rebuild and verify jazz-napi native binding
+        run: |
+          pnpm turbo run build --filter=jazz-napi --force
+          node -e "require('./crates/jazz-napi')"
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!todo-server-ts --filter=!todo-server-ts-docs --filter=!todo-client-localfirst-ts --filter=!todo-client-localfirst-ts-docs --filter=!todo-client-localfirst-solid --filter=!todo-client-localfirst-svelte --filter=!todo-client-localfirst-vue --filter=!todo-client-localfirst-react --filter=!todo-client-localfirst-react-docs --filter=!create-jazz --concurrency=2
+      - run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!todo-server-ts --filter=!todo-server-ts-docs --filter=!todo-client-localfirst-ts --filter=!todo-client-localfirst-ts-docs --filter=!todo-client-localfirst-solid --filter=!todo-client-localfirst-svelte --filter=!todo-client-localfirst-vue --filter=!todo-client-localfirst-react --filter=!todo-client-localfirst-react-docs --filter=!create-jazz --concurrency=2 --only
       - run: pnpm --filter jazz-tools test:browser
