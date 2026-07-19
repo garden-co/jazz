@@ -42,6 +42,10 @@ async function bundleToTempFile(filePath: string): Promise<string> {
     format: "esm",
     platform: "node",
     outfile: outFile,
+    // jazz-napi must stay external: inlining its loader breaks the relative
+    // require of the platform .node binding once the bundle runs from outside
+    // the package directory.
+    external: ["jazz-napi", "*.node"],
     plugins: [localJazzToolsPlugin()],
   });
 
