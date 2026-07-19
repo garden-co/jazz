@@ -233,5 +233,17 @@ Two work items:
   queries answerable from global-current indexes?
 - 🔶 **Db-surface bench migration order.** With B1/B1.5 landed (S3 has a Db-surface
   mode), decide which of S4/S5/S6/S7/S9 migrate to the public API next (ch. 13).
+- 🔶 **Storage physics receipts.** The old storage-physics note is folded here:
+  keep physical-layout, compaction/compression, WAL, and cold/warm-open work
+  attached to benchmark receipts rather than unmeasured design claims.
+- 🔶 **Wire and row payload byte budget.** Track verbose batch payloads,
+  text-encoded storage enums, common-case row encoding, and avoidable WebSocket
+  frame clones as one byte/copy budget.
+- 🔶 **Projection hot path.** Decide whether `project_row` and related record
+  projection paths need memcpy avoidance, descriptor specialization, or a
+  different row representation.
+- 🔶 **Memory profiling accuracy.** Stabilize the memory measurement harness
+  across WASM/native/server paths before using retained memory numbers as launch
+  evidence.
 
 ---

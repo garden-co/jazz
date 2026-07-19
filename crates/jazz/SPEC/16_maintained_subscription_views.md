@@ -313,6 +313,31 @@ sets on every tick.
 
 None at this time.
 
+### 16.8 Subsumed subscription-reactivity notes
+
+The former granular-reactivity and subgraph-sharing TODOs are folded into this
+chapter. Maintained views should emit enough structured terminal facts for host
+bindings to choose full replacement, row-level deltas, include/path deltas, or
+patch streams without rerunning a semantic query in the facade. Framework
+adapters may optimize rendering granularity, but the authoritative delta source
+is the maintained-view peer state.
+
+Correlated array subqueries require shared maintenance rather than one compiled
+graph per outer row. The likely direction is a binding/prepared-shape style
+correlation relation that lets parent keys flow as data, then routes child
+result changes back to the correct parent output.
+
 ## Open Questions
 
-None.
+- 🔶 **Granular patch surface.** Define the exact patch/event payloads exposed to
+  TypeScript and framework bindings, including row identity, include path,
+  ordering/window movement, and deletion/restore transitions.
+- 🔶 **Streaming first result opt-out.** Decide whether callers can subscribe to
+  live deltas before initial settle, and how to mark unsettle/partial coverage
+  without confusing "not loaded" with "empty".
+- 🔶 **Correlated subquery maintenance.** Replace one-graph-per-outer-row array
+  subqueries with shared prepared/correlation maintenance that remains bounded
+  by affected parent and child keys.
+- 🔶 **Branch-aware deletion witnesses.** Branch overlays need deletion-register
+  terminal facts so branch-scoped views can publish delete/restore changes
+  without full refresh.

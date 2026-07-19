@@ -189,6 +189,24 @@ tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
   `by_global_seq(global_seq, table_name, row_uuid, layer)` (`INV-DATA-19`);
 - _content_ — the raw ordered KV store `jazz_content` (ch. 12).
 
+### 2.14 Subsumed table-first row-history notes
+
+The former top-level row-history and row-history-engine notes are now part of
+this chapter's model instead of a separate alpha archive. A logical row is
+identified by `RowUuid`; application columns and engine-managed metadata are
+stored in one flat row/version record; and current reads are served from compact
+visible/current state rather than by scanning history. Retained history remains
+the source for replay, sync, deletion/restore, and historical reads, while the
+visible/current surfaces are derived indexes over that history.
+
+The old alpha wording around reserved `_jazz_*` fields maps to the typed identity
+and column-class model here: stable row identity, transaction identity, authorship
+or `made_by`, parents, deletion state, durability/fate observations, branch or
+schema context, and implementation metadata are engine-owned facts, not
+application columns. Catalogue rows stay on the schema/lens catalogue lane
+(ch. 10); they are not ordinary user rows even though they reuse the same storage
+and sync machinery.
+
 ## Open Questions
 
 ### Open questions
@@ -200,3 +218,8 @@ tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
 - 🔶 **Mixed-version row descriptors.** Mixed-version sync is owned by ch. 8 /
   ch. 10; the implementation currently requires sender and receiver row
   descriptors to match exactly.
+- 🔶 **Visible-row common-case encoding.** The old visible-row notes and later
+  storage TODO both called out duplication between current visible entries and
+  retained history. Decide the compact encoding for singleton frontiers, empty
+  metadata, and deletion/register metadata without changing the row/version
+  identity model.

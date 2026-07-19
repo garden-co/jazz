@@ -456,6 +456,22 @@ no eviction; eviction invalidates the persisted fact. Persisting slow exact
 declarations is intentionally not part of v1; they are derived from the
 receiver's current local store when needed.
 
+### 8.13 Subsumed sync and wire notes
+
+The former SyncManager and query/sync integration notes are folded here as the
+same protocol-level rule: subscriptions are desired-state declarations over
+validated shapes and bindings, not a separate query transport. A peer registers
+the shape, subscribes the binding, receives an initial coverage result, and then
+receives live updates driven by maintained-view state (ch. 16). Reconnect should
+replay desired subscriptions and locally-authored pending commit units before
+falling back to broader snapshots.
+
+There is one wire vocabulary across network links and worker bridges. Browser
+main-thread to worker communication may use `postMessage` as a carrier, but the
+semantic payload should remain the same wire-frame/SyncMessage envelope used by
+network sync. Transport-local batching, compression, and resume metadata must
+not leak into row/version encoding.
+
 ## Open Questions
 
 ### Open questions
@@ -507,3 +523,18 @@ receiver's current local store when needed.
 - 🔶 **Covering-scope subsumption** is the design for broader permission scopes
   satisfying narrower ones; the implementation has exact-key sharing only, with
   no covering relation yet.
+- 🔶 **Worker bridge carrier unification.** Replace bespoke worker messages with
+  the same core wire-frame batches carried over WebSockets, while preserving the
+  worker bridge's different disconnect and lifecycle semantics.
+- 🔶 **Upstream-open signaling.** Binding surfaces need an explicit connected /
+  handshaking / failed / reconnecting signal before edge/global-tier reads are
+  unblocked; a synchronous `connect()` return is not enough.
+- 🔶 **Sent-transaction retention.** Per-peer sent-id tracking should be bounded
+  by resume/ack state rather than retaining unbounded transaction id history.
+- 🔶 **Verbose payload cleanup.** Replayable settlements and wire batches should
+  avoid repeating member identity already fixed by the outer transaction or
+  envelope, while keeping idempotency and replay diagnostics intact.
+- 🔶 **Protocol and storage version tags.** Version mismatches must fail loudly
+  and diagnostically across wire envelopes, storage headers, and binding ABI
+  fixtures; compatibility windows are a release-policy decision, not an alpha
+  promise.

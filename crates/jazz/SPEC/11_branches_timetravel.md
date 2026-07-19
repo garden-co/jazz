@@ -124,6 +124,32 @@ _Further invariants._ `INV-BRANCH-10` — branch metadata (including the frozen
 overlay partitions are created lazily on first branch write, not at branch
 creation.
 
+### 11.7 Subsumed branch and time-travel notes
+
+The former branch/snapshot TODOs and row-history project notes are now expressed
+as branch and historical-read surface here. Per-object time travel is the first
+bounded product shape: expose a row's version timeline and read a single object
+at a known cut. Full point-in-time queries are broader because they require
+query-wide completeness, branch-aware source resolution, and stable cut evidence
+across every table the shape touches.
+
+Prefix/batch storage sketches treat branch and schema dimensions as storage
+keys, but the semantic model remains branch overlays and frozen bases, not a
+public dependency on physical prefixes.
+
+### 11.7 Subsumed branch and time-travel notes
+
+The former branch/snapshot TODOs and row-history project notes are now expressed
+as branch and historical-read surface here. Per-object time travel is the first
+bounded product shape: expose a row's version timeline and read a single object
+at a known cut. Full point-in-time queries are broader because they require
+query-wide completeness, branch-aware source resolution, and stable cut evidence
+across every table the shape touches.
+
+Prefix/batch storage sketches treat branch and schema dimensions as storage
+keys, but the semantic model remains branch overlays and frozen bases, not a
+public dependency on physical prefixes.
+
 ## Open Questions
 
 ### Open questions (branches: future contract)
@@ -197,3 +223,12 @@ merge-back and discard have graduated:
   history-complete node at a sufficient watermark to answer exactly at the
   requested position. The implementation's completeness check is conservative:
   `history_complete && position <= applied_global_watermark`.
+- 🔶 **Per-object time-travel facade.** Expose row-local history first: version
+  list, authored metadata, deletion/restore events, and a read-at-version API
+  that fails when the node lacks the required history.
+- 🔶 **Full point-in-time queries.** General `at(position)` queries need
+  query-wide completeness evidence, aligned schema/lens projection, and stable
+  behavior for includes, array subqueries, and policy dependencies.
+- 🔶 **Branch deletion witnesses.** Maintained views over branch overlays need
+  explicit deletion-register current witnesses so a deletion/restore transition
+  cannot be missed by a branch-scoped subscriber.

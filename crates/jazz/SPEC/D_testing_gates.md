@@ -141,3 +141,13 @@ run includes the fixed-seed sync sweep.
   discipline?
 - 🔶 **Fixed-seed count.** Earlier docs said seven fixed M3 seeds; the code
   defines eight. Reconcile, and pin the canonical count in D.2.
+- 🔶 **Test catalogue ownership.** The old test-catalogue inventory is folded
+  here: keep tests organized by public contract owner, not by historical module,
+  and prefer black-box integration coverage for Rust crate behavior.
+- 🔶 **Multi-server topology tests.** Add integration tests that exercise client
+  to edge to core communication, including reconnect, policy narrowing,
+  subscription deltas, and durability waits.
+- 🔶 **Browser storage fallback tests.** OPFS-unavailable modes need explicit
+  browser coverage for fail-loud or in-memory fallback behavior.
+- 🔶 **WASM teardown regression.** Keep navigation/teardown churn coverage for
+  multi-client WASM transports until the true shutdown fix lands.

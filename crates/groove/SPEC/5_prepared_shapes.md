@@ -192,3 +192,7 @@ the API does not define shape drop.
   sink operator so hot shapes avoid evaluating binding-count by sink-count tails
   while preserving the same "route-carrying graph -> binding partition -> public
   sink" semantics.
+- 🔶 **Correlated array-subquery bindings.** Jazz array-subquery sharing can be
+  expressed as parent correlation keys flowing through prepared-shape style
+  binding sources. Decide whether this is ordinary prepared-shape routing or a
+  specialized correlation source.

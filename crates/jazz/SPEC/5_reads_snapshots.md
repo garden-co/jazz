@@ -114,6 +114,16 @@ deletion anti-join before returning visible content (`INV-READ-9`). Time-travel
 and snapshot-base branches build on this mechanism (ch. 11), and read policy is
 evaluated at the historical cut (ch. 7).
 
+### 5.7 Subsumed row-history read notes
+
+The old table-first row-history project described current visible entries and
+retained history as one model. This chapter owns the read side of that model:
+ordinary current reads start from compact visible/current state, while
+historical reads require an explicit cut and enough history completeness to
+answer at that cut. Snapshot fallback during reconnect is an implementation
+strategy for rebuilding coverage; it does not change the observable read
+contract.
+
 ## Open Questions
 
 ### Open questions

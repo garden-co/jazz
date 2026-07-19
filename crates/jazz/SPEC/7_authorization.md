@@ -220,6 +220,22 @@ Historical/as-of reads served for a link evaluate read policy **at the requested
 cut**. An ownership change across cuts therefore changes visibility at those
 cuts (`INV-RLS-13`, ch. 5, ch. 11).
 
+### 7.9 Subsumed provenance and permission notes
+
+The former principal-authorship TODO is now part of this chapter's backlog:
+commit provenance must identify the Jazz principal that performed the write, not
+a row object id or raw external provider subject. Creator/updater provenance is
+kept as explicit row/version metadata so created-by permissions survive later
+updates and history truncation. Public policy helpers such as `$createdBy`,
+`$createdAt`, `$updatedBy`, and `$updatedAt` are authorization vocabulary only
+after they can be lowered and validated through the same fail-closed policy
+machinery as ordinary columns.
+
+Auth-mode gating belongs in permissions rather than process-global flags. A
+policy should be able to distinguish anonymous/local/authenticated/backend/system
+admission modes through trusted session claims or first-class admission facts;
+client-supplied values must not widen those facts.
+
 ## Open Questions
 
 ### Open questions
@@ -275,3 +291,20 @@ cuts (`INV-RLS-13`, ch. 5, ch. 11).
   hypothetically, with local-preview semantics. The facade methods (`can_insert`,
   `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
   (`INV-API-28`).
+- 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
+  representation for commit authorship, how old self-authored commit encodings
+  are rejected or migrated, and where backend attribution helpers are permitted.
+- 🔶 **Created/updated provenance magic columns.** `$createdBy`, `$createdAt`,
+  `$updatedBy`, and `$updatedAt` need validation, join/filter/order behavior,
+  and fail-closed semantics before policy authors rely on them.
+- 🔶 **Policy denial reasons.** Policy clauses should be able to return
+  structured denial reasons suitable for client errors without exposing data
+  from rows the caller cannot read.
+- 🔶 **Partial schema visibility.** Decide whether schema/catalogue visibility is
+  all-or-nothing per app, scoped by policy, or split into public shape metadata
+  plus protected implementation details.
+- 🔶 **`NOT(INHERITS)` semantics.** Negative inheritance-style predicates need a
+  precise fail-closed meaning before the DSL exposes them.
+- 🔶 **Per-column encryption and authorization.** If encrypted columns are added,
+  policy evaluation must define what can be evaluated server-side, what requires
+  client-side keys, and how key loss/revocation interacts with read policy.

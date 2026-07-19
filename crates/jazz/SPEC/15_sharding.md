@@ -65,6 +65,10 @@ probable shape is:
   flip ownership in the catalogue" — no in-place state surgery. Ownership must not
   flip before the new owner can serve it, and in-flight work must drain.
 
+The former sharding sketch's rendezvous/top-2 replication and two-level
+subscription ideas are treated as candidate mechanisms for the same open design.
+They do not supersede the authority and completeness questions below.
+
 ## Open Questions
 
 ### Open questions (the actual deliverable)
@@ -98,3 +102,9 @@ The load-bearing unknowns are:
 - 🔶 The design is sharded authority; the implementation has a singleton global
   core that is history-complete, has exclusive authority, and maintains a single
   `GlobalSeq` line.
+- 🔶 **Adaptive shard growth.** Slot-based table growth and rendezvous placement
+  need a concrete migration protocol before they can become part of the storage
+  or topology contract.
+- 🔶 **Subscription assembly during migration.** Rebalancing may require
+  dual-subscribe or handoff witnesses so live shapes remain complete while
+  ownership moves.

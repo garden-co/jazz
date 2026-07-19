@@ -175,3 +175,9 @@ NodeState, Event) -> Vec<OutboxMessage>` dispatcher (`Event`/`OutboxMessage`
 - 🔶 **Discipline invariant tests.** `INV-DISC-*` already have registry rows,
   marked as guidance anchors (not conformance) in the registry header; decide
   whether any should also get enforcing tests.
+- 🔶 **Type-aware lint lane.** The old oxlint TODO moves here: decide whether
+  type-aware linting becomes a required local gate, a CI-only package lane, or a
+  package-maintainer tool outside the crate contract.
+- 🔶 **WASM tracing upstreaming.** Track local wasm-tracing improvements that
+  should be contributed upstream or replaced by upstream releases, so debugging
+  hooks do not remain private forks.

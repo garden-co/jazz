@@ -219,6 +219,20 @@ approximation: least-recently-written unpinned row versions first. Direct
 large-value content/checkpoint bytes remain regenerable cold content under the
 same budget, while metadata and all pin roots survive.
 
+### 9.9 Subsumed topology and server notes
+
+The former alpha transport and sync-manager notes are now represented as role
+semantics. The server shell terminates carriers and admission, then hands
+authorized links to `Node`/peer state; it does not own a parallel query,
+transaction, or sync engine. CORS, WebSocket paths, health endpoints, quota
+limits, and dashboard or deployment configuration are shell/product concerns
+around this role ladder.
+
+Client and edge cache limits are topology policy. Storage may evict cold
+coverage only when doing so preserves fate-pending units, authority evidence,
+large-value content needed by accepted rows, and enough resume/catalogue state to
+refetch accurately.
+
 ## Open Questions
 
 ### Open questions
@@ -266,3 +280,16 @@ same budget, while metadata and all pin roots survive.
   read/write policy for the identities it terminates. The implementation still
   relies on core for general read narrowing and write-policy enforcement, while
   edge-client links narrow under the terminated identity.
+- 🔶 **Client TTL configuration.** The old hardcoded client-state TTL should
+  become an explicit cache/staleness option with clear interaction between
+  local, edge, and global durability tiers.
+- 🔶 **CORS and admission routes.** Server shells must accept normal browser
+  authorization headers and preflight behavior without weakening admission; this
+  belongs in shell conformance, not the core protocol.
+- 🔶 **Edge-local catalogue pruning.** When an edge reconnects with stale
+  catalogue state, core replay must be able to remove edge-local catalogue rows
+  absent from the authoritative catalogue without deleting unrelated local
+  state.
+- 🔶 **Edge transaction authorities.** Future edge authority placement must say
+  which scopes an edge may decide, how leases or ownership move, and how that
+  composes with sharding.

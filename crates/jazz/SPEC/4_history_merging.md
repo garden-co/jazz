@@ -198,6 +198,14 @@ version rows in a different order is idempotent and conflict-free. `INV-HIST-14`
 rejected transactions never appear as accepted history and never participate in
 currentness or domination.
 
+### 4.8 Subsumed merge-strategy backlog
+
+The former TODO notes on complex merge strategies are treated as future surface
+area over this chapter's deterministic merge contract. Built-in strategies cover
+the first engine paths; richer set/map/rich-text/custom strategies must still
+produce deterministic, grouping-insensitive merge results and must fail closed
+without wedging authority progress.
+
 ## Open Questions
 
 ### Open questions
@@ -206,3 +214,7 @@ currentness or domination.
   `MergeStrategy` contract is normative. The external plugin/registry surface
   that lets applications ship new strategies is still staged; built-ins and
   registered test strategies exercise only the first engine paths.
+- 🔶 **Strategy versioning and schema movement.** Changing a merge strategy is a
+  schema-version change, but the compatibility story for old clients, lenses,
+  corrected strategies, and historical re-merge remains open beyond the built-in
+  strategy paths.

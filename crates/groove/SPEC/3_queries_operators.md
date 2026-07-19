@@ -294,6 +294,20 @@ unsupported/ill-typed predicates rather than approximating them.
 `INV-QUERY-18` — SQL inner joins lower only equality predicates, with `AND`
 forming multi-column join keys.
 
+### 3.11 Subsumed operator backlog
+
+The former ordered-index top-k project is folded into the operator/query model.
+The problem statement remains valid: `ORDER BY ... LIMIT k` should not
+materialize, sort, and discard the full result when an ordered index can stream
+candidate rows in result order. A future streaming or pull-based path may remove
+the explicit sort for eligible shapes, but it must compose with filters,
+policies, joins, offsets/cursors, and incremental maintenance.
+
+Count aggregation and projection hot-path optimizations are likewise operator
+work under the same graph contract. They should add or specialize operators only
+when the weighted-delta semantics stay observable-equivalent to the existing
+graph.
+
 ## Open Questions
 
 ### Open questions
@@ -301,3 +315,17 @@ forming multi-column join keys.
 - 🔶 **`ArgMaxBy` terminology.** It lives under "Aggregate" in `op_types` but is
   source-backed and PK-constrained. Decide whether to rename it (e.g. a
   "latest/winner" operator) so the taxonomy doesn't imply general aggregation.
+- 🔶 **Ordered top-k operator path.** Decide whether this is a new streaming
+  protocol between nodes, a specialized source/limit operator, or planner sugar
+  over existing ordered arrangements.
+- 🔶 **Cursor pagination.** Ordered top-k needs a stable cursor model that
+  resumes from the prior page without re-sorting the full result set and without
+  breaking deterministic ordering for ties.
+- 🔶 **JOIN plus ordered top-k.** Define when an ordered index on one side of a
+  join can drive the plan without losing rows that only become eligible after
+  join or policy filtering.
+- 🔶 **COUNT aggregation.** Add a terminal count shape with weighted-delta
+  maintenance and clear output descriptor semantics.
+- 🔶 **Projection memcpy optimization.** `Project` should avoid unnecessary row
+  copies on hot paths where descriptor layout permits borrowing or direct field
+  assembly.

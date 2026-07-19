@@ -54,6 +54,12 @@ WASM or NAPI against a server shell without semantic forks.**
 - **Lens/branch facades** — ch. 10 and ch. 11 own the schema-lens and branch
   lifecycle semantics; ch. 13 owns their product-facing API placement.
 
+The former launch binding TODOs are folded into this roadmap. Go, Swift,
+Kotlin, React Native, NAPI, and WASM are language/package surfaces over the same
+capability matrix, wire fixtures, storage configuration, and error vocabulary.
+The first supported binding must prove the shape; later bindings should consume
+the same fixtures instead of each inventing a parallel runtime contract.
+
 #### 17.2.1 NAPI status and next practical step
 
 `jazz-napi` exists as a workspace `cdylib` crate and Node package sibling to
@@ -184,3 +190,12 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 - 🔶 Which TypeScript framework adapter, if any, should be the first blessed
   adapter after the core cross-binding capability gate passes?
+- 🔶 Which native binding comes next after the first direct WASM/NAPI proof:
+  React Native packaging, Go, Swift, or Kotlin, and what fixture parity is the
+  entry criterion?
+- 🔶 How should serverless KV storage hosts integrate with the portable storage
+  contract without losing ordered range scans, atomic batches, or reopen/migration
+  diagnostics?
+- 🔶 Which framework/tooling plugin issues belong in the core repo's
+  integrability matrix versus package-specific backlog once top-level specs are
+  gone?

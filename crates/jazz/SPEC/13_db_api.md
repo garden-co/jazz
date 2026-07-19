@@ -497,6 +497,24 @@ batches, and a headless Chromium smoke gate. `db_read_at` and
 `db_edit_text` remain typed/API-surface-only in the TS harness until there is a
 serving-node or stable large-value setup for those paths.
 
+### 13.12 Subsumed client, backend, and binding notes
+
+The former TypeScript client and backend-context notes are folded into this
+chapter. The public API should keep app code focused on tables, queries,
+subscriptions, writes, and write state. Defaults are write-origin behavior
+(ch. 10), query builders are immutable shape builders (ch. 6), and transaction
+helpers must surface real commit/fate semantics rather than local-only batches.
+
+Backend helpers need explicit authority and identity boundaries:
+`asBackend()` is trusted server-owned work, request/session helpers are
+caller-scoped, and any embedded/local-only `db()` helper must be documented as
+such. Attribution-only writes are distinct from requester-scoped authorization.
+
+Binding surfaces should expose host-native promises, callbacks, and streams over
+Rust-owned objects. WASM, NAPI, React Native, and future language bindings all
+consume the same `Db`/selected `Node` contract; packaging differences must not
+fork query, transaction, or sync semantics.
+
 ## Open Questions
 
 ### Open questions
@@ -569,3 +587,22 @@ so the authority validates serializably) plus fate exposure via `Db::write_state
   permission-filtered sync, S5/S6 for current-row sync and resume, S7 for schema
   migration, and S9 for durable execution. The measurement target is the public
   user API end to end, not permanent internal peer hooks.
+- 🔶 **Backend context helper cleanup.** Keep `asBackend()`, `forRequest(...)`,
+  and `forSession(...)` semantically separate; decide whether `db()` remains
+  public and, if so, document it as embedded/local-only rather than a
+  server-connected default.
+- 🔶 **Optimistic update DX.** Expose pending/confirmed/rejected mutation state
+  on writes and rows, including filters by settlement tier, without inventing a
+  second fate model.
+- 🔶 **Full-mode subscription API.** Decide whether callers can opt into full
+  result replacement, delta streams, or first-settle opt-out, and how those modes
+  map to maintained-view terminal deltas.
+- 🔶 **Live identity switching.** Changing the authenticated principal on a live
+  client needs a teardown/rebind protocol for subscriptions, outbox attribution,
+  claims, and local optimistic state.
+- 🔶 **React Native runtime reuse.** RN `connect()` should reuse an owned runtime
+  and expose deterministic connect/disconnect lifecycle signals rather than
+  creating a fresh executor per call.
+- 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
+  teardown traps; the durable fix is an explicit async shutdown and transport
+  lifecycle boundary that prevents callbacks into torn-down linear memory.

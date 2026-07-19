@@ -306,6 +306,19 @@ by a sound static path; the fallback is a counted full scan, not a different
 semantic evaluator. Prepared-shape steady-state probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
+### 14.8 Subsumed lowering backlog
+
+The former public-schema-subset, SQL dialect, explicit-index, and top-k notes are
+folded into this chapter as lowering work. Public schema features may exist
+before core execution supports them, but any executable schema must pass one
+shared validator before it reaches storage or runtime open. Query, policy, and
+SQL entry surfaces lower to groove through the same shape identity.
+
+Ordered-window and top-k lowering should prefer an ordered index path when the
+requested order and filters can be satisfied by storage. The fallback remains
+correct materialize/sort/limit behavior, but the optimized path must preserve
+policy filtering, pagination, and live subscription maintenance.
+
 ## Open Questions
 
 ### Open questions
@@ -336,3 +349,18 @@ overlay-probe phase (groove ch. 4 §4.6).
   it back to the base source. Decide the first-class groove/source node for
   policy authorization facts so source authorization remains in the query engine
   without relying on a materialized bridge.
+- 🔶 **Executable schema subset.** Reject unsupported public schema constructs at
+  every execution entry point using one validator, including dynamic defaults,
+  unsupported column types, reserved metadata, and planner-ineligible features.
+- 🔶 **Declarative indices.** Replace "index all columns" with explicit
+  developer-declared indices, plus a migration story for existing tables and
+  planner diagnostics when a query falls back.
+- 🔶 **Ordered top-k lowering.** Recognize `ORDER BY ... LIMIT/OFFSET` shapes
+  that can use ordered storage scans, preserve policy/filter composition, and
+  keep maintained subscriptions bounded.
+- 🔶 **Policy constant folding.** Fold claim/literal constants consistently
+  across read policy, write policy, and query-time authorization without hiding
+  dependency edges that can later change.
+- 🔶 **Smart automatic indices.** Automatic index recommendations may follow
+  explicit indices, but must be diagnostics or migrations rather than silent
+  planner behavior that changes storage shape unexpectedly.

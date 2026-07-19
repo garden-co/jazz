@@ -315,6 +315,22 @@ sequences, the storage conformance suite passes identically under windowed and
 plain representations, and no consumer above the record store can observe
 which representation is in use.
 
+### 2.12 Subsumed storage backlog
+
+The former top-level storage notes are now represented by this chapter's
+ordered-key/value and record-store contract. Raw table instances, durable
+indices, catalogue-like record stores, row-history payloads, visible/current
+payloads, and backend-specific persistence are implementation choices under the
+same ordered byte-range API. Browser OPFS, SQLite, RocksDB, memory, and future
+host-provided backends must be judged by the portable contract here before a
+consumer crate advertises them.
+
+The storage-physics notes are performance guidance, not a new semantic model.
+Column-family-per-physical-class layouts, per-class compaction/compression, row
+encoding improvements, and bounded eviction should be evaluated through the
+benchmark/performance chapters while preserving ordered scans, atomic batches,
+record descriptors, and reopen/migration diagnostics.
+
 ## Open Questions
 
 ### Open questions
@@ -354,3 +370,22 @@ which representation is in use.
   native column type instead of a custom encoding. The motivating consumer is
   jazz's large-value op-log, whose ops could then be a true groove column rather
   than a jazz-private byte encoding (jazz ch. 12 open questions).
+- 🔶 **Async persistence boundary.** Mobile and host bindings may need
+  non-blocking persistence, but the contract still needs atomic batch writes and
+  ordered scans. Decide whether async is a wrapper, a second trait, or the only
+  portable FFI surface.
+- 🔶 **Explicit index declarations.** Storage can maintain many indices, but the
+  schema/lowering contract should decide which are declared, migrated, and
+  persisted rather than auto-indexing every column forever.
+- 🔶 **Index staleness fallback.** Update paths must not silently tolerate stale
+  indices when old row content is unavailable; either rebuild, fail loudly, or
+  prove correctness under partial history.
+- 🔶 **Row common-case encoding.** Compact empty metadata, singleton frontiers,
+  enum tags, and visible/current rows without weakening deterministic decoding
+  or cross-language fixtures.
+- 🔶 **Serverless KV adapters.** Future KV hosts must prove ordered range scans,
+  atomic writes, durable reopen, and migration metadata; simple key/value APIs
+  without these properties are not equivalent backends.
+- 🔶 **Compression policy.** Per-class compression/compaction choices should be
+  explicit storage policy knobs with benchmark receipts, not incidental RocksDB
+  defaults leaking into the portable contract.

@@ -318,6 +318,26 @@ plan below records the intended coverage without changing tests now.
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.
 
+### 6.11 Subsumed query and SQL notes
+
+The old QueryManager notes are now treated as migration context for this
+chapter's stable query vocabulary. Jazz keeps one normalized query AST for
+one-shot reads, live subscriptions, policy shapes, schema/lens projected reads,
+and sync coverage shapes. It may choose index-first planning, materialization,
+or groove lowering per shape, but these are execution strategies under one
+validated shape identity.
+
+Array subqueries remain distinct from include paths. They represent correlated
+one-to-many result fields with parent-column to child-column bindings. One-shot
+materialization may evaluate them directly; maintained subscriptions require
+the relation/path terminal-delta machinery in ch. 16 before they are accepted as
+live shapes.
+
+SQL is an entry surface, not a second semantic model. A Jazz SQL dialect should
+lower into the same query AST and reject unsupported SQL constructs loudly.
+Custom DSL helpers should likewise normalize into the AST rather than building
+parallel query identities.
+
 ## Open Questions
 
 ### Open questions
@@ -357,3 +377,17 @@ plan below records the intended coverage without changing tests now.
   types inside one relation. If future relation-valued outputs can mix id types
   or grouped outputs can expose heterogeneous key domains at one key position,
   the spec needs a stable cross-type ordering rule or must reject those shapes.
+- 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
+  syntax, error reporting, and escape-hatch rules, and prove it lowers to the
+  same `Query` contract as the builder DSL.
+- 🔶 **COUNT aggregation.** Add terminal count queries for filtered relations,
+  with reactive `COUNT(*)` as the MVP shape, without adding a separate
+  aggregation result identity outside the query AST.
+- 🔶 **Array-subquery dirty-list dedupe.** The former `array_subquery_tables`
+  backlog noted duplicate `(node, table)` entries. Consumers tolerate duplicates,
+  but deduping the tracking set would reduce mutation-time work and make the
+  maintained path easier to reason about.
+- 🔶 **Correlated subgraph sharing.** Per-outer-row recompilation is correct but
+  too expensive for large result sets. Shared hash-index or prepared-shape based
+  correlated execution should preserve parent binding semantics while avoiding
+  one graph per outer row.

@@ -201,6 +201,28 @@ carrying `Cascade { root }` with the original root `TxId` (`INV-TX-8`). The
 `RejectedTransaction` / `RejectedVersion` retry stores (so it can retry), while a
 non-origin authority does not retain foreign rejected payloads (`INV-TX-9`).
 
+### 3.10 Subsumed batch and replay notes
+
+The former batch specs are now interpreted through this chapter's transaction
+vocabulary. The old "direct batch" is the ordinary mergeable commit path:
+local work is grouped under one `TxId`, syncs as one commit unit, and receives an
+authority fate plus durability observations. The old "transactional batch" maps
+to explicit exclusive or future authority-decided multi-row work: staged writes
+are not ordinary visible state until commit and authority acceptance.
+
+Replayable reconciliation is part of the transaction contract rather than a
+separate manager. A client may retransmit a locally-authored committed unit until
+it observes the unit's fate; authorities answer idempotently for matching
+payloads and reject conflicting reuses of the same transaction id. Pending local
+state is preview state only. Rejected outcomes must become explicit write state
+that applications can observe and acknowledge through the high-level API
+(ch. 13).
+
+Prefix/batch storage planning is treated as substrate design for the same model:
+storage may choose prefixes, commit segments, or compact catalogues, but the
+public semantics remain transaction identity, fate, durability, and view-scoped
+atomicity.
+
 ## Open Questions
 
 ### Open questions
@@ -211,3 +233,17 @@ non-origin authority does not retain foreign rejected payloads (`INV-TX-9`).
   permission-subscription gating are the design; the implementation path
   described by this chapter currently has the core act as the mergeable fate
   authority before global finalization.
+- 🔶 **Opt-in transaction facade.** The former replayable-reconciliation TODO
+  defines explicit transactional writes with authority-decided fate, optional
+  local pending overlay, schema-family validation, restart persistence, and
+  rejected-state acknowledgement. Decide which pieces land as public `Db`
+  transaction API versus lower-level `Node` authority plumbing.
+- 🔶 **Unsealed pending cleanup.** Staged/open rows that never commit must be
+  cleaned without ever becoming ordinary visible state, including rollback,
+  disconnect, thrown user code, and restart cases.
+- 🔶 **Durability guarantee wording.** `wait(tier)` is the durable contract;
+  fire-and-forget writes may be dropped under backpressure/rate limiting only if
+  the resulting write-state semantics remain explicit and observable.
+- 🔶 **Timestamp sanity.** The history model accepts HLC ordering, but the policy
+  for unrealistic future or past physical timestamps is still open: reject,
+  clamp, quarantine, or accept with diagnostics.

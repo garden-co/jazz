@@ -269,8 +269,21 @@ acceptable user-facing shorthand for the declared durable pk-ref case.
 "Covering" replaces ad-hoc "full record vs PK" phrasing. A _boundary
 arrangement_ is the param-keyed arrangement at a shape's binding join.
 
+### 4.9 Subsumed maintenance backlog
+
+The former top-k and subgraph-sharing notes are folded into this chapter as
+maintenance constraints. Any optimized ordered-window, top-k, or correlated
+subquery path must maintain bounded deltas after writes; it is not enough to be
+fast for initial snapshots. If an optimization cannot preserve incremental
+equivalence, it remains a one-shot optimization only and must be rejected for
+maintained subscriptions.
+
 ## Open Questions
 
 ### Open questions
 
-No open questions in this chapter.
+- 🔶 **Top-k incremental maintenance.** Decide the bounded-window maintenance
+  algorithm for ordered top-k subscriptions, including replacements when a row
+  enters or leaves the top window.
+- 🔶 **Correlated subquery maintenance.** Maintain parent-key to child-row
+  correlation sets incrementally without full child-table re-evaluation.

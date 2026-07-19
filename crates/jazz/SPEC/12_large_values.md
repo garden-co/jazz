@@ -773,6 +773,20 @@ until then the current mechanisms remain in force.
 - Streaming materialization for very large dumps; compression of op
   metadata beyond RLE if scenario 6 shows headroom vs. eg-walker's format.
 
+### 12.10 Subsumed file and encryption notes
+
+The former file-storage and mutable-file notes are folded into the large-value
+model. Files are ordinary rows with `blob` content and metadata columns, not a
+privileged side table. Future helpers for image/file serving, cascade deletion,
+and mutable file edits must keep that property: reference counting, soft delete,
+hard delete, and serving eligibility derive from ordinary row visibility and
+authorization plus the content-channel rules in this chapter.
+
+Smart chunking remains a future optimization over the same op-log/content-store
+model. FastCDC-style chunks, hash-based dedupe, and mutable binary merge
+strategies may reduce rewrite cost, but they must not expose raw content extents
+or bypass row authorization.
+
 ## Open Questions
 
 ### Open questions
@@ -811,5 +825,14 @@ until then the current mechanisms remain in force.
   folding op storage (and potentially op merge) into the normal record/column path
   instead of a parallel mechanism. Blocked on the enabling groove feature
   (variable-width tuple members; groove ch. 2 open questions).
+- 🔶 **Cascade semantics for file rows.** File helpers need distributed
+  reference-count or cascade semantics that distinguish eager user-visible
+  removal from authoritative content reclamation.
+- 🔶 **Mutable binary files.** Chunking and binary merge strategies remain open:
+  define chunk boundaries, patch payloads, conflict behavior, and when a whole
+  rewrite is cheaper than an edit script.
+- 🔶 **Per-column encryption.** Encrypted large values need a key-envelope
+  surface, authorization-aware content serving, and a clear rule for which
+  metadata remains queryable without decryption.
 
 ---

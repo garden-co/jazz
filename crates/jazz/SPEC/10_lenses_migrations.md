@@ -177,6 +177,22 @@ receives resolved lenses**: a draft lens, such as an ambiguous diff where a
 drop+add might be a rename, is a product/tooling concept, and the validation tool
 refuses unresolved drafts upstream.
 
+### 10.9 Subsumed schema-file and schema-subset notes
+
+The former schema manager and schema file notes are folded into the catalogue
+model here. Developer-authored `schema.ts`, `permissions.ts`, and migration/lens
+modules are source material for immutable `SchemaVersion` and `MigrationLens`
+catalogue entries. CLI validation, dev-server loading, runtime open, and server
+conversion must share one executable-schema gate so a schema accepted by one
+path is not later rejected by another.
+
+Column defaults are schema metadata but execute at the write origin: omitted
+defaulted fields become explicit cells in the committed payload before policy
+dry-runs and before sealing. Literal defaults are in scope; dynamic defaults such
+as `now()` require a deterministic authority/origin rule before they can be
+accepted. Merge-strategy-only changes still change schema identity because they
+change future merge behavior.
+
 ## Open Questions
 
 ### Open questions
@@ -208,3 +224,18 @@ refuses unresolved drafts upstream.
   first-class lowered source-node surface for schema/lens projections so
   projected sources compose with the normal query graph instead of staying as an
   inline resolver path.
+- 🔶 **Shared core-supported schema gate.** Keep CLI publish, dev server schema
+  load, native/WASM runtime open, and server conversion on one validator until
+  the public schema vocabulary and executable core support converge.
+- 🔶 **Dynamic defaults.** Literal defaults are write-origin expansion; dynamic
+  defaults need a deterministic time/source rule and policy ordering before they
+  can enter the executable subset.
+- 🔶 **Column metadata.** Arbitrary column metadata can help generated UIs, but
+  must be versioned, preserved through lenses, and kept separate from executable
+  policy/planner semantics unless explicitly promoted.
+- 🔶 **Lens hardening.** Preserve hidden newer fields under old-client writes,
+  make lens-path selection ambiguity-aware, allow corrected or asymmetric
+  migrations where safe, and define type-changing migrations.
+- 🔶 **Schema version GC.** The current contract forbids automatic deletion of
+  version partitions. If explicit GC is ever added, it needs completeness,
+  branch/history, lens, and audit constraints.
