@@ -308,15 +308,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     expect(sortGrantRoles(grants)).toEqual(["manager", "viewer"]);
   });
 
-  // Known engine bug: mixed OR of a plain-claims branch with a reachable_via
-
-  // gather branch drops the gather results (under-visibility). Repro kept as
-
-  // expected-fail so it ALARMS when the fix lands (then remove .fails).
-
-  // Investigated 2026-07-18; fix scheduled in Rust policy lowering.
-
-  it.fails("supports the full alpha.33 grant-closure repro end to end", async () => {
+  it("supports the full alpha.33 grant-closure repro end to end", async () => {
     const context = await createReproContext(({ policy, session, allOf }) => {
       const reachableTeams = policy.teams.gather({
         start: {

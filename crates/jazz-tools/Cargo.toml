@@ -220,6 +220,10 @@ required-features = ["test-utils"]
 name = "edge_server_mode"
 required-features = ["test"]
 
+[[test]]
+name = "policy_branch_closure"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

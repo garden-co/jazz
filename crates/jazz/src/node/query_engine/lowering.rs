@@ -2470,7 +2470,7 @@ fn lower_union_relation_input(
             request,
         )?);
     }
-    lower_union_inputs(lowered)
+    lower_union_inputs(lowered, request)
 }
 
 fn lower_union_plan(
@@ -2514,12 +2514,23 @@ fn lower_union_plan(
         };
         lowered.push(input);
     }
-    lower_union_inputs(lowered)
+    lower_union_inputs(lowered, request)
 }
 
 fn lower_union_inputs(
     lowered: Vec<LoweredRelationInput>,
+    request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let union_fields = lowered_union_fields(&lowered);
+    let needs_alignment = lowered.iter().any(|branch| branch.fields != union_fields);
+    let lowered = if needs_alignment {
+        lowered
+            .into_iter()
+            .map(|branch| align_union_route_fields(branch, &union_fields, request))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        lowered
+    };
     let mut lowered = lowered.into_iter();
     let first = lowered.next().ok_or_else(|| {
         UnsupportedReason::Operator("union row-set nodes require at least one input".to_owned())
@@ -2559,6 +2570,44 @@ fn lower_union_inputs(
         nullable_fields,
         nullable_field_depths,
     })
+}
+
+fn lowered_union_fields(lowered: &[LoweredRelationInput]) -> BTreeSet<String> {
+    lowered
+        .iter()
+        .flat_map(|branch| branch.fields.iter().cloned())
+        .collect()
+}
+
+fn align_union_route_fields(
+    mut branch: LoweredRelationInput,
+    fields: &BTreeSet<String>,
+    request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let route_fields = parameter_domain_for_request(request)?.routing_params;
+    let missing = fields
+        .difference(&branch.fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if missing.iter().any(|field| !route_fields.contains(field)) {
+        return Err(UnsupportedReason::Operator(
+            "union branches must output the same fields".to_owned(),
+        ));
+    }
+
+    let project_fields = fields
+        .iter()
+        .map(|field| {
+            if branch.fields.contains(field) {
+                Ok(ProjectField::named(field.clone()))
+            } else {
+                route_literal_project_field(field, request)
+            }
+        })
+        .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+    branch.graph = branch.graph.project_fields(project_fields);
+    branch.fields = fields.clone();
+    Ok(branch)
 }
 
 fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
@@ -5565,6 +5614,40 @@ fn fact_terminal_graph(
             },
         })),
     }
+}
+
+fn route_literal_project_field(
+    route_field: &str,
+    request: &QueryProgramRequest,
+) -> Result<ProjectField, UnsupportedReason> {
+    let domain = parameter_domain_for_request(request)?;
+    if let Some(path) = claim_path_from_param_field(route_field) {
+        let value = claim_value(&path, &request.policy)?;
+        let literal = domain
+            .claim_params
+            .get(route_field)
+            .map(|claim| {
+                coerce_literal_for_value_type(value.clone().into(), &claim.ty.value_type())
+            })
+            .unwrap_or_else(|| value.into());
+        return Ok(ProjectField::literal(route_field.to_owned(), literal));
+    }
+    let Some(param) = route_param_from_field(route_field) else {
+        return Err(UnsupportedReason::Runtime(format!(
+            "authorization route field '{route_field}' is neither a claim nor user parameter"
+        )));
+    };
+    let Some(value) = request.input.binding.values.get(param) else {
+        return Err(UnsupportedReason::Runtime(format!(
+            "authorization route field '{route_field}' refers to unbound parameter '{param}'"
+        )));
+    };
+    let literal = domain
+        .user_params
+        .get(param)
+        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.value_type()))
+        .unwrap_or_else(|| value.clone().into());
+    Ok(ProjectField::literal(route_field.to_owned(), literal))
 }
 
 fn relation_edge_graph(
