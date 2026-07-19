@@ -22,6 +22,20 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
+const DEFAULTS_SCHEMA: WasmSchema = {
+  counters: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "largeCount",
+        column_type: { type: "BigInt" },
+        nullable: false,
+        default: { type: "BigInt", value: 9007199254740993n },
+      },
+    ],
+  },
+};
+
 const ALICE_ID = "00000000-0000-4000-8000-0000000000a1";
 const BOB_ID = "00000000-0000-4000-8000-0000000000b2";
 
@@ -329,6 +343,35 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.delete("todos", inserted.id);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("applies column defaults for direct napi inserts with omitted cells", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      DEFAULTS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-defaults:node"),
+      deterministicBytes("jazz-napi-native-runtime-defaults:author"),
+      1,
+      true,
+    );
+
+    const inserted = runtime.insert("counters", {
+      title: { type: "Text", value: "direct napi default row" },
+    });
+
+    await expect(runtime.query(JSON.stringify({ table: "counters" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "counters",
+        values: [
+          { type: "Text", value: "direct napi default row" },
+          { type: "BigInt", value: 9007199254740993n },
+        ],
+      },
+    ]);
+
+    runtime.close();
   });
 
   it("delivers native NAPI subscription updates through the native handle", async () => {

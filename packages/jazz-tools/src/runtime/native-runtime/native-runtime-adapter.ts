@@ -3296,7 +3296,12 @@ export function encodeCellsForRow(
   table?: string,
 ): Uint8Array {
   assertRequiredRowColumnsPresent(definition.columns, row, table);
-  return encodeCells(definition.columns, (column) => row[column.name], true);
+  const columns = definition.columns.filter(
+    (column) =>
+      Object.hasOwn(row, column.name) ||
+      (column.column_type.type === "Array" && column.default == null),
+  );
+  return encodeCells(columns, (column) => row[column.name], true);
 }
 
 export function encodeCellsForPatch(
@@ -3349,13 +3354,15 @@ function encodeValue(
   value: Value | undefined,
   requireMissingDefaults: boolean,
 ): Uint8Array {
-  const resolved = value ?? column.default;
+  const resolved = value;
   if (!resolved || resolved.type === "Null") {
     if (column.nullable) return encodeNullValue(columnValueType(column));
     if (column.column_type.type === "Array") {
       return encodeNonNullValue(column.column_type, { type: "Array", value: [] });
     }
-    if (requireMissingDefaults) throw new Error(`missing required column ${column.name}`);
+    if (requireMissingDefaults && column.default == null) {
+      throw new Error(`missing required column ${column.name}`);
+    }
     return new Uint8Array();
   }
   const bytes = encodeNonNullValue(column.column_type, resolved);

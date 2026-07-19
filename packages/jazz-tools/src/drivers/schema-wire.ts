@@ -40,13 +40,16 @@ export function normalizeRuntimeSchema(schema: unknown): WasmSchema {
 }
 
 /**
- * Schemas can contain Uint8Array values (as defaults for bytea columns).
- * Since they are not serializable by JSON.stringify, we need to replace them
- * with regular arrays.
+ * Schemas can contain values that JSON.stringify cannot serialize directly:
+ * Uint8Array defaults become regular arrays, and BigInt defaults become
+ * decimal strings.
  */
 function runtimeSchemaJsonReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) {
     return Array.from(value);
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
   }
   return value;
 }

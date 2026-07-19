@@ -4587,6 +4587,7 @@ function readSchemaPolicyBranches(
       skipSchemaValueType(columnReader);
       columnReader.option(() => undefined);
       columnReader.option(() => undefined);
+      columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
     for (let index = 0; index < referenceCount; index += 1) {
@@ -4634,6 +4635,7 @@ function readSchemaColumnLargeValues(
           throw new Error(`unsupported large value kind ${tag}`);
         }) ?? null;
       columnReader.option(() => undefined);
+      columnReader.option(skipGrooveValue);
       return { name, largeValue };
     });
     const referenceCount = tableReader.u64();
@@ -4674,6 +4676,7 @@ function readSchemaTableMetadata(
       skipSchemaValueType(columnReader);
       columnReader.option(() => undefined);
       columnReader.option(() => undefined);
+      columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
     for (let index = 0; index < referenceCount; index += 1) {
@@ -4743,6 +4746,7 @@ function readSchemaSelectPolicyReachables(
       skipSchemaValueType(columnReader);
       columnReader.option(() => undefined);
       columnReader.option(() => undefined);
+      columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
     for (let index = 0; index < referenceCount; index += 1) {
@@ -4787,6 +4791,7 @@ function readSchemaPolicyInherits(
       skipSchemaValueType(columnReader);
       columnReader.option(() => undefined);
       columnReader.option(() => undefined);
+      columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
     for (let index = 0; index < referenceCount; index += 1) {
@@ -4991,6 +4996,46 @@ function readPolicyOperandForTest(reader: PostcardReader): TestPolicyOperand {
 function skipSchemaValueType(reader: PostcardReader): void {
   const tag = reader.u64();
   if (tag === 11 || tag === 12) skipSchemaValueType(reader);
+}
+
+function skipGrooveValue(reader: PostcardReader): void {
+  const tag = reader.u64();
+  switch (tag) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 9:
+      reader.u64();
+      return;
+    case 4:
+      reader.f64Le();
+      return;
+    case 5:
+      reader.bool();
+      return;
+    case 6:
+      reader.string();
+      return;
+    case 7:
+      reader.bytes();
+      return;
+    case 8:
+      reader.bytes(false);
+      return;
+    case 10:
+    case 11:
+      reader.readVec(skipGrooveValue);
+      return;
+    case 12:
+      reader.option(skipGrooveValue);
+      return;
+    case 13:
+      reader.i64();
+      return;
+    default:
+      throw new Error(`unsupported groove value tag ${tag}`);
+  }
 }
 
 type TestPolicyBranch = {

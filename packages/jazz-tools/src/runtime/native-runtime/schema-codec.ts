@@ -86,6 +86,7 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
       writeValueType(column, columnValueType(columnSpec));
       writeLargeValueKind(column, columnSpec);
       column.none();
+      writeColumnDefault(column, columnSpec);
     }, definition.columns.length);
     table.map(definition.columns.filter((column) => column.references).length);
     for (const column of definition.columns) {
@@ -122,6 +123,90 @@ function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
     throw new Error(`large_value is only supported on Bytea columns: ${column.name}`);
   }
   writer.some((kind) => kind.enumUnit(largeValue === "Text" ? 0 : 1));
+}
+
+function writeColumnDefault(writer: PostcardWriter, column: ColumnDescriptor): void {
+  if (column.default == null) {
+    writer.none();
+    return;
+  }
+  writer.some((value) => {
+    if (column.default!.type === "Null") {
+      writeDefaultValue(value, column.column_type, column.default!);
+      return;
+    }
+    if (column.nullable) {
+      value.u64(12); // groove::records::Value::Nullable
+      value.some((inner) => writeDefaultValue(inner, column.column_type, column.default!));
+      return;
+    }
+    writeDefaultValue(value, column.column_type, column.default!);
+  });
+}
+
+function writeDefaultValue(writer: PostcardWriter, columnType: ColumnType, value: Value): void {
+  if (value.type === "Null") {
+    writer.u64(12); // groove::records::Value::Nullable
+    writer.none();
+    return;
+  }
+  switch (columnType.type) {
+    case "Boolean":
+      if (value.type !== "Boolean") throw new Error("expected Boolean default");
+      writer.u64(5); // groove::records::Value::Bool
+      writer.bool(value.value);
+      return;
+    case "Integer":
+      writer.u64(2); // groove::records::Value::U32
+      writer.u64(encodeSignedI32ForCore(expectI32(value, "Integer")));
+      return;
+    case "BigInt":
+      if (value.type !== "BigInt" && value.type !== "Integer") {
+        throw new Error("expected BigInt default");
+      }
+      writer.u64(13); // groove::records::Value::I64
+      writer.i64(value.value);
+      return;
+    case "Timestamp":
+      if (value.type !== "Timestamp") throw new Error("expected Timestamp default");
+      writer.u64(3); // groove::records::Value::U64
+      writer.u64(value.value);
+      return;
+    case "Double":
+      if (value.type !== "Double" && value.type !== "Integer") {
+        throw new Error("expected Double default");
+      }
+      writer.u64(4); // groove::records::Value::F64
+      writer.bytes(f64Bytes(value.value), false);
+      return;
+    case "Text":
+    case "Json":
+    case "Enum":
+      if (value.type !== "Text") throw new Error(`expected ${columnType.type} default`);
+      writer.u64(6); // groove::records::Value::String
+      writer.string(value.value);
+      return;
+    case "Uuid":
+      if (value.type !== "Uuid") throw new Error("expected Uuid default");
+      writer.u64(8); // groove::records::Value::Uuid
+      writer.bytes(uuidBytes(value.value));
+      return;
+    case "Bytea":
+      if (value.type !== "Bytea") throw new Error("expected Bytea default");
+      writer.u64(7); // groove::records::Value::Bytes
+      writer.bytes(value.value);
+      return;
+    case "Array":
+      if (value.type !== "Array") throw new Error("expected Array default");
+      writer.u64(11); // groove::records::Value::Array
+      writer.vec(
+        (item, index) => writeDefaultValue(item, columnType.element, value.value[index]!),
+        value.value.length,
+      );
+      return;
+    case "Row":
+      throw new Error("Core runtime schema defaults do not support Row values yet");
+  }
 }
 
 function writeIndexedColumns(writer: PostcardWriter, indexedColumns: string[] | undefined): void {
@@ -1361,6 +1446,21 @@ function uuidBytes(value: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function expectI32(value: Value, type: string): number {
+  if (value.type !== "Integer" && value.type !== "BigInt") {
+    throw new Error(`expected ${type} default`);
+  }
+  const number = Number(value.value);
+  if (!Number.isSafeInteger(number) || number < -0x80000000 || number > 0x7fffffff) {
+    throw new Error(`${type} default must be a signed 32-bit integer`);
+  }
+  return number;
+}
+
+function encodeSignedI32ForCore(value: number): number {
+  return (value ^ 0x80000000) >>> 0;
 }
 
 function f64Bytes(value: number): Uint8Array {
