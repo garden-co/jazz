@@ -60,6 +60,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
             groove::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
             groove::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
+            groove::schema::ColumnType::I64 => Value::I64(i64::from(seed) - 128),
             groove::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
             groove::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
             groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
