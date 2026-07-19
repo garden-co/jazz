@@ -105,7 +105,7 @@ impl WebSocketTransport {
             auth,
         })
         .map_err(WebSocketClientError::EncodePrelude)?;
-        ws.send(Message::Binary(prelude))
+        ws.send(Message::Binary(prelude.into()))
             .await
             .map_err(WebSocketClientError::Send)?;
 
@@ -116,7 +116,7 @@ impl WebSocketTransport {
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
             .map_err(WebSocketClientError::EncodeHello)?;
-        ws.send(Message::Binary(batch))
+        ws.send(Message::Binary(batch.into()))
             .await
             .map_err(WebSocketClientError::Send)?;
 
@@ -267,7 +267,7 @@ async fn run_ws_pump(
                     batch.len(),
                     bytes.len()
                 ));
-                if ws.send(Message::Binary(bytes)).await.is_err() {
+                if ws.send(Message::Binary(bytes.into())).await.is_err() {
                     return;
                 }
             }

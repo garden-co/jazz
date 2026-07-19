@@ -681,7 +681,10 @@ fn map_key_algorithm(alg: KeyAlgorithm) -> Option<Algorithm> {
         KeyAlgorithm::PS384 => Some(Algorithm::PS384),
         KeyAlgorithm::PS512 => Some(Algorithm::PS512),
         KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
-        KeyAlgorithm::RSA1_5 | KeyAlgorithm::RSA_OAEP | KeyAlgorithm::RSA_OAEP_256 => None,
+        KeyAlgorithm::RSA1_5
+        | KeyAlgorithm::RSA_OAEP
+        | KeyAlgorithm::RSA_OAEP_256
+        | KeyAlgorithm::UNKNOWN_ALGORITHM => None,
     }
 }
 
