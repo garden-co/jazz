@@ -112,7 +112,7 @@ jobs:
       - run: pnpm exec playwright install chromium
       - env:
           GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4194304
-        run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!todo-server-ts --filter=!todo-server-ts-docs --filter=!todo-client-localfirst-ts --filter=!todo-client-localfirst-ts-docs --filter=!todo-client-localfirst-solid --filter=!todo-client-localfirst-svelte --filter=!todo-client-localfirst-vue --filter=!todo-client-localfirst-react --filter=!todo-client-localfirst-react-docs --filter=!create-jazz --concurrency=2 --only
+        run: pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!todo-server-ts --filter=!todo-server-ts-docs --filter=!todo-client-localfirst-ts --filter=!todo-client-localfirst-ts-docs --filter=!todo-client-localfirst-solid --filter=!todo-client-localfirst-svelte --filter=!todo-client-localfirst-vue --filter=!todo-client-localfirst-react --filter=!todo-client-localfirst-react-docs --filter=!create-jazz --concurrency=2
       - env:
           GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4194304
         run: pnpm --filter jazz-tools test:browser
