@@ -1,7 +1,11 @@
 import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
 import type { DbConfig } from "../runtime/db.js";
 import { type SyncJazzClient } from "../web/create-jazz-client.js";
-import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
+import {
+  attachSubscriptionStore,
+  subscriptionStoreKey,
+  type WithSubscriptionStore,
+} from "../subscription-store-internal.js";
 
 export type JazzClientFactory = (config: DbConfig) => Promise<SyncJazzClient>;
 
@@ -52,16 +56,17 @@ export function createSolidJazzClientInternal(
       }
       connectRunId();
 
-      return attachSubscriptionStore(
-        {
-          ...rawClient,
-          shutdown: () => {
-            disconnectRunId();
-            return rawClient.shutdown();
-          },
+      const wrappedClient = {
+        ...rawClient,
+        shutdown: () => {
+          disconnectRunId();
+          return rawClient.shutdown();
         },
-        getSubscriptionStore(rawClient),
-      );
+      };
+      const subscriptionStore = (rawClient as Partial<WithSubscriptionStore>)[subscriptionStoreKey];
+      return subscriptionStore
+        ? attachSubscriptionStore(wrappedClient, subscriptionStore)
+        : wrappedClient;
     },
     {
       // Disables Hydration
