@@ -158,6 +158,10 @@ export type QueryLiteral =
 
 export type QueryPredicate =
   | {
+      op: "All" | "Any";
+      predicates: QueryPredicate[];
+    }
+  | {
       column: string;
       op: QueryPredicateOp;
       value: QueryLiteral;
@@ -327,6 +331,14 @@ function arraySubqueryRequirementTag(requirement: QueryArraySubqueryRequirement)
 }
 
 function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void {
+  if (predicate.op === "All" || predicate.op === "Any") {
+    writer.u64(predicate.op === "All" ? 0 : 1);
+    writer.vec(
+      (predicateWriter, index) => writePredicate(predicateWriter, predicate.predicates[index]!),
+      predicate.predicates.length,
+    );
+    return;
+  }
   if (predicate.op === "In") {
     writer.u64(5); // Predicate::In
     writeColumnOperand(writer, predicate.column);

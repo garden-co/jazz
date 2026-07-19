@@ -270,6 +270,7 @@ type SubscriptionState = {
   relationEdges: NativeRelationSubscriptionEdge[];
   relationMaterialization: RelationMaterializationSpec;
   outputColumns: SubscriptionOutputColumns | null;
+  snapshotRefresh: boolean;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
@@ -823,6 +824,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
     }
+    const snapshotRefresh = !usesNativeRelationApi;
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -840,6 +842,7 @@ export class NativeRuntimeAdapter implements Runtime {
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
+      snapshotRefresh,
       session,
       opts,
       opened: false,
@@ -1608,6 +1611,20 @@ export class NativeRuntimeAdapter implements Runtime {
           subscription.relationRootCount,
           subscription.relationMaterialization,
         );
+        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
+        subscription.opened = true;
+        const wireDelta = chunk.reset
+          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
+          : nativeDeltaFromRows(
+              subscription.rows,
+              previousRows,
+              this.schema,
+              subscription.outputColumns,
+            );
+        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
+      } else if (subscription.snapshotRefresh) {
+        const previousRows = subscription.rows;
+        subscription.rows = this.refreshPlainSubscriptionRows(subscription);
         subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
         subscription.opened = true;
         const wireDelta = chunk.reset
@@ -2410,7 +2427,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const encoded = encodeSimpleRelationQuery(parsed.table, parsed, schema);
   return queryWithPredicates(parsed.table, encoded.predicates, {
     limit: readLimitIfPresent(parsed.limit ?? encoded.limit),
-    offset: encoded.offset,
+    offset: readOffset(parsed.offset ?? encoded.offset),
     orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by ?? parsed.orderBy)),
     select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
     arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
@@ -2582,7 +2599,37 @@ function coerceQueryPredicate(
   filter: QueryPredicate,
   schema: WasmSchema,
 ): QueryPredicate {
+  if (filter.op === "All" || filter.op === "Any") {
+    return {
+      op: filter.op,
+      predicates: filter.predicates.map((predicate) =>
+        coerceQueryPredicate(table, predicate, schema),
+      ),
+    };
+  }
   if (filter.op === "In") {
+    const columnType =
+      filter.column === "id"
+        ? ({ type: "Uuid" } as const)
+        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+    if (columnType?.type === "Array") {
+      return {
+        op: "Any",
+        predicates: filter.values.map((value) =>
+          value.type === "Array"
+            ? {
+                column: filter.column,
+                op: "Eq",
+                value: coerceQueryLiteral(table, filter.column, value, schema),
+              }
+            : {
+                column: filter.column,
+                op: "Contains",
+                value: coerceLiteralForColumnType(value, columnType.element, false),
+              },
+        ),
+      };
+    }
     return {
       ...filter,
       values: filter.values.map((value) => coerceQueryLiteral(table, filter.column, value, schema)),
