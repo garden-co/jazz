@@ -8,6 +8,7 @@ import {
 } from "@radix-ui/themes";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { ProfileName, profileNameParts } from "./ProfileName.js";
+import { ReplyIcon } from "./ReplyIcon.js";
 import { segmentRichText } from "./rich-text.js";
 import type {
   DisplayPost,
@@ -328,7 +329,7 @@ function PostCard({
           disabled={!canReply}
           onClick={() => setReplying((open) => !open)}
         >
-          <span aria-hidden="true">↩</span>
+          <ReplyIcon />
           <span>{post.replyCount || ""}</span>
         </Button>
         <Button
