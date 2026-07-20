@@ -12,6 +12,8 @@ describe("timeline projection", () => {
   afterEach(() => {
     vi.doUnmock("./bluesky.js");
     vi.doUnmock("./jazz.js");
+    vi.doUnmock("./projector.js");
+    vi.doUnmock("./reconciler.js");
     vi.resetModules();
   });
 
@@ -188,6 +190,24 @@ describe("timeline projection", () => {
     await reconciliation;
 
     expect(putRecord.mock.calls.map(([, request]) => request.rkey)).toEqual(["first", "second"]);
+  });
+
+  it("exposes only the application operations", async () => {
+    vi.doMock("./projector.js", () => ({
+      createProjector: () => ({
+        getTimelineProjectionStatus: vi.fn(),
+        projectThread: vi.fn(),
+        projectTimelinePage: vi.fn(),
+      }),
+    }));
+    vi.doMock("./reconciler.js", () => ({
+      createReconciler: () => ({ reconcileOperations: vi.fn() }),
+    }));
+    expect(Object.keys(await import("./bridge.js")).sort()).toEqual([
+      "projectThread",
+      "projectTimelinePage",
+      "reconcileOperations",
+    ]);
   });
 
 });
