@@ -235,7 +235,9 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   conditional single PUT, multipart completion (conditional only where
   the backend supports it — best-effort hardening, not contract; see
   the support matrix in the spec-review-fixes map notes), server-side
-  copy with metadata `REPLACE`, presigned part URLs for an existing
+  copy — `CopyObject` with metadata `REPLACE` below the single-copy cap,
+  `UploadPartCopy` multipart copy (pinned headers on the destination
+  `CreateMultipartUpload`) above it — presigned part URLs for an existing
   `UploadId`, HEAD, DELETE —
   implemented by the real backend and the in-process fake alike.
 - **Delete execution (decided after this spec's first cut, amended by the
@@ -268,7 +270,8 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   without `ttl`); shape-valid descriptor accepted, malformed rejected;
   in-place edit and cross-cell copy accepted as plain writes; copy into a
   differently-declared column keeps its class; descriptor readable at a
-  historical cut; grant issued with zero bucket calls for own namespace;
+  historical cut; single-PUT grant issued with zero bucket calls for own
+  namespace (multipart grant with exactly one, `CreateMultipartUpload`);
   foreign-namespace grant and delete refused; out-of-set class refused at
   grant; mime type outside the destination column's declared set refused
   at grant; id class contradicting the column's declaration refused at

@@ -49,8 +49,11 @@ amendments in this spec:
    identity id plus a random part; the object key is
    `{app}/{identity}/{random}`. Grant and delete
    authorization is a pure computation — "is the key's identity segment
-   yours?" — with **zero bucket calls at issuance and zero records
-   anywhere**: no ledger, no tombstones, no uploader metadata. Taking over
+   yours?" — with **zero bucket reads and zero server-side records
+   anywhere**: no ledger, no tombstones, no uploader metadata. Issuance
+   itself is call-free on the single-PUT path; the multipart path makes
+   exactly one bucket call, `CreateMultipartUpload`, to mint the
+   `UploadId`. Taking over
    another identity's URL is impossible by construction.
 8. **TTL is declared on the schema.** A file column may name a TTL class —
    `s.file({ ttl: "7d" })` — from a deployment-declared set (each class a
@@ -127,8 +130,10 @@ is a pure computation** — the requested key's identity segment must equal
 the UUIDv5 derivation of the requesting session's identity, its class
 segment (if any) must sit in the deployment's class set and match the
 destination column's declaration, and the declared `mime_type` must sit
-in that column's declared type set — with zero bucket calls and nothing
-written or recorded anywhere. Nobody can ever be granted a key outside
+in that column's declared type set — reading nothing from the bucket and
+recording nothing server-side (the multipart path's lone
+`CreateMultipartUpload` to mint the `UploadId` is the only bucket call at
+issuance; single-PUT grants make none). Nobody can ever be granted a key outside
 their own namespace, so overwriting or taking over another identity's URL
 is impossible by construction; the conditional-write guard
 (`If-None-Match: *`) on the presigned single PUT remains as a mandated
@@ -153,8 +158,8 @@ column as `for` — finalizes the id and yields a handle whose descriptor is
 ready to write into a cell; the
 upload may begin as soon as the handle exists — grant → PUT → release —
 straight from that Blob, no longer waiting on a cell write.
-The SDK holds the transaction that writes the descriptor at the outbox
-until release — an
+The SDK holds every transaction that writes the descriptor at the outbox
+until the upload's terminal outcome (release or `failed`) — an
 **in-memory** client-side courtesy so that descriptors written through the
 upload path have bytes present when they sync, not a server-enforced gate
 — and independent later writes bypass the held unit while causally
@@ -230,7 +235,7 @@ never deletes objects.
    column writes — in-place edits, swaps, copies, even hand-rolled
    descriptors — with no immutability enforcement, so that there is no
    file-specific write machinery and no previous-value comparison on the
-   write path; the _body_ stays immutable at the bucket regardless.
+   write path; the _body_ stays immutable by construction regardless.
 6. As an app developer, I want app-level metadata (captions, tags, display
    names that change) to be ordinary sibling columns on the same row, so
    that anything I need to query or index lives in real columns.
@@ -290,8 +295,9 @@ never deletes objects.
 19. As an app developer, I want uploads to go directly from the client to
     the object store under a presigned grant, so that my server's bandwidth
     bill doesn't scale with upload traffic.
-20. As an app developer, I want the SDK to hold the transaction that writes
-    a fromBlob descriptor at the outbox until the upload is released, so
+20. As an app developer, I want the SDK to hold every transaction that
+    writes a fromBlob descriptor at the outbox until the upload's terminal
+    outcome (release or `failed`), so
     that files created through the upload path are fetchable by the time
     other devices see them — as an in-memory courtesy of the SDK, not a
     server gate: after a restart the hold is gone and the transaction syncs
@@ -373,8 +379,10 @@ never deletes objects.
     computation — the requested key's identity segment must equal the
     derivation of the requesting session's identity, and its class and
     declared `mime_type` must match the destination column's declaration
-    and the deployment class set — with zero bucket calls and zero
-    records, so that nobody can ever upload into another identity's
+    and the deployment class set — reading nothing from the bucket and
+    recording nothing server-side (the multipart path's single
+    `CreateMultipartUpload` is the only issuance bucket call), so that
+    nobody can ever upload into another identity's
     namespace and no server state or lookup exists on the issue path.
 38. As an app developer, I want takeover of another identity's URL to be
     impossible by construction — after deletion, after TTL expiry, even for
@@ -452,8 +460,11 @@ never deletes objects.
 
 54. As an operator, I want the backend contract to be exactly the
     S3-compatible API (conditional presigned single PUT, multipart
-    create/complete/abort — conditional completion applied only where
-    supported — server-side copy with metadata `REPLACE`, public GET,
+    create/upload/complete/abort — conditional completion applied only
+    where
+    supported — server-side copy with metadata `REPLACE` for objects
+    below the single-copy cap and `UploadPartCopy` multipart copy above
+    it, public GET,
     HEAD, DELETE, and prefix-scoped lifecycle expiry for `pending/` and
     each TTL class), so that S3, R2, minio, and Tigris all work
     unchanged; incomplete-multipart cleanup and nosniff are per-backend
@@ -518,11 +529,15 @@ never deletes objects.
 - **Serving is hardened against content-type abuse, in two tiers.**
   Tier 1 — per-object headers, pinned at grant and emitted by the store
   itself (portable on all four backends): the grant carries `mime_type`
-  and `name`; the server validates `mime_type` against the destination
+  and `name`; the server validates `mime_type` as a well-formed RFC 9110
+  media type (even on a column with no declared type set, since it is
+  pinned into `Content-Type`) and against the destination
   column's declared type set, pins `Content-Type` from it, computes
   `Content-Disposition` itself — `inline` only for an
-  implementation-owned allowlist of render-safe types (image, video,
-  audio, PDF — never `text/html` or `image/svg+xml`), everything else
+  implementation-owned allowlist of render-safe types, matched on the
+  parsed **essence** type (ignoring parameters, so `text/html;x=y` cannot
+  dodge the exclusion of `text/html` or `image/svg+xml`) — image, video,
+  audio, PDF inline, everything else
   `attachment`, filename from `name` sanitized for header safety (CRLF
   and control characters stripped, RFC 6266/5987 encoding) — and pins
   `Cache-Control` (long-lived `immutable` for permanent files, `max-age`
@@ -548,11 +563,16 @@ nosniff` is a deployment requirement on the public object host in
   an email — that must never appear raw in a public URL). `JAZZ_FILES_NAMESPACE`
   is a single fixed namespace UUID — defined as `UUIDv5(DNS,
 "files.jazz.tools")`, computed once and frozen as a literal constant
-  shared verbatim by client and server — because the client mints the
-  segment and the server recomputes it to authorize; different namespaces
-  would fail every grant. It is a protocol constant, never
+  shared verbatim by client and server. The **name** input is the UTF-8
+  bytes of the `user_id` string exactly as the session establishes it —
+  no case-folding, no normalization — because the client mints the
+  segment and the server recomputes it to authorize; any divergence in
+  the namespace or the name bytes fails every grant. It is a protocol
+  constant, never
   per-deployment. The random
-  part is a canonical UUIDv4 minted from a CSPRNG (a protocol
+  part is a canonical UUIDv4 minted from a CSPRNG — the write-path
+  grammar checks the version nibble, not merely UUID shape, so a
+  hand-rolled non-v4 random is rejected (a protocol
   requirement, not SDK guidance: it is the only byte-confidentiality
   barrier). Class names are constrained to `^[a-z0-9]{1,15}$` at
   deployment-declaration time, and the class segment renders as
@@ -614,7 +634,10 @@ nosniff` is a deployment requirement on the public object host in
   fetch them. Body _deletion_ has its own rule (below) because bodies
   outlive any particular cell.
 - **Authorization is a pure computation — the server keeps no file-plane
-  state and issues grants with zero bucket calls.** The session identity
+  state, reads nothing from the bucket at issuance, and records nothing
+  (the multipart path's single `CreateMultipartUpload` to mint the
+  `UploadId` is the only issuance bucket call; single-PUT grants make
+  none).** The session identity
   is `Session.user_id` exactly as the existing sync auth establishes it
   at the handshake (backend impersonation → JWT → none); identity is
   account-scoped — the same keypair yields the same id on every device —
@@ -688,39 +711,63 @@ nosniff` is a deployment requirement on the public object host in
   edge HEADs the final key (already
   present → success), completes the multipart (conditionally where the
   backend supports it),
-  server-side-copies the pending object to its final key re-sending the
-  pinned headers with the `REPLACE` directive — a single `CopyObject`
-  below the ~5 GB single-copy cap, an `UploadPartCopy`-based multipart
-  copy above it (uploads run to 5 TB, past the single-copy limit; the
-  threshold is an implementation constant alongside the upload
-  single/multipart threshold), applying the destination guard
+  server-side-copies the pending object to its final key, pinning the
+  serving headers on the copy — **below the ~5 GB single-copy cap** a
+  single `CopyObject` re-sending them with the `REPLACE` metadata
+  directive, guarded on the destination where the backend supports it
   (`If-None-Match: *` on S3, `cf-copy-destination-if-none-match: *` on
-  R2) only where the backend supports it, else unconditionally — for
-  TTL'd files
+  R2), else unconditional; **above the cap** an `UploadPartCopy`-based
+  multipart copy whose pinned headers travel on the destination
+  `CreateMultipartUpload` (there is no metadata directive on a multipart
+  copy) and whose guard, where offered at all, sits on the copy's
+  `CompleteMultipartUpload` (uploads run to 5 TB, past the single-copy
+  limit; the threshold is an implementation constant alongside the upload
+  single/multipart threshold). A crashed above-cap copy leaves an
+  incomplete multipart upload under the **final** prefix, so the
+  incomplete-MPU cleanup requirement (below) is bucket-wide, not scoped
+  to `pending/`. For TTL'd files
   that key sits under the class prefix, and the copy is what starts the
   expiry clock — and deletes the pending object (best-effort; the
   `pending/` lifecycle rule is the backstop) — idempotent end to end by
   construction; the held transactions then enter the ordinary lane. There
   is no step six: no size check, no file-specific acceptance. A client that
   never releases leaves only a pending object the bucket will expire; a
-  client that lies harms only its own URL (a release with no completed
-  upload finds nothing to copy — the server treats the missing pending
-  source as an idempotent no-op, never an error). The small-file cost is stated
+  client that lies harms only its own URL. The release response
+  distinguishes its outcome — **final present / copy performed** vs
+  **nothing found** (no final object and no pending source, and, on the
+  multipart path, `CompleteMultipartUpload` returning no-such-upload) —
+  at zero extra cost, since the server already knows which branch it
+  took. "Nothing found" is not a silent success: the SDK maps it to
+  `failed` (or an in-session restart), so an honest client whose pending
+  object was reaped by the `pending/` lifecycle at a day boundary, or
+  whose completed upload vanished before the copy, learns its URL is
+  bodyless rather than being told it released. The small-file cost is stated
   plainly: PUT + copy + delete is three bucket writes per file — the
   price of `pending/` being the lease and GC mechanism.
   **On terminal upload failure** — the grant refused (mime type or class
-  outside the column's declaration), an unrecoverable transport error, or
-  lease expiry with no in-session retry left — the handle enters the
+  outside the column's declaration), or lease expiry with no in-session
+  retry left — the handle enters the
   `failed` state and the outbox hold releases exactly as on success: the
   held descriptor-writing transactions enter the ordinary lane bodyless,
   their URLs 404, identical to the interrupted-upload outcome. The hold
   never outlives its upload; a held transaction cannot hang the session.
+  Transient transport errors and going offline mid-session are **not**
+  terminal — the in-session driver waits and retries within the lease
+  (US 11's offline-attach relies on this); only grant refusal, lease
+  exhaustion, and explicit cancellation move a handle to `failed`. (One
+  honest edge: a session that dies mid-release-retry can land in `failed`
+  even though the release actually completed — the URL then serves, not
+  404s; the app re-derives state from the descriptor, not the stale
+  handle.)
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
   lifecycle rule expires the `pending/` prefix after the lease window
   (day-granularity, matching the "order of days" lease) — prefix-scoped
   expiry is portable across S3, R2, minio, and Tigris (R2 lifecycle
-  cannot filter by tag; irrelevant here). Half-finished multiparts are a
-  per-backend deployment requirement — abandoned uploads must be reaped
+  cannot filter by tag; irrelevant here). Half-finished multiparts —
+  both abandoned upload MPUs under `pending/` and abandoned above-cap
+  release-copy MPUs under the final prefix, so cleanup is bucket-wide —
+  are a
+  per-backend deployment requirement — abandoned multiparts must be reaped
   within roughly the lease window — because no portable lifecycle action
   exists: the `AbortIncompleteMultipartUpload` rule on S3 and R2;
   minio's built-in stale-uploads purge, with its default 24h expiry
@@ -795,9 +842,13 @@ nosniff` is a deployment requirement on the public object host in
   whose URLs 404; historical and branch reads behave identically.
 - **Backend contract is one abstraction — the S3-compatible API**
   (conditional presigned single PUT, multipart
-  create/upload/complete/abort, server-side copy with metadata
-  `REPLACE`, public GET, HEAD, DELETE, prefix-scoped lifecycle expiry),
-  covering S3, R2, minio, Tigris. Conditional multipart completion and
+  create/upload/complete/abort, server-side copy — `CopyObject` with
+  metadata `REPLACE` below the single-copy cap, `UploadPartCopy`
+  multipart copy above it — public GET, HEAD, DELETE, prefix-scoped
+  lifecycle expiry),
+  covering S3, R2, minio, Tigris. The in-process fake implements the
+  multipart-copy path too (Tigris's copy-size limit and above-cap copy
+  are unverified in the matrix — flagged for per-backend confirmation). Conditional multipart completion and
   destination-guarded copy are best-effort hardening applied where a
   backend supports them (S3 and minio for conditional completion; S3
   and R2 — the latter via `cf-copy-destination-if-*` extension
@@ -866,7 +917,8 @@ column)`, validates class and mime type against the schema
     `TestingClient`s, or `test_client` where one runtime suffices) covering
     descriptor shape validation (malformed rejected; in-place edit, copy,
     and hand-rolled descriptor all accepted), grant authorization
-    (own-namespace grant issued with zero bucket calls; a grant naming
+    (own-namespace single-PUT grant issued with zero bucket calls, a
+    multipart grant with exactly one — `CreateMultipartUpload`; a grant naming
     another identity's segment refused; a grant whose id names a class
     outside the deployment's set refused; a grant whose `mime_type` is
     outside the destination column's declared type set refused; a grant
