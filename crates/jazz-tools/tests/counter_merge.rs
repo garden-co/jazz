@@ -65,9 +65,7 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
         QUERY_TIMEOUT,
         "bob sees the counter base",
         |rows| {
-            (rows.len() == 1
-                && rows[0].0 == counter_id
-                && counter_value(&rows[0]) == Some(0))
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(0))
                 .then_some(())
         },
     )
@@ -76,32 +74,29 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
     // Bob keeps the shared base locally, then goes offline before writing.
     // Alice's +5 and Bob's offline +3 are concurrent absolute snapshots, so
     // the server must merge their MRCA-relative deltas to the canonical 8.
-    let alice_batch = alice
-        .update(
-            counter_id,
-            vec![("value".to_string(), Value::Integer(5))],
-        )
-        .expect("alice writes +5");
-    alice
-        .wait_for_batch(alice_batch, DurabilityTier::EdgeServer)
+    bob.shutdown()
         .await
-        .expect("alice's write settles at the server");
-    bob.shutdown().await.expect("bob shuts down before offline write");
+        .expect("bob shuts down before offline write");
     bob_context.server_url = String::new();
     let bob_offline = JazzClient::connect(bob_context.clone())
         .await
         .expect("bob opens his persistent storage offline");
     bob_offline
-        .update(
-            counter_id,
-            vec![("value".to_string(), Value::Integer(3))],
-        )
+        .update(counter_id, vec![("value".to_string(), Value::Integer(3))])
         .expect("bob writes +3");
     bob_offline
         .shutdown()
         .await
         .expect("bob shuts down after offline write");
     bob_context.server_url = server.base_url();
+
+    let alice_batch = alice
+        .update(counter_id, vec![("value".to_string(), Value::Integer(5))])
+        .expect("alice writes +5");
+    alice
+        .wait_for_batch(alice_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's write settles at the server");
 
     let observer = TestingClient::builder()
         .with_server(&server)
@@ -115,35 +110,46 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
         .await
         .expect("bob reconnects with persistent storage");
     wait_for_query(
-        &bob_restarted,
+        &alice,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "restarted Bob converges to the canonical counter",
+        "live Alice sees the canonical counter",
         |rows| {
-            (rows.len() == 1
-                && rows[0].0 == counter_id
-                && counter_value(&rows[0]) == Some(8))
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(8))
                 .then_some(())
         },
     )
     .await;
     wait_for_query(
         &observer,
-        query,
+        query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
         "fresh observer sees the canonical counter",
         |rows| {
-            (rows.len() == 1
-                && rows[0].0 == counter_id
-                && counter_value(&rows[0]) == Some(8))
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(8))
+                .then_some(())
+        },
+    )
+    .await;
+    wait_for_query(
+        &bob_restarted,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "restarted Bob converges to the canonical counter",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(8))
                 .then_some(())
         },
     )
     .await;
 
-    bob_restarted.shutdown().await.expect("shutdown restarted Bob");
+    bob_restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted Bob");
     observer.shutdown().await.expect("shutdown observer");
     alice.shutdown().await.expect("shutdown Alice");
     server.shutdown().await;
@@ -181,46 +187,36 @@ async fn counter_merge_does_not_recount_causal_updates_for_live_clients() {
         QUERY_TIMEOUT,
         "bob sees the causal counter base",
         |rows| {
-            (rows.len() == 1
-                && rows[0].0 == counter_id
-                && counter_value(&rows[0]) == Some(0))
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(0))
                 .then_some(())
         },
     )
     .await;
 
     let first_batch = alice
-        .update(
-            counter_id,
-            vec![("value".to_string(), Value::Integer(2))],
-        )
+        .update(counter_id, vec![("value".to_string(), Value::Integer(2))])
         .expect("alice writes the first causal snapshot");
     alice
         .wait_for_batch(first_batch, DurabilityTier::EdgeServer)
         .await
         .expect("first causal snapshot settles");
     let second_batch = alice
-        .update(
-            counter_id,
-            vec![("value".to_string(), Value::Integer(3))],
-        )
+        .update(counter_id, vec![("value".to_string(), Value::Integer(3))])
         .expect("alice writes the second causal snapshot");
     alice
         .wait_for_batch(second_batch, DurabilityTier::EdgeServer)
         .await
         .expect("second causal snapshot settles");
 
-    for client in [&alice, &bob] {
+    for (name, client) in [("Alice", &alice), ("Bob", &bob)] {
         wait_for_query(
             client,
             query.clone(),
             Some(DurabilityTier::EdgeServer),
             QUERY_TIMEOUT,
-            "live client sees the causal counter result",
+            &format!("{name} sees the causal counter result"),
             |rows| {
-                (rows.len() == 1
-                    && rows[0].0 == counter_id
-                    && counter_value(&rows[0]) == Some(3))
+                (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(3))
                     .then_some(())
             },
         )
@@ -241,9 +237,7 @@ async fn counter_merge_does_not_recount_causal_updates_for_live_clients() {
         QUERY_TIMEOUT,
         "fresh observer sees the causal counter result",
         |rows| {
-            (rows.len() == 1
-                && rows[0].0 == counter_id
-                && counter_value(&rows[0]) == Some(3))
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(3))
                 .then_some(())
         },
     )

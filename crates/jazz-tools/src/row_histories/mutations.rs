@@ -190,7 +190,7 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
     let ApplyRowBatchWithContext {
         object_id,
         branch_name,
-        row,
+        mut row,
         index_mutations,
         row_locator,
         table,
@@ -218,6 +218,68 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
         .as_ref()
         .map(|entry| entry.current_row.clone());
 
+    let existing_history_row = if !is_known_new_object {
+        io.load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
+            .map_err(RowHistoryError::StorageError)?
+    } else {
+        None
+    };
+
+    // Scoped deliveries intentionally omit parents. Reattach a new snapshot
+    // to the local frontier so a causal update does not become a new root.
+    // If the raw batch already exists, update only the visible projection:
+    // the merged snapshot must not replace the writer's raw history.
+    if row.state.is_visible() && row.parents.is_empty() && !is_known_new_object {
+        if let Some(existing_row) = existing_history_row.as_ref()
+            && !existing_row.parents.is_empty()
+        {
+            if existing_row == &row {
+                return Ok(ApplyRowBatchResult {
+                    batch_id,
+                    row_locator,
+                    visibility_change: None,
+                });
+            }
+
+            let current_entry = VisibleRowEntry::new(row.clone());
+            let current_visible = Some(row.clone());
+            let visible_changed = previous_visible != current_visible;
+            let encoded_visible =
+                crate::storage::encode_visible_row_bytes_with_context(&context, &current_entry)
+                    .map_err(RowHistoryError::StorageError)?;
+            <H as Storage>::apply_prepared_row_mutation(
+                io,
+                &table,
+                &[],
+                std::slice::from_ref(&current_entry),
+                &[],
+                std::slice::from_ref(&encoded_visible),
+                index_mutations,
+            )
+            .map_err(RowHistoryError::StorageError)?;
+
+            let applied = AppliedRowBatch {
+                row_locator: row_locator.clone(),
+                previous_visible,
+                current_visible,
+                is_new_object: false,
+                visible_changed,
+            };
+            return Ok(ApplyRowBatchResult {
+                batch_id,
+                row_locator,
+                visibility_change: visibility_change_from_applied(object_id, applied),
+            });
+        }
+
+        if let Some(previous_entry) = previous_entry.as_ref()
+            && !previous_entry.branch_frontier.is_empty()
+            && !previous_entry.branch_frontier.contains(&batch_id)
+        {
+            row.parents = previous_entry.branch_frontier.clone().into();
+        }
+    }
+
     if !is_known_new_object {
         for parent in &row.parents {
             if io
@@ -243,16 +305,14 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
     } else {
         let mut patched_history = load_branch_history(io, &table, object_id, &branch)?;
 
-        if let Some(existing_row) = io
-            .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
-            .map_err(RowHistoryError::StorageError)?
-            && existing_row == row
-        {
-            return Ok(ApplyRowBatchResult {
-                batch_id,
-                row_locator,
-                visibility_change: None,
-            });
+        if let Some(existing_row) = existing_history_row {
+            if existing_row == row {
+                return Ok(ApplyRowBatchResult {
+                    batch_id,
+                    row_locator,
+                    visibility_change: None,
+                });
+            }
         }
         if let Some(existing) = patched_history
             .iter_mut()
