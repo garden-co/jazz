@@ -314,6 +314,15 @@ impl SyncManager {
         if row.parents.is_empty() {
             return None;
         }
+        // If the row has a single parent, we don't need any conflict resolution
+        if let [parent_batch_id] = row.parents.as_slice() {
+            let parent_row = storage
+                .load_history_row_batch(table, row.branch.as_str(), row.row_id, *parent_batch_id)
+                .ok()
+                .flatten()?;
+            return (parent_row.batch_id != row.batch_id && parent_row.state.is_visible())
+                .then_some(parent_row);
+        }
 
         let context =
             crate::storage::resolve_history_row_write_context(storage, table, row).ok()?;
