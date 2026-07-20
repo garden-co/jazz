@@ -1,0 +1,117 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  currentSession: vi.fn(),
+  jazzToken: vi.fn(),
+  projectTimelinePage: vi.fn(),
+  reconcileOperations: vi.fn(),
+}));
+
+vi.mock("./auth.js", () => ({
+  bffSessionCookie: "bff-session",
+  createBffSession: vi.fn(),
+  currentSession: mocks.currentSession,
+  invalidateBffSession: vi.fn(),
+  jazzJwks: { keys: [] },
+  jazzToken: mocks.jazzToken,
+  oauth: { authorize: vi.fn(), callback: vi.fn(), revoke: vi.fn() },
+  oauthScope: "atproto transition:generic",
+}));
+
+vi.mock("./bridge.js", () => ({
+  OperationError: class OperationError extends Error {
+    constructor(message: string, readonly status: 400 | 502) {
+      super(message);
+    }
+  },
+  getTimelineProjectionStatus: vi.fn(),
+  projectThread: vi.fn(),
+  projectTimelinePage: mocks.projectTimelinePage,
+  reconcileOperations: mocks.reconcileOperations,
+}));
+
+import { createServer } from "./app.js";
+
+const authenticatedSession = {
+  did: "did:plc:alice",
+  session: { fetchHandler: vi.fn() },
+};
+
+const queuedPost = {
+  id: "00000000-0000-0000-0000-000000000001",
+  ownerDid: "did:plc:alice",
+  kind: "post",
+  rkey: "3mpost",
+  payload: JSON.stringify({ text: "Hello", createdAt: "2026-07-16T18:00:00.000Z" }),
+  state: "queued",
+  createdAt: "2026-07-16T18:00:00.000Z",
+};
+
+describe("BFF routes", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.currentSession.mockResolvedValue(authenticatedSession);
+    mocks.jazzToken.mockResolvedValue("jazz-jwt");
+  });
+
+  it("exchanges the BFF session for the matching Jazz identity", async () => {
+    const response = await createServer().request("/api/session", {
+      headers: { cookie: "bff-session=opaque-session-id" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ did: "did:plc:alice", token: "jazz-jwt" });
+    expect(mocks.currentSession).toHaveBeenCalledWith("opaque-session-id");
+    expect(mocks.jazzToken).toHaveBeenCalledWith("did:plc:alice");
+  });
+
+  it("triggers projection into Jazz without returning timeline rows", async () => {
+    const metadata = {
+      cursor: "next-page",
+      hasMore: true,
+      count: 20,
+      projection: { id: "projection-id", state: "accepted" },
+    };
+    mocks.projectTimelinePage.mockResolvedValue(metadata);
+
+    const response = await createServer().request("/api/timeline", {
+      headers: { cookie: "bff-session=opaque-session-id" },
+    });
+
+    expect(await response.json()).toEqual(metadata);
+    expect(mocks.projectTimelinePage).toHaveBeenCalledWith(
+      "did:plc:alice",
+      authenticatedSession.session,
+      undefined,
+    );
+  });
+
+  it("decodes Jazz outbox rows before reconciling them with ATProto", async () => {
+    const response = await createServer().request("/api/operations", {
+      method: "POST",
+      headers: { cookie: "bff-session=opaque-session-id", "content-type": "application/json" },
+      body: JSON.stringify([queuedPost]),
+    });
+
+    expect(response.status).toBe(200);
+    expect(mocks.reconcileOperations).toHaveBeenCalledWith(
+      "did:plc:alice",
+      authenticatedSession.session,
+      [expect.objectContaining({
+        kind: "post",
+        payload: { text: "Hello", createdAt: queuedPost.createdAt },
+      })],
+    );
+  });
+
+  it("rejects Jazz outbox rows owned by another authenticated user", async () => {
+    const response = await createServer().request("/api/operations", {
+      method: "POST",
+      headers: { cookie: "bff-session=opaque-session-id", "content-type": "application/json" },
+      body: JSON.stringify([{ ...queuedPost, ownerDid: "did:plc:mallory" }]),
+    });
+
+    expect(response.status).toBe(403);
+    expect(mocks.reconcileOperations).not.toHaveBeenCalled();
+  });
+});
