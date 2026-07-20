@@ -186,12 +186,13 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
 }
 
 #[tokio::test]
-/// Preserves a merged counter projection when the receiving writer contributed to it.
+/// Preserves a merged counter projection through the receiving writer's next update.
 ///
 /// ```text
 /// bob ── base ── offline +3 ────────────────► server
 /// alice ── +5 ──► server ── merged 8 ───────► bob
-/// bob ── offline follow-up 9 ───────────────► local view
+/// bob ── offline follow-up 9 ───────────────► server
+/// charlie ◄────────────── merged 9 ────────── server
 /// ```
 async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_batch() {
     let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
@@ -296,7 +297,7 @@ async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_b
         .await
         .expect("shutdown restarted Bob");
     bob_context.server_url = String::new();
-    let bob_follow_up = JazzClient::connect(bob_context)
+    let bob_follow_up = JazzClient::connect(bob_context.clone())
         .await
         .expect("bob reopens his merged state offline");
     bob_follow_up
@@ -319,6 +320,28 @@ async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_b
         .shutdown()
         .await
         .expect("shutdown Bob after the offline follow-up");
+
+    bob_context.server_url = server.base_url();
+    let bob_after_follow_up = JazzClient::connect(bob_context)
+        .await
+        .expect("bob reconnects with the offline follow-up");
+    wait_for_query(
+        &observer,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "observer sees exactly the merged counter plus Bob's follow-up",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(9))
+                .then_some(())
+        },
+    )
+    .await;
+
+    bob_after_follow_up
+        .shutdown()
+        .await
+        .expect("shutdown Bob after reconnecting the follow-up");
     observer.shutdown().await.expect("shutdown observer");
     alice.shutdown().await.expect("shutdown Alice");
     server.shutdown().await;
