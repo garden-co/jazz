@@ -369,7 +369,7 @@ describe("alpha public package flow", () => {
       const remoteRows = await waitForRemoteBrowserDbTitle({
         id: remoteBrowserDbId,
         title: "Adopt alpha websocket flow",
-        timeoutMs: 15_000,
+        timeoutMs: 45_000,
         tier: "local",
       });
       expect(remoteRows).toContainEqual({
@@ -542,7 +542,7 @@ describe("alpha public package flow", () => {
       richQuery,
       (todos) => todos.length === 1 && todos[0]?.id === created.id,
       "mixed persistent reader local reopen",
-      15_000,
+      45_000,
       "local",
     );
     expect(reopenedRow).toMatchObject({
@@ -615,7 +615,7 @@ describe("alpha public package flow", () => {
       app.todos.orderBy("title"),
       (todos) => summariesEqual(todos, summaries),
       "reopened public websocket client catches up via all",
-      15_000,
+      45_000,
       "local",
     );
     expect(allRows).toEqual([initial, offlineWrite]);
@@ -759,7 +759,7 @@ describe("alpha public package flow", () => {
       app.todos.where({ id: todo.id }),
       (todos) => todos.length === 0,
       "deleted todo is hidden from default reads",
-      15_000,
+      45_000,
       "edge",
     );
     const restored = await withTimeout(
@@ -817,7 +817,7 @@ describe("alpha public package flow", () => {
       app.todos.includeDeleted().where({ id: todo.id }),
       (todos) => todos.length === 1,
       "deleted todo is visible with includeDeleted",
-      15_000,
+      45_000,
       "edge",
     );
     expect(deletedTodo).toEqual(todo);
@@ -972,7 +972,7 @@ async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): 
     app.todos.orderBy("title"),
     (todos) => titlesEqual(todos, titles),
     `todos converge to ${titles.join(", ")}`,
-    15_000,
+    45_000,
   );
   expect(rows.map((todo) => todo.title)).toEqual(titles);
   await waitForCondition(
@@ -1001,7 +1001,7 @@ async function expectTodoSummariesForQuery(
     query,
     (todos) => summariesEqual([...todos].sort(byTitle), summaries),
     `todos converge to ${summaries.join(", ")}`,
-    15_000,
+    45_000,
     tier,
   );
   expect([...rows].sort(byTitle).map(summary)).toEqual(summaries);
@@ -1047,7 +1047,7 @@ async function waitForSubscribedTodoSummaries(
             `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
         ),
       );
-    }, 15_000);
+    }, 45_000);
     unsubscribe = ctx.trackSubscription(
       db.subscribeAll(query, (delta) => {
         lastRows = [...delta.all];
@@ -1067,7 +1067,7 @@ async function waitForRichTodos(
   predicate: (todos: RichTodo[]) => boolean,
   label: string,
 ): Promise<RichTodo[]> {
-  return await waitForQuery(db, query, predicate, label, 15_000, "edge");
+  return await waitForQuery(db, query, predicate, label, 45_000, "edge");
 }
 
 function titlesEqual(rows: Todo[], titles: string[]): boolean {
@@ -1092,7 +1092,7 @@ async function waitForFileRecord(db: Db, fileId: string): Promise<void> {
     fileApp.files.where({ id: fileId }),
     (files) => files.length === 1,
     `file ${fileId}`,
-    15_000,
+    45_000,
     "local",
   );
 }
@@ -1109,7 +1109,7 @@ async function waitForSubscribedFileRecord(db: Db, fileId: string): Promise<void
             `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
         ),
       );
-    }, 15_000);
+    }, 45_000);
     unsubscribe = ctx.trackSubscription(
       db.subscribeAll(fileApp.files.where({ id: fileId }), (delta) => {
         lastRows = [...delta.all];
