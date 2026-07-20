@@ -10,8 +10,9 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
-import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy, Value } from "jazz-tools";
+import type { ColumnDescriptor, ColumnType, TableProxy, Value } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
+import type { DynamicTableRow } from "../../utility/generic-query-builder.js";
 import {
   useEffect,
   useLayoutEffect,
@@ -892,21 +893,18 @@ export function TableDataGrid() {
       );
 
       await Promise.all([
-        ...rowUpdates.map(({ rowId, updates }) =>
-          db.update(tableProxy, rowId, updates).wait({
-            tier: mutationDurabilityTier,
-          }),
-        ),
-        ...[...queuedDeletes].map((rowId) =>
-          db.delete(tableProxy, rowId).wait({
-            tier: mutationDurabilityTier,
-          }),
-        ),
-        ...insertValues.map((values) =>
-          db.insert(tableProxy, values).wait({
-            tier: mutationDurabilityTier,
-          }),
-        ),
+        ...rowUpdates.map(async ({ rowId, updates }) => {
+          const handle = await db.update(tableProxy, rowId, updates);
+          await handle.wait({ tier: mutationDurabilityTier });
+        }),
+        ...[...queuedDeletes].map(async (rowId) => {
+          const handle = await db.delete(tableProxy, rowId);
+          await handle.wait({ tier: mutationDurabilityTier });
+        }),
+        ...insertValues.map(async (values) => {
+          const handle = await db.insert(tableProxy, values);
+          await handle.wait({ tier: mutationDurabilityTier });
+        }),
       ]);
 
       setQueuedEdits({});
