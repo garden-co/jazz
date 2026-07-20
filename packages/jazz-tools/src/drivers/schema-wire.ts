@@ -54,13 +54,21 @@ function runtimeSchemaJsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
+function sortSchemaTables(schema: WasmSchema): WasmSchema {
+  return Object.fromEntries(
+    Object.keys(schema)
+      .sort()
+      .map((tableName) => [tableName, schema[tableName]]),
+  ) as WasmSchema;
+}
+
 export function serializeRuntimeSchema(
   schema: WasmSchema,
   options?: SerializeRuntimeSchemaOptions,
 ): string {
   const envelope: RuntimeSchemaEnvelope = {
     __jazzRuntimeSchema: 1,
-    schema,
+    schema: sortSchemaTables(schema),
     loadedPolicyBundle: options?.loadedPolicyBundle ?? false,
   };
   return JSON.stringify(envelope, runtimeSchemaJsonReplacer);

@@ -82,11 +82,7 @@ export function InspectorApp() {
 
   return (
     <InspectorConnectionErrorBoundary>
-      <JazzProvider
-        config={config}
-        autoAttachDevTools={false}
-        fallback={<p style={{ padding: 16 }}>Connecting…</p>}
-      >
+      <JazzProvider config={config} fallback={<p style={{ padding: 16 }}>Connecting…</p>}>
         <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
           <MemoryRouter>
             <InspectorRoutes />

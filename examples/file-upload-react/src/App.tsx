@@ -89,16 +89,15 @@ function FileUploadScreen() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const db = useDb();
   const session = useSession();
-  const uploads =
-    useAll(
-      app.uploads
-        .include({
-          file: true,
-        })
-        .orderBy("lastModified", "desc")
-        .limit(1)
-        .requireIncludes(),
-    ) ?? [];
+  const { data: uploads = [] } = useAll(
+    app.uploads
+      .include({
+        file: true,
+      })
+      .orderBy("lastModified", "desc")
+      .limit(1)
+      .requireIncludes(),
+  );
   const latestUpload = uploads[0];
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 

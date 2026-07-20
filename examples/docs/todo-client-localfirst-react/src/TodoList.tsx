@@ -6,10 +6,10 @@ import { app } from "../schema.js";
 export function TodoList() {
   // #region read-write-react
   const db = useDb();
-  const todos = useAll(app.todos) ?? [];
+  const { data: todos = [] } = useAll(app.todos);
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
-  const incompleteTodos = useAll(
+  const { data: incompleteTodos } = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
@@ -24,12 +24,15 @@ export function TodoList() {
 
   // #region reading-loading-state-react
   const allTodos = useAll(app.todos);
-  // allTodos is undefined while connecting, [] when loaded but empty
+  // `allTodos.data` is `undefined` while loading the first result (and `allTodos.isLoading` is `true`).
+  // `allTodos.data` is `[]` when loaded but empty
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react
   const [filter, setFilter] = useState<string | null>(null);
-  const filtered = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+  const { data: filtered } = useAll(
+    filter ? app.todos.where({ title: { contains: filter } }) : undefined,
+  );
   // #endregion reading-conditional-query-react
 
   // #region writing-use-db-react
@@ -56,7 +59,7 @@ export function TodoList() {
     setTitle("");
   };
 
-  if (allTodos === undefined) {
+  if (allTodos.isLoading) {
     return <p>Connecting…</p>;
   }
 
