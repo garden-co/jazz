@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
+use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::ivm::MultisinkSubscription;
 use groove::storage::OrderedKvStorage;
 use web_time::Instant;
@@ -1059,7 +1060,7 @@ impl PeerState {
             let positioned_members = trace_positioned_members.expect("trace positioned members");
             let known_state = trace_known_state.expect("trace known state");
             eprintln!(
-                "JAZZ_REHYDRATE_TRACE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} bundle_reads={} bundle_ranges={}",
+                "JAZZ_REHYDRATE_TRACE stage=rehydrate table={} subscription={subscription:?} reset={} known_state={} positioned_members={} open_ms={} filter_ms={} bundle_ms={} raw_adds={} raw_removes={} raw_fact_adds={} adds={} removes={} bundles={} open_reads={} open_ranges={} open_read_buckets={} bundle_reads={} bundle_ranges={}",
                 shape.query().table,
                 reset_result_set,
                 known_state,
@@ -1075,6 +1076,7 @@ impl PeerState {
                 bundle_count,
                 open_reads.total.reads,
                 open_reads.total.ranges,
+                storage_read_metrics_buckets(&open_reads),
                 bundle_reads.total.reads,
                 bundle_reads.total.ranges,
             );
@@ -2094,6 +2096,35 @@ fn split_row_version_payloads(
         });
     }
     Ok(messages)
+}
+
+fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> String {
+    [
+        ("history_rows", metrics.history_rows),
+        ("history_indexes", metrics.history_indexes),
+        ("global_current_rows", metrics.global_current_rows),
+        ("global_current_indexes", metrics.global_current_indexes),
+        (
+            "register_global_current_rows",
+            metrics.register_global_current_rows,
+        ),
+        ("global_changes_rows", metrics.global_changes_rows),
+        ("global_changes_indexes", metrics.global_changes_indexes),
+        ("transactions_rows", metrics.transactions_rows),
+        ("transactions_indexes", metrics.transactions_indexes),
+        ("other", metrics.other),
+    ]
+    .into_iter()
+    .map(|(name, bucket)| storage_read_bucket_field(name, bucket))
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
+fn storage_read_bucket_field(name: &str, bucket: StorageReadBucket) -> String {
+    format!(
+        "{name}.reads={}:{}.ranges={}",
+        bucket.reads, name, bucket.ranges
+    )
 }
 
 fn view_update_reset_result_set(update: &mut SyncMessage) {

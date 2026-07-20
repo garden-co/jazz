@@ -2785,7 +2785,7 @@ fn lower_linear_plan_steps(
                 }
             }
             LinearStep::Join { right, mode, on } => {
-                if *mode != JoinMode::Inner {
+                if !matches!(mode, JoinMode::Inner | JoinMode::Semi) {
                     return Err(UnsupportedReason::Operator(
                         "join_via only lowers inner/semi joins".to_owned(),
                     ));
@@ -2832,17 +2832,73 @@ fn lower_linear_plan_steps(
                         );
                     }
                 }
-                graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
-                let right_fields = lowered_right.fields.clone();
-                last_join_right = Some((
-                    (**right).clone(),
-                    right_nullable_fields,
-                    right_nullable_field_depths,
-                    right_fields,
-                ));
+                if *mode == JoinMode::Semi {
+                    // Existence join: the right (authorization) side matters
+                    // only per (join key, route fields) group — one qualifying
+                    // derivation is as good as fifty, but the route fields must
+                    // survive because one shared program serves every bound
+                    // identity and result rows are routed by them. Project the
+                    // right side down to exactly those fields and keep one
+                    // maintained winner per group; rows within a group are
+                    // identical post-projection, so losing one of several
+                    // derivations produces no output delta and losing the last
+                    // retracts the group. The join itself stays a plain inner
+                    // join, so downstream field/route bookkeeping is unchanged.
+                    let mut dedup_fields: Vec<String> = right_keys.clone();
+                    for field in route_fields
+                        .iter()
+                        .filter(|field| lowered_right.fields.contains(*field))
+                    {
+                        if !dedup_fields.contains(field) {
+                            dedup_fields.push(field.clone());
+                        }
+                    }
+                    let projected = right_graph.project_fields(
+                        dedup_fields
+                            .iter()
+                            .map(|field| ProjectField::named(field.clone()))
+                            .collect::<Vec<_>>(),
+                    );
+                    let right_reduced = GraphBuilder::arg_max_by(
+                        projected,
+                        dedup_fields.clone(),
+                        right_keys.clone(),
+                    );
+                    graph = GraphBuilder::join(graph, right_reduced, left_keys, right_keys);
+                    // Downstream steps (Project, route retention) resolve
+                    // right-prefixed fields through this; the right side now
+                    // carries only the dedup fields.
+                    let reduced_right_fields: BTreeSet<String> =
+                        dedup_fields.iter().cloned().collect();
+                    last_join_right = Some((
+                        (**right).clone(),
+                        right_nullable_fields
+                            .intersection(&reduced_right_fields)
+                            .cloned()
+                            .collect(),
+                        right_nullable_field_depths
+                            .iter()
+                            .filter(|(field, _)| reduced_right_fields.contains(*field))
+                            .map(|(field, depth)| (field.clone(), *depth))
+                            .collect(),
+                        reduced_right_fields,
+                    ));
+                } else {
+                    graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
+                    let right_fields = lowered_right.fields.clone();
+                    last_join_right = Some((
+                        (**right).clone(),
+                        right_nullable_fields,
+                        right_nullable_field_depths,
+                        right_fields,
+                    ));
+                }
                 let next_is_project =
                     matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
-                if matches!(&plan.root, LinearRoot::Source { .. }) && !next_is_project {
+                if matches!(mode, JoinMode::Inner | JoinMode::Semi)
+                    && matches!(&plan.root, LinearRoot::Source { .. })
+                    && !next_is_project
+                {
                     let introduced_route_fields = route_fields
                         .iter()
                         .filter(|field| lowered_right.fields.contains(*field))

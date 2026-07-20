@@ -306,6 +306,38 @@ by a sound static path; the fallback is a counted full scan, not a different
 semantic evaluator. Prepared-shape steady-state probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
+### 14.7 Existence lowering for inherited-parent policy joins
+
+Inherited-parent authorization (`inherits(parent_column)`) is existence
+semantics: a child row is visible iff at least one qualifying derivation
+(access edge × membership path) exists for the parent, per identity. The
+normalizer marks this join `JoinMode::Semi`; the lowering implements it as a
+derivation-collapse, not a groove semi-join:
+
+1. project the parent-policy subtree down to exactly the join keys plus the
+   route fields it carries (claim route fields included);
+2. `arg_max_by` grouped on all of those fields — rows within a group are
+   identical post-projection, so losing one of several derivations emits no
+   output delta and losing the last retracts the group;
+3. plain inner join against the reduced side; downstream field/route
+   bookkeeping is unchanged (`last_join_right` carries the reduced field set).
+
+Two constraints force this shape over a plain `SemiJoin` node:
+
+- **Multisink identity routing.** One shared program serves every bound
+  identity of a prepared shape; result rows are routed to subscribers by their
+  claim route-field values. The claim must therefore survive to the join
+  output as a runtime-bound field — never baked as a literal (prepared graphs
+  are shared across identities), and never erased (a groove `SemiJoin` emits
+  left rows only, which would destroy per-identity attribution).
+- **Maintained deltas across permission changes.** The parent set must stay
+  dynamic; freezing visible parents at open time would drop deltas for
+  children under later-granted or later-revoked parents.
+
+Without this, hydration computes each child once per derivation and
+consolidates the excess away (observed: ~2.4M intermediate rows for 24k
+visible children; warm reopen 4.3s → 0.4s with the collapse in place).
+
 ### 14.8 Subsumed lowering backlog
 
 The former public-schema-subset, SQL dialect, explicit-index, and top-k notes are
@@ -344,6 +376,13 @@ policy filtering, pagination, and live subscription maintenance.
   these benchmark phases must report a visible
   `[needs: historical-implicit-include-source-coverage]` gate rather than being
   silently counted.
+- 🔶 **Existence lowering beyond inherits.** §14.7's derivation-collapse is
+  applied only to inherited-parent policy joins. Reachable-closure and policy
+  atom-chain joins carry the same existence semantics and plausibly the same
+  per-derivation fanout on edge-heavy schemas; extending the collapse needs the
+  same route-field and maintained-delta analysis per site, plus a receipt that
+  the fanout actually exists there. A real groove `Distinct` (today an
+  unsupported marker op) would subsume the `arg_max_by` encoding.
 - 🔶 **Policy authorization source node.** Read policy lowering currently bridges
   policy authorization through a physical authorized-row-id graph before joining
   it back to the base source. Decide the first-class groove/source node for

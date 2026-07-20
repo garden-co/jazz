@@ -273,7 +273,10 @@ const GROUP_ACCESS: &str = "group_access_edges";
 const GROUP_ENTRY: &str = "group_entry";
 const PROFILE: &str = "profile";
 const CHILD_TABLES: usize = 6;
-const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v4";
+const DOMINANT_CHILD_TABLE: &str = "res_l_child_3";
+const DOMINANT_CHILD_VISIBLE_PARENTS: usize = 36;
+const DOMINANT_CHILD_TOTAL_PARENTS: usize = 65;
+const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v5";
 const SEED_CACHE_READY: &str = ".jazz_customer_seed_ready";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
@@ -288,7 +291,7 @@ const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_i", 22, 69, None),
     ResourceSpec::new("res_j", 7, 24, None),
     ResourceSpec::new("res_k", 10, 45, None),
-    ResourceSpec::new("res_l", 30, 35, Some(19_894)),
+    ResourceSpec::new("res_l", DOMINANT_CHILD_TOTAL_PARENTS, 3_000, Some(43_000)),
     ResourceSpec::new("res_m", 8, 10, None),
     ResourceSpec::new("res_n", 1, 2, None),
 ];
@@ -501,6 +504,10 @@ struct RunSummary {
     seed_ms: u128,
     slowest_subscription: String,
     slowest_subscription_ms: u128,
+    dominant_child_rows: usize,
+    dominant_child_subscribe_us: u128,
+    dominant_child_opened_ms: u128,
+    dominant_child_materialized_ms: u128,
     served_view_updates: Vec<ViewUpdateSummary>,
     timelines: Vec<SubscriptionTimeline>,
 }
@@ -539,6 +546,7 @@ struct OpenSubscription {
     expected: usize,
     stream: SubscriptionStream,
     rows: BTreeSet<RowUuid>,
+    subscribe_us: u128,
     opened_ms: Option<u128>,
     materialized_ms: Option<u128>,
 }
@@ -1151,9 +1159,14 @@ fn resource_access_group(
         // Direct member group: keeps at least one parent-visible child-bearing
         // resource at every scale.
         ("res_a", 0) => groups[1],
+        ("res_l", _)
+            if edge_index % DOMINANT_CHILD_TOTAL_PARENTS < DOMINANT_CHILD_VISIBLE_PARENTS =>
+        {
+            groups[24]
+        }
+        ("res_l", _) => groups[34 + (edge_index % 4)],
         // Transitive member group reached through group_entry: exercises the
         // recursive policy path even at the smallest scale.
-        ("res_l", 0) => groups[24],
         // Another direct visible resource kind without children so the member
         // slice is not child-only.
         ("res_e", 0) => groups[2],
@@ -1314,8 +1327,10 @@ fn run_connect_and_subscribe(
             .db
             .prepare_query(&query)
             .unwrap_or_else(|error| panic!("prepare {table} failed: {error}"));
+        let subscribe_call_start = Instant::now();
         let stream = block_on(client.db.subscribe(&prepared, ReadOpts::default()))
             .unwrap_or_else(|error| panic!("subscribe {table} failed: {error}"));
+        let subscribe_us = subscribe_call_start.elapsed().as_micros();
         subscriptions.push(OpenSubscription {
             name: table.clone(),
             expected: *expected
@@ -1323,6 +1338,7 @@ fn run_connect_and_subscribe(
                 .unwrap_or_else(|| panic!("missing expected count for {table}")),
             stream,
             rows: BTreeSet::new(),
+            subscribe_us,
             opened_ms: None,
             materialized_ms: None,
         });
@@ -1416,6 +1432,18 @@ fn run_connect_and_subscribe(
             .expect("warm-prime relay state should flush before reopen");
     }
     let expected_rows = expected.values().sum::<usize>();
+    let dominant_child_metrics = subscriptions
+        .iter()
+        .find(|sub| sub.name == DOMINANT_CHILD_TABLE)
+        .map(|sub| {
+            (
+                sub.rows.len(),
+                sub.subscribe_us,
+                sub.opened_ms.unwrap_or_default(),
+                sub.materialized_ms.unwrap_or_default(),
+            )
+        })
+        .unwrap_or_default();
     let timelines = subscriptions
         .into_iter()
         .map(|sub| SubscriptionTimeline {
@@ -1430,6 +1458,12 @@ fn run_connect_and_subscribe(
         .iter()
         .max_by_key(|timeline| timeline.materialized_ms)
         .unwrap();
+    let (
+        dominant_child_rows,
+        dominant_child_subscribe_us,
+        dominant_child_opened_ms,
+        dominant_child_materialized_ms,
+    ) = dominant_child_metrics;
     let relay_sync_metrics = relay.db.sync_metrics_for_test();
     let client_sync_metrics = client.db.sync_metrics_for_test();
     let relay_runtime_stats = relay.db.runtime_stats_for_test();
@@ -1526,6 +1560,10 @@ fn run_connect_and_subscribe(
         seed_ms: seeded.seed_ms,
         slowest_subscription: slowest.name.clone(),
         slowest_subscription_ms: slowest.materialized_ms,
+        dominant_child_rows,
+        dominant_child_subscribe_us,
+        dominant_child_opened_ms,
+        dominant_child_materialized_ms,
         served_view_updates: summarized_view_updates(&client_relay.right_to_left),
         timelines,
     }
@@ -2062,8 +2100,28 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!(summary.slowest_subscription_ms),
     );
     fields.insert(
+        "dominant_child_table".to_owned(),
+        json!(DOMINANT_CHILD_TABLE),
+    );
+    fields.insert(
+        "dominant_child_rows".to_owned(),
+        json!(summary.dominant_child_rows),
+    );
+    fields.insert(
+        "dominant_child_subscribe_us".to_owned(),
+        json!(summary.dominant_child_subscribe_us),
+    );
+    fields.insert(
+        "dominant_child_opened_ms".to_owned(),
+        json!(summary.dominant_child_opened_ms),
+    );
+    fields.insert(
+        "dominant_child_materialized_ms".to_owned(),
+        json!(summary.dominant_child_materialized_ms),
+    );
+    fields.insert(
         "assumption_child_skew".to_owned(),
-        json!("uniform generated fanout; scale <=1 preserves observed child-bearing parent counts, scale >1 scales parents and child totals proportionally"),
+        json!("dominant child table has 65 parent resources, 43k total child rows, and member-visible rows inherited through 36 parent resources"),
     );
     fields.insert(
         "assumption_group_graph".to_owned(),
