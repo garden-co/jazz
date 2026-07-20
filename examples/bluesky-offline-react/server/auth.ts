@@ -16,10 +16,9 @@ import {
 } from "./oauth-session-store.js";
 import { loadOrCreateJwtKeys, type StoredJwtKeys } from "./signing-keys.js";
 
-const port = Number(process.env.PORT ?? 3001);
 export const oauthScope = "atproto transition:generic";
 const clientMetadata = buildAtprotoLoopbackClientMetadata({
-  redirect_uris: [`http://127.0.0.1:${port}/api/auth/callback`],
+  redirect_uris: ["http://127.0.0.1:3001/api/auth/callback"],
   scope: oauthScope,
 });
 const db = getBackendDb();
