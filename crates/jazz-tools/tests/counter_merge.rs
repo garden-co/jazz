@@ -348,6 +348,159 @@ async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_b
 }
 
 #[tokio::test]
+/// Rebases Bob's staged counter intent over Alice's incoming scoped projection.
+///
+/// Ordinary reads exclude Bob's open transaction and therefore show Alice's
+/// server value. Bob's transaction-scoped read must retain his pending `+1`.
+///
+/// ```text
+/// bob ── stage +1 (open transaction) ───────────────► local only
+/// alice ── +5 ──► server ── scoped 5 ──────────────► bob
+/// bob ordinary read: 5    bob transaction read: 6
+/// bob ── commit +1 ──► server ── merged 6 ─────────► charlie
+/// ```
+async fn scoped_projection_rebases_an_open_counter_transaction() {
+    let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
+    let schema = counter_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-counter-pending")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-counter-pending")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (counter_id, _, _) = alice
+        .insert("counters", jazz_tools::row_input!("value" => 0))
+        .expect("alice creates counter");
+    let query = QueryBuilder::new("counters").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees the counter base",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(0))
+                .then_some(())
+        },
+    )
+    .await;
+
+    let bob_tx = bob
+        .begin_transaction()
+        .expect("bob begins a counter transaction");
+    let bob_batch = bob_tx
+        .update(counter_id, vec![("value".to_string(), Value::Integer(1))])
+        .expect("bob stages +1");
+    assert_eq!(bob_batch, bob_tx.batch_id());
+    wait_for_query(
+        bob_tx.client(),
+        query.clone(),
+        None,
+        QUERY_TIMEOUT,
+        "bob's transaction sees its staged +1",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(1))
+                .then_some(())
+        },
+    )
+    .await;
+
+    let alice_batch = alice
+        .update(counter_id, vec![("value".to_string(), Value::Integer(5))])
+        .expect("alice writes +5 while Bob's transaction is open");
+    alice
+        .wait_for_batch(alice_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's +5 settles");
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob's ordinary read receives Alice's scoped projection",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(5))
+                .then_some(())
+        },
+    )
+    .await;
+    wait_for_query(
+        bob_tx.client(),
+        query.clone(),
+        None,
+        QUERY_TIMEOUT,
+        "bob's transaction rebases its pending +1 over the scoped 5",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(6))
+                .then_some(())
+        },
+    )
+    .await;
+    let rebased_query = QueryBuilder::new("counters")
+        .filter_eq("value", Value::Integer(6))
+        .build();
+    wait_for_query(
+        bob_tx.client(),
+        rebased_query,
+        None,
+        QUERY_TIMEOUT,
+        "bob's transaction filters against the rebased counter projection",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(6))
+                .then_some(())
+        },
+    )
+    .await;
+
+    assert_eq!(bob_tx.commit().expect("bob commits +1"), bob_batch);
+    let rejection = bob
+        .wait_for_batch(bob_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("bob's stale transaction is rejected")
+        .to_string();
+    assert!(
+        rejection.contains("transaction_conflict"),
+        "unexpected rejection: {rejection}"
+    );
+
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("charlie-counter-pending")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+    wait_for_query(
+        &observer,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "fresh observer sees Alice's durable +5",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(5))
+                .then_some(())
+        },
+    )
+    .await;
+
+    observer.shutdown().await.expect("shutdown observer");
+    bob.shutdown().await.expect("shutdown Bob");
+    alice.shutdown().await.expect("shutdown Alice");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 /// Keeps caller-supplied IDs from turning concurrent inserts into causal updates.
 ///
 /// Alice and bob intentionally create the same deterministic ID while offline;
