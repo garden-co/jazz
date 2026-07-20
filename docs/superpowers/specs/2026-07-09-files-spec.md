@@ -32,7 +32,10 @@ amendments in this spec:
 5. **The descriptor is a convention, not an enforced invariant.** There is
    no descriptor immutability enforcement and no body verification anywhere.
    Only the descriptor's _shape_ is validated on write (canonical `v:1`
-   JSON). Body immutability is enforced at the bucket alone; `name`/
+   JSON). Body immutability is by construction — identity-bound key
+   namespaces make third-party writes impossible, the SDK never reuses a
+   random, and the conditional single-PUT belt guards self-collision —
+   not a bucket Object-Lock feature; `name`/
    `mime_type`/`size` are app-trusted metadata. In-place edits, copies
    between cells, and hand-rolled descriptors are all legal, ordinary
    policy-gated writes whose URLs simply 404 if no body exists.
@@ -162,10 +165,12 @@ loses the body: the committed descriptor syncs and its URL 404s — the
 ordinary bodyless state, documented as the interrupted-upload outcome.
 Nothing re-uploads; durable staging and resume belong to the opt-in
 offline package. A handle released but never written into a surviving,
-accepted cell (the write is rejected by policy, or never happens) leaves a
-live orphan body: an accepted, stated leak — the handle's `rejected` state
-is the app's cue, `delete()` the remedy, and a TTL'd column self-heals on
-schedule.
+accepted cell leaves a live orphan body — an accepted, stated leak. Where
+the write is rejected by policy, the handle's `rejected` state is the
+app's cue and `delete()` the remedy; where the descriptor is simply never
+written, the app must track its own unreferenced handles (dropping a
+handle before release cancels its in-flight upload, so an abandoned handle
+usually never releases). A TTL'd column self-heals either way.
 
 Reading a file _is the web_: one stable, unauthenticated, public URL —
 `GET /files/{app}/{identity}/{random}` — redirecting to the public object
@@ -535,11 +540,17 @@ nosniff` is a deployment requirement on the public object host in
   encode the destination column's TTL class (when one is declared), the
   uploader's identity segment, and a random part:
   `[t{class}/]{identity}/{random}`. The identity segment is always
-  `UUIDv5(files-namespace, user_id)` — one uniform, URL-safe, locally
+  `UUIDv5(JAZZ_FILES_NAMESPACE, user_id)` — one uniform, URL-safe, locally
   computable derivation covering both self-signed identities (whose
   `user_id` is already a UUIDv5 of their public key) and external-JWT
   identities (whose `sub` is an arbitrary app-controlled string — often
-  an email — that must never appear raw in a public URL). The random
+  an email — that must never appear raw in a public URL). `JAZZ_FILES_NAMESPACE`
+  is a single fixed namespace UUID — defined as `UUIDv5(DNS,
+"files.jazz.tools")`, computed once and frozen as a literal constant
+  shared verbatim by client and server — because the client mints the
+  segment and the server recomputes it to authorize; different namespaces
+  would fail every grant. It is a protocol constant, never
+  per-deployment. The random
   part is a canonical UUIDv4 minted from a CSPRNG (a protocol
   requirement, not SDK guidance: it is the only byte-confidentiality
   barrier). Class names are constrained to `^[a-z0-9]{1,15}$` at
@@ -671,13 +682,23 @@ nosniff` is a deployment requirement on the public object host in
   present → success), completes the multipart (conditionally where the
   backend supports it),
   server-side-copies the pending object to its final key re-sending the
-  pinned headers with the `REPLACE` directive — for TTL'd files
+  pinned headers with the `REPLACE` directive — a single `CopyObject`
+  below the ~5 GB single-copy cap, an `UploadPartCopy`-based multipart
+  copy above it (uploads run to 5 TB, past the single-copy limit; the
+  threshold is an implementation constant alongside the upload
+  single/multipart threshold), applying the destination guard
+  (`If-None-Match: *` on S3, `cf-copy-destination-if-none-match: *` on
+  R2) only where the backend supports it, else unconditionally — for
+  TTL'd files
   that key sits under the class prefix, and the copy is what starts the
-  expiry clock — and deletes the pending object — idempotent end to end by
+  expiry clock — and deletes the pending object (best-effort; the
+  `pending/` lifecycle rule is the backstop) — idempotent end to end by
   construction; the held transaction then enters the ordinary lane. There
   is no step six: no size check, no file-specific acceptance. A client that
   never releases leaves only a pending object the bucket will expire; a
-  client that lies harms only its own URL. The small-file cost is stated
+  client that lies harms only its own URL (a release with no completed
+  upload finds nothing to copy — the server treats the missing pending
+  source as an idempotent no-op, never an error). The small-file cost is stated
   plainly: PUT + copy + delete is three bucket writes per file — the
   price of `pending/` being the lease and GC mechanism.
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
@@ -948,14 +969,16 @@ column)`, validates class and mime type against the schema
   enforced at grant time only — copies and hand-rolled descriptors
   escape them, and serving is protected by the disposition policy, not
   the declaration; a released body whose descriptor is never written into
-  a surviving accepted cell — the write rejected by policy, or never made
-  — remaining a live orphan (an accepted leak: the handle's `rejected`
-  state is the app's cue, `delete()` the remedy, a TTL'd column
-  self-healing; the SDK never auto-deletes, because the same descriptor
-  may live in other accepted cells it cannot see); `url()` on a handle
-  being valid the moment `fromBlob` returns and only throwing if called on
-  a handle whose `fromBlob` has not returned (there is no pre-id limbo —
-  the id is minted synchronously); the small-file write path costing three
+  a surviving accepted cell remaining a live orphan (an accepted leak):
+  on the rejected-write path the handle's `rejected` state is the app's
+  cue and `delete()` the remedy; on the never-written path there is no
+  per-handle terminal cue — the app tracks its own unreferenced handles,
+  and dropping a handle before release cancels its in-flight upload (so an
+  abandoned handle usually never releases at all); either way a TTL'd
+  column self-heals, and the SDK never auto-deletes a released body
+  because the same descriptor may live in other accepted cells it cannot
+  see; `url()` being valid the moment `fromBlob` returns, with no pre-id
+  limbo state (the id is minted synchronously); the small-file write path costing three
   bucket
   writes (PUT + copy + delete); only the original owner can ever re-claim
   one of their own ids after a delete or expiry — third-party takeover is

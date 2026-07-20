@@ -42,7 +42,7 @@ Two deliverables, buildable together and testable end to end:
    grant, part-URL refresh, release, delete — implemented at the server
    against the S3-compatible backend contract. File ids are
    identity-bound — the key is `{app}[/t{class}]/{identity}/{random}`,
-   where `{identity}` is `UUIDv5(files-namespace, user_id)` — so every
+   where `{identity}` is `UUIDv5(JAZZ_FILES_NAMESPACE, user_id)` — so every
    authorization is a pure computation (identity-segment derivation plus
    class-set, column-declaration, and mime-type checks): the server keeps
    no file-plane state and reads nothing from the bucket at issuance.
@@ -170,7 +170,11 @@ Two deliverables, buildable together and testable end to end:
 - **Validation lives in the existing column-kind validation layer** (the
   same place JSON columns parse and JSON-Schema-check): parse the cell as
   canonical JSON, require `v:1` and exactly the four fields with correct
-  types, reject otherwise. No previous-value comparison, no grant
+  types, **and require the `id` field to match the file-id grammar**
+  (`[t{class}/]{identity-uuid}/{random-uuidv4}`, class `^[a-z0-9]{1,15}$`)
+  — reject otherwise. The grammar check is load-bearing: it guarantees the
+  identity segment is parseable for authorization. Class-set membership is
+  checked at grant time, not here. No previous-value comparison, no grant
   awareness — shape only.
 - **Schema builder & wire:** the TS builder gains the file column factory
   with an optional `ttl` option (validated for grammar `^[a-z0-9]{1,15}$`
@@ -181,7 +185,7 @@ Two deliverables, buildable together and testable end to end:
   parameterized kinds). The Rust schema parser gains the matching kind.
 - **Id format:** one opaque string — the `/`-joined key suffix
   `[t{class}/]{identity}/{random}` — where `{identity}` is
-  `UUIDv5(files-namespace, user_id)` and `{random}` a canonical CSPRNG
+  `UUIDv5(JAZZ_FILES_NAMESPACE, user_id)` and `{random}` a canonical CSPRNG
   UUIDv4; class names match `^[a-z0-9]{1,15}$`, so parsing is
   unambiguous (a UUID never matches `^t[a-z0-9]+$`; two segments =
   classless, three = classed). Write-path "well-formed" means this
@@ -214,12 +218,17 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
 - **Bucket layout and rules:** uploads land at
   `pending/{app}[/t{class}]/{identity}/{random}` under conditional
   writes; release copies to the final key (starting the TTL clock,
-  re-sending the pinned headers with the `REPLACE` metadata directive)
-  and
-  deletes the pending object; lifecycle rules = one expiry per TTL class
+  re-sending the pinned headers with the `REPLACE` metadata directive) —
+  a single `CopyObject` below the ~5 GB single-copy cap, an
+  `UploadPartCopy` multipart copy above it, with the destination guard
+  applied only where the backend supports it (S3 plain `If-None-Match`,
+  R2 `cf-copy-destination-if-none-match`), else unconditional — and
+  deletes the pending object (best-effort; the `pending/` lifecycle rule
+  is the backstop); lifecycle rules = one expiry per TTL class
   prefix, one expiry on `pending/`; incomplete-multipart cleanup is a
   per-backend deployment requirement (see the PRD's operator section),
-  not a portable rule. The
+  not a portable rule. A release with no completed upload finds no pending
+  source and is an idempotent no-op, not an error. The
   serving endpoint 302s to the public object URL; bucket policy is
   anonymous GetObject with listing denied.
 - **Backend contract additions** to the S3-compatible abstraction:
@@ -269,7 +278,13 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   (no `UploadId`: HEAD + copy + delete); pending object expiry via the
   fake's lifecycle simulation; TTL'd final object expiry with the
   descriptor cell intact; delete by uploader succeeds / stranger denied /
-  backend succeeds; permanent vs class-capped cache headers on serving.
+  backend succeeds; permanent vs class-capped cache headers on serving;
+  grant-time serving hardening — `Content-Disposition: attachment` pinned
+  for a non-render-safe type (e.g. `text/html` is never served inline)
+  and `Content-Type` pinned from the validated `mime_type`; the served
+  endpoint returning bytes with no auth for a released file, including one
+  whose host row the fetching identity's read policy would hide
+  (asserting the public-bytes-despite-hidden-row semantic).
 - **Prior art:** the JSON-column validation behavior is the direct
   template for the column kind; the permissions/claims/client-restart
   integration suites for the Rust protocol tests; the runtime db/client
@@ -296,9 +311,12 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
 - The descriptor's canonical bytes matter (equality/digests): compact,
   sorted keys, no extra whitespace — treat canonicalization as part of
   the write-path validation, not a client courtesy.
-- The identity segment is `UUIDv5(files-namespace, user_id)` — one
+- The identity segment is `UUIDv5(JAZZ_FILES_NAMESPACE, user_id)` — one
   uniform, URL-safe derivation covering both self-signed identities
   (already UUIDs) and external-JWT `sub` strings (arbitrary,
   app-controlled, sometimes email-like — never embeddable raw in a
   public URL). This is a public deterministic derivation, not the
-  deferred HMAC blinding recorded in the PRD.
+  deferred HMAC blinding recorded in the PRD. `JAZZ_FILES_NAMESPACE` is a
+  fixed protocol constant (`UUIDv5(DNS, "files.jazz.tools")`, frozen as a
+  literal) shared verbatim by the client (which mints the segment) and
+  the server (which recomputes it to authorize) — not per-deployment.
