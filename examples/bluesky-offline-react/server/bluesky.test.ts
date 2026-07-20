@@ -1,109 +1,131 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { XRPCError } from "@atproto/api";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deleteRecord,
   fetchProfile,
   fetchPostThread,
   fetchTimelineFeed,
   fetchViewerPosts,
   putRecord,
+  recordKey,
   type SessionFetcher,
 } from "./bluesky.js";
 
-function sessionReturning(response: Response) {
-  const fetchHandler = vi.fn(async () => response);
-  return { session: { fetchHandler } as SessionFetcher, fetchHandler };
-}
+const agent = vi.hoisted(() => ({
+  constructor: vi.fn(),
+  getTimeline: vi.fn(),
+  getPosts: vi.fn(),
+  getPostThread: vi.fn(),
+  getProfile: vi.fn(),
+  putRecord: vi.fn(),
+  deleteRecord: vi.fn(),
+}));
 
-afterEach(() => {
-  vi.unstubAllGlobals();
+vi.mock("@atproto/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@atproto/api")>();
+  return {
+    ...actual,
+    Agent: class {
+      com = { atproto: { repo: { putRecord: agent.putRecord, deleteRecord: agent.deleteRecord } } };
+      getTimeline = agent.getTimeline;
+      getPosts = agent.getPosts;
+      getPostThread = agent.getPostThread;
+      getProfile = agent.getProfile;
+
+      constructor(session: SessionFetcher) {
+        agent.constructor(session);
+      }
+    },
+  };
 });
 
-describe("AppView requests", () => {
-  it("prefers the authenticated AppView for profile enrichment when a session is available", async () => {
-    const { session, fetchHandler } = sessionReturning(Response.json({
-      did: "did:plc:alice",
-      handle: "alice.example",
-    }));
+const session = {
+  fetchHandler: vi.fn(async () => {
+    throw new Error("the adapter bypassed @atproto/api");
+  }),
+} satisfies SessionFetcher;
 
-    await expect(fetchProfile("did:plc:alice", session)).resolves.toMatchObject({
-      did: "did:plc:alice",
-      handle: "alice.example",
-    });
-    expect(fetchHandler).toHaveBeenCalledWith(
-      "/xrpc/app.bsky.actor.getProfile?actor=did%3Aplc%3Aalice",
-      { headers: { "atproto-proxy": "did:web:api.bsky.app#bsky_appview" } },
-    );
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe("AppView reads", () => {
+  it("loads a timeline page through an authenticated Agent", async () => {
+    const page = { feed: [], cursor: "next-page" };
+    agent.getTimeline.mockResolvedValue({ data: page });
+
+    await expect(fetchTimelineFeed(session, "current-page")).resolves.toEqual(page);
+    expect(agent.constructor).toHaveBeenCalledWith(session);
+    expect(agent.getTimeline).toHaveBeenCalledWith({ limit: 20, cursor: "current-page" });
   });
 
-  it("uses explicitly best-effort public profile enrichment without a session", async () => {
-    const publicFetch = vi.fn(async () => new Response("unavailable", { status: 503 }));
-    vi.stubGlobal("fetch", publicFetch);
+  it("forwards the remaining projection reads to Agent", async () => {
+    const uri = "at://did:plc:alice/app.bsky.feed.post/3m12345678921";
+    const post = { uri, cid: "bafy-post" };
+    const thread = { $type: "app.bsky.feed.defs#threadViewPost", post };
+    const profile = { did: "did:plc:alice", handle: "alice.example" };
+    agent.getPosts.mockResolvedValue({ data: { posts: [post] } });
+    agent.getPostThread.mockResolvedValue({ data: { thread } });
+    agent.getProfile.mockResolvedValue({ data: profile });
 
-    await expect(fetchProfile("did:plc:alice")).resolves.toBeUndefined();
-    expect(publicFetch).toHaveBeenCalledWith(
-      new URL("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=did%3Aplc%3Aalice"),
-      undefined,
-    );
-  });
+    await expect(fetchViewerPosts(session, [uri])).resolves.toEqual([post]);
+    await expect(fetchPostThread(session, uri)).resolves.toEqual(thread);
+    await expect(fetchProfile("did:plc:alice", session)).resolves.toEqual(profile);
 
-  it("reports AppView errors consistently", async () => {
-    const timeline = sessionReturning(new Response("upstream unavailable", { status: 503 }));
-    const posts = sessionReturning(new Response("upstream unavailable", { status: 503 }));
-
-    await expect(fetchTimelineFeed(timeline.session)).rejects.toThrow(
-      "AppView app.bsky.feed.getTimeline failed (503): upstream unavailable",
-    );
-    await expect(fetchViewerPosts(posts.session, ["at://did:plc:alice/app.bsky.feed.post/1"])).rejects.toThrow(
-      "AppView app.bsky.feed.getPosts failed (503): upstream unavailable",
-    );
-  });
-
-  it("identifies AppView transport failures at the same boundary", async () => {
-    const session = {
-      fetchHandler: vi.fn(async () => {
-        throw new TypeError("fetch failed");
-      }),
-    } as SessionFetcher;
-
-    await expect(fetchTimelineFeed(session)).rejects.toThrow(
-      "AppView app.bsky.feed.getTimeline failed: fetch failed",
-    );
-  });
-
-  it("rejects malformed protocol responses at the XRPC boundary", async () => {
-    const timeline = sessionReturning(Response.json({ feed: "not-an-array" }));
-    const posts = sessionReturning(Response.json({ posts: "not-an-array" }));
-    const thread = sessionReturning(Response.json({ thread: [] }));
-    const profile = sessionReturning(Response.json({ did: 42 }));
-
-    await expect(fetchTimelineFeed(timeline.session)).rejects.toThrow(
-      "Invalid app.bsky.feed.getTimeline response",
-    );
-    await expect(fetchViewerPosts(posts.session, [])).rejects.toThrow(
-      "Invalid app.bsky.feed.getPosts response",
-    );
-    await expect(fetchPostThread(thread.session, "at://did:plc:alice/app.bsky.feed.post/1")).rejects.toThrow(
-      "Invalid app.bsky.feed.getPostThread response",
-    );
-    await expect(fetchProfile("did:plc:alice", profile.session)).rejects.toThrow(
-      "Invalid app.bsky.actor.getProfile response",
-    );
+    expect(agent.getPosts).toHaveBeenCalledWith({ uris: [uri] });
+    expect(agent.getPostThread).toHaveBeenCalledWith({ uri, depth: 100, parentHeight: 100 });
+    expect(agent.getProfile).toHaveBeenCalledWith({ actor: "did:plc:alice" });
   });
 });
 
-describe("PDS requests", () => {
-  it("maps retryable XRPC failures to a gateway operation error", async () => {
-    const { session } = sessionReturning(new Response("rate limited", { status: 429 }));
+describe("PDS writes", () => {
+  const input = {
+    repo: "did:plc:alice",
+    collection: "app.bsky.feed.post",
+    rkey: "3m12345678921",
+    record: { text: "hello" },
+  };
 
-    const result = putRecord(session, {
-      repo: "did:plc:alice",
-      collection: "app.bsky.feed.post",
-      rkey: "3m12345678921",
-      record: { text: "hello" },
-    });
+  it("forwards record writes and deletes to Agent", async () => {
+    agent.putRecord.mockResolvedValue({ data: { uri: "at://post", cid: "bafy-post" } });
+    agent.deleteRecord.mockResolvedValue({ data: {} });
 
-    await expect(result).rejects.toMatchObject({
-      message: "PDS com.atproto.repo.putRecord failed (429): rate limited",
-      status: 502,
+    await expect(putRecord(session, input)).resolves.toEqual({ uri: "at://post", cid: "bafy-post" });
+    await expect(deleteRecord(session, input)).resolves.toBeUndefined();
+
+    expect(agent.putRecord).toHaveBeenCalledWith(input);
+    expect(agent.deleteRecord).toHaveBeenCalledWith({
+      repo: input.repo,
+      collection: input.collection,
+      rkey: input.rkey,
     });
+  });
+
+  it.each([
+    [400, 400],
+    [429, 502],
+    [503, 502],
+  ] as const)("maps an upstream %i response to operation status %i", async (upstream, expected) => {
+    agent.putRecord.mockRejectedValue(new XRPCError(upstream, "UpstreamError", "write failed"));
+
+    await expect(putRecord(session, input)).rejects.toMatchObject({ status: expected });
+  });
+
+  it("treats transport failures as retryable", async () => {
+    agent.putRecord.mockRejectedValue(new TypeError("fetch failed"));
+
+    await expect(putRecord(session, input)).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe("recordKey", () => {
+  const did = "did:plc:alice";
+  const collection = "app.bsky.feed.like";
+
+  it("returns a key only for the expected repository and collection", () => {
+    expect(recordKey(`at://${did}/${collection}/3m12345678921`, did, collection)).toBe("3m12345678921");
+    expect(recordKey(`at://did:plc:bob/${collection}/3m12345678921`, did, collection)).toBeUndefined();
+    expect(recordKey(`at://${did}/app.bsky.feed.repost/3m12345678921`, did, collection)).toBeUndefined();
+    expect(recordKey("not-an-at-uri", did, collection)).toBeUndefined();
   });
 });
