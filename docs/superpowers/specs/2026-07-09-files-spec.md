@@ -273,9 +273,10 @@ never deletes objects.
     uploads longer than a presign window, or interrupted by network blips
     within a session, still complete with no edge affinity.
 16. As an end user, I want to see upload progress and state
-    (`local → uploading(progress) → released → accepted | rejected`) on the
+    (`local → uploading(progress) → released → accepted | rejected`, or
+    `uploading → failed` on a terminal upload failure) on the
     file handle, so that the app can show me what's pending and warn me
-    before I abandon a device holding unreleased files.
+    before I abandon a session holding unreleased files.
 17. As an app developer, I want `fromBlob(blob, { for })` to finalize the
     id and return a usable handle immediately — `url()` valid at once —
     while upload continues in the background, so that I
@@ -653,10 +654,16 @@ nosniff` is a deployment requirement on the public object host in
   identity-bound
   id (class segment from the `for` column's declaration + identity +
   fresh random), returning a handle whose `url()` is immediately valid;
-  writing the descriptor into a cell is an ordinary local transaction and
-  need not precede the upload; (2) the SDK holds the descriptor-writing
-  transaction
-  at the outbox until release — an in-memory client-side courtesy so
+  the upload begins on the microtask after `fromBlob` returns — it does
+  not wait on a cell write; `fromBlob` requires an identity-bearing
+  session (anonymous local-first identities are keypair-backed and qualify;
+  a session with no identity cannot mint or upload); writing the
+  descriptor into a cell is an ordinary local transaction and
+  need not precede the upload; (2) the SDK holds every transaction that
+  writes this descriptor
+  at the outbox — the hold is keyed by the file id, so all such writes
+  release together on the single upload's terminal outcome — an in-memory
+  client-side courtesy so
   upload-path
   descriptors have bytes when they sync — while later independent commit
   units bypass it (causally dependent writes — those the outbox's existing
@@ -693,7 +700,7 @@ nosniff` is a deployment requirement on the public object host in
   that key sits under the class prefix, and the copy is what starts the
   expiry clock — and deletes the pending object (best-effort; the
   `pending/` lifecycle rule is the backstop) — idempotent end to end by
-  construction; the held transaction then enters the ordinary lane. There
+  construction; the held transactions then enter the ordinary lane. There
   is no step six: no size check, no file-specific acceptance. A client that
   never releases leaves only a pending object the bucket will expire; a
   client that lies harms only its own URL (a release with no completed
@@ -701,6 +708,13 @@ nosniff` is a deployment requirement on the public object host in
   source as an idempotent no-op, never an error). The small-file cost is stated
   plainly: PUT + copy + delete is three bucket writes per file — the
   price of `pending/` being the lease and GC mechanism.
+  **On terminal upload failure** — the grant refused (mime type or class
+  outside the column's declaration), an unrecoverable transport error, or
+  lease expiry with no in-session retry left — the handle enters the
+  `failed` state and the outbox hold releases exactly as on success: the
+  held descriptor-writing transactions enter the ordinary lane bodyless,
+  their URLs 404, identical to the interrupted-upload outcome. The hold
+  never outlives its upload; a held transaction cannot hang the session.
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
   lifecycle rule expires the `pending/` prefix after the lease window
   (day-granularity, matching the "order of days" lease) — prefix-scoped
@@ -809,8 +823,12 @@ nosniff` is a deployment requirement on the public object host in
   `jazz.files.delete(fileId)` (returns a Promise — resolves on origin
   confirmation, rejects on failure; retries are the caller's), and an
   observable upload state on the
-  handle: `local → uploading(progress) → released → accepted | rejected`
-  (accepted/rejected are the ordinary transaction fates — nothing
+  handle: `local → uploading(progress) → released → accepted | rejected`,
+  plus a terminal `failed` reached from `uploading` when the upload
+  itself fails (grant refused, unrecoverable transport error, lease
+  expiry) — `failed` releases the outbox hold and lets the descriptor
+  sync bodyless, so it never hangs (accepted/rejected are the ordinary
+  transaction fates — nothing
   file-specific). Nothing else: reads, previews, and blob derivation are
   userland.
 - **Vocabulary amendments to the Files section of the core context doc**
