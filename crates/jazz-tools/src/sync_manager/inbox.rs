@@ -362,6 +362,7 @@ impl SyncManager {
         metadata: Option<RowMetadata>,
         mut row: StoredRowBatch,
         fate_recording: AuthoritativeFateRecording,
+        is_scoped_delivery: bool,
     ) -> Option<AppliedRowBatch> {
         let authoritative_tier = match (row.confirmed_tier, self.max_local_durability_tier()) {
             (Some(incoming), Some(local)) => Some(incoming.max(local)),
@@ -412,6 +413,7 @@ impl SyncManager {
                             branch,
                             context,
                             is_known_new_object: is_newly_located_object && row.parents.is_empty(),
+                            is_scoped_delivery,
                         },
                     ) {
                         Ok(applied) => applied.visibility_change,
@@ -705,6 +707,7 @@ impl SyncManager {
                 branch: branch_name.as_str().to_string().into(),
                 context,
                 is_known_new_object: false,
+                is_scoped_delivery: !self.has_durability_identity(),
             },
         )
         .ok()
@@ -1323,6 +1326,7 @@ impl SyncManager {
             | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
+                let is_scoped_delivery = !self.has_durability_identity();
                 tracing::debug!(
                     %object_id,
                     %branch_name,
@@ -1333,6 +1337,7 @@ impl SyncManager {
                     metadata,
                     row.clone(),
                     AuthoritativeFateRecording::AcceptedByLocalAuthority,
+                    is_scoped_delivery,
                 ) {
                     self.apply_authoritative_transaction_fate_for_row(
                         storage,
@@ -1862,7 +1867,7 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) =
-                    self.apply_row_updated(storage, metadata, row.clone(), fate_recording)
+                    self.apply_row_updated(storage, metadata, row.clone(), fate_recording, false)
                 {
                     self.forward_row_batch_to_servers(
                         storage,

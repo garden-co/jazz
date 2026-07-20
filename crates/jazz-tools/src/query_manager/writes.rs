@@ -508,6 +508,7 @@ impl QueryManager {
                 branch: branch_name.as_str().to_string().into(),
                 context,
                 is_known_new_object,
+                is_scoped_delivery: false,
             },
         )
         .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;

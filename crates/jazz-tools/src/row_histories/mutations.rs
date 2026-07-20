@@ -44,6 +44,9 @@ pub(crate) struct ApplyRowBatchWithContext<'a> {
     pub(crate) branch: SharedString,
     pub(crate) context: PreparedRowWriteContext,
     pub(crate) is_known_new_object: bool,
+    /// True only when a top-level client applies a parent-stripped row from
+    /// its upstream server.
+    pub(crate) is_scoped_delivery: bool,
 }
 
 pub(super) fn row_locator_from_storage<H: Storage>(
@@ -179,6 +182,7 @@ pub fn apply_row_batch<H: Storage>(
             branch,
             context,
             is_known_new_object: false,
+            is_scoped_delivery: false,
         },
     )
 }
@@ -197,6 +201,7 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
         branch,
         context,
         is_known_new_object,
+        is_scoped_delivery,
     } = request;
     let batch_id = row.batch_id();
     debug_assert!(
@@ -218,8 +223,10 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
         .as_ref()
         .map(|entry| entry.current_row.clone());
 
-    let is_scoped_visible_delivery =
-        row.state.is_visible() && row.parents.is_empty() && !is_known_new_object;
+    let is_scoped_visible_delivery = is_scoped_delivery
+        && row.state.is_visible()
+        && row.parents.is_empty()
+        && !is_known_new_object;
     let existing_history_row = if is_scoped_visible_delivery {
         io.load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
             .map_err(RowHistoryError::StorageError)?
