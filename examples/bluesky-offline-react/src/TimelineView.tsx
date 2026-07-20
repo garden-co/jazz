@@ -1,3 +1,11 @@
+import {
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  Spinner,
+  TextArea,
+} from "@radix-ui/themes";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { ProfileName, profileNameParts } from "./ProfileName.js";
 import { segmentRichText } from "./rich-text.js";
@@ -15,7 +23,7 @@ export function LoadingScreen({ label = "Opening your local timeline…" }: { la
         <strong>Jazz ❤️ Bluesky</strong>
         <span>{label}</span>
       </div>
-      <span className="spinner" aria-hidden="true" />
+      <Spinner aria-hidden="true" />
     </main>
   );
 }
@@ -112,21 +120,23 @@ function QuotedPost({ post }: { post: DisplayPost }) {
   const profile = post.authorProfile;
   const author = profileNameParts(profile, post.authorDid).name;
   return (
-    <aside className="quoted-post" aria-label={`Quoted post by ${author}`}>
+    <Card asChild size="1">
+      <aside className="quoted-post" aria-label={`Quoted post by ${author}`}>
       <header className="quoted-post-header">
-        {profile?.avatar ? (
-          <img className="avatar quoted-avatar" src={profile.avatar} alt="" loading="lazy" />
-        ) : (
-          <span className="avatar quoted-avatar" aria-hidden="true">
-            {author.charAt(0).toUpperCase()}
-          </span>
-        )}
+        <Avatar
+          className="quoted-avatar"
+          src={profile?.avatar ?? undefined}
+          fallback={author.charAt(0).toUpperCase()}
+          size="1"
+          radius="medium"
+        />
         <ProfileName profile={profile} fallback={post.authorDid} />
         <time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time>
       </header>
       <p><PostText text={post.text} facetsJson={post.facetsJson} /></p>
       <PostImages post={post} compact />
-    </aside>
+      </aside>
+    </Card>
   );
 }
 
@@ -151,27 +161,29 @@ export function AppHeader({
         </div>
       </div>
       <div className="account-actions">
-        <span
+        <Badge
           className={online ? "status online" : "status"}
+          color={online ? "jade" : "gray"}
+          variant="soft"
           role="status"
           aria-live="polite"
         >
           <span aria-hidden="true" />
           {online ? "Online" : "Offline"}
-        </span>
+        </Badge>
         <span className="account-identity">
-          {profile?.avatar ? (
-            <img className="avatar account-avatar" src={profile.avatar} alt="" />
-          ) : (
-            <span className="avatar account-avatar" aria-hidden="true">
-              {handle.charAt(0).toUpperCase()}
-            </span>
-          )}
+          <Avatar
+            className="account-avatar"
+            src={profile?.avatar ?? undefined}
+            fallback={handle.charAt(0).toUpperCase()}
+            size="1"
+            radius="medium"
+          />
           <span className="account-handle">
             <ProfileName profile={profile} fallback={handle} />
           </span>
         </span>
-        <button className="link" onClick={onSignOut}>Sign out</button>
+        <Button variant="ghost" color="gray" onClick={onSignOut}>Sign out</Button>
       </div>
     </header>
   );
@@ -198,12 +210,13 @@ export function Composer({ text, onChange, onPublish }: {
   onPublish: () => void;
 }) {
   return (
-    <section className="composer" aria-labelledby="composer-title">
+    <Card asChild size="2">
+      <section className="composer" aria-labelledby="composer-title">
       <div className="composer-heading">
         <label id="composer-title" htmlFor="post-text">Write a post</label>
         <span>{text.length} / 300</span>
       </div>
-      <textarea
+      <TextArea
         id="post-text"
         value={text}
         onChange={(event) => onChange(event.target.value)}
@@ -211,11 +224,12 @@ export function Composer({ text, onChange, onPublish }: {
         maxLength={300}
       />
       <div className="composer-actions">
-        <button className="primary" onClick={onPublish} disabled={!text.trim()}>
+        <Button onClick={onPublish} disabled={!text.trim()}>
           Post
-        </button>
+        </Button>
       </div>
-    </section>
+      </section>
+    </Card>
   );
 }
 
@@ -226,7 +240,8 @@ export function SyncBanner({ count, online, onSync }: {
 }) {
   if (!count) return null;
   return (
-    <section className="sync-banner" aria-live="polite">
+    <Card asChild size="2">
+      <section className="sync-banner" aria-live="polite">
       <div>
         <strong>
           {count} {count === 1 ? "change" : "changes"} waiting to sync
@@ -237,10 +252,11 @@ export function SyncBanner({ count, online, onSync }: {
             : "They’re safe in your local Jazz cache."}
         </span>
       </div>
-      <button className="secondary" onClick={onSync} disabled={!online}>
+      <Button highContrast onClick={onSync} disabled={!online}>
         {online ? "Sync now" : "Waiting for network"}
-      </button>
-    </section>
+      </Button>
+      </section>
+    </Card>
   );
 }
 
@@ -278,30 +294,33 @@ function PostCard({
     setReplying(false);
   }
   return (
-    <article
-      className={`post-card${pendingPost ? " pending" : ""}${isNew ? " new" : ""}`}
-      data-post-uri={post.uri}
-    >
+    <Card asChild size="1">
+      <article
+        className={`post-card${pendingPost ? " pending" : ""}${isNew ? " new" : ""}`}
+        data-post-uri={post.uri}
+      >
       <header className="post-header">
-        {profile?.avatar ? (
-          <img className="avatar" src={profile.avatar} alt="" loading="lazy" />
-        ) : (
-          <span className="avatar" aria-hidden="true">
-            {author.charAt(0).toUpperCase()}
-          </span>
-        )}
+        <Avatar
+          src={profile?.avatar ?? undefined}
+          fallback={author.charAt(0).toUpperCase()}
+          size="2"
+          radius="medium"
+        />
         <div>
           <ProfileName profile={profile} fallback={post.authorDid} />
           <time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time>
         </div>
-        {pendingPost && <span className="pending-label">Pending</span>}
+        {pendingPost && <Badge className="pending-label">Pending</Badge>}
       </header>
       <p><PostText text={post.text} facetsJson={post.facetsJson} /></p>
       <PostImages post={post} />
       {post.quote && <QuotedPost post={post.quote} />}
       <footer className="post-actions">
-        <button
+        <Button
           className="reaction-button reply-button"
+          variant="ghost"
+          color="gray"
+          size="1"
           type="button"
           aria-label={`Reply to post by ${author}`}
           aria-expanded={replying}
@@ -311,9 +330,12 @@ function PostCard({
         >
           <span aria-hidden="true">↩</span>
           <span>{post.replyCount || ""}</span>
-        </button>
-        <button
+        </Button>
+        <Button
           className={`reaction-button like-button${post.like?.active ? " active" : ""}`}
+          variant="ghost"
+          color={post.like?.active ? "crimson" : "gray"}
+          size="1"
           type="button"
           aria-pressed={post.like?.active ?? false}
           aria-label={`${post.like?.active ? "Unlike" : "Like"} post by ${author}`}
@@ -323,9 +345,12 @@ function PostCard({
         >
           <span aria-hidden="true">{post.like?.active ? "♥" : "♡"}</span>
           <span>{post.likeCount || ""}</span>
-        </button>
-        <button
+        </Button>
+        <Button
           className={`reaction-button repost-button${post.repost?.active ? " active" : ""}`}
+          variant="ghost"
+          color={post.repost?.active ? "jade" : "gray"}
+          size="1"
           type="button"
           aria-pressed={post.repost?.active ?? false}
           aria-label={`${post.repost?.active ? "Undo repost" : "Repost"} post by ${author}`}
@@ -335,15 +360,15 @@ function PostCard({
         >
           <span aria-hidden="true">↻</span>
           <span>{post.repostCount || ""}</span>
-        </button>
+        </Button>
         {(pendingLike || pendingRepost) && (
-          <span className="reaction-pending">Pending</span>
+          <Badge className="reaction-pending" variant="soft">Pending</Badge>
         )}
       </footer>
       {replying && (
         <form className="reply-composer" onSubmit={submitReply}>
           <label htmlFor={`reply-${post.id}`}>Reply to {author}</label>
-          <textarea
+          <TextArea
             id={`reply-${post.id}`}
             value={replyText}
             onChange={(event) => setReplyText(event.target.value)}
@@ -353,24 +378,26 @@ function PostCard({
           />
           <div>
             <span>{replyText.length} / 300</span>
-            <button
+            <Button
               type="button"
-              className="link"
+              variant="ghost"
+              color="gray"
               onClick={() => setReplying(false)}
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="primary"
+              size="1"
               disabled={!replyText.trim() || !canReply}
             >
               Reply
-            </button>
+            </Button>
           </div>
         </form>
       )}
-    </article>
+      </article>
+    </Card>
   );
 }
 
@@ -445,7 +472,7 @@ function TimelinePostTree({ node, threadRoot, onReroot, postState, actions, dept
         >
           {loadingReplies ? (
             <>
-              <span className="spinner" aria-hidden="true" />
+              <Spinner aria-hidden="true" />
               Loading replies…
             </>
           ) : postState.online ? (
@@ -562,7 +589,7 @@ export function TimelineFeed({
         ))}
         {waiting && (
           <div className="empty-state">
-            <span className="spinner" aria-hidden="true" />
+            <Spinner aria-hidden="true" />
             <h3>Syncing your timeline</h3>
             <p>New posts will appear as Jazz receives them.</p>
           </div>
@@ -578,7 +605,7 @@ export function TimelineFeed({
       <div ref={loadMoreRef} className="feed-sentinel" aria-hidden="true" />
       {loadingMore && (
         <p className="pagination-status">
-          <span className="spinner" aria-hidden="true" />
+          <Spinner aria-hidden="true" />
           Loading more posts…
         </p>
       )}
@@ -596,7 +623,7 @@ export function AppFooter({ onSignOut }: { onSignOut: () => void }) {
   return (
     <footer className="app-footer">
       <span>Jazz ❤️ Bluesky is a local-first ATProto proof of concept.</span>
-      <button className="link" onClick={onSignOut}>Sign out</button>
+      <Button variant="ghost" color="gray" onClick={onSignOut}>Sign out</Button>
     </footer>
   );
 }

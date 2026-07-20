@@ -1,5 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { AppTheme } from "./AppTheme.js";
+import "@radix-ui/themes/styles.css";
 import "./styles.css";
 
 const rootElement = document.getElementById("root");
@@ -19,4 +21,8 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
 // JazzProvider owns an OPFS leader worker. StrictMode's development-only
 // remount races that worker's lock cleanup and turns a local-cache open into a
 // transport-timeout retry, so keep this stateful root single-mounted.
-createRoot(rootElement).render(<App />);
+createRoot(rootElement).render(
+  <AppTheme>
+    <App />
+  </AppTheme>,
+);

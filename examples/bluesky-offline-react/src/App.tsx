@@ -1,3 +1,4 @@
+import { Button, Card, Spinner, TextField } from "@radix-ui/themes";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -187,47 +188,49 @@ export function App() {
           </li>
         </ul>
       </section>
-      <section className="login-card" aria-labelledby="login-title">
-        <p className="eyebrow">Welcome</p>
-        <h2 id="login-title">Connect your Bluesky account</h2>
-        <p>Enter your handle to continue through ATProto OAuth at your PDS.</p>
-        <form onSubmit={beginLogin} aria-busy={loggingIn}>
-          <label htmlFor="handle">Bluesky handle</label>
-          <input
-            id="handle"
-            value={handle}
-            onChange={(event) => setHandle(event.target.value)}
-            placeholder="you.bsky.social"
-            autoCapitalize="none"
-            autoCorrect="off"
-            required
-          />
-          <button
-            className="primary"
-            type="submit"
-            disabled={loggingIn || !handle.trim()}
-          >
-            {loggingIn ? (
-              <>
-                <span className="spinner" aria-hidden="true" />
-                Opening ATProto OAuth…
-              </>
-            ) : "Continue with ATProto OAuth"}
-          </button>
-          {(loggingIn || loginError) && (
-            <p
-              className={loginError ? "form-status error" : "form-status"}
-              role="status"
-              aria-live="polite"
+      <Card asChild size="4">
+        <section className="login-card" aria-labelledby="login-title">
+          <p className="eyebrow">Welcome</p>
+          <h2 id="login-title">Connect your Bluesky account</h2>
+          <p>Enter your handle to continue through ATProto OAuth at your PDS.</p>
+          <form onSubmit={beginLogin} aria-busy={loggingIn}>
+            <label htmlFor="handle">Bluesky handle</label>
+            <TextField.Root
+              id="handle"
+              value={handle}
+              onChange={(event) => setHandle(event.target.value)}
+              placeholder="you.bsky.social"
+              autoCapitalize="none"
+              autoCorrect="off"
+              required
+            />
+            <Button
+              type="submit"
+              size="3"
+              disabled={loggingIn || !handle.trim()}
             >
-              {loginError ?? "Opening secure sign-in…"}
-            </p>
-          )}
-        </form>
-        <p className="oauth-note">
-          Jazz ❤️ Bluesky never asks for your Bluesky password.
-        </p>
-      </section>
+              {loggingIn ? (
+                <>
+                  <Spinner aria-hidden="true" />
+                  Opening ATProto OAuth…
+                </>
+              ) : "Continue with ATProto OAuth"}
+            </Button>
+            {(loggingIn || loginError) && (
+              <p
+                className={loginError ? "form-status error" : "form-status"}
+                role="status"
+                aria-live="polite"
+              >
+                {loginError ?? "Opening secure sign-in…"}
+              </p>
+            )}
+          </form>
+          <p className="oauth-note">
+            Jazz ❤️ Bluesky never asks for your Bluesky password.
+          </p>
+        </section>
+      </Card>
     </main>
   );
 }
