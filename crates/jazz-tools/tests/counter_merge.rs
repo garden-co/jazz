@@ -112,7 +112,7 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
         .connect()
         .await;
 
-    let bob_restarted = JazzClient::connect(bob_context)
+    let bob_restarted = JazzClient::connect(bob_context.clone())
         .await
         .expect("bob reconnects with persistent storage");
     wait_for_query(
@@ -156,6 +156,29 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
         .shutdown()
         .await
         .expect("shutdown restarted Bob");
+    bob_context.server_url = String::new();
+    let bob_offline_after_merge = JazzClient::connect(bob_context)
+        .await
+        .expect("bob reopens his merged state offline");
+    bob_offline_after_merge
+        .update(counter_id, vec![("value".to_string(), Value::Integer(9))])
+        .expect("bob writes the next counter value offline");
+    let local_rows = bob_offline_after_merge
+        .query(QueryBuilder::new("counters").build(), None)
+        .await
+        .expect("query Bob's offline counter");
+    assert_eq!(
+        local_rows
+            .iter()
+            .find(|row| row.0 == counter_id)
+            .and_then(counter_value),
+        Some(9),
+        "a local write after a scoped merge must build on the merged visible value"
+    );
+    bob_offline_after_merge
+        .shutdown()
+        .await
+        .expect("shutdown Bob after the offline follow-up");
     observer.shutdown().await.expect("shutdown observer");
     alice.shutdown().await.expect("shutdown Alice");
     server.shutdown().await;
