@@ -15,29 +15,32 @@ export function useOutbox(
   async function runFlush() {
     const operations = await db.all(app.pendingOperations.where({ ownerDid: { eq: ownerDid }, state: { eq: "queued" } }));
     if (!operations.length || !navigator.onLine) return;
-    try {
-      const response = await fetch("/api/operations", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(operations),
-      });
-      const result = await response.json().catch(() => ({ error: "Sync failed" })) as { error?: string };
-      if (!response.ok) {
-        const permanent = response.status === 400 || response.status === 401 || response.status === 403;
-        for (const operation of operations) {
+    const ordered = [...operations].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    for (const operation of ordered) {
+      try {
+        const response = await fetch("/api/operations", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify([operation]),
+        });
+        const result = await response.json().catch(() => ({ error: "Sync failed" })) as { error?: string };
+        if (!response.ok) {
+          const permanent = response.status === 400 || response.status === 401 || response.status === 403;
           db.update(app.pendingOperations, operation.id, {
             state: permanent ? "failed" : "queued",
             error: result.error ?? "Sync failed",
           });
+          reportApiReachable(permanent);
+          return;
         }
-        reportApiReachable(permanent);
+      } catch {
+        db.update(app.pendingOperations, operation.id, { error: "Sync failed" });
+        reportApiReachable(false);
         return;
       }
-      reportApiReachable(true);
-    } catch {
-      for (const operation of operations) db.update(app.pendingOperations, operation.id, { error: "Sync failed" });
-      reportApiReachable(false);
     }
+    reportApiReachable(true);
   }
 
   const flushState = useRef<{ ownerDid: string; run: () => Promise<void> } | undefined>(undefined);
