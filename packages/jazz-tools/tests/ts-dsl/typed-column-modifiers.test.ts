@@ -12,10 +12,13 @@ const schema = {
     optionalCount: s.int().optional(),
     defaultedCount: s.int().default(0),
     optionalDefaulted: s.int().optional().default(null),
-    transformedOptional: s.string().optional().transform({
-      from: (value) => (value === null ? null : value.length),
-      to: (value) => (value === null ? null : value.toString()),
-    }),
+    transformedOptional: s
+      .string()
+      .optional()
+      .transform({
+        from: (value) => (value === null ? null : value.length),
+        to: (value) => (value === null ? null : value.toString()),
+      }),
     defaultedMerge: s.int().default(0).merge("counter"),
   }),
 };
