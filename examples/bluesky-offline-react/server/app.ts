@@ -54,6 +54,7 @@ export function createServer(webOrigin = configuredWebOrigin) {
   });
 
   server.get("/health", (c) => c.json({ status: "ok" }));
+  server.get("/api/health", (c) => c.json({ status: "ok" }));
   server.get("/.well-known/jazz-jwks.json", (c) => c.json(jazzJwks));
 
   server.use("/api/session", requireSession);
