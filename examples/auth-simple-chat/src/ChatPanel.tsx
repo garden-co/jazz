@@ -30,13 +30,12 @@ export function ChatPanel({
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 
-  const rows =
-    useAll(
-      app.messages
-        .where({ chat_id: chatId })
-        .select("id", "author_name", "text", "sent_at")
-        .orderBy("sent_at", "asc"),
-    ) ?? [];
+  const { data: rows = [] } = useAll(
+    app.messages
+      .where({ chat_id: chatId })
+      .select("id", "author_name", "text", "sent_at")
+      .orderBy("sent_at", "asc"),
+  );
 
   const [canDeleteById, setCanDeleteById] = React.useState<Record<string, boolean>>({});
   const rowIds = React.useMemo(() => rows.map((row) => row.id).join("\0"), [rows]);

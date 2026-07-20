@@ -30,7 +30,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
   const chatRowsResult = useAll(app.chats.where({ id: chatId }));
-  const chatRows = chatRowsResult ?? [];
+  const chatRows = chatRowsResult.data ?? [];
   const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
 
@@ -40,8 +40,8 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     app.chatMembers.where({ chatId, userId: userId ?? "__none__" }),
     sharedWriteOptions,
   );
-  const myMemberships = myMembershipsResult ?? [];
-  const membershipKnown = myMembershipsResult !== undefined;
+  const myMemberships = myMembershipsResult.data ?? [];
+  const membershipKnown = myMembershipsResult.data !== undefined;
   const isMember = myMemberships.length > 0;
   // autoJoinPending: true while we've started the insert but haven't yet
   // received server acknowledgement.  Used to suppress the isMember shortcut
@@ -123,14 +123,13 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const canRenderChat = chatKnown || membershipKnown;
   const canReadChatContents = chatKnown || membershipReady;
-  const messages =
-    useAll(
-      app.messages
-        .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
-        .include({ sender: true })
-        .orderBy("createdAt", "desc")
-        .limit(showNLastMessages + 1),
-    ) ?? [];
+  const { data: messages = [] } = useAll(
+    app.messages
+      .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
+      .include({ sender: true })
+      .orderBy("createdAt", "desc")
+      .limit(showNLastMessages + 1),
+  );
 
   const hasMore = messages.length > showNLastMessages;
 
