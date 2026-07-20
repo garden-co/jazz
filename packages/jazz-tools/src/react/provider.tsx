@@ -1,12 +1,13 @@
 import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
-import type { Db, DbConfig } from "../runtime/db.js";
-import { startInspectorOnce } from "../dev-tools/auto-attach.js";
+import type { DbConfig } from "../runtime/db.js";
+import { jazzDevPluginActive, startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
+  type CreateJazzClient,
 } from "../react-core/provider.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 
@@ -21,15 +22,14 @@ if (process.env.NODE_ENV === "development" && typeof window !== "undefined") {
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
 interface JazzClientContextValue {
-  db: Db;
-  manager: CreatedJazzClient["manager"];
+  db: CreatedJazzClient["db"];
   session: Session | null;
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-// Dev-only: mount the inspector overlay + attach the bridge for this db. Only
-// rendered when shouldAutoAttach is true, so the lazy overlay chunk is dropped
-// from production bundles.
+// Dev-only: mount the inspector overlay + publish the host handle for this db.
+// Only rendered when shouldAutoAttach is true, so the lazy overlay chunk is
+// dropped from production bundles.
 function DevToolsAutoAttach() {
   const { db } = useCoreJazzClient() as JazzClientContextValue;
   useEffect(() => {
@@ -54,12 +54,24 @@ export function JazzProvider({
   onJWTExpired,
   autoAttachDevTools,
 }: JazzProviderProps) {
+  const createClient: CreateJazzClient = (nextConfig) =>
+    createJazzClient(nextConfig) as Promise<CreatedJazzClient>;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  // Subscription traces only register while devMode is on at subscribe time,
+  // so it must be on from Db construction for the overlay's Subscriptions tab
+  // to see the app's startup queries — the host bridge's later setDevMode(true)
+  // only covers subscriptions opened after the overlay attached. Default it on
+  // exactly when the overlay will mount; an explicit config value always wins.
+  const effectiveConfig =
+    shouldAutoAttach && config.devMode === undefined && jazzDevPluginActive()
+      ? { ...config, devMode: true }
+      : config;
+
   return (
     <CoreJazzProvider
-      config={config}
+      config={effectiveConfig}
       fallback={fallback}
-      createJazzClient={createJazzClient}
+      createJazzClient={createClient}
       onJWTExpired={onJWTExpired}
     >
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
@@ -75,8 +87,8 @@ export function useJazzClient(): JazzClientContextValue {
 /**
  * Get a Jazz {@link Db} instance that can be used to read and write data.
  */
-export function useDb(): Db {
-  return useCoreDb<Db>();
+export function useDb(): CreatedJazzClient["db"] {
+  return useCoreDb<CreatedJazzClient["db"]>();
 }
 
 export { useSession };

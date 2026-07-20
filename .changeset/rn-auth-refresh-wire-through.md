@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 ---
 
 Replace HTTP `/sync` + SSE `/events` with a single Rust-owned WebSocket `/ws` transport, and wire JWT rotation and server-side auth rejection end-to-end across all bindings.

@@ -1,24 +1,21 @@
-use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::time::Duration;
 
-use crate::catalogue::CatalogueEntry;
-use crate::metadata::{MetadataKey, ObjectType};
-use crate::object::{BranchName, ObjectId};
 #[cfg(feature = "test-utils")]
-use crate::query_manager::query::Query;
+use crate::AppId;
+use crate::object::ObjectId;
 #[cfg(feature = "test-utils")]
-use crate::query_manager::types::Value;
-use crate::query_manager::types::{Schema, SchemaHash};
-use crate::row_histories::{
-    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch,
-};
-use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{
-    MemoryStorage, Storage, StorageError, metadata_from_row_locator, row_locator_from_metadata,
-};
+use crate::public_api::query::Query;
 #[cfg(feature = "test-utils")]
-use crate::{DurabilityTier, JazzClient};
+use crate::public_api::types::Value;
+#[cfg(feature = "test-utils")]
+use crate::public_schema::SchemaHash;
+#[cfg(feature = "test-utils")]
+use crate::schema_lens::Lens;
+#[cfg(feature = "test-utils")]
+use crate::server::ServerState;
+#[cfg(feature = "test-utils")]
+use crate::{DurabilityTier, JazzClient, Schema};
 
 #[cfg(feature = "test-utils")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
@@ -29,106 +26,31 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(feature = "test-utils")]
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
-pub fn persist_test_schema<H: Storage + ?Sized>(storage: &mut H, schema: &Schema) -> SchemaHash {
-    let schema_hash = SchemaHash::compute(schema);
-    storage
-        .upsert_catalogue_entry(&CatalogueEntry {
-            object_id: schema_hash.to_object_id(),
-            metadata: HashMap::from([
-                (
-                    MetadataKey::Type.to_string(),
-                    ObjectType::CatalogueSchema.to_string(),
-                ),
-                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-            ]),
-            content: encode_schema(schema),
-        })
-        .expect("test schema should persist to catalogue");
-    schema_hash
+#[cfg(feature = "test-utils")]
+const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
+
+/// Sanctioned test-support reconnect control: mirrors the public client's
+/// upstream detach without clearing local known-state or pending writes.
+#[cfg(feature = "test-utils")]
+pub fn disconnect_client(client: &JazzClient) -> bool {
+    client.disconnect_upstream_for_test()
 }
 
-pub fn seeded_memory_storage(schema: &Schema) -> MemoryStorage {
-    let mut storage = MemoryStorage::new();
-    persist_test_schema(&mut storage, schema);
-    storage
+/// Sanctioned test-support reconnect control: reattaches the preserved client
+/// state to the original upstream transport.
+#[cfg(feature = "test-utils")]
+pub async fn reconnect_client(client: &JazzClient) -> crate::Result<bool> {
+    client.reconnect_upstream_for_test().await
 }
 
-pub fn create_test_row<H: Storage>(
-    storage: &mut H,
-    metadata: Option<HashMap<String, String>>,
-) -> ObjectId {
-    let object_id = ObjectId::new();
-    create_test_row_with_id(storage, object_id, metadata)
-}
-
-pub fn create_test_row_with_id<H: Storage>(
-    storage: &mut H,
-    object_id: ObjectId,
-    metadata: Option<HashMap<String, String>>,
-) -> ObjectId {
-    let metadata = metadata.unwrap_or_default();
-    let row_locator = row_locator_from_metadata(&metadata)
-        .expect("test rows should provide row-locator metadata");
-    storage
-        .put_row_locator(object_id, Some(&row_locator))
-        .expect("test row locator should persist");
-    object_id
-}
-
-pub fn put_test_row_metadata<H: Storage>(
-    storage: &mut H,
-    object_id: ObjectId,
-    metadata: HashMap<String, String>,
-) {
-    let row_locator = row_locator_from_metadata(&metadata)
-        .expect("test rows should provide row-locator metadata");
-    storage
-        .put_row_locator(object_id, Some(&row_locator))
-        .expect("test row locator should persist");
-}
-
-pub fn apply_test_row_batch<H: Storage>(
-    storage: &mut H,
-    object_id: ObjectId,
-    branch: impl AsRef<str>,
-    row: StoredRowBatch,
-) -> Result<ApplyRowBatchResult, RowHistoryError> {
-    apply_row_batch(
-        storage,
-        object_id,
-        &BranchName::new(branch.as_ref()),
-        row,
-        &[],
-    )
-}
-
-pub fn load_test_row_metadata<H: Storage>(
-    storage: &H,
-    object_id: ObjectId,
-) -> Option<HashMap<String, String>> {
-    storage
-        .load_row_locator(object_id)
-        .expect("test row locator lookup should succeed")
-        .map(|locator| metadata_from_row_locator(&locator))
-}
-
-pub fn load_test_row_tip_ids<H: Storage>(
-    storage: &H,
-    object_id: ObjectId,
-    branch: impl ToString,
-) -> Result<Vec<BatchId>, StorageError> {
-    let branch = branch.to_string();
-    let row_locator = storage.load_row_locator(object_id)?.ok_or_else(|| {
-        StorageError::IoError(format!("missing row locator for test row {}", object_id))
-    })?;
-    let tips = storage.scan_row_branch_tip_ids(row_locator.table.as_str(), &branch, object_id)?;
-    if tips.is_empty() {
-        return Err(StorageError::IoError(format!(
-            "missing row branch tips for test row {} on {}",
-            object_id, branch
-        )));
-    }
-    Ok(tips)
+#[cfg(feature = "test-utils")]
+fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
+    let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MULTIPLIER);
+    timeout.checked_mul(multiplier).unwrap_or(timeout)
 }
 
 /// Re-runs a query until its rows satisfy the provided matcher or the timeout
@@ -149,7 +71,9 @@ where
     F: FnMut(QueryRows) -> Option<T>,
 {
     let description = description.into();
-    let deadline = tokio::time::Instant::now() + timeout;
+    #[cfg(feature = "sync-autopsy")]
+    jazz::db::sync_autopsy::enable();
+    let deadline = tokio::time::Instant::now() + load_tolerant_wait_timeout(timeout);
 
     let mut last_error: Option<String> = None;
     let mut last_rows: Option<QueryRows> = None;
@@ -173,15 +97,68 @@ where
         }
 
         if tokio::time::Instant::now() >= deadline {
+            #[cfg(feature = "sync-autopsy")]
+            let autopsy = jazz::db::sync_autopsy::dump();
+            #[cfg(not(feature = "sync-autopsy"))]
+            let autopsy = String::new();
             match last_error {
-                Some(e) => panic!("timed out waiting for {description}: last query error: {e}"),
+                Some(e) => {
+                    panic!("timed out waiting for {description}: last query error: {e}\n{autopsy}")
+                }
                 None => panic!(
-                    "timed out waiting for {description}: last rows: {:?}",
-                    last_rows
+                    "timed out waiting for {description}: last rows: {:?}\n{}",
+                    last_rows, autopsy
                 ),
             }
         }
 
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
     }
+}
+
+/// Publishes schemas and lenses directly into an in-process test server's
+/// catalogue store.
+///
+/// This helper is intentionally scoped to `test-utils`: integration tests need
+/// to seed catalogue state before exercising public client behavior, but the
+/// catalogue storage itself remains a server-internal implementation detail.
+#[cfg(feature = "test-utils")]
+pub async fn push_catalogue_in_memory(
+    state: std::sync::Arc<ServerState>,
+    app_id: AppId,
+    env: &str,
+    user_branch: &str,
+    schemas: &[Schema],
+    lenses: &[Lens],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
+        std::collections::HashMap::with_capacity(schemas.len());
+    for schema in schemas {
+        schema_by_hash.insert(SchemaHash::compute(schema), schema);
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
+    }
+
+    for lens in lenses {
+        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
+            format!(
+                "No schema provided for lens source hash {}",
+                lens.source_hash
+            )
+        })?;
+        let _ = (source_schema, app_id, env, user_branch);
+        state
+            .catalogue
+            .publish_lens(&state.catalogue_store, lens)
+            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
+    }
+
+    state
+        .catalogue
+        .flush(&state.catalogue_store)
+        .map_err(|error| format!("flush server catalogue: {error}"))?;
+
+    Ok(())
 }

@@ -1,0 +1,25 @@
+[package]
+name = "jazz-server"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[features]
+default = ["rocksdb"]
+rocksdb = ["jazz/rocksdb"]
+
+[dependencies]
+jazz = { path = "../jazz", default-features = false }
+postcard = { version = "1.1", features = ["alloc"] }
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+futures-util = "0.3"
+hex = "0.4"
+uuid = "1"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }

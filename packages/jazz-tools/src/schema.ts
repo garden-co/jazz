@@ -6,6 +6,7 @@ export type ScalarSqlType =
   | "TEXT"
   | "BOOLEAN"
   | "INTEGER"
+  | "BIGINT"
   | "REAL"
   | "TIMESTAMP"
   | "UUID"
@@ -60,15 +61,17 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
     ? boolean
     : T extends "INTEGER"
       ? number
-      : T extends "REAL"
-        ? number
-        : T extends "TIMESTAMP"
-          ? Date
-          : T extends "UUID"
-            ? string
-            : T extends "BYTEA"
-              ? Uint8Array
-              : never;
+      : T extends "BIGINT"
+        ? bigint
+        : T extends "REAL"
+          ? number
+          : T extends "TIMESTAMP"
+            ? Date
+            : T extends "UUID"
+              ? string
+              : T extends "BYTEA"
+                ? Uint8Array
+                : never;
 
 export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
   ? TSTypeFromScalarSqlType<T>
@@ -87,6 +90,7 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
+  largeValue?: "blob" | "text";
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

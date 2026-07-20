@@ -129,38 +129,6 @@ export async function withTimeout<T>(
   }
 }
 
-/**
- * Wait for a worker to emit a message with a specific `type` field.
- */
-export async function waitForWorkerMessageType(
-  worker: Worker,
-  expectedType: string,
-  timeoutMs: number,
-  label: string,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${label}: no ${expectedType} worker message within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = event.data as { type?: string } | undefined;
-      if (data?.type === expectedType) {
-        cleanup();
-        resolve();
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Query builders
 // ---------------------------------------------------------------------------
@@ -267,12 +235,13 @@ export async function createSyncedDb(
   testingServer?: JazzServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl } = testingServer ?? (await getJazzServerInfo());
+  const { appId, serverUrl, adminSecret } = testingServer ?? (await getJazzServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
+      adminSecret,
       secret: localFirstSecret,
     }),
   );

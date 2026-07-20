@@ -68,6 +68,27 @@ describe("bytes DSL API", () => {
     expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
+
+  it("marks byte columns as binary large values explicitly", () => {
+    resetCollectedState();
+    table("files", {
+      data: col.bytes().large(),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns[0]).toEqual({
+      name: "data",
+      sqlType: "BYTEA",
+      nullable: false,
+      largeValue: "blob",
+    });
+    expect(schemaToWasm(schema).files?.columns[0]).toMatchObject({
+      name: "data",
+      column_type: { type: "Bytea" },
+      nullable: false,
+      large_value: "Blob",
+    });
+  });
 });
 
 describe("json DSL API", () => {
@@ -308,37 +329,37 @@ describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();
     table("todos", {
-      imageId: col.ref("files"),
+      imageId: col.ref("images"),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
       name: "imageId",
-      references: "files",
+      references: "images",
     });
   });
 
   it("stores references on array(ref(...)) columns", () => {
     resetCollectedState();
-    table("files", {
-      partIds: col.array(col.ref("file_parts")),
+    table("bundles", {
+      itemIds: col.array(col.ref("bundle_items")),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "partIds",
-      references: "file_parts",
+      name: "itemIds",
+      references: "bundle_items",
     });
   });
 
   it("rejects scalar reference columns not ending in Id or _id", () => {
     resetCollectedState();
-    expect(() => table("todos", { image: col.ref("files") })).toThrow(
+    expect(() => table("todos", { image: col.ref("images") })).toThrow(
       "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
     );
   });
 
   it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
     resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.ref("files")) })).toThrow(
+    expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
       "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
   });

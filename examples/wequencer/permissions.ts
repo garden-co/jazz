@@ -2,13 +2,7 @@ import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
 export default s.definePermissions(app, ({ policy, isCreator }) => {
-  for (const table of [
-    policy.instruments,
-    policy.jams,
-    policy.beats,
-    policy.files,
-    policy.file_parts,
-  ]) {
+  for (const table of [policy.instruments, policy.jams, policy.beats, policy.files]) {
     table.allowRead.always();
     table.allowInsert.always();
     table.allowUpdate.always();

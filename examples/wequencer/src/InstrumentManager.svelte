@@ -36,9 +36,6 @@
 		if (fileId) {
 			const storedFile = await db.one(app.files.where({ id: fileId }));
 			if (storedFile) {
-				for (const partId of storedFile.partIds) {
-					db.delete(app.file_parts, partId);
-				}
 				db.delete(app.files, storedFile.id);
 			}
 		}

@@ -28,8 +28,8 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::public_schema::PolicyExpr;
+use jazz_tools::public_schema::TablePolicies;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,

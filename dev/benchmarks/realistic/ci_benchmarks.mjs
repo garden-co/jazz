@@ -35,99 +35,66 @@ const NATIVE_EXAMPLE_SCENARIOS = [
 
 const NATIVE_CRITERION_SCENARIOS = [
   {
-    id: "r1_crud_sustained",
-    label: "Criterion R1 CRUD sustained",
+    id: "r1_crud",
+    label: "Criterion R1 CRUD",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/crud_sustained_rocksdb",
-      sqlite: "realistic_phase1/crud_sustained_sqlite",
+      rocksdb: "realistic_phase1/r1_crud",
+      sqlite: "realistic_phase1/r1_crud",
     },
   },
   {
-    id: "r1_crud_sustained_single_hop",
-    label: "Criterion R1 CRUD single-hop",
+    id: "r2_reads",
+    label: "Criterion R2 reads",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/crud_sustained_single_hop_rocksdb",
-      sqlite: "realistic_phase1/crud_sustained_single_hop_sqlite",
+      rocksdb: "realistic_phase1/r2_reads",
+      sqlite: "realistic_phase1/r2_reads",
     },
   },
   {
-    id: "r2_reads_sustained",
-    label: "Criterion R2 reads sustained",
+    id: "r3_rocksdb_cold_load",
+    label: "Criterion R3 RocksDB cold-load",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_sqlite",
+      rocksdb: "realistic_phase1/r3_rocksdb_cold_load",
     },
   },
   {
-    id: "r2_reads_sustained_single_hop",
-    label: "Criterion R2 reads single-hop",
+    id: "r4_hot_task_history",
+    label: "Criterion R4 hot task history",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_single_hop_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_single_hop_sqlite",
+      rocksdb: "realistic_phase1/r4_hot_task_history",
+      sqlite: "realistic_phase1/r4_hot_task_history",
     },
   },
   {
-    id: "r2_reads_with_write_churn",
-    label: "Criterion R2 reads with churn",
+    id: "r9_subscribed_write",
+    label: "Criterion R9 subscribed write",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
-      sqlite: "realistic_phase1/reads_sustained_with_write_churn_sqlite",
+      rocksdb: "realistic_phase1/r9_subscribed_write",
+      sqlite: "realistic_phase1/r9_subscribed_write",
     },
   },
   {
-    id: "r3_cold_load",
-    label: "Criterion R3 cold-load",
+    id: "r10_sync_fanout",
+    label: "Criterion R10 direct sync fanout",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/cold_load_rocksdb",
-      sqlite: "realistic_phase1/cold_load_sqlite",
+      rocksdb: "realistic_phase1/r10_sync_fanout",
+      sqlite: "realistic_phase1/r10_sync_fanout",
     },
   },
   {
-    id: "r4_fanout_updates",
-    label: "Criterion R4 fanout updates",
+    id: "r11_byte_wire_resume",
+    label: "Criterion R11 byte-wire resume",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/fanout_updates_rocksdb",
-      sqlite: "realistic_phase1/fanout_updates_sqlite",
+      rocksdb: "realistic_phase1/r11_byte_wire_resume",
+      sqlite: "realistic_phase1/r11_byte_wire_resume",
     },
   },
   {
-    id: "r5_permission_recursive",
-    label: "Criterion R5 permission recursive",
+    id: "r12_recursive_permissions",
+    label: "Criterion R12 recursive permissions",
     criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/permission_recursive_rocksdb",
-      sqlite: "realistic_phase1/permission_recursive_sqlite",
-    },
-  },
-  {
-    id: "r6_permission_write_heavy",
-    label: "Criterion R6 permission write-heavy",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/permission_write_heavy_rocksdb",
-      sqlite: "realistic_phase1/permission_write_heavy_sqlite",
-    },
-  },
-  {
-    id: "r7_hotspot_history",
-    label: "Criterion R7 hotspot history",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/hotspot_history_rocksdb",
-      sqlite: "realistic_phase1/hotspot_history_sqlite",
-    },
-  },
-  {
-    id: "r8_many_branches",
-    label: "Criterion R8 many branches",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/many_branches_rocksdb",
-      sqlite: "realistic_phase1/many_branches_sqlite",
-    },
-  },
-  {
-    id: "r9_subscribed_write_path",
-    label: "Criterion R9 subscribed write path",
-    criterion_filter_by_engine: {
-      rocksdb: "realistic_phase1/subscribed_write_path_rocksdb",
-      sqlite: "realistic_phase1/subscribed_write_path_sqlite",
+      rocksdb: "realistic_phase1/r12_recursive_permissions",
+      sqlite: "realistic_phase1/r12_recursive_permissions",
     },
   },
 ];
@@ -145,18 +112,24 @@ export const NATIVE_BENCHMARKS = NATIVE_STORAGE_ENGINES.flatMap((storage_engine)
     profile_path: scenario.profile_path,
     prepare_seed: scenario.prepare_seed,
   })),
-  ...NATIVE_CRITERION_SCENARIOS.map((scenario) => ({
-    id: `native-criterion:${storage_engine}:${scenario.id}`,
-    suite: "native",
-    storage_engine,
-    label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
-    kind: "criterion",
-    log_path: `logs/criterion_${scenario.id}.log`,
-    criterion_filter: scenario.criterion_filter_by_engine[storage_engine],
-    env: {
-      JAZZ_REALISTIC_VARIANT: "ci",
-    },
-  })),
+  ...NATIVE_CRITERION_SCENARIOS.flatMap((scenario) => {
+    const criterion_filter = scenario.criterion_filter_by_engine[storage_engine];
+    if (!criterion_filter) return [];
+    return [
+      {
+        id: `native-criterion:${storage_engine}:${scenario.id}`,
+        suite: "native",
+        storage_engine,
+        label: `${scenario.label} (${nativeStorageEngineLabel(storage_engine)})`,
+        kind: "criterion",
+        log_path: `logs/criterion_${scenario.id}.log`,
+        criterion_filter,
+        env: {
+          JAZZ_REALISTIC_VARIANT: "ci",
+        },
+      },
+    ];
+  }),
 ]);
 
 export const BROWSER_BENCHMARKS = [
@@ -234,6 +207,106 @@ export const BROWSER_BENCHMARKS = [
   },
 ];
 
+const JAZZ_SIM_FAST_SCENARIOS = [
+  {
+    id: "s1_saas",
+    label: "Jazz-sim S1 SaaS",
+    bench: "s1_saas",
+    output_path: "s1_saas.jsonl",
+    log_path: "logs/s1_saas.log",
+  },
+  {
+    id: "s2_canvas",
+    label: "Jazz-sim S2 canvas",
+    bench: "s2_canvas",
+    output_path: "s2_canvas.jsonl",
+    log_path: "logs/s2_canvas.log",
+  },
+  {
+    id: "s3_permissions",
+    label: "Jazz-sim S3 permissions",
+    bench: "s3_permissions",
+    output_path: "s3_permissions.jsonl",
+    log_path: "logs/s3_permissions.log",
+  },
+  {
+    id: "s4_order_processing",
+    label: "Jazz-sim S4 order processing",
+    bench: "s4_order_processing",
+    output_path: "s4_order_processing.jsonl",
+    log_path: "logs/s4_order_processing.log",
+  },
+  {
+    id: "s5_durable_stream",
+    label: "Jazz-sim S5 durable stream",
+    bench: "s5_durable_stream",
+    output_path: "s5_durable_stream.jsonl",
+    log_path: "logs/s5_durable_stream.log",
+  },
+  {
+    id: "s6_text_traces",
+    label: "Jazz-sim S6 text traces",
+    bench: "s6_text_traces",
+    output_path: "s6_text_traces.jsonl",
+    log_path: "logs/s6_text_traces.log",
+  },
+  {
+    id: "s7_migrations",
+    label: "Jazz-sim S7 migrations",
+    bench: "s7_migrations",
+    output_path: "s7_migrations.jsonl",
+    log_path: "logs/s7_migrations.log",
+  },
+  {
+    id: "s9_durable_execution",
+    label: "Jazz-sim S9 durable execution",
+    bench: "s9_durable_execution",
+    output_path: "s9_durable_execution.jsonl",
+    log_path: "logs/s9_durable_execution.log",
+  },
+];
+
+export const JAZZ_SIM_BENCHMARKS = [
+  ...JAZZ_SIM_FAST_SCENARIOS.map((scenario) => ({
+    id: `jazz-sim:${scenario.id}`,
+    suite: "jazz-sim",
+    label: scenario.label,
+    kind: "jazz-sim-bench",
+    bench: scenario.bench,
+    output_path: scenario.output_path,
+    log_path: scenario.log_path,
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+    },
+  })),
+  {
+    id: "jazz-sim:s2_canvas:wire_frames",
+    suite: "jazz-sim",
+    label: "Jazz-sim S2 canvas (wire frames)",
+    kind: "jazz-sim-bench",
+    bench: "s2_canvas",
+    output_path: "wire_frames/s2_canvas.jsonl",
+    log_path: "logs/wire_frames_s2_canvas.log",
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+      JAZZ_S2_TRANSPORT_CODEC: "wire_frames",
+    },
+  },
+  {
+    id: "jazz-sim:s1_saas:wire_frames",
+    suite: "jazz-sim",
+    label: "Jazz-sim S1 SaaS reconnect (wire frames)",
+    kind: "jazz-sim-bench",
+    bench: "s1_saas",
+    output_path: "wire_frames/s1_saas.jsonl",
+    log_path: "logs/wire_frames_s1_saas.log",
+    env: {
+      JAZZ_BENCH_PROFILE: "fast",
+      JAZZ_S1_RECONNECT_TRANSPORT_CODEC: "wire_frames",
+    },
+  },
+];
+
 export function benchmarksForSuite(suite, options = {}) {
   if (suite === "native") {
     if (!options.storageEngine) return NATIVE_BENCHMARKS;
@@ -242,6 +315,7 @@ export function benchmarksForSuite(suite, options = {}) {
     );
   }
   if (suite === "browser") return BROWSER_BENCHMARKS;
+  if (suite === "jazz-sim") return JAZZ_SIM_BENCHMARKS;
   throw new Error(`Unsupported suite: ${suite}`);
 }
 
@@ -268,7 +342,11 @@ export function skipIds(skipSet) {
 
 export function repeatCountForBenchmark(benchmark, requestedCount = DEFAULT_NOISE_REPEAT_COUNT) {
   if (!benchmark || typeof benchmark !== "object") return 1;
-  if (benchmark.kind === "native-example" || benchmark.kind === "browser-scenario") {
+  if (
+    benchmark.kind === "native-example" ||
+    benchmark.kind === "browser-scenario" ||
+    benchmark.kind === "jazz-sim-bench"
+  ) {
     return Math.max(1, Number(requestedCount) || DEFAULT_NOISE_REPEAT_COUNT);
   }
   return 1;

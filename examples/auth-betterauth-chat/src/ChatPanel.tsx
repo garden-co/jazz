@@ -33,9 +33,27 @@ export function ChatPanel({
   const { data: rows = [] } = useAll(
     app.messages
       .where({ chat_id: chatId })
-      .select("id", "author_name", "text", "sent_at", "$canDelete")
+      .select("id", "author_name", "text", "sent_at")
       .orderBy("sent_at", "asc"),
   );
+
+  const [canDeleteById, setCanDeleteById] = React.useState<Record<string, boolean>>({});
+  const rowIds = React.useMemo(() => rows.map((row) => row.id).join("\0"), [rows]);
+  React.useEffect(() => {
+    let cancelled = false;
+    const ids = rowIds.length > 0 ? rowIds.split("\0") : [];
+    void (async () => {
+      const next = Object.fromEntries(
+        await Promise.all(
+          ids.map(async (id) => [id, await db.canDelete(app.messages, id)] as const),
+        ),
+      );
+      if (!cancelled) setCanDeleteById(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [db, rowIds]);
 
   const [messageText, setMessageText] = React.useState("");
   const [messagePending, setMessagePending] = React.useState(false);
@@ -52,14 +70,14 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db
-        .insert(app.messages, {
+      await (
+        await db.insert(app.messages, {
           author_name: authorName,
           chat_id: chatId,
           text: messageText.trim(),
           sent_at: new Date(),
         })
-        .wait({ tier: "edge" });
+      ).wait({ tier: "edge" });
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
@@ -73,7 +91,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db.delete(app.messages, messageId).wait({ tier: "edge" });
+      await (await db.delete(app.messages, messageId)).wait({ tier: "edge" });
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -110,7 +128,7 @@ export function ChatPanel({
                   <strong data-testid="message-author">{row.author_name}</strong>
                   <time data-testid="message-date">{formatTimestamp(row.sent_at)}</time>
                 </div>
-                {row.$canDelete ? (
+                {canDeleteById[row.id] ? (
                   <button
                     type="button"
                     className="delete-message-button"

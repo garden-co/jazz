@@ -218,10 +218,24 @@ function isWhereByField(field: string, where: CleanedWhere): boolean {
   return where.field === field && where.operator === "eq" && where.connector === "AND";
 }
 
+type SingleStringEqWhere<T extends string> = CleanedWhere & {
+  field: T;
+  operator: "eq";
+  value: string;
+  connector: "AND";
+};
+
+function isStringEqWhereByField<T extends string>(
+  field: T,
+  where: CleanedWhere,
+): where is SingleStringEqWhere<T> {
+  return isWhereByField(field, where) && typeof where.value === "string";
+}
+
 export function isWhereBySingleField<T extends string>(
   field: T,
   where: CleanedWhere[] | undefined,
-): where is [{ field: T; operator: "eq"; value: string; connector: "AND" }] {
+): where is [SingleStringEqWhere<T>] {
   if (where === undefined || where.length !== 1) {
     return false;
   }
@@ -231,7 +245,7 @@ export function isWhereBySingleField<T extends string>(
     return false;
   }
 
-  return isWhereByField(field, cond);
+  return isStringEqWhereByField(field, cond);
 }
 
 export function containWhereByField<T extends string>(

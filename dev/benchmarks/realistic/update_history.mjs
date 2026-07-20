@@ -228,77 +228,157 @@ function nativeBenchmarkIdForFile(file, storageEngine) {
   return null;
 }
 
-function criterionBenchmarkId(benchmark) {
+function criterionBenchmarkId(benchmark, storageEngine) {
   const groupId = benchmark?.group_id;
   const exactMap = new Map([
-    ["realistic_phase1/crud_sustained_rocksdb", "native-criterion:rocksdb:r1_crud_sustained"],
-    ["realistic_phase1/crud_sustained_sqlite", "native-criterion:sqlite:r1_crud_sustained"],
-    [
-      "realistic_phase1/crud_sustained_single_hop_rocksdb",
-      "native-criterion:rocksdb:r1_crud_sustained_single_hop",
-    ],
-    [
-      "realistic_phase1/crud_sustained_single_hop_sqlite",
-      "native-criterion:sqlite:r1_crud_sustained_single_hop",
-    ],
-    ["realistic_phase1/reads_sustained_rocksdb", "native-criterion:rocksdb:r2_reads_sustained"],
-    ["realistic_phase1/reads_sustained_sqlite", "native-criterion:sqlite:r2_reads_sustained"],
-    [
-      "realistic_phase1/reads_sustained_single_hop_rocksdb",
-      "native-criterion:rocksdb:r2_reads_sustained_single_hop",
-    ],
-    [
-      "realistic_phase1/reads_sustained_single_hop_sqlite",
-      "native-criterion:sqlite:r2_reads_sustained_single_hop",
-    ],
-    [
-      "realistic_phase1/reads_sustained_with_write_churn_rocksdb",
-      "native-criterion:rocksdb:r2_reads_with_write_churn",
-    ],
-    [
-      "realistic_phase1/reads_sustained_with_write_churn_sqlite",
-      "native-criterion:sqlite:r2_reads_with_write_churn",
-    ],
-    ["realistic_phase1/cold_load_rocksdb", "native-criterion:rocksdb:r3_cold_load"],
-    ["realistic_phase1/cold_load_sqlite", "native-criterion:sqlite:r3_cold_load"],
-    ["realistic_phase1/fanout_updates_rocksdb", "native-criterion:rocksdb:r4_fanout_updates"],
-    ["realistic_phase1/fanout_updates_sqlite", "native-criterion:sqlite:r4_fanout_updates"],
-    [
-      "realistic_phase1/permission_recursive_rocksdb",
-      "native-criterion:rocksdb:r5_permission_recursive",
-    ],
-    [
-      "realistic_phase1/permission_recursive_sqlite",
-      "native-criterion:sqlite:r5_permission_recursive",
-    ],
-    [
-      "realistic_phase1/permission_write_heavy_rocksdb",
-      "native-criterion:rocksdb:r6_permission_write_heavy",
-    ],
-    [
-      "realistic_phase1/permission_write_heavy_sqlite",
-      "native-criterion:sqlite:r6_permission_write_heavy",
-    ],
-    ["realistic_phase1/hotspot_history_rocksdb", "native-criterion:rocksdb:r7_hotspot_history"],
-    ["realistic_phase1/hotspot_history_sqlite", "native-criterion:sqlite:r7_hotspot_history"],
-    [
-      "realistic_phase1/subscribed_write_path_rocksdb",
-      "native-criterion:rocksdb:r9_subscribed_write_path",
-    ],
-    [
-      "realistic_phase1/subscribed_write_path_sqlite",
-      "native-criterion:sqlite:r9_subscribed_write_path",
-    ],
+    ["realistic_phase1/r1_crud", "native-criterion:r1_crud"],
+    ["realistic_phase1/r2_reads", "native-criterion:r2_reads"],
+    ["realistic_phase1/r3_rocksdb_cold_load", "native-criterion:rocksdb:r3_rocksdb_cold_load"],
+    ["realistic_phase1/r4_hot_task_history", "native-criterion:r4_hot_task_history"],
+    ["realistic_phase1/r9_subscribed_write", "native-criterion:r9_subscribed_write"],
+    ["realistic_phase1/r10_sync_fanout", "native-criterion:r10_sync_fanout"],
+    ["realistic_phase1/r11_byte_wire_resume", "native-criterion:r11_byte_wire_resume"],
+    ["realistic_phase1/r12_recursive_permissions", "native-criterion:r12_recursive_permissions"],
   ]);
 
   if (exactMap.has(groupId)) {
-    return exactMap.get(groupId);
+    const id = exactMap.get(groupId);
+    if (id.includes(":rocksdb:") || id.includes(":sqlite:")) return id;
+    return `native-criterion:${storageEngine}:${id.replace("native-criterion:", "")}`;
   }
-  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_rocksdb")) {
-    return "native-criterion:rocksdb:r8_many_branches";
+  return null;
+}
+
+function walkFiles(rootDir, predicate) {
+  const files = [];
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (entry.isFile() && predicate(full)) files.push(full);
+    }
   }
-  if (typeof groupId === "string" && groupId.startsWith("realistic_phase1/many_branches_sqlite")) {
-    return "native-criterion:sqlite:r8_many_branches";
+  return files.sort();
+}
+
+function readJsonl(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed && typeof parsed === "object" ? [parsed] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function jazzSimBenchmarkIdForPath(file, rootDir) {
+  const rel = path.relative(rootDir, file).split(path.sep).join("/");
+  if (!rel.endsWith(".jsonl")) return null;
+  const scenario = path.basename(rel, ".jsonl");
+  if (!scenario) return null;
+  if (rel.startsWith("wire_frames/")) return `jazz-sim:${scenario}:wire_frames`;
+  return `jazz-sim:${scenario}`;
+}
+
+function stableToken(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function jazzSimVariant(record) {
+  const parts = [
+    record.phase,
+    record.api_surface,
+    record.driver,
+    record.durability_tier,
+    record.envelope,
+    record.adversary,
+    record.trace,
+    record.batch_edits != null ? `batch_${record.batch_edits}` : null,
+    record.scope,
+  ].filter((value) => value != null && String(value).trim().length > 0);
+  return parts.map(stableToken).filter(Boolean).join("/") || "result";
+}
+
+const JAZZ_SIM_METRIC_EXCLUDE = new Set([
+  "batch_edits",
+  "commits",
+  "edits",
+  "seed",
+  "git_dirty",
+  "final_doc_matched",
+]);
+
+function jazzSimMetrics(record) {
+  const metrics = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (JAZZ_SIM_METRIC_EXCLUDE.has(key)) continue;
+    if (!Number.isFinite(Number(value))) continue;
+    metrics[key] = Number(value);
+  }
+  return metrics;
+}
+
+function jazzSimScenarioSummary(record, benchmarkId) {
+  const scenarioId = String(
+    record.scenario ?? path.basename(benchmarkId ?? "unknown") ?? "unknown",
+  );
+  const phase = String(record.phase ?? "result");
+  const metrics = jazzSimMetrics(record);
+  const wallTimeMs = Number.isFinite(Number(record.elapsed_us))
+    ? Number(record.elapsed_us) / 1000
+    : Number.isFinite(Number(record.elapsed_ms))
+      ? Number(record.elapsed_ms)
+      : null;
+  const throughput = firstFiniteNumber(
+    record.throughput_ops_per_sec,
+    record.ingest_edits_per_sec,
+    record.replay_edits_per_sec,
+    record.adversary_replay_edits_per_sec,
+  );
+
+  return {
+    scenario_id: scenarioId,
+    scenario_name: scenarioId,
+    topology: phase,
+    total_operations: firstFiniteNumber(record.operations, record.edits, record.commits),
+    wall_time_ms: wallTimeMs,
+    throughput_ops_per_sec: throughput,
+    operation_summaries: {},
+    extra: {
+      benchmark_id: [benchmarkId, jazzSimVariant(record)].filter(Boolean).join(":"),
+      phase,
+      source_benchmark_id: benchmarkId,
+      metrics,
+    },
+  };
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
   }
   return null;
 }
@@ -362,6 +442,69 @@ function extractNative(nativeDir) {
   ];
 }
 
+function extractJazzSim(jazzSimDir) {
+  if (!jazzSimDir) return [];
+  if (!fs.existsSync(jazzSimDir)) return [];
+
+  const metadata = readJsonIfExists(path.join(jazzSimDir, "metadata.json")) ?? {};
+  const manifest = readJsonIfExists(path.join(jazzSimDir, "manifest.json")) ?? {};
+  if (manifest?.kind !== "realistic-bench-jazz-sim") return [];
+
+  const suiteStatus = readJsonIfExists(path.join(jazzSimDir, "suite_status.json")) ?? {};
+  const passedIds = passedBenchmarkIds(suiteStatus);
+  const manifestJsonlFiles = (manifest.files ?? [])
+    .map((entry) => (typeof entry?.path === "string" ? path.join(jazzSimDir, entry.path) : null))
+    .filter((file) => file && file.endsWith(".jsonl"));
+  const jsonlFiles =
+    manifestJsonlFiles.length > 0
+      ? manifestJsonlFiles.sort()
+      : walkFiles(jazzSimDir, (file) => file.endsWith(".jsonl"));
+
+  const scenarios = [];
+  for (const file of jsonlFiles) {
+    const benchmarkId = jazzSimBenchmarkIdForPath(file, jazzSimDir);
+    if (passedIds.size > 0 && benchmarkId && !passedIds.has(benchmarkId)) continue;
+    for (const record of readJsonl(file)) {
+      if (!record || typeof record !== "object") continue;
+      if (typeof record.scenario !== "string" || typeof record.phase !== "string") continue;
+      scenarios.push(jazzSimScenarioSummary(record, benchmarkId));
+    }
+  }
+  if (scenarios.length === 0) return [];
+
+  const generatedAt =
+    suiteStatus.generated_at ??
+    manifest.generated_at ??
+    metadata.generated_at ??
+    new Date().toISOString();
+  const branch = resolveBranch(metadata, manifest, metadata.ref ?? manifest.ref);
+  return [
+    {
+      id: buildRunId([
+        "jazz-sim",
+        metadata.run_id ?? manifest.run_id,
+        metadata.run_attempt ?? manifest.run_attempt,
+        metadata.sha ?? manifest.sha,
+        metadata.profile ?? manifest.profile,
+      ]),
+      suite: "jazz-sim",
+      storage_engine: null,
+      generated_at: generatedAt,
+      repository: metadata.repository ?? manifest.repository ?? null,
+      run_id: metadata.run_id ?? manifest.run_id ?? null,
+      run_attempt: metadata.run_attempt ?? manifest.run_attempt ?? null,
+      sha: metadata.sha ?? manifest.sha ?? null,
+      ref: metadata.ref ?? manifest.ref ?? null,
+      branch,
+      profile: metadata.profile ?? manifest.profile ?? suiteStatus.profile ?? null,
+      runner_name: metadata.runner_name ?? null,
+      runner_os: metadata.runner_os ?? null,
+      runner_arch: metadata.runner_arch ?? null,
+      scenarios,
+    },
+  ];
+}
+
 function extractNativeCriterion(nativeDir) {
   if (!nativeDir) return [];
   if (!fs.existsSync(nativeDir)) return [];
@@ -384,7 +527,7 @@ function extractNativeCriterion(nativeDir) {
     .filter((x) => x && typeof x === "object" && typeof x.full_id === "string")
     .filter((x) => {
       if (passedIds.size === 0) return true;
-      const benchmarkId = criterionBenchmarkId(x);
+      const benchmarkId = criterionBenchmarkId(x, storageEngine);
       return benchmarkId ? passedIds.has(benchmarkId) : true;
     })
     .map((x) => criterionScenarioSummary(x));
@@ -494,7 +637,11 @@ function main() {
   const nativeDirs = artifactDirs(path.resolve(args.native || ""));
   const browserDirs = artifactDirs(path.resolve(args.browser || ""));
   const incoming = [
-    ...nativeDirs.flatMap((dir) => [...extractNative(dir), ...extractNativeCriterion(dir)]),
+    ...nativeDirs.flatMap((dir) => [
+      ...extractNative(dir),
+      ...extractNativeCriterion(dir),
+      ...extractJazzSim(dir),
+    ]),
     ...browserDirs.flatMap((dir) => extractBrowser(dir)),
   ];
   if (incoming.length === 0) {

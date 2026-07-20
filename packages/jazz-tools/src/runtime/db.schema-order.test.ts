@@ -1,30 +1,49 @@
 import { describe, expect, it, vi } from "vitest";
-import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
+import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import { WriteResult, JazzClient, type DirectInsertResult, WriteHandle } from "./client.js";
+import { WriteResult, JazzClient, type InsertResult, WriteHandle } from "./client.js";
+import type { Session } from "./context.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
+
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
 
 class TestDb extends Db {
-  constructor(private readonly testClient: JazzClient) {
-    super({ appId: "schema-order-test" }, null);
+  constructor(
+    private readonly testClient: JazzClient,
+    private readonly testContext: { session?: Session } | null = null,
+  ) {
+    super({ appId: "schema-order-test" }, new TestRuntimeSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
     return this.testClient;
   }
+
+  protected override getRuntimeOperationContext(): { session?: Session } | null {
+    return this.testContext;
+  }
 }
 
 function makeHandleClient(): JazzClient {
   return {
-    waitForBatch: vi.fn(async () => undefined),
+    waitForTransaction: vi.fn(async () => undefined),
   } as unknown as JazzClient;
 }
 
-function makeWriteResult(row: DirectInsertResult): WriteResult<DirectInsertResult> {
-  return new WriteResult(row, row.batchId, makeHandleClient());
+function makeWriteResult(row: InsertResult): WriteResult<InsertResult> {
+  return new WriteResult(row, row.transactionId, makeHandleClient());
 }
 
-function makeWriteHandle(batchId: string): WriteHandle {
-  return new WriteHandle(batchId, makeHandleClient());
+function makeWriteHandle(transactionId: string): WriteHandle {
+  return new WriteHandle(transactionId, makeHandleClient());
 }
 
 describe("Db runtime schema order", () => {
@@ -45,14 +64,14 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<InsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-schema-order-runtime",
+        transactionId: "transaction-schema-order-runtime",
       }),
     );
     const client = {
@@ -144,6 +163,64 @@ describe("Db runtime schema order", () => {
     ]);
   });
 
+  it("carries session identity through local native runtime queries", async () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const session: Session = {
+      user_id: "00000000-0000-0000-0000-0000000000a1",
+      claims: {},
+      authMode: "anonymous",
+    };
+    const query = vi.fn(
+      async (_queryJson: string, _options: unknown, receivedSession?: Session) => {
+        expect(receivedSession).toBe(session);
+        return [
+          {
+            id: "todo-1",
+            values: [
+              { type: "Text", value: "Direct scoped" },
+              { type: "Boolean", value: false },
+            ],
+          },
+        ];
+      },
+    );
+    const client = {
+      getSchema: () => new Map(Object.entries(generatedSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client, { session });
+    const builder = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    const rows = await db.all(builder, { tier: "local" });
+
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(rows).toEqual([
+      {
+        id: "todo-1",
+        title: "Direct scoped",
+        done: false,
+      },
+    ]);
+  });
+
   it("falls back to the generated schema when the runtime schema is missing a table", async () => {
     const generatedSchema: WasmSchema = {
       todos: {
@@ -153,14 +230,14 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+    const insert = vi.fn<(...args: [string, InsertValues]) => WriteResult<InsertResult>>(() =>
       makeWriteResult({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-schema-order-generated",
+        transactionId: "transaction-schema-order-generated",
       }),
     );
     const client = {
@@ -208,7 +285,7 @@ describe("Db runtime schema order", () => {
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const insert = vi.fn<
-      (...args: [string, InsertValues, { id: string }]) => WriteResult<DirectInsertResult>
+      (...args: [string, InsertValues, { id: string }]) => WriteResult<InsertResult>
     >(() =>
       makeWriteResult({
         id: externalId,
@@ -216,7 +293,7 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-1",
+        transactionId: "transaction-1",
       }),
     );
     const client = {
@@ -264,7 +341,7 @@ describe("Db runtime schema order", () => {
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => WriteHandle>(() =>
-      makeWriteHandle("batch-upsert"),
+      makeWriteHandle("transaction-upsert"),
     );
     const client = {
       getSchema: () => new Map(),
@@ -282,7 +359,7 @@ describe("Db runtime schema order", () => {
     >;
 
     expect(db.upsert(table, { title: "Buy milk", done: false }, { id: externalId })).toMatchObject({
-      batchId: "batch-upsert",
+      transactionId: "transaction-upsert",
     });
 
     expect(upsert).toHaveBeenCalledWith(
@@ -308,7 +385,7 @@ describe("Db runtime schema order", () => {
     };
     const updatedAt = 1_764_000_000_000_000;
     const insert = vi.fn<
-      (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<DirectInsertResult>
+      (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<InsertResult>
     >(() =>
       makeWriteResult({
         id: "todo-1",
@@ -316,15 +393,15 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-1",
+        transactionId: "transaction-1",
       }),
     );
     const update = vi.fn<(...args: [string, InsertValues, { updatedAt: number }]) => WriteHandle>(
-      () => makeWriteHandle("batch-update"),
+      () => makeWriteHandle("transaction-update"),
     );
     const upsert = vi.fn<
       (...args: [string, InsertValues, { id: string; updatedAt: number }]) => WriteHandle
-    >(() => makeWriteHandle("batch-upsert"));
+    >(() => makeWriteHandle("transaction-upsert"));
     const client = {
       getSchema: () => new Map(),
       insert,
@@ -357,6 +434,7 @@ describe("Db runtime schema order", () => {
       undefined,
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },
@@ -393,18 +471,18 @@ describe("Db runtime schema order", () => {
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-insert",
+        transactionId: "transaction-insert",
       }),
     );
-    const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-update"));
-    const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("batch-upsert"));
+    const update = vi.fn<() => WriteHandle>(() => makeWriteHandle("transaction-update"));
+    const upsert = vi.fn<() => WriteHandle>(() => makeWriteHandle("transaction-upsert"));
     const client = {
       getSchema: () => new Map(Object.entries(generatedSchema)),
       insert,
       update,
       upsert,
     } as unknown as JazzClient;
-    const db = createDbFromClient({ appId: "client-backed-db-test" }, client);
+    const db = new TestDb(client);
     const table = {
       _table: "todos",
       _schema: generatedSchema,
@@ -430,6 +508,7 @@ describe("Db runtime schema order", () => {
       undefined,
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },
@@ -494,5 +573,70 @@ describe("Db runtime schema order", () => {
         done: true,
       },
     ]);
+  });
+
+  it("rejects queries whose public schema is missing the built table", async () => {
+    const runtimeSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const query = vi.fn<(...args: [string, object?]) => Promise<WasmRow[]>>(async () => []);
+    const client = {
+      getSchema: () => new Map(Object.entries(runtimeSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const builder = {
+      _table: "todos",
+      _schema: {},
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    await expect(db.all(builder)).rejects.toThrow('Query schema is missing table "todos".');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects queries whose built public shape omits the table", async () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const query = vi.fn<(...args: [string, object?]) => Promise<WasmRow[]>>(async () => []);
+    const client = {
+      getSchema: () => new Map(Object.entries(generatedSchema)),
+      query,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const builder = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    await expect(db.all(builder)).rejects.toThrow(
+      "QueryBuilder._build() must include a non-empty table.",
+    );
+    expect(query).not.toHaveBeenCalled();
   });
 });

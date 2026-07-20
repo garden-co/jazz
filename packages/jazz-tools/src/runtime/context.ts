@@ -5,7 +5,7 @@
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
 /**
- * Runtime source overrides for Jazz WASM and worker startup.
+ * Runtime source overrides for Jazz WASM startup.
  *
  * These are primarily used by browser and edge-style runtimes.
  */
@@ -13,21 +13,12 @@ export interface RuntimeSourcesConfig {
   /**
    * Base URL for Jazz runtime files.
    *
-   * When set, Jazz derives:
-   * - `jazz_wasm_bg.wasm`
-   * - `worker/jazz-worker.js`
-   * - `worker/jazz-broker-worker.js`
+   * When set, Jazz derives `jazz_wasm_bg.wasm`.
    */
   baseUrl?: string;
 
   /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
   wasmUrl?: string;
-
-  /** Explicit URL for the worker entry script. Overrides `baseUrl`. */
-  workerUrl?: string;
-
-  /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
-  brokerWorkerUrl?: string;
 
   /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
   wasmSource?: BufferSource;
@@ -37,7 +28,7 @@ export interface RuntimeSourcesConfig {
 }
 
 /**
- * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/query_manager/session.rs`.
+ * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/public_schema.rs`.
  */
 export type AuthMode = "external" | "local-first" | "anonymous";
 
@@ -69,7 +60,7 @@ export interface AppContext {
   /** Optional server URL for sync */
   serverUrl?: string;
 
-  /** Optional runtime source overrides for WASM and worker loading. */
+  /** Optional runtime source overrides for WASM loading. */
   runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */

@@ -3,7 +3,6 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
-import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { __resetJazzNextPluginForTests, withJazz, type NextConfigLike } from "./next.js";
 
@@ -200,7 +199,7 @@ describe("withJazz", () => {
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
 
     const deploy = vi
-      .spyOn(catalogueProject, "deploy")
+      .spyOn(devServer, "deploy")
       .mockRejectedValueOnce(new Error("schema push failed"));
 
     const wrapped = withJazz(
@@ -313,7 +312,7 @@ describe("withJazz", () => {
       stop: vi.fn().mockResolvedValue(undefined),
     });
     const deploy = vi
-      .spyOn(catalogueProject, "deploy")
+      .spyOn(devServer, "deploy")
       .mockResolvedValue(deployed("1111111111111111aaaaaaaaaaaaaaaaaaaaaaaa"));
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
@@ -360,7 +359,7 @@ describe("withJazz", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation(() => ({ close: vi.fn() }));
 
     const appRoot = await tempRoots.create("jazz-next-alias-");

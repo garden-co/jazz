@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import clsx from "clsx";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+import { fireAndReport } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 
 function ReactorName({ userId, currentUserId }: { userId: string; currentUserId?: string }) {
@@ -107,13 +108,16 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
     if (!userId) return;
     const myReaction = reactions.find((r) => r.emoji === emoji && r.userId === userId);
     if (myReaction) {
-      db.delete(app.reactions, myReaction.id);
+      fireAndReport(db.delete(app.reactions, myReaction.id), "failed to delete reaction");
     } else {
-      db.insert(app.reactions, {
-        messageId,
-        userId,
-        emoji,
-      });
+      fireAndReport(
+        db.insert(app.reactions, {
+          messageId,
+          userId,
+          emoji,
+        }),
+        "failed to add reaction",
+      );
     }
   };
 

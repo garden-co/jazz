@@ -1,7 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDbFromClient } from "./db.js";
+import { Db, type DbConfig } from "./db.js";
 import type { AuthState } from "./auth-state.js";
 import type { Session } from "./context.js";
+import type { JazzClient } from "./client.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
+import type { WasmSchema } from "../drivers/types.js";
+
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
+
+class TestDb extends Db {
+  constructor(
+    config: DbConfig,
+    private readonly client: JazzClient,
+    scopedAuthState?: AuthState,
+  ) {
+    super(
+      config,
+      new TestRuntimeSource(client),
+      scopedAuthState
+        ? {
+            initialState: scopedAuthState,
+            lockAuthenticatedState: true,
+          }
+        : undefined,
+    );
+  }
+
+  touchClient(): void {
+    this.getClient({ auth_state_touch: { columns: [] } });
+  }
+}
 
 function toBase64Url(value: unknown): string {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
@@ -18,7 +54,7 @@ function makeDbWithJwt(jwtToken: string) {
     updateAuthToken: vi.fn(),
   };
 
-  const db = createDbFromClient(
+  const db = new TestDb(
     {
       appId: "test-app",
       jwtToken,
@@ -35,7 +71,7 @@ function makeDbWithCookieSession(cookieSession: Session) {
     updateCookieSession: vi.fn(),
   };
 
-  const db = createDbFromClient(
+  const db = new TestDb(
     {
       appId: "cookie-auth-app",
       cookieSession,
@@ -78,14 +114,13 @@ describe("Db auth state", () => {
       updateAuthToken: vi.fn(),
     };
 
-    const db = createDbFromClient(
+    const db = new TestDb(
       {
         appId: "test-app",
         jwtToken: makeJwt({ sub: "bob", claims: { role: "reader" } }),
       },
       runtimeClient as any,
-      session,
-      "alice@writer",
+      { authMode: session.authMode, session },
     );
 
     expect(db.getAuthState()).toMatchObject({
@@ -107,21 +142,23 @@ describe("Db auth state", () => {
       updateAuthToken: vi.fn(),
     };
 
-    const sharedDb = createDbFromClient(
+    const sharedDb = new TestDb(
       {
         appId: "test-app",
         jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
       },
       runtimeClient as any,
     );
-    const scopedDb = createDbFromClient(
+    const scopedDb = new TestDb(
       {
         appId: "test-app",
         jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
       },
       runtimeClient as any,
-      { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
-      "bob@writer",
+      {
+        authMode: "external",
+        session: { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
+      },
     );
 
     scopedDb.updateAuthToken(makeJwt({ sub: "bob", claims: { role: "admin" } }));
@@ -162,6 +199,7 @@ describe("Db auth state", () => {
     const stop = db.onAuthChanged((state) => {
       states.push(state);
     });
+    db.touchClient();
 
     db.updateAuthToken(refreshed);
     stop();
@@ -246,6 +284,7 @@ describe("Db auth state", () => {
     const stop = db.onAuthChanged((state) => {
       states.push(state);
     });
+    db.touchClient();
 
     db.updateCookieSession(refreshed);
     stop();

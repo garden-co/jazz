@@ -6,12 +6,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
+import { WebSocket as UndiciWebSocket } from "undici";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
 import {
   createServer,
   startServer,
@@ -19,6 +19,8 @@ import {
   type RunningServer,
   type Todo,
 } from "../src/main.ts";
+
+globalThis.WebSocket ??= UndiciWebSocket as unknown as typeof globalThis.WebSocket;
 
 describe("Todo Server Integration", () => {
   let server: RunningServer;
@@ -32,8 +34,7 @@ describe("Todo Server Integration", () => {
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
-      schema: app,
-      permissions,
+      schemaDir: join(import.meta.dirname, ".."),
     });
 
     // Create server with temp persistent storage plus an ephemeral upstream server.
@@ -157,11 +158,13 @@ describe("Todo Server Integration", () => {
     it("filters rows by owner_id when querying with session context", async () => {
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
+      const aliceId = randomUUID();
+      const bobId = randomUUID();
 
       const createAlice = await fetch(`${baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: aliceTitle, owner_id: "alice" }),
+        body: JSON.stringify({ title: aliceTitle, owner_id: aliceId }),
       });
       expect(createAlice.status).toBe(201);
       const aliceTodo: Todo = await createAlice.json();
@@ -169,19 +172,19 @@ describe("Todo Server Integration", () => {
       const createBob = await fetch(`${baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: bobTitle, owner_id: "bob" }),
+        body: JSON.stringify({ title: bobTitle, owner_id: bobId }),
       });
       expect(createBob.status).toBe(201);
       const bobTodo: Todo = await createBob.json();
 
-      const aliceViewRes = await fetch(`${baseUrl}/todos/as/alice`);
+      const aliceViewRes = await fetch(`${baseUrl}/todos/as/${aliceId}`);
       expect(aliceViewRes.status).toBe(200);
       const aliceView: Todo[] = await aliceViewRes.json();
       const aliceTitles = new Set(aliceView.map((todo) => todo.title));
       expect(aliceTitles.has(aliceTitle)).toBe(true);
       expect(aliceTitles.has(bobTitle)).toBe(false);
 
-      const bobViewRes = await fetch(`${baseUrl}/todos/as/bob`);
+      const bobViewRes = await fetch(`${baseUrl}/todos/as/${bobId}`);
       expect(bobViewRes.status).toBe(200);
       const bobView: Todo[] = await bobViewRes.json();
       const bobTitles = new Set(bobView.map((todo) => todo.title));
@@ -203,8 +206,7 @@ describe("Todo Server Integration", () => {
         serverUrl: coldStartUpstream.url,
         appId: coldStartUpstream.appId,
         adminSecret: coldStartUpstream.adminSecret,
-        schema: app,
-        permissions,
+        schemaDir: join(import.meta.dirname, ".."),
       });
 
       // Use a shared data path so both server instances see the same Fjall file
@@ -284,8 +286,7 @@ describe("Todo Server Integration", () => {
         serverUrl: sseUpstream.url,
         appId: sseUpstream.appId,
         adminSecret: sseUpstream.adminSecret,
-        schema: app,
-        permissions,
+        schemaDir: join(import.meta.dirname, ".."),
       });
       const sseServer = await startServer(
         await createServer({

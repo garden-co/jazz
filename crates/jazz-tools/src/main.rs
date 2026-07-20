@@ -91,6 +91,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Create a new resource
     Create {
@@ -142,9 +143,13 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Upstream core server URL. When set, this server runs as an edge.
+        /// Upstream server URL. When set, this server runs as an edge.
         #[arg(long, env = "JAZZ_UPSTREAM_URL")]
         upstream_url: Option<String>,
+
+        /// Edge cache eviction byte budget. Absent disables automatic edge eviction.
+        #[arg(long, env = "JAZZ_EDGE_CACHE_BUDGET_BYTES")]
+        edge_cache_budget_bytes: Option<u64>,
 
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
@@ -201,6 +206,7 @@ async fn main() {
             backend_secret,
             admin_secret,
             upstream_url,
+            edge_cache_budget_bytes,
             shutdown_timeout_secs,
             bound_port_file,
         } => {
@@ -238,6 +244,7 @@ async fn main() {
                 admin_secret,
                 ..Default::default()
             };
+            let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
             if let Err(e) = commands::server::run(
                 &app_id,
                 port,
@@ -245,6 +252,7 @@ async fn main() {
                 in_memory,
                 auth_config,
                 upstream_url,
+                edge_cache_budget,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
             )

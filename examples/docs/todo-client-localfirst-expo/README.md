@@ -1,6 +1,6 @@
 # todo-client-localfirst-expo
 
-Expo example for local-first todos using `jazz-tools/react-native` + `jazz-rn`.
+Expo example for local-first todos using `jazz-tools/react` + `jazz-rn`.
 
 ## Notes
 

@@ -1,5 +1,4 @@
-import { startLocalJazzServer } from "jazz-tools/testing";
-import { deploy } from "jazz-tools/dev";
+import { mergePermissionsIntoWasmSchema, startLocalJazzServer } from "jazz-tools/testing";
 import {
   ADMIN_SECRET,
   APP_ID,
@@ -7,6 +6,7 @@ import {
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
 import { app, permissions } from "../tests/browser/schema.ts";
+import { publishStoredSchema } from "jazz-tools";
 import { createJazzContext } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
@@ -19,12 +19,15 @@ export default async function runServer() {
     backendSecret: "test",
   });
 
-  await deploy({
-    serverUrl: serverHandle.url,
+  // Publish the schema (with permissions merged) through the admin endpoint —
+  // the code-first counterpart of the directory-based catalogue deploy, which
+  // needs a schema project on disk and can't take the in-code app object. This
+  // both wires the runtime catalogue (clients can connect) and registers the
+  // hash for hash-keyed consumers (the standalone inspector).
+  await publishStoredSchema(serverHandle.url, {
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
-    schema: app,
-    permissions,
+    schema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions),
   });
 
   const context = createJazzContext({

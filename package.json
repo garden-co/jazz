@@ -5,18 +5,18 @@
     "format": "oxfmt --ignore-path .oxfmtignore .",
     "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
     "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
-    "ensure:rust-toolchain": "bash dev/scripts/install-jazz-rn-deps.sh",
+    "ensure:rust-toolchain": "rustup target add wasm32-unknown-unknown && (wasm-pack --version >/dev/null 2>&1 || cargo install wasm-pack@0.13.1 --locked)",
     "build:vercel-docs": "bash dev/scripts/install-vercel-deps.sh && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
     "build:vercel-inspector": "pnpm --filter inspector run build:vercel",
-    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-wasm --only",
     "build:core": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=./packages/** --filter=jazz-napi --only",
     "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
-    "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "build:all": "pnpm build",
     "release:version": "changeset version",
     "release:version:alpha": "changeset version --snapshot alpha",
     "release:publish": "changeset publish",
     "release:publish:alpha": "changeset publish --tag alpha",
-    "test": "turbo run test --filter=!jazz-rn --only",
+    "test": "turbo run test --only",
     "bench:realistic:update-history": "node dev/benchmarks/realistic/update_history.mjs",
     "bench:realistic:build-site": "node dev/benchmarks/realistic/build_site.mjs",
     "bench:realistic:render": "node dev/benchmarks/realistic/render_deltas.mjs",
@@ -27,7 +27,6 @@
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
     "lefthook": "^2.0.15",
-    "metro-runtime": "0.83.3",
     "next": "16.1.6",
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
@@ -39,11 +38,5 @@
   "engines": {
     "node": ">=22.12"
   },
-  "packageManager": "pnpm@10.14.0",
-  "pnpm": {
-    "overrides": {
-      "react": "19.2.4",
-      "react-dom": "19.2.4"
-    }
-  }
+  "packageManager": "pnpm@10.14.0"
 }

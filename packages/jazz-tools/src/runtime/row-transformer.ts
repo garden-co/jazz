@@ -5,9 +5,13 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import { isProvenanceMagicTimestampColumn, magicColumnType } from "../magic-columns.js";
+import {
+  isPermissionIntrospectionColumn,
+  isProvenanceMagicTimestampColumn,
+  magicColumnType,
+} from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
+import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
 export type { WasmValue };
 
@@ -20,6 +24,33 @@ type IncludePlan = {
   nested: IncludePlan[];
   projection?: readonly string[];
 };
+
+type NamedRowValues = Map<string, WasmValue> | Record<string, WasmValue>;
+type RowValueWithNamedValues = {
+  id?: string;
+  values: WasmValue[];
+  valuesByColumn?: NamedRowValues;
+};
+type WasmRowWithNamedValues = WasmRow & { valuesByColumn?: NamedRowValues };
+
+function getNamedValue(
+  valuesByColumn: NamedRowValues | undefined,
+  name: string,
+): WasmValue | undefined {
+  if (!valuesByColumn) return undefined;
+  if (valuesByColumn instanceof Map) {
+    return valuesByColumn.get(name) ?? valuesByColumn.get(`user_${name}`);
+  }
+  return valuesByColumn[name] ?? valuesByColumn[`user_${name}`];
+}
+
+function hasNamedValue(valuesByColumn: NamedRowValues | undefined, name: string): boolean {
+  if (!valuesByColumn) return false;
+  if (valuesByColumn instanceof Map) {
+    return valuesByColumn.has(name) || valuesByColumn.has(`user_${name}`);
+  }
+  return name in valuesByColumn || `user_${name}` in valuesByColumn;
+}
 
 function resolveBaseColumns(
   tableName: string,
@@ -36,6 +67,9 @@ function resolveBaseColumns(
       const magicType = magicColumnType(columnName);
       if (magicType) {
         return { name: columnName, columnType: magicType };
+      }
+      if (isPermissionIntrospectionColumn(columnName)) {
+        return { name: columnName, columnType: { type: "Boolean" } as const };
       }
       const column = table.columns.find((candidate) => candidate.name === columnName);
       return column ? { name: column.name, columnType: column.column_type } : null;
@@ -103,6 +137,7 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
     // Row id is carried in the struct's `id` field
     const rowId = entry.value.id;
     const columnValues = entry.value.values;
+    const valuesByColumn = (entry.value as RowValueWithNamedValues).valuesByColumn;
     return transformRowValues(
       columnValues,
       schema,
@@ -110,6 +145,7 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
       plan.nested,
       rowId,
       plan.projection,
+      valuesByColumn,
     );
   });
 
@@ -123,6 +159,7 @@ function transformRowValues(
   includePlans: IncludePlan[],
   rowId?: string,
   projection?: readonly string[],
+  valuesByColumn?: NamedRowValues,
 ): Record<string, unknown> {
   const table = schema[tableName];
   if (!table) {
@@ -139,17 +176,31 @@ function transformRowValues(
   for (let i = 0; i < baseColumns.length; i++) {
     const col = baseColumns[i];
     if (!col) continue;
-    const value = values[i];
+    const value = hasNamedValue(valuesByColumn, col.name)
+      ? getNamedValue(valuesByColumn, col.name)
+      : valuesByColumn
+        ? undefined
+        : values[i];
     if (value !== undefined) {
       obj[col.name] = unwrapValue(value, col.columnType, col.name);
     }
   }
 
   for (let i = 0; i < includePlans.length; i++) {
-    const value = values[baseColumns.length + i];
-    if (value === undefined) continue;
     const plan = includePlans[i];
     if (!plan) continue;
+    const hiddenColumnName = hiddenIncludeColumnName(plan.relation.name);
+    const value = hasNamedValue(valuesByColumn, hiddenColumnName)
+      ? getNamedValue(valuesByColumn, hiddenColumnName)
+      : hasNamedValue(valuesByColumn, plan.relation.name)
+        ? getNamedValue(valuesByColumn, plan.relation.name)
+        : valuesByColumn
+          ? undefined
+          : values[baseColumns.length + i];
+    if (value === undefined) {
+      obj[plan.relation.name] = plan.relation.isArray ? [] : null;
+      continue;
+    }
     obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
   }
 
@@ -230,7 +281,7 @@ export function transformRows<T>(
       ? []
       : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
 
-  return rows.map((row) => {
+  return rows.map((row: WasmRowWithNamedValues) => {
     return transformRowValues(
       row.values as WasmValue[],
       schema,
@@ -238,6 +289,7 @@ export function transformRows<T>(
       includePlans,
       row.id,
       projection,
+      row.valuesByColumn,
     ) as T;
   });
 }

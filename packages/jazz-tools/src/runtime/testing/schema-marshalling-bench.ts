@@ -1,5 +1,6 @@
 import { JazzClient, type Runtime } from "../client.js";
-import { createDbFromClient, type QueryBuilder } from "../db.js";
+import { Db, type DbConfig, type QueryBuilder } from "../db.js";
+import { RuntimeSource, type RuntimeClientContext } from "../runtime-source.js";
 import type { WasmRow, WasmSchema } from "../../drivers/types.js";
 
 const DEFAULT_TABLE_COUNT = 24;
@@ -41,6 +42,27 @@ export interface SchemaMarshallingBenchResult {
     getSchemaAvgMsPerCall: number;
     getSchemaAvgMsPerIteration: number;
   };
+}
+
+class RuntimeSourceAdapter extends RuntimeSource<DbConfig> {
+  constructor(private readonly runtime: Runtime) {
+    super();
+  }
+
+  override createClient({
+    config,
+    schema,
+    onAuthFailure,
+  }: RuntimeClientContext<DbConfig>): JazzClient {
+    return JazzClient.connectWithRuntime(
+      this.runtime,
+      {
+        appId: config.appId,
+        schema,
+      },
+      { onAuthFailure },
+    );
+  }
 }
 
 export function createSyntheticRuntimeSchema(options?: {
@@ -169,16 +191,6 @@ export async function runSchemaMarshallingBench(
 
   const runtime = new Proxy(options.runtime, {
     get(target, property, receiver) {
-      if (property === "getSchema") {
-        return () => {
-          const startedAt = performance.now();
-          const value = target.getSchema();
-          getSchemaCalls += 1;
-          getSchemaTotalMs += performance.now() - startedAt;
-          return value;
-        };
-      }
-
       if (property === "query") {
         return async () => cloneRows(rows);
       }
@@ -192,11 +204,14 @@ export async function runSchemaMarshallingBench(
     appId: `schema-marshalling-bench-${options.label}`,
     schema: options.schema,
   });
-  const db = createDbFromClient({ appId: `schema-marshalling-db-${options.label}` }, client);
+  const db = Db.create(
+    { appId: `schema-marshalling-db-${options.label}` },
+    new RuntimeSourceAdapter(runtime),
+  );
   const query = createQuery(options.schema, tableName);
 
   for (let index = 0; index < warmupIterations; index += 1) {
-    options.runtime.getSchema();
+    client.getSchema();
     await db.all(query);
   }
 
@@ -204,7 +219,10 @@ export async function runSchemaMarshallingBench(
   getSchemaTotalMs = 0;
 
   const directGetSchema = measureSyncIterations(measuredIterations, () => {
-    options.runtime.getSchema();
+    const startedAt = performance.now();
+    client.getSchema();
+    getSchemaCalls += 1;
+    getSchemaTotalMs += performance.now() - startedAt;
   });
   const dbAll = await measureAsyncIterations(measuredIterations, async () => {
     await db.all(query);

@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,7 +57,7 @@ describe("Profile E2E", () => {
     mounts.push({ root: r, container: el });
 
     const appId = config.appId ?? APP_ID;
-    const serverUrl = config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = config.serverUrl ?? TEST_SERVER_URL;
 
     r.render(<App config={{ appId, dbName: crypto.randomUUID(), serverUrl, ...config }} />);
 

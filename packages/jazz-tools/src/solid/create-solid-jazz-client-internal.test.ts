@@ -32,7 +32,6 @@ function makeRawClient(id: string) {
     id,
     db: { clientId: id } as any,
     session: null,
-    manager: {} as any,
     shutdown: vi.fn(async () => undefined),
   };
 }

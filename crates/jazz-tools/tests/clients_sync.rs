@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
-use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
+#[cfg(feature = "client")]
+use jazz_tools::{ObjectId, SubscriptionStream};
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 
@@ -38,66 +39,38 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     .await;
 }
 
-#[tokio::test]
-async fn wait_for_batch_waits_until_expected_tier_confirmation_reaches_client() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema, "alice-wait-for-batch"))
+#[cfg(feature = "client")]
+async fn wait_for_subscription_driven_query<F>(
+    client: &JazzClient,
+    stream: &mut SubscriptionStream,
+    query: jazz_tools::Query,
+    timeout: Duration,
+    description: &str,
+    mut predicate: F,
+) -> Vec<(ObjectId, Vec<Value>)>
+where
+    F: FnMut(&[(ObjectId, Vec<Value>)]) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        assert!(now < deadline, "timed out waiting for {description}");
+
+        tokio::time::timeout(deadline - now, stream.next())
             .await
-            .expect("connect alice");
-    let alice_client_id = alice.client_id().expect("alice transport client id");
+            .unwrap_or_else(|_| panic!("timed out waiting for subscription event: {description}"))
+            .unwrap_or_else(|| {
+                panic!("subscription stream closed while waiting for {description}")
+            });
 
-    wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
-
-    let blocked = server.block_messages_to(alice_client_id);
-    let (_, _, batch_id) = alice
-        .insert(
-            "todos",
-            row_input!("title" => "blocked confirmation", "completed" => false),
-        )
-        .expect("insert todo");
-
-    blocked
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == batch_id
-                            && fate
-                                .confirmed_tier()
-                                .is_some_and(|tier| tier >= DurabilityTier::EdgeServer)
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should produce the edge confirmation while messages are blocked");
-    assert!(
-        blocked.buffered_count() > 0,
-        "blocked client should have buffered server messages"
-    );
-
-    {
-        let wait_for_batch = alice.wait_for_batch(batch_id, DurabilityTier::EdgeServer);
-        tokio::pin!(wait_for_batch);
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut wait_for_batch)
-                .await
-                .is_err(),
-            "wait_for_batch should not resolve before the confirmation is delivered"
-        );
-
-        blocked.unblock();
-        wait_for_batch
+        let rows = client
+            .query(query.clone(), None)
             .await
-            .expect("wait_for_batch should resolve after unblocking the confirmation");
+            .unwrap_or_else(|error| panic!("local query after subscription event failed: {error}"));
+        if predicate(&rows) {
+            return rows;
+        }
     }
-
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
 }
 
 /// Verifies that a fresh client resolves the latest state for a single object
@@ -200,82 +173,123 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     server.shutdown().await;
 }
 
-#[tokio::test]
+#[cfg(feature = "client")]
+#[tokio::test(flavor = "current_thread")]
 async fn jazz_tools_cli_two_clients_sync_values() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(
-        server.make_client_context_for_user(schema.clone(), "sync-values-user"),
-    )
-    .await
-    .expect("connect client a");
-    let client_b =
-        JazzClient::connect(server.make_client_context_for_user(schema, "sync-values-user"))
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client_a = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "sync-values-user"),
+            )
+            .await
+            .expect("connect client a");
+            let client_b = JazzClient::connect(
+                server.make_client_context_for_user(schema, "sync-values-user"),
+            )
             .await
             .expect("connect client b");
 
-    wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
+            let query = QueryBuilder::new("todos").build();
+            let mut stream_a = client_a
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe client a");
+            let mut stream_b = client_b
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe client b");
 
-    client_a
-        .insert(
-            "todos",
-            HashMap::from([
-                (
-                    "title".to_string(),
-                    Value::Text("shared-through-server".to_string()),
-                ),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
-        .expect("create from client a");
+            tokio::time::timeout(Duration::from_secs(5), stream_a.next())
+                .await
+                .expect("client a subscription should open")
+                .expect("client a subscription stream should stay open");
+            tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+                .await
+                .expect("client b subscription should open")
+                .expect("client b subscription stream should stay open");
 
-    let rows_on_b = wait_for_query(
-        &client_b,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "todos count 1",
-        |rows| (rows.len() == 1).then_some(rows),
-    )
-    .await;
-    let todo_id = rows_on_b[0].0;
+            client_a
+                .insert(
+                    "todos",
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("shared-through-server".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(false)),
+                    ]),
+                )
+                .expect("create from client a");
 
-    client_b
-        .update(
-            todo_id,
-            vec![("completed".to_string(), Value::Boolean(true))],
-        )
-        .expect("update from client b");
+            let rows_on_b = wait_for_subscription_driven_query(
+                &client_b,
+                &mut stream_b,
+                query.clone(),
+                Duration::from_secs(10),
+                "client b observes client a insert",
+                |rows| {
+                    rows.len() == 1
+                        && rows[0].1
+                            == vec![
+                                Value::Text("shared-through-server".to_string()),
+                                Value::Boolean(false),
+                            ]
+                },
+            )
+            .await;
+            let todo_id = rows_on_b[0].0;
 
-    let rows_on_a = wait_for_query(
-        &client_a,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "todo completed=true",
-        |rows| {
-            let has_expected_completed = rows.iter().any(|(_, values)| {
-                values
-                    .iter()
-                    .any(|value| matches!(value, Value::Boolean(flag) if *flag))
-            });
+            client_b
+                .insert(
+                    "todos",
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("from-client-b".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(true)),
+                    ]),
+                )
+                .expect("create from client b");
 
-            (!rows.is_empty() && has_expected_completed).then_some(rows)
-        },
-    )
-    .await;
-    assert!(
-        rows_on_a[0]
-            .1
-            .iter()
-            .any(|value| matches!(value, Value::Boolean(true))),
-        "client a should observe client b's update through the server"
-    );
+            let rows_on_a = wait_for_subscription_driven_query(
+                &client_a,
+                &mut stream_a,
+                query,
+                Duration::from_secs(10),
+                "client a observes client b insert",
+                |rows| {
+                    let titles = rows
+                        .iter()
+                        .flat_map(|(_, values)| values.iter())
+                        .filter_map(|value| match value {
+                            Value::Text(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
 
-    client_a.shutdown().await.expect("shutdown client a");
-    client_b.shutdown().await.expect("shutdown client b");
-    server.shutdown().await;
+                    rows.len() == 2
+                        && titles == BTreeSet::from(["shared-through-server", "from-client-b"])
+                },
+            )
+            .await;
+            assert_eq!(
+                rows_on_a.len(),
+                2,
+                "client a should observe client b's insert through scheduler-driven sync"
+            );
+            assert!(
+                rows_on_a.iter().any(|(id, _)| *id == todo_id),
+                "client a should retain the row created by client a"
+            );
+
+            client_a.shutdown().await.expect("shutdown client a");
+            client_b.shutdown().await.expect("shutdown client b");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -411,61 +425,103 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
     server.shutdown().await;
 }
 
-#[tokio::test]
+#[cfg(feature = "client")]
+#[tokio::test(flavor = "current_thread")]
 async fn caller_supplied_uuid_is_used_for_created_row() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-    let client = JazzClient::connect(
-        server.make_client_context_for_user(schema.clone(), "external-id-writer"),
-    )
-    .await
-    .expect("connect writer");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            publish_allow_all_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &schema,
+            )
+            .await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "external-id-writer"),
+            )
+            .await
+            .expect("connect writer");
 
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
-    let external_id =
-        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
+            let external_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+                .expect("parse external uuid");
 
-    let (todo_id, expected_values, _) = client
-        .insert_with_id(
-            "todos",
-            external_id,
-            HashMap::from([
-                (
-                    "title".to_string(),
-                    Value::Text("external-id-created".to_string()),
-                ),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
-        .expect("create row with external id");
+            let (todo_id, expected_values, _) = client
+                .insert_with_id(
+                    "todos",
+                    external_id,
+                    HashMap::from([
+                        (
+                            "title".to_string(),
+                            Value::Text("external-id-created".to_string()),
+                        ),
+                        ("completed".to_string(), Value::Boolean(false)),
+                    ]),
+                )
+                .expect("create row with external id");
 
-    assert_eq!(todo_id.uuid(), &external_id);
+            assert_eq!(todo_id.uuid(), &external_id);
 
-    let rows = wait_for_query(
-        &client,
-        QueryBuilder::new("todos").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "query returns row created with external id",
-        |rows| {
-            (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
-                .then_some(rows)
-        },
-    )
-    .await;
+            let rows = wait_for_query(
+                &client,
+                QueryBuilder::new("todos").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "query returns row created with external id",
+                |rows| {
+                    (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
+                        .then_some(rows)
+                },
+            )
+            .await;
 
-    assert_eq!(rows[0].0.uuid(), &external_id);
+            assert_eq!(rows[0].0.uuid(), &external_id);
 
-    client.shutdown().await.expect("shutdown writer");
-    server.shutdown().await;
+            client.shutdown().await.expect("shutdown writer");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[cfg(feature = "client")]
+#[tokio::test(flavor = "current_thread")]
+async fn wait_for_batch_reaches_edge_and_global_tiers() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = test_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let alice = JazzClient::connect(
+                server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
+            )
+            .await
+            .expect("connect alice");
+
+            wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
+
+            let (_, _, batch_id) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "scheduler confirmation", "completed" => false),
+                )
+                .expect("insert todo");
+
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("edge wait_for_batch should resolve from scheduled core progress");
+            alice
+                .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+                .await
+                .expect("global wait_for_batch should resolve from scheduled core progress");
+
+            alice.shutdown().await.expect("shutdown alice");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test]

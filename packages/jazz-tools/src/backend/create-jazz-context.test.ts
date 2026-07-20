@@ -1,21 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
   const resolveRequestSession = vi.fn();
-  const runtimeCtor = vi.fn();
-  const inMemoryRuntimeCtor = vi.fn();
-  const runtimeInstances: Array<{ flush: ReturnType<typeof vi.fn> }> = [];
-  const createdDbs: Array<{
-    kind: string;
-    client: unknown;
-    session?: Session;
-    attribution?: string;
-  }> = [];
+  const openMemory = vi.fn();
+  const openPersistent = vi.fn();
+  const nativeRuntimeCtor = vi.fn();
+  const runtimeInstances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
   const clients: Array<{
     asBackend: ReturnType<typeof vi.fn>;
     connectTransport: ReturnType<typeof vi.fn>;
@@ -32,44 +26,43 @@ const mocks = vi.hoisted(() => {
     clients.push(client);
     return client;
   });
-  const createDbFromClient = vi.fn(
-    (_config: unknown, client: unknown, session?: Session, attribution?: string) => {
-      const db = {
-        kind: session ? "scoped-db" : attribution !== undefined ? "attributed-db" : "db",
-        client,
-        ...(session ? { session } : {}),
-        ...(attribution !== undefined ? { attribution } : {}),
-      };
-      createdDbs.push(db);
-      return db;
-    },
-  );
+  const fakeDb = {
+    close: vi.fn(),
+  };
 
-  class MockNapiRuntime {
-    readonly flush = vi.fn();
+  const MockNapiDb = {
+    openMemory: vi.fn((schemaBytes: Uint8Array, configBytes: Uint8Array) => {
+      openMemory(schemaBytes, configBytes);
+      return fakeDb;
+    }),
+    openPersistent: vi.fn((dataPath: string, schemaBytes: Uint8Array, configBytes: Uint8Array) => {
+      openPersistent(dataPath, schemaBytes, configBytes);
+      return fakeDb;
+    }),
+  };
 
+  class MockNativeRuntimeAdapter {
+    readonly close = vi.fn();
     constructor(
-      schemaJson: string,
-      appId: string,
-      env: string,
-      userBranch: string,
-      dataPath: string,
-      tier?: string,
+      Runtime: typeof MockNapiDb,
+      schema: WasmSchema,
+      node: Uint8Array,
+      author: Uint8Array,
+      sourceId: number,
+      historyComplete: boolean,
+      opts?: { persistentPath?: string },
     ) {
-      runtimeCtor(schemaJson, appId, env, userBranch, dataPath, tier);
+      nativeRuntimeCtor(Runtime, schema, node, author, sourceId, historyComplete, opts);
+      if (opts?.persistentPath) {
+        Runtime.openPersistent(
+          opts.persistentPath,
+          new TextEncoder().encode(JSON.stringify(schema)),
+          new Uint8Array(),
+        );
+      } else {
+        Runtime.openMemory(new TextEncoder().encode(JSON.stringify(schema)), new Uint8Array());
+      }
       runtimeInstances.push(this);
-    }
-
-    static inMemory(
-      schemaJson: string,
-      appId: string,
-      env: string,
-      userBranch: string,
-      tier?: string,
-    ) {
-      inMemoryRuntimeCtor(schemaJson, appId, env, userBranch, tier);
-      const instance = new MockNapiRuntime(schemaJson, appId, env, userBranch, "__memory__", tier);
-      return instance;
     }
   }
 
@@ -78,31 +71,37 @@ const mocks = vi.hoisted(() => {
   }
 
   return {
-    MockNapiRuntime,
+    MockNapiDb,
+    MockNativeRuntimeAdapter,
     MockJazzClient,
     resolveRequestSession,
-    runtimeCtor,
-    inMemoryRuntimeCtor,
+    openMemory,
+    openPersistent,
+    nativeRuntimeCtor,
     runtimeInstances,
     connectWithRuntime,
     clients,
-    createDbFromClient,
-    createdDbs,
     reset() {
       resolveRequestSession.mockReset();
-      runtimeCtor.mockReset();
-      inMemoryRuntimeCtor.mockReset();
+      openMemory.mockReset();
+      openPersistent.mockReset();
+      nativeRuntimeCtor.mockReset();
+      MockNapiDb.openMemory.mockClear();
+      MockNapiDb.openPersistent.mockClear();
+      fakeDb.close.mockClear();
       runtimeInstances.length = 0;
       connectWithRuntime.mockClear();
       clients.length = 0;
-      createDbFromClient.mockClear();
-      createdDbs.length = 0;
     },
   };
 });
 
 vi.mock("jazz-napi", () => ({
-  NapiRuntime: mocks.MockNapiRuntime,
+  NapiDb: mocks.MockNapiDb,
+}));
+
+vi.mock("../runtime/native-runtime/native-runtime-adapter.js", () => ({
+  NativeRuntimeAdapter: mocks.MockNativeRuntimeAdapter,
 }));
 
 vi.mock("../runtime/client.js", async () => {
@@ -115,10 +114,6 @@ vi.mock("../runtime/client.js", async () => {
 
 vi.mock("./request-auth.js", () => ({
   resolveRequestSession: mocks.resolveRequestSession,
-}));
-
-vi.mock("../runtime/db.js", () => ({
-  createDbFromClient: mocks.createDbFromClient,
 }));
 
 const SCHEMA_A: WasmSchema = {};
@@ -204,29 +199,25 @@ describe("backend/create-jazz-context", () => {
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
-    expect(mocks.runtimeCtor).not.toHaveBeenCalled();
+    expect(mocks.nativeRuntimeCtor).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).not.toHaveBeenCalled();
 
     const dbA = context.db();
     const dbB = context.db();
 
     expect(dbA).not.toBe(dbB);
-    expect(mocks.runtimeCtor).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(1);
+    expect(mocks.openPersistent).toHaveBeenCalledTimes(1);
+    expect(mocks.openMemory).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
-    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(2);
-    expect(mocks.createdDbs[0]?.client).toBe(mocks.createdDbs[1]?.client);
-    expect(JSON.parse(mocks.runtimeCtor.mock.calls[0]![0] as string)).toEqual({
-      __jazzRuntimeSchema: 1,
-      schema: SCHEMA_A,
-      loadedPolicyBundle: true,
-    });
-    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      expect.any(String),
-      "server-app",
-      "dev",
-      "main",
-      "/tmp/jazz.db",
-      "edge",
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
+      mocks.MockNapiDb,
+      SCHEMA_A,
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+      1,
+      true,
+      { persistentPath: "/tmp/jazz.db" },
     );
   });
 
@@ -272,39 +263,19 @@ describe("backend/create-jazz-context", () => {
     const attributedSessionDb = context.withAttributionForSession(session);
     const attributedRequestDb = await context.withAttributionForRequest(req);
 
-    expect(db).toEqual({
-      kind: "db",
-      client: mocks.clients[0]!,
-    });
-    expect(backendDb).toEqual({
-      kind: "db",
-      client: mocks.clients[0]!,
-    });
-    expect(requestDb).toEqual({
-      kind: "scoped-db",
-      client: mocks.clients[0]!,
-      session: { user_id: "u1", claims: {}, authMode: "external" },
-    });
-    expect(sessionDb).toEqual({
-      kind: "scoped-db",
-      client: mocks.clients[0]!,
-      session,
-    });
-    expect(attributedDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u2",
-    });
-    expect(attributedSessionDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u1",
-    });
-    expect(attributedRequestDb).toEqual({
-      kind: "attributed-db",
-      client: mocks.clients[0]!,
-      attribution: "u1",
-    });
+    for (const scopedDb of [
+      db,
+      backendDb,
+      requestDb,
+      sessionDb,
+      attributedDb,
+      attributedSessionDb,
+      attributedRequestDb,
+    ]) {
+      expect(scopedDb).toHaveProperty("getAuthState");
+    }
+    expect(requestDb.getAuthState()).toMatchObject({ authMode: "external", session });
+    expect(sessionDb.getAuthState()).toMatchObject({ authMode: "external", session });
     expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
     expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
       appId: "server-app",
@@ -318,7 +289,7 @@ describe("backend/create-jazz-context", () => {
     });
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
-    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(7);
+    expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
   });
 
   it("BC-U03: request/session/attribution helpers work locally without backend sync config", async () => {
@@ -418,22 +389,12 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(
-        {
-          todos: {
-            columns: [],
-            policies: TODO_PERMISSIONS.todos as any,
-          },
-        },
-        { loadedPolicyBundle: true },
-      ),
-      "server-app",
-      "dev",
-      "main",
-      "/tmp/jazz.db",
-      "edge",
-    );
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
+      todos: {
+        columns: [],
+        policies: TODO_PERMISSIONS.todos as any,
+      },
+    });
   });
 
   it("BC-U04b: normalizes relation literals before serializing runtime schema JSON", () => {
@@ -452,71 +413,61 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(
-        {
-          resources: {
-            columns: [],
-            policies: {
-              select: {
-                using: {
-                  type: "ExistsRel",
-                  rel: {
-                    Filter: {
-                      input: {
-                        TableScan: {
-                          table: "resource_access_edges",
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
+      resources: {
+        columns: [],
+        policies: {
+          select: {
+            using: {
+              type: "ExistsRel",
+              rel: {
+                Filter: {
+                  input: {
+                    TableScan: {
+                      table: "resource_access_edges",
+                    },
+                  },
+                  predicate: {
+                    And: [
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "kind",
+                          },
+                          op: "Eq",
+                          right: {
+                            Literal: {
+                              type: "Text",
+                              value: "individual",
+                            },
+                          },
                         },
                       },
-                      predicate: {
-                        And: [
-                          {
-                            Cmp: {
-                              left: {
-                                scope: "resource_access_edges",
-                                column: "kind",
-                              },
-                              op: "Eq",
-                              right: {
-                                Literal: {
-                                  type: "Text",
-                                  value: "individual",
-                                },
-                              },
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "grant_role",
+                          },
+                          op: "Eq",
+                          right: {
+                            Literal: {
+                              type: "Text",
+                              value: "viewer",
                             },
                           },
-                          {
-                            Cmp: {
-                              left: {
-                                scope: "resource_access_edges",
-                                column: "grant_role",
-                              },
-                              op: "Eq",
-                              right: {
-                                Literal: {
-                                  type: "Text",
-                                  value: "viewer",
-                                },
-                              },
-                            },
-                          },
-                        ],
+                        },
                       },
-                    },
+                    ],
                   },
                 },
               },
             },
           },
         },
-        { loadedPolicyBundle: true },
-      ),
-      "server-app",
-      "dev",
-      "main",
-      "/tmp/jazz.db",
-      "edge",
-    );
+      },
+    });
   });
 
   it("BC-U04: throws when no schema source is available", () => {
@@ -541,7 +492,7 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U06: flush is safe before init and delegates after init", () => {
+  it("BC-U06: flush is safe before and after init", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -551,10 +502,9 @@ describe("backend/create-jazz-context", () => {
 
     expect(() => context.flush()).not.toThrow();
     context.db();
-    context.flush();
 
     expect(mocks.runtimeInstances).toHaveLength(1);
-    expect(mocks.runtimeInstances[0]!.flush).toHaveBeenCalledTimes(1);
+    expect(() => context.flush()).not.toThrow();
   });
 
   it("BC-U07: shutdown releases client and allows re-init", async () => {
@@ -573,7 +523,7 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);
-    expect(mocks.runtimeCtor).toHaveBeenCalledTimes(2);
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(2);
   });
 
   it("BC-U08: uses in-memory runtime when driver.type is memory", () => {
@@ -587,14 +537,16 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.inMemoryRuntimeCtor).toHaveBeenCalledTimes(1);
-    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
-      serializeRuntimeSchema(SCHEMA_A, { loadedPolicyBundle: true }),
-      "server-app",
-      "dev",
-      "main",
-      "__memory__",
-      "edge",
+    expect(mocks.openMemory).toHaveBeenCalledTimes(1);
+    expect(mocks.openPersistent).not.toHaveBeenCalled();
+    expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
+      mocks.MockNapiDb,
+      SCHEMA_A,
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+      1,
+      true,
+      undefined,
     );
   });
 

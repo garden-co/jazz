@@ -17,7 +17,7 @@ function resolveBrowserAssetBase(locationHref: string): string {
   return new URL("/", locationHref).href;
 }
 
-export function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
+function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
   // If `url` is already absolute, ignore the base. Workers under some bundlers
   // (Turbopack) expose a non-URL `self.location.href`, and `new URL(absolute,
   // badBase)` still throws because the base is validated.
@@ -101,96 +101,4 @@ export function resolveRuntimeConfigWasmUrl(
   // from a non-HTTP origin (e.g. file://) — a static HTML page with the WASM
   // copied to the same directory.
   return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, false);
-}
-
-export function resolveWorkerBootstrapWasmUrl(
-  runtimeModuleUrl: string,
-  locationHref: string | undefined,
-  runtime?: RuntimeSourcesConfig,
-): string | null {
-  if (runtime?.wasmUrl) {
-    return resolveConfiguredUrl(runtime.wasmUrl, locationHref);
-  }
-
-  if (runtime?.baseUrl) {
-    const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
-    if (baseUrl) {
-      return new URL("jazz_wasm_bg.wasm", baseUrl).href;
-    }
-  }
-
-  // Worker bootstrap still needs an explicit wasm URL when the page is HTTP-hosted
-  // but the runtime module itself is bundled from a file:// URL.
-  return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, true);
-}
-
-export function resolveRuntimeConfigWorkerUrl(
-  runtimeModuleUrl: string,
-  locationHref: string | undefined,
-  runtime?: RuntimeSourcesConfig,
-): string {
-  return resolveRuntimeConfigScriptUrl(
-    runtimeModuleUrl,
-    locationHref,
-    runtime,
-    runtime?.workerUrl,
-    "worker/jazz-worker.js",
-    "../worker/jazz-worker.js",
-  );
-}
-
-export function resolveRuntimeConfigBrokerWorkerUrl(
-  runtimeModuleUrl: string,
-  locationHref: string | undefined,
-  runtime?: RuntimeSourcesConfig,
-): string {
-  return resolveRuntimeConfigScriptUrl(
-    runtimeModuleUrl,
-    locationHref,
-    runtime,
-    runtime?.brokerWorkerUrl,
-    "worker/jazz-broker-worker.js",
-    "../worker/jazz-broker-worker.js",
-  );
-}
-
-function resolveRuntimeConfigScriptUrl(
-  runtimeModuleUrl: string,
-  locationHref: string | undefined,
-  runtime: RuntimeSourcesConfig | undefined,
-  explicitUrl: string | undefined,
-  baseRelativePath: string,
-  moduleRelativePath: string,
-): string {
-  if (explicitUrl) {
-    return resolveConfiguredUrl(explicitUrl, locationHref);
-  }
-  if (runtime?.baseUrl) {
-    const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
-    if (baseUrl) {
-      return new URL(baseRelativePath, baseUrl).href;
-    }
-  }
-  if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
-    return new URL(moduleRelativePath, runtimeModuleUrl).href;
-  }
-  return new URL(baseRelativePath, resolveBrowserAssetBase(locationHref)).href;
-}
-
-export function appendWorkerRuntimeWasmUrl(workerUrl: string, wasmUrl: string | null): string {
-  if (!wasmUrl) {
-    return workerUrl;
-  }
-
-  const url = new URL(workerUrl);
-  url.searchParams.set("jazz-wasm-url", wasmUrl);
-  return url.href;
-}
-
-export function readWorkerRuntimeWasmUrl(locationHref: string | undefined): string | null {
-  if (!locationHref) {
-    return null;
-  }
-
-  return new URL(locationHref).searchParams.get("jazz-wasm-url");
 }

@@ -4,6 +4,7 @@ import { ChatListItem } from "@/components/chat-list/ChatListItem";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { navigate } from "@/hooks/useRouter";
+import { fireAndReport, waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 import { DurabilityTier } from "jazz-tools";
 
@@ -24,21 +25,23 @@ export const ChatList = () => {
   const createPublicChat = async () => {
     if (!userId || !myProfile) return;
 
-    const chat = await db
-      .insert(app.chats, {
+    const chat = await waitForWrite(
+      db.insert(app.chats, {
         isPublic: true,
         createdBy: userId,
-      })
-      .wait(sharedWriteOptions);
-    await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
-    await db
-      .insert(app.messages, {
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(db.insert(app.chatMembers, { chatId: chat.id, userId }), sharedWriteOptions);
+    await waitForWrite(
+      db.insert(app.messages, {
         chatId: chat.id,
         text: "Hello world",
         senderId: myProfile.id,
         createdAt: new Date(),
-      })
-      .wait(sharedWriteOptions);
+      }),
+      sharedWriteOptions,
+    );
 
     navigate(`/#/chat/${chat.id}`);
   };
@@ -48,28 +51,31 @@ export const ChatList = () => {
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const chat = await db
-      .insert(app.chats, {
+    const chat = await waitForWrite(
+      db.insert(app.chats, {
         isPublic: false,
         createdBy: userId,
         joinCode: shareCode,
-      })
-      .wait(sharedWriteOptions);
-    await db
-      .insert(app.chatMembers, {
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(
+      db.insert(app.chatMembers, {
         chatId: chat.id,
         userId,
         joinCode: shareCode,
-      })
-      .wait(sharedWriteOptions);
-    await db
-      .insert(app.messages, {
+      }),
+      sharedWriteOptions,
+    );
+    await waitForWrite(
+      db.insert(app.messages, {
         chatId: chat.id,
         text: "This is a private chat.",
         senderId: myProfile.id,
         createdAt: new Date(),
-      })
-      .wait(sharedWriteOptions);
+      }),
+      sharedWriteOptions,
+    );
 
     navigate(`/#/chat/${chat.id}`);
   };
@@ -95,7 +101,9 @@ export const ChatList = () => {
             key={membership.id}
             chatId={chat?.id ?? membership.id}
             chat={chat}
-            onDelete={() => db.delete(app.chatMembers, membership.id)}
+            onDelete={() =>
+              fireAndReport(db.delete(app.chatMembers, membership.id), "failed to delete chat")
+            }
           />
         );
       })}

@@ -1,34 +1,38 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use tokio::sync::RwLock;
+use jazz::db::WireTransportAdapter;
+use jazz::ids::AuthorId;
+use jazz::node::EdgeCacheBudget;
+use jazz::schema::JazzSchema;
+use jazz_server::{NodeRole, StorageConfig};
 use tracing::info;
 
+use crate::AppId;
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::query_manager::types::Schema;
-use crate::routes;
-use crate::runtime_tokio::TokioRuntime;
-use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
-use crate::server::{ConnectionEventHub, DynStorage, ServerState, ServerTopology};
-#[cfg(feature = "rocksdb")]
-use crate::storage::RocksDBStorage;
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStorage;
-use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::{Destination, DurabilityTier, SyncManager};
-use crate::transport_manager::TransportRetryConfig;
+use crate::public_schema::Schema;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+use crate::server::CatalogueRocksDbStorage;
+use crate::server::core_websocket_transport::WebSocketTransport;
+use crate::server::routes;
+use crate::server::{
+    CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
+};
+#[cfg(test)]
+use crate::sync::DurabilityTier;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(feature = "rocksdb")]
+const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
+#[cfg(feature = "rocksdb")]
+const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-const EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
-const EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -44,9 +48,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` picks the best available backend at compile time
-/// (RocksDB > SQLite > in-memory). `Sqlite` and `RocksDb` pin the backend
-/// regardless of which other storage features are enabled.
+/// `Persistent` requires the RocksDB feature for durable server shell
+/// storage. SQLite remains a client/native storage backend, but is not a
+/// supported server shell backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -68,8 +72,9 @@ pub struct ServerBuilder {
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
-    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    core_server_shell_schema: Option<JazzSchema>,
     upstream_url: Option<String>,
+    edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
 }
 
@@ -85,15 +90,11 @@ impl ServerBuilder {
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
-            sync_tracer: None,
+            core_server_shell_schema: None,
             upstream_url: None,
+            edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
-    }
-
-    pub fn with_sync_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
-        self.sync_tracer = Some(tracer);
-        self
     }
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
@@ -108,6 +109,11 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
+        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -127,16 +133,17 @@ impl ServerBuilder {
         self
     }
 
+    pub fn with_core_server_shell_schema(mut self, schema: JazzSchema) -> Self {
+        self.core_server_shell_schema = Some(schema);
+        self
+    }
+
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
         let topology = if self.upstream_url.is_some() {
             ServerTopology::Edge
         } else {
             ServerTopology::Core
-        };
-        let upstream_ws_url = match self.upstream_url.as_deref() {
-            Some(upstream_url) => Some(upstream_ws_url(upstream_url, self.app_id)?),
-            None => None,
         };
         let upstream_http_url = match self.upstream_url.as_deref() {
             Some(upstream_url) => Some(upstream_http_url(upstream_url, self.app_id)?),
@@ -146,150 +153,215 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
-        let (runtime, connection_event_hub) = self.build_runtime()?;
-        if let Some(upstream_ws_url) = upstream_ws_url.clone() {
-            start_upstream_sync(&runtime, upstream_ws_url, &auth_config)?;
-        }
+        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
+        let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
+        let core_server_shell = self.build_core_server_shell(
+            latest_catalogue_schema,
+            core_server_shell_storage_config.clone(),
+            topology,
+        )?;
+        let edge_upstream_shell = core_server_shell.clone();
+        let core_server_shell_storage_config = core_server_shell_storage_config.ok();
+
         let state = Arc::new(ServerState {
-            runtime,
+            catalogue_store,
+            catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            connection_event_hub,
             auth_config,
             upstream_http_url,
             topology,
             jwt_verifier,
             http_client,
-            disconnect_candidates: RwLock::new(HashMap::new()),
-            client_ttl: RwLock::new(Duration::from_secs(300)),
-            sync_tracer: self.sync_tracer.clone(),
+            core_server_shell: std::sync::RwLock::new(core_server_shell),
+            core_server_shell_storage_config,
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
-        // Spawn periodic client state sweep (uses Weak so the task exits
-        // when all strong refs to ServerState are dropped, e.g. in tests).
-        {
-            let weak_state = Arc::downgrade(&state);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    let Some(state) = weak_state.upgrade() else {
-                        break;
-                    };
-                    let reaped = state.run_sweep_once().await;
-                    if !reaped.is_empty() {
-                        tracing::info!(count = reaped.len(), "reaped stale disconnected clients");
-                    }
-                }
-            });
+        if let (ServerTopology::Edge, Some(upstream_url), Some(shell), Some(admin_secret)) = (
+            topology,
+            self.upstream_url.clone(),
+            edge_upstream_shell,
+            state.auth_config.admin_secret.clone(),
+        ) {
+            spawn_edge_upstream_connector(
+                state.clone(),
+                shell,
+                upstream_url,
+                self.app_id,
+                admin_secret,
+            );
         }
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
     }
 
-    #[allow(clippy::type_complexity)]
-    fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
-        let connection_event_hub = Arc::new(ConnectionEventHub::default());
-        let dispatch_hub = Arc::clone(&connection_event_hub);
+    /// Build the direct admin catalogue store used by HTTP catalogue routes.
+    ///
+    fn build_catalogue_store(&self) -> Result<(StoredCatalogue, Option<Schema>), String> {
+        let storage = self.build_catalogue_storage()?;
+        let initial_schema = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
+            ServerSchemaMode::Dynamic => None,
+        };
 
-        let storage = self.build_main_storage()?;
-        let schema_manager = self.build_schema_manager(storage.as_ref())?;
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            if let Destination::Client(client_id) = entry.destination {
-                dispatch_hub.dispatch_payload(client_id, entry.payload);
-            }
-        });
+        #[cfg(test)]
+        let store = {
+            let schema_branches = test_schema_branches(initial_schema.as_ref());
+            let local_durability_tiers =
+                std::collections::HashSet::from([self.local_durability_tier()]);
+            StoredCatalogue::with_test_observability(
+                self.app_id,
+                initial_schema,
+                storage,
+                schema_branches,
+                local_durability_tiers,
+            )
+        };
+        #[cfg(not(test))]
+        let store = StoredCatalogue::new(self.app_id, initial_schema, storage);
 
-        if let Some(ref tracer) = self.sync_tracer {
-            runtime.set_sync_tracer(tracer.clone(), "server".to_string());
-        }
-
-        Ok((runtime, connection_event_hub))
+        let latest_catalogue_schema = store
+            .latest_published_schema()
+            .map_err(|error| format!("failed to read latest catalogue schema: {error:?}"))?;
+        Ok((store, latest_catalogue_schema))
     }
 
-    fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
-        let sync_manager = server_sync_manager(self.local_durability_tier());
-
-        match &self.schema_mode {
-            ServerSchemaMode::Dynamic => {
-                let mut schema_manager =
-                    SchemaManager::new_server(sync_manager, self.app_id, "prod");
-                rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
-                    .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
-                // Dynamic servers fail closed until an explicit permissions head
-                // is available for the active app.
-                schema_manager
-                    .query_manager_mut()
-                    .require_authorization_schema();
-                Ok(schema_manager)
-            }
-            ServerSchemaMode::Fixed(schema) => {
-                SchemaManager::new(sync_manager, schema.clone(), self.app_id, "prod", "main")
-                    .map_err(|e| format!("failed to initialize schema manager: {e:?}"))
-            }
+    fn build_core_server_shell(
+        &self,
+        latest_catalogue_schema: Option<Schema>,
+        storage_config: Result<StorageConfig, String>,
+        topology: ServerTopology,
+    ) -> Result<Option<crate::server::core_server_shell::ServerShellHandle>, String> {
+        let role = match topology {
+            ServerTopology::Core => NodeRole::Core,
+            ServerTopology::Edge => NodeRole::Edge,
+        };
+        if let Some(schema) = &self.core_server_shell_schema {
+            let storage_config = storage_config?;
+            return Ok(Some(
+                crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+                    schema.clone(),
+                    storage_config,
+                    role,
+                    self.edge_cache_budget,
+                )?,
+            ));
         }
+
+        let schema = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
+            ServerSchemaMode::Dynamic => latest_catalogue_schema,
+        };
+        let Some(schema) = schema else {
+            return Ok(None);
+        };
+        let storage_config = storage_config?;
+        let schema = crate::server::public_schema_convert::convert_public_schema(&schema)
+            .map_err(|error| format!("failed to build server shell schema: {error}"))?;
+        Ok(Some(
+            crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+                schema,
+                storage_config,
+                role,
+                self.edge_cache_budget,
+            )?,
+        ))
     }
 
-    fn build_main_storage(&self) -> Result<DynStorage, String> {
+    fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
         match &self.storage_backend {
+            StorageBackend::InMemory => Ok(StorageConfig::InMemory),
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
                 #[cfg(feature = "rocksdb")]
                 {
-                    let db_path = path.join("jazz.rocksdb");
-                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                        .map_err(|e| {
-                            format!("failed to open storage '{}': {e:?}", db_path.display())
-                        })?;
-                    Ok(Box::new(storage))
+                    Ok(StorageConfig::RocksDb {
+                        path: path.join(SERVER_SHELL_ROCKSDB_DIR),
+                    })
                 }
-                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+                #[cfg(not(feature = "rocksdb"))]
                 {
-                    let db_path = path.join("jazz.sqlite");
-                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                        format!("failed to open storage '{}': {e:?}", db_path.display())
-                    })?;
-                    Ok(Box::new(storage))
+                    Err("server shell persistent storage requires the rocksdb feature".to_owned())
                 }
-                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
-                {
-                    Ok(Box::new(MemoryStorage::new()))
-                }
-            }
-            #[cfg(feature = "sqlite")]
-            StorageBackend::Sqlite { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join("jazz.sqlite");
-                let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                    format!("failed to open storage '{}': {e:?}", db_path.display())
-                })?;
-                Ok(Box::new(storage))
             }
             #[cfg(feature = "rocksdb")]
             StorageBackend::RocksDb { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join("jazz.rocksdb");
-                let storage =
-                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open storage '{}': {e:?}", db_path.display())
-                    })?;
-                Ok(Box::new(storage))
+                Ok(StorageConfig::RocksDb {
+                    path: path.join(SERVER_SHELL_ROCKSDB_DIR),
+                })
             }
-            StorageBackend::InMemory => Ok(Box::new(MemoryStorage::new())),
+            #[cfg(feature = "sqlite")]
+            StorageBackend::Sqlite { .. } => {
+                Err("server shell storage does not support sqlite yet".to_owned())
+            }
         }
     }
 
+    fn build_catalogue_storage(&self) -> Result<DynCatalogueStorage, String> {
+        match &self.storage_backend {
+            StorageBackend::Persistent { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+
+                #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+                {
+                    let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
+                    let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                        .map_err(|e| {
+                            format!(
+                                "failed to open catalogue storage '{}': {e:?}",
+                                db_path.display()
+                            )
+                        })?;
+                    Ok(Box::new(storage))
+                }
+                #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
+                {
+                    Err("catalogue storage does not support rocksdb on wasm".to_owned())
+                }
+                #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+                {
+                    Err("persistent catalogue storage requires the rocksdb feature".to_owned())
+                }
+            }
+            #[cfg(feature = "sqlite")]
+            StorageBackend::Sqlite { .. } => {
+                Err("server catalogue storage does not support sqlite".to_owned())
+            }
+            #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+            StorageBackend::RocksDb { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
+                let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                    .map_err(|e| {
+                        format!(
+                            "failed to open catalogue storage '{}': {e:?}",
+                            db_path.display()
+                        )
+                    })?;
+                Ok(Box::new(storage))
+            }
+            #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
+            StorageBackend::RocksDb { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                Err("catalogue storage does not support rocksdb on wasm".to_owned())
+            }
+            StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
+        }
+    }
+
+    #[cfg(test)]
     fn local_durability_tier(&self) -> DurabilityTier {
         if self.upstream_url.is_some() {
             DurabilityTier::EdgeServer
@@ -299,21 +371,56 @@ impl ServerBuilder {
     }
 }
 
-fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
-    let sync_manager = SyncManager::new().with_durability_tier(local_tier);
-
-    if should_allow_unprivileged_schema_catalogue_writes() {
-        sync_manager.with_unprivileged_schema_catalogue_writes()
-    } else {
-        sync_manager
-    }
+#[cfg(test)]
+fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
+    schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
-fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
-    !matches!(
-        std::env::var("NODE_ENV"),
-        Ok(value) if value.eq_ignore_ascii_case("production")
-    )
+fn spawn_edge_upstream_connector(
+    state: Arc<ServerState>,
+    shell: crate::server::core_server_shell::ServerShellHandle,
+    upstream_url: String,
+    app_id: AppId,
+    admin_secret: String,
+) {
+    tokio::spawn(async move {
+        let retry_delay = Duration::from_millis(100);
+        loop {
+            if state.shutdown.is_shutting_down() {
+                return;
+            }
+            let wake_shell = shell.clone();
+            let wake = Arc::new(move || wake_shell.notify_activity());
+            let auth = crate::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some(admin_secret.clone()),
+                ..Default::default()
+            };
+            match WebSocketTransport::connect_with_wake(
+                &upstream_url,
+                app_id,
+                AuthorId::SYSTEM,
+                auth,
+                wake,
+            )
+            .await
+            {
+                Ok(transport) => {
+                    if shell
+                        .connect_upstream(Box::new(WireTransportAdapter::current(transport)))
+                        .await
+                        .is_ok()
+                    {
+                        shell.notify_activity();
+                        return;
+                    }
+                }
+                Err(error) => {
+                    info!("edge upstream connection pending: {}", error);
+                }
+            }
+            tokio::time::sleep(retry_delay).await;
+        }
+    });
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
@@ -401,47 +508,6 @@ fn log_auth_config(auth_config: &AuthConfig, topology: ServerTopology) {
     );
 }
 
-pub fn upstream_ws_url(base_url: &str, app_id: AppId) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(base_url)
-        .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
-
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("upstream URL must not include query parameters or a fragment".to_string());
-    }
-
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        "ws" => "ws",
-        "wss" => "wss",
-        other => {
-            return Err(format!(
-                "unsupported upstream URL scheme '{other}'; expected http, https, ws, or wss"
-            ));
-        }
-    };
-    url.set_scheme(scheme)
-        .map_err(|_| format!("failed to set upstream URL scheme to {scheme}"))?;
-
-    let app_ws_path = format!("/apps/{app_id}/ws");
-    let normalized_path = url.path().trim_end_matches('/');
-    if normalized_path == app_ws_path.trim_end_matches('/') {
-        url.set_path(&app_ws_path);
-    } else {
-        let base_path = match normalized_path {
-            "" | "/" => String::new(),
-            path => path.to_string(),
-        };
-        url.set_path(&format!(
-            "{}/{}",
-            base_path.trim_end_matches('/'),
-            app_ws_path.trim_start_matches('/')
-        ));
-    }
-
-    Ok(url.to_string())
-}
-
 pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String> {
     let mut url = reqwest::Url::parse(base_url)
         .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
@@ -482,104 +548,29 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
     Ok(url.to_string())
 }
 
-fn start_upstream_sync(
-    runtime: &TokioRuntime<DynStorage>,
-    upstream_ws_url: String,
-    auth_config: &AuthConfig,
-) -> Result<(), String> {
-    let admin_secret = auth_config
-        .admin_secret
-        .clone()
-        .ok_or_else(|| "edge mode requires --admin-secret / JAZZ_ADMIN_SECRET".to_string())?;
-
-    info!(
-        local_tier = "edge",
-        upstream_url = %upstream_ws_url,
-        upstream_connected = false,
-        "starting edge upstream sync"
-    );
-
-    let retry_config = TransportRetryConfig {
-        connect_attempt_timeout: Some(EDGE_UPSTREAM_CONNECT_ATTEMPT_TIMEOUT),
-        auth_handshake_timeout: Some(EDGE_UPSTREAM_AUTH_HANDSHAKE_TIMEOUT),
-    };
-
-    runtime.connect_with_retry_config(
-        upstream_ws_url.clone(),
-        crate::transport_manager::AuthConfig {
-            admin_secret: Some(admin_secret),
-            ..Default::default()
-        },
-        retry_config,
-    );
-
-    let wait_runtime = (*runtime).clone();
-    tokio::spawn(async move {
-        let connected = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            wait_runtime.transport_wait_until_connected(),
-        )
-        .await
-        .unwrap_or(false);
-        if connected {
-            tracing::info!(
-                local_tier = "edge",
-                upstream_url = %upstream_ws_url,
-                upstream_connected = true,
-                "edge upstream sync connected"
-            );
-        } else {
-            tracing::warn!(
-                local_tier = "edge",
-                upstream_url = %upstream_ws_url,
-                upstream_connected = false,
-                "edge upstream sync ended before first connection"
-            );
-        }
-    });
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema_manager::AppId;
+    use crate::AppId;
+    use crate::server::catalogue::CatalogueStore;
 
-    #[test]
-    fn upstream_url_conversion_maps_base_urls_to_app_ws_route() {
+    #[tokio::test]
+    async fn edge_upstream_mode_builds_with_admin_secret() {
         let app_id =
             AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+        let auth_config = AuthConfig {
+            admin_secret: Some("test-admin-secret".to_owned()),
+            ..Default::default()
+        };
 
-        assert_eq!(
-            upstream_ws_url("https://core.example.com", app_id).expect("https conversion"),
-            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-        assert_eq!(
-            upstream_ws_url("http://core.example.com/base/", app_id).expect("http conversion"),
-            "ws://core.example.com/base/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-        assert_eq!(
-            upstream_ws_url("ws://core.example.com", app_id).expect("ws conversion"),
-            "ws://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-        assert_eq!(
-            upstream_ws_url(
-                "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws",
-                app_id
-            )
-            .expect("already app-scoped ws URL"),
-            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
-        );
-    }
+        let result = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("http://127.0.0.1:12345")
+            .build()
+            .await;
 
-    #[test]
-    fn upstream_url_conversion_rejects_query_and_fragment_urls() {
-        let app_id =
-            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
-
-        assert!(upstream_ws_url("https://core.example.com?token=abc", app_id).is_err());
-        assert!(upstream_ws_url("https://core.example.com#cluster-a", app_id).is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -648,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_allows_edge_mode_with_admin_secret_only() {
+    async fn builder_accepts_edge_mode_with_admin_secret() {
         let built = ServerBuilder::new(AppId::from_name("edge-builder-admin-secret-only"))
             .with_storage(StorageBackend::InMemory)
             .with_auth_config(AuthConfig {
@@ -658,18 +649,10 @@ mod tests {
             .with_upstream_url("ws://127.0.0.1:9")
             .build()
             .await
-            .expect("build edge server with admin secret only");
+            .expect("build edge server with admin secret");
 
-        let tiers = built
-            .state
-            .runtime
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
-
-        assert_eq!(
-            tiers,
-            std::collections::HashSet::from([DurabilityTier::EdgeServer])
-        );
+        assert!(built.state.topology.is_edge());
+        assert!(built.state.upstream_http_url.is_some());
     }
 
     #[tokio::test]
@@ -682,14 +665,101 @@ mod tests {
 
         let tiers = built
             .state
-            .runtime
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
+            .catalogue_store
+            .local_durability_tiers_for_test()
+            .expect("read catalogue durability tiers");
 
         assert_eq!(
             tiers,
             std::collections::HashSet::from([DurabilityTier::GlobalServer])
         );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
+        let schema = crate::public_schema::SchemaBuilder::new()
+            .table(
+                crate::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::public_schema::ColumnType::Uuid)
+                    .column("title", crate::public_schema::ColumnType::Text),
+            )
+            .build();
+
+        {
+            let built = ServerBuilder::new(app_id)
+                .with_schema(schema)
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build fixed schema server");
+            assert!(built.state.core_server_shell().is_some());
+            built
+                .state
+                .catalogue_store
+                .persist_schema()
+                .expect("publish fixed schema catalogue");
+            built
+                .state
+                .catalogue_store
+                .flush()
+                .expect("flush fixed schema catalogue");
+        }
+
+        let rebuilt = ServerBuilder::new(app_id)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build dynamic server from rehydrated catalogue");
+
+        assert!(rebuilt.state.core_server_shell().is_some());
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-server-shell-restart");
+        let schema = crate::public_schema::SchemaBuilder::new()
+            .table(
+                crate::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::public_schema::ColumnType::Uuid)
+                    .column("title", crate::public_schema::ColumnType::Text),
+            )
+            .build();
+
+        {
+            let built = ServerBuilder::new(app_id)
+                .with_schema(schema.clone())
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build RocksDB server with server shell");
+
+            assert!(built.state.core_server_shell().is_some());
+            assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
+            assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
+        }
+
+        let rebuilt = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("rebuild RocksDB server with server shell");
+
+        assert!(rebuilt.state.core_server_shell().is_some());
+        assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
     }
 
     #[tokio::test]
@@ -707,9 +777,9 @@ mod tests {
 
         let tiers = built
             .state
-            .runtime
-            .with_sync_manager(|sync| sync.local_durability_tiers())
-            .expect("read sync manager");
+            .catalogue_store
+            .local_durability_tiers_for_test()
+            .expect("read catalogue durability tiers");
 
         assert_eq!(
             tiers,

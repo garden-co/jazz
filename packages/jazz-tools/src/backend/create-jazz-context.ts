@@ -1,11 +1,15 @@
-import { NapiRuntime } from "jazz-napi";
+import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, type RequestLike } from "../runtime/client.js";
+import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
-import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
+import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
+import { Db, type DbConfig } from "../runtime/db.js";
+import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
   resolveSchemaSource,
@@ -23,7 +27,7 @@ export type BackendJwtPublicKey = JWK | string;
 export type BackendDriver =
   | {
       type: "persistent";
-      /** Path to the SQLite database file used by the server runtime. */
+      /** Path to the Fjall file used by the server runtime. */
       dataPath: string;
     }
   | {
@@ -59,6 +63,149 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
+type FlushableRuntime = Runtime & { flush?: () => void };
+
+function schemaHasNativePolicies(schema: WasmSchema): boolean {
+  return Object.values(schema).some((table) => table.policies !== undefined);
+}
+
+class BackendRuntimeSource extends RuntimeSource<DbConfig> {
+  private initializedSchemaJson?: string;
+  private runtime?: FlushableRuntime;
+  private client?: JazzClient;
+
+  constructor(
+    private readonly config: ResolvedBackendContextConfig,
+    private readonly nodeIdentityScope: string,
+  ) {
+    super();
+  }
+
+  get currentRuntime(): FlushableRuntime | undefined {
+    return this.runtime;
+  }
+
+  override createClient({
+    config,
+    schema,
+    onAuthFailure,
+  }: RuntimeClientContext<DbConfig>): JazzClient {
+    const hasSeparatePermissionsBundle =
+      this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: hasSeparatePermissionsBundle,
+    });
+
+    if (this.client) {
+      if (this.initializedSchemaJson !== schemaJson) {
+        throw new Error(
+          "JazzContext is already initialized with a different schema. Create a separate context for each schema/app.",
+        );
+      }
+      return this.client;
+    }
+
+    this.initializedSchemaJson = schemaJson;
+    const nodeTier = this.config.tier ?? "edge";
+    const env = this.config.env ?? "dev";
+    const userBranch = this.config.userBranch ?? "main";
+    this.runtime = new NativeRuntimeAdapter(
+      NapiDb,
+      schema,
+      deterministicBytes(
+        `${this.config.appId}:${env}:${userBranch}:${this.nodeIdentityScope}:node`,
+      ),
+      deterministicBytes(`${this.config.appId}:${env}:${userBranch}:author`),
+      1,
+      true,
+      this.config.driver.type === "persistent"
+        ? { persistentPath: this.config.driver.dataPath }
+        : undefined,
+    );
+
+    this.client = JazzClient.connectWithRuntime(
+      this.runtime,
+      {
+        appId: config.appId,
+        schema,
+        serverUrl: config.serverUrl,
+        env: config.env,
+        userBranch: config.userBranch,
+        jwtToken: config.jwtToken,
+        backendSecret: config.backendSecret,
+        adminSecret: config.adminSecret,
+        cookieSession: config.cookieSession,
+        tier: nodeTier,
+        defaultDurabilityTier: config.serverUrl ? nodeTier : undefined,
+      },
+      { onAuthFailure },
+    );
+    return this.client;
+  }
+
+  async shutdown(): Promise<void> {
+    const client = this.client;
+    this.client = undefined;
+    this.runtime = undefined;
+    this.initializedSchemaJson = undefined;
+    if (client) {
+      await client.shutdown();
+    }
+  }
+}
+
+class BackendDb extends Db {
+  constructor(
+    config: DbConfig,
+    coreSource: RuntimeSource<DbConfig>,
+    private readonly client: JazzClient,
+    private readonly runtimeSchema: WasmSchema,
+    private readonly operationContext: {
+      session?: Session;
+      attribution?: string;
+      readSession?: Session;
+    } | null,
+    scopedAuthState?: AuthState,
+  ) {
+    super(
+      config,
+      coreSource,
+      scopedAuthState
+        ? {
+            initialState: scopedAuthState,
+            lockAuthenticatedState: true,
+          }
+        : undefined,
+    );
+  }
+
+  protected override getRuntimeOperationContext(): {
+    session?: Session;
+    attribution?: string;
+    readSession?: Session;
+  } | null {
+    return this.operationContext;
+  }
+
+  protected override getClient(_schema: WasmSchema): JazzClient {
+    return this.client;
+  }
+}
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
+}
+
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
@@ -82,9 +229,9 @@ function assertValidBackendConfig(config: BackendContextConfig): void {
 export class JazzContext {
   private readonly config: ResolvedBackendContextConfig;
   private readonly defaultSchemaInput?: BackendSchemaInput;
-  private initializedSchemaJson?: string;
-  private runtime?: NapiRuntime;
-  private clientInstance?: JazzClient;
+  private readonly nodeIdentityScope: string;
+  private readonly coreSource: BackendRuntimeSource;
+  private backendSyncEnabled = false;
 
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
@@ -93,6 +240,11 @@ export class JazzContext {
       allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
     };
     this.defaultSchemaInput = config.app;
+    this.nodeIdentityScope =
+      config.driver.type === "persistent"
+        ? config.driver.dataPath
+        : `memory:${Date.now()}:${Math.random()}`;
+    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope);
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
@@ -103,62 +255,9 @@ export class JazzContext {
       );
     }
     const schema = resolveSchemaSource(selected);
-    return this.config.permissions
+    return this.config.permissions && !schemaHasNativePolicies(schema)
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;
-  }
-
-  private createClient(schema: WasmSchema): JazzClient {
-    const schemaJson = serializeRuntimeSchema(schema, {
-      loadedPolicyBundle: this.config.permissions !== undefined,
-    });
-    this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "edge";
-
-    if (this.config.driver.type === "persistent") {
-      this.runtime = new NapiRuntime(
-        schemaJson,
-        this.config.appId,
-        this.config.env ?? "dev",
-        this.config.userBranch ?? "main",
-        this.config.driver.dataPath,
-        nodeTier,
-      );
-    } else {
-      this.runtime = NapiRuntime.inMemory(
-        schemaJson,
-        this.config.appId,
-        this.config.env ?? "dev",
-        this.config.userBranch ?? "main",
-        nodeTier,
-      );
-    }
-
-    const context: AppContext = {
-      appId: this.config.appId,
-      schema,
-      serverUrl: this.config.serverUrl,
-      env: this.config.env,
-      userBranch: this.config.userBranch,
-      jwtToken: this.config.jwtToken,
-      backendSecret: this.config.backendSecret,
-      adminSecret: this.config.adminSecret,
-      tier: nodeTier,
-      defaultDurabilityTier: nodeTier,
-    };
-
-    this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
-
-    // Wire Rust-owned WebSocket transport when a server URL is configured.
-    if (this.config.serverUrl) {
-      this.clientInstance.connectTransport(this.config.serverUrl, {
-        backend_secret: this.config.backendSecret,
-        admin_secret: this.config.adminSecret,
-        jwt_token: this.config.jwtToken,
-      });
-    }
-
-    return this.clientInstance;
   }
 
   private buildDbConfig(): DbConfig {
@@ -170,20 +269,30 @@ export class JazzContext {
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
+      backendSecret: this.config.backendSecret,
     };
   }
 
   private wrapDb(
     client: JazzClient,
+    schema: WasmSchema,
     session?: Session,
     attribution?: string,
     backendScoped = false,
+    backendReads = false,
   ): Db {
-    return createDbFromClient(
+    return new BackendDb(
       this.buildDbConfig(),
+      this.coreSource,
       client,
-      session,
-      attribution,
+      schema,
+      session || attribution || backendReads
+        ? {
+            session,
+            attribution,
+            readSession: backendReads ? SYSTEM_READ_SESSION : undefined,
+          }
+        : null,
       backendScoped
         ? {
             authMode: session?.authMode ?? "external",
@@ -198,35 +307,41 @@ export class JazzContext {
    */
   private getClient(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
-    const schemaJson = serializeRuntimeSchema(schema, {
-      loadedPolicyBundle: this.config.permissions !== undefined,
+    return this.coreSource.createClient({
+      config: this.buildDbConfig(),
+      schema,
+      onAuthFailure: () => {},
     });
+  }
 
-    if (!this.clientInstance) {
-      return this.createClient(schema);
-    }
-
-    if (this.initializedSchemaJson !== schemaJson) {
-      throw new Error(
-        "JazzContext is already initialized with a different schema. Create a separate context for each schema/app.",
-      );
-    }
-
-    return this.clientInstance;
+  private getClientAndSchema(source?: BackendSchemaInput): {
+    client: JazzClient;
+    schema: WasmSchema;
+  } {
+    const schema = this.resolveSchema(source);
+    const client = this.coreSource.createClient({
+      config: this.buildDbConfig(),
+      schema,
+      onAuthFailure: () => {},
+    });
+    return { client, schema };
   }
 
   /**
    * Get the shared high-level `Db` for this context with no per-request session attached.
    */
   db(source?: BackendSchemaInput): Db {
-    return this.wrapDb(this.getClient(source));
+    const { client, schema } = this.getClientAndSchema(source);
+    return this.wrapDb(client, schema);
   }
 
   /**
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
   asBackend(source?: BackendSchemaInput): Db {
-    return this.wrapDb(this.getClient(source).asBackend(), undefined, undefined, true);
+    const { client, schema } = this.getClientAndSchema(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, schema, undefined, SYSTEM_AUTHOR_ID, true, true);
   }
 
   /**
@@ -234,9 +349,9 @@ export class JazzContext {
    * without evaluating permissions as that user.
    */
   withAttribution(principalId: string, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, principalId, true);
+    return this.wrapDb(client, schema, undefined, principalId, true, true);
   }
 
   /**
@@ -253,6 +368,16 @@ export class JazzContext {
       );
     }
     client.asBackend();
+    if (this.backendSyncEnabled) {
+      return;
+    }
+    client.connectTransport(this.config.serverUrl, {
+      jwt_token: this.config.jwtToken,
+      admin_secret: this.config.adminSecret,
+      backend_secret: this.config.backendSecret,
+      backend_session: this.config.cookieSession,
+    });
+    this.backendSyncEnabled = true;
   }
 
   private async resolveRequestSession(request: RequestLike): Promise<Session> {
@@ -268,10 +393,10 @@ export class JazzContext {
    * Build a requester-scoped `Db` from an authenticated request.
    */
   async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     const session = await this.resolveRequestSession(request);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session, undefined, true);
+    return this.wrapDb(client, schema, session, undefined, true);
   }
 
   /**
@@ -279,9 +404,9 @@ export class JazzContext {
    * principal in `session` without switching permission evaluation to it.
    */
   withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, session.user_id, true);
+    return this.wrapDb(client, schema, undefined, session.user_id, true);
   }
 
   /**
@@ -296,31 +421,24 @@ export class JazzContext {
    * Build a session-scoped `Db` for server-side impersonation flows.
    */
   forSession(session: Session, source?: BackendSchemaInput): Db {
-    const client = this.getClient(source);
+    const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session, undefined, true);
+    return this.wrapDb(client, schema, session, undefined, true);
   }
 
   /**
    * Flush the underlying runtime if initialized.
    */
   flush(): void {
-    this.runtime?.flush();
+    this.coreSource.currentRuntime?.flush?.();
   }
 
   /**
    * Shutdown the context and release runtime resources.
    */
   async shutdown(): Promise<void> {
-    const client = this.clientInstance;
-
-    this.clientInstance = undefined;
-    this.runtime = undefined;
-    this.initializedSchemaJson = undefined;
-
-    if (client) {
-      await client.shutdown();
-    }
+    this.backendSyncEnabled = false;
+    await this.coreSource.shutdown();
   }
 }
 

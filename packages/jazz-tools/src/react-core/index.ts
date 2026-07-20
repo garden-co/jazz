@@ -10,7 +10,7 @@ export {
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 export { useAuthState, type AuthStateInfo } from "./use-auth-state.js";
-export { useLocalFirstAuthWithStore, type LocalFirstAuth } from "./use-local-first-auth.js";
+export { createUseLocalFirstAuth, type LocalFirstAuth } from "./use-local-first-auth.js";
 
 export type {
   DurabilityTier,

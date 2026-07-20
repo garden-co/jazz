@@ -1,15 +1,15 @@
 # todo-server-ts
 
-Node + Express REST API backed by Jazz as the database. No frontend — pure server-side TypeScript, persistent SQLite storage via the Jazz NAPI bindings.
+Node + Express REST API backed by Jazz as the database. No frontend — pure server-side TypeScript, persistent Fjall storage via the Jazz NAPI bindings.
 
 ## What it demonstrates
 
 - Using Jazz as a server-side backend via `jazz-tools/backend` and `createJazzContext` — no browser, no WASM.
 - CRUD over `/todos` (`GET`, `POST`, `PUT /:id`, `DELETE /:id`) with row-level permissions enforced server-side.
-- Per-session policy evaluation via `context.forSession(session)` — the `/todos/as/:userId` endpoint resolves a session so `definePermissions` filters rows by `owner_id`.
+- Per-session policy evaluation via `context.forSession(userId)` — the `/todos/as/:userId` endpoint impersonates a session so `definePermissions` filters rows by `owner_id`.
 - Server-Sent Events (`/todos/live`) pushing live snapshots to connected clients on every mutation.
 - Write durability control via `wait({ tier })` (`local`, `edge`, `global`).
-- Persistent SQLite storage rooted in a temp directory on cold start.
+- Persistent Fjall storage rooted in a temp directory on cold start.
 
 ## Schema
 
@@ -22,7 +22,7 @@ Node + Express REST API backed by Jazz as the database. No frontend — pure ser
 pnpm dev
 ```
 
-`pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`); a fresh SQLite database is created in a temp directory.
+`pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`); a fresh Fjall database is created in a temp directory.
 
 ## Tests
 

@@ -9,7 +9,7 @@
 
 export type Value =
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint | number }
   | { type: "Double"; value: number }
   | { type: "Boolean"; value: boolean }
   | { type: "Text"; value: string }
@@ -61,6 +61,8 @@ export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDel
 export type RowDelta = WireRowChange[];
 
 export interface NativeRowDelta {
+  __jazzNativeRowDelta: true;
+  reset?: boolean;
   added: Uint8Array;
   removed: Uint8Array;
   updated: Uint8Array;
@@ -94,6 +96,7 @@ export interface ColumnDescriptor {
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;
+  large_value?: "Blob" | "Text";
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
@@ -162,7 +165,7 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (OPFS in browser, platform-specific native storage elsewhere)
+ * - `persistent`: local persistence enabled (OPFS in browser, Fjall in backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =

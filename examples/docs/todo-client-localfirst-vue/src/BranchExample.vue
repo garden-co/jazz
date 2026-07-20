@@ -3,6 +3,7 @@
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
 const client = createJazzClient({
+  asyncSubscriptionsOnly: false,
   appId: "my-app",
   env: "prod",
   userBranch: "staging",

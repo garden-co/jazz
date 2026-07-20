@@ -25,6 +25,8 @@ pub enum MetadataKey {
     AppId,
     /// Schema content hash on catalogue schema objects.
     SchemaHash,
+    /// Catalogue publish timestamp reserved by the publishing runtime.
+    PublishedAt,
     /// Source schema hash on catalogue lens objects.
     SourceHash,
     /// Target schema hash on catalogue lens objects.
@@ -44,6 +46,7 @@ impl MetadataKey {
             Self::CreatedAt => "created_at",
             Self::AppId => "app_id",
             Self::SchemaHash => "schema_hash",
+            Self::PublishedAt => "published_at",
             Self::SourceHash => "source_hash",
             Self::TargetHash => "target_hash",
             Self::NoSync => "nosync",
@@ -64,8 +67,6 @@ pub enum ObjectType {
     CatalogueLens,
     CataloguePermissionsBundle,
     CataloguePermissionsHead,
-    /// Legacy single-object permissions catalogue entry.
-    CataloguePermissions,
     Index,
 }
 
@@ -76,7 +77,6 @@ impl ObjectType {
             Self::CatalogueLens => "catalogue_lens",
             Self::CataloguePermissionsBundle => "catalogue_permissions_bundle",
             Self::CataloguePermissionsHead => "catalogue_permissions_head",
-            Self::CataloguePermissions => "catalogue_permissions",
             Self::Index => "index",
         }
     }
@@ -88,7 +88,6 @@ impl ObjectType {
                 | "catalogue_lens"
                 | "catalogue_permissions_bundle"
                 | "catalogue_permissions_head"
-                | "catalogue_permissions"
         )
     }
 }

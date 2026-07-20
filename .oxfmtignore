@@ -9,3 +9,5 @@ dev/benchmarks/**/*.json
 dev/benchmarks/**/*.html
 **/ENV.md
 **/.jazz-schema-*.mjs
+dev/benchmarks/SMOKE_LEDGER.md
+dev/benchmarks/realistic/history/bench_history.json

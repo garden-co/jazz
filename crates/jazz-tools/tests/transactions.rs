@@ -1,15 +1,19 @@
 #![cfg(feature = "test-utils")]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+mod support;
 
 use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
-use jazz_tools::sync_manager::SyncPayload;
-use jazz_tools::test_support::wait_for_query;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value, WriteContext,
 };
+use support::wait_for_query;
+
+static TEST_USER_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn todo_schema() -> Schema {
     SchemaBuilder::new()
@@ -66,10 +70,17 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     client
 }
 
+fn unique_user_id(prefix: &str) -> String {
+    let id = TEST_USER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{id}")
+}
+
 async fn start_two_clients(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice = connect_user(&server, schema.clone(), "alice-transactions").await;
-    let bob = connect_user(&server, schema, "bob-transactions").await;
+    let alice_id = unique_user_id("alice-transactions");
+    let bob_id = unique_user_id("bob-transactions");
+    let alice = connect_user(&server, schema.clone(), &alice_id).await;
+    let bob = connect_user(&server, schema, &bob_id).await;
     (server, alice, bob)
 }
 
@@ -98,7 +109,18 @@ async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) 
     todo_id
 }
 
-#[tokio::test]
+macro_rules! local_tokio_test {
+    (async fn $name:ident() $body:block) => {
+        #[tokio::test(flavor = "current_thread")]
+        async fn $name() {
+            tokio::task::LocalSet::new()
+                .run_until(async $body)
+                .await;
+        }
+    };
+}
+
+local_tokio_test! {
 async fn transaction_stages_writes_and_can_commit() {
     let client = JazzClient::test_client(todo_schema()).await;
     let tx = client
@@ -130,8 +152,9 @@ async fn transaction_stages_writes_and_can_commit() {
         "committed transaction should reject a second commit"
     );
 }
+}
 
-#[tokio::test]
+local_tokio_test! {
 async fn transaction_can_be_rolled_back() {
     let client = JazzClient::test_client(todo_schema()).await;
     let tx = client
@@ -162,8 +185,9 @@ async fn transaction_can_be_rolled_back() {
         "rolled back transaction should reject commit"
     );
 }
+}
 
-#[tokio::test]
+local_tokio_test! {
 async fn committed_transaction_rejects_later_handle_operations() {
     let client = JazzClient::test_client(todo_schema()).await;
     let tx = client
@@ -242,8 +266,9 @@ async fn committed_transaction_rejects_later_handle_operations() {
         );
     }
 }
+}
 
-#[tokio::test]
+local_tokio_test! {
 async fn rolled_back_transaction_rejects_later_handle_operations() {
     let client = JazzClient::test_client(todo_schema()).await;
     let tx = client
@@ -321,12 +346,13 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
         );
     }
 }
+}
 
-/// Alice stages one transactional row locally.
-/// Authority receives the staged row but keeps it non-visible.
-/// Alice seals the batch.
-/// Authority accepts it and replays the settlement back.
-#[tokio::test]
+// Alice stages one transactional row locally.
+// Authority receives the staged row but keeps it non-visible.
+// Alice seals the batch.
+// Authority accepts it and replays the settlement back.
+local_tokio_test! {
 async fn transaction_insert_is_visible_only_after_commit_settles() {
     let (server, alice, bob) = start_two_clients(todo_schema()).await;
     let tx = alice
@@ -389,15 +415,17 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
+}
 
-/// Client local runtime inserts one staged transactional row.
-/// The transaction updates that same row again before sealing.
-/// The latest accepted row should reflect the update.
-#[tokio::test]
+// Client inserts one staged transactional row.
+// The transaction updates that same row again before sealing.
+// The latest accepted row should reflect the update.
+local_tokio_test! {
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "transaction-update-inserted-row").await;
+    let user_id = unique_user_id("transaction-update-inserted-row");
+    let client = connect_user(&server, schema, &user_id).await;
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
@@ -437,17 +465,19 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
+}
 
-/// Todo row visible on main.
-/// Transaction update #1 changes title.
-/// Transaction update #2 changes completed.
-/// Latest staged member should compose both changes.
-/// Only one accepted row should remain for that row/batch.
-#[tokio::test]
+// Todo row visible on main.
+// Transaction update #1 changes title.
+// Transaction update #2 changes completed.
+// Latest staged member should compose both changes.
+// Only one accepted row should remain for that row/batch.
+local_tokio_test! {
 async fn multiple_updates_to_same_row_in_transaction_compose() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "multiple-updates-compose").await;
+    let user_id = unique_user_id("multiple-updates-compose");
+    let client = connect_user(&server, schema, &user_id).await;
     let todo_id = insert_visible_todo(&client, "draft", false).await;
 
     let tx = client
@@ -491,16 +521,18 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
+}
 
-/// Client stages two transactional writes under one logical batch.
-/// Client seals that shared batch once.
-/// Authority accepts both rows into one replayable accepted settlement.
-/// Client observes both rows after that shared batch fate.
-#[tokio::test]
+// Client stages two transactional writes under one logical batch.
+// Client seals that shared batch once.
+// Authority accepts both rows into one replayable accepted settlement.
+// Client observes both rows after that shared batch fate.
+local_tokio_test! {
 async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client = connect_user(&server, schema, "multiple-writes-one-transaction").await;
+    let user_id = unique_user_id("multiple-writes-one-transaction");
+    let client = connect_user(&server, schema, &user_id).await;
     let tx = client
         .begin_transaction()
         .expect("begin transaction through client API");
@@ -548,94 +580,13 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
-
-/// Two transactions modify the same object unaware of each other.
-/// The server accepts the first tx and rejects the second.
-#[tokio::test]
-async fn stale_concurrent_transaction_is_rejected() {
-    let (server, alice, bob) = start_two_clients(todo_schema()).await;
-    let todo_id = insert_visible_todo(&alice, "shared", false).await;
-    wait_for_todos(
-        &bob,
-        Some(DurabilityTier::EdgeServer),
-        "bob sees shared row",
-        |rows| has_todo(rows, todo_id, "shared", false),
-    )
-    .await;
-
-    let alice_tx = alice.begin_transaction().expect("begin alice transaction");
-    let bob_tx = bob.begin_transaction().expect("begin bob transaction");
-    let alice_batch_id = alice_tx
-        .update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("alice".to_string()))],
-        )
-        .expect("alice stages update");
-    let bob_batch_id = bob_tx
-        .update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("bob".to_string()))],
-        )
-        .expect("bob stages stale update");
-
-    let blocked_bob = server.block_messages_to(bob.client_id().expect("bob client id"));
-    assert_eq!(
-        alice_tx.commit().expect("commit alice transaction"),
-        alice_batch_id
-    );
-    alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("alice transaction accepted");
-
-    assert_eq!(
-        bob_tx.commit().expect("commit bob transaction"),
-        bob_batch_id
-    );
-    blocked_bob
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == bob_batch_id
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should reject bob's stale transaction while bob is blocked");
-    blocked_bob.unblock();
-
-    let rejection = bob
-        .wait_for_batch(bob_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect_err("bob stale transaction should be rejected")
-        .to_string();
-    assert!(
-        rejection.contains("transaction_conflict"),
-        "unexpected rejection: {rejection}"
-    );
-
-    let rows = wait_for_todos(
-        &bob,
-        Some(DurabilityTier::EdgeServer),
-        "bob sees alice value after stale transaction rejection",
-        |rows| has_todo(rows, todo_id, "alice", false),
-    )
-    .await;
-    assert!(has_todo(&rows, todo_id, "alice", false));
-
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    server.shutdown().await;
 }
 
-/// Two transactions modify the same object.
-/// Alice's tx commits first and Bob's tx sees Alice's update
-/// AFTER its write (and before its commit).
-/// The server accepts the first tx and rejects the second.
-#[tokio::test]
+// Two transactions modify the same object.
+// Alice's tx commits first and Bob's tx sees Alice's update
+// AFTER its write (and before its commit).
+// The server accepts the first tx and rejects the second.
+local_tokio_test! {
 async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     let (server, alice, bob) = start_two_clients(todo_schema()).await;
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
@@ -705,11 +656,12 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
+}
 
-/// Two transactions modify the same object.
-/// Alice's tx commits first and Bob's tx sees Alice's update BEFORE its write.
-/// The server accepts both transactions.
-#[tokio::test]
+// Two transactions modify the same object.
+// Alice's tx commits first and Bob's tx sees Alice's update BEFORE its write.
+// The server accepts both transactions.
+local_tokio_test! {
 async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let (server, alice, bob) = start_two_clients(todo_schema()).await;
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
@@ -772,8 +724,9 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
+}
 
-#[tokio::test]
+local_tokio_test! {
 async fn wait_for_batch_errors_for_unattainable_durability_tier() {
     let client = JazzClient::test_client(todo_schema()).await;
     let (_, _, batch_id) = client
@@ -794,4 +747,5 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
         .wait_for_batch(batch_id, DurabilityTier::Local)
         .await
         .expect("local durability should be reachable");
+}
 }

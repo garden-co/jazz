@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -12,8 +12,6 @@ import {
 } from "./parse.js";
 
 // Re-exported so existing importers (and tests) keep a single entry point.
-// The implementations live in parse.ts, which has no node:sqlite dependency —
-// the text-search fallback imports them from there, never from this module.
 export {
   extractDescription,
   parseFrontmatter,
@@ -30,7 +28,7 @@ export type { FrontmatterResult, Section } from "./parse.js";
 export interface BuildIndexOptions {
   /** Path to the content/docs directory containing .mdx files. */
   contentDir: string;
-  /** Directory where docs-index.db and docs-index.txt are written. */
+  /** Directory where docs-index.db is written. */
   outputDir: string;
   /**
    * Base directory used to resolve <include cwd> paths.
@@ -107,11 +105,13 @@ export async function buildIndex({
 
   // --- SQLite DB ---
   const dbPath = join(outputDir, "docs-index.db");
-  // Remove any stale DB so we always start fresh
-  try {
-    await unlink(dbPath);
-  } catch {
-    // File didn't exist — fine
+  // Remove stale index artifacts so we always start fresh.
+  for (const fileName of ["docs-index.db", "docs-index.txt"]) {
+    try {
+      await unlink(join(outputDir, fileName));
+    } catch {
+      // File didn't exist — fine
+    }
   }
 
   const db = new DatabaseSync(dbPath);
@@ -148,12 +148,6 @@ export async function buildIndex({
   }
 
   db.close();
-
-  // --- Plain-text file ---
-  const txtParts = pages.map(
-    (p) => `===PAGE:${p.slug}===\nTITLE:${p.title}\nDESCRIPTION:${p.description}\n\n${p.body}`,
-  );
-  await writeFile(join(outputDir, "docs-index.txt"), txtParts.join("\n\n"), "utf8");
 }
 
 // ---------------------------------------------------------------------------

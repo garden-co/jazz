@@ -1,8 +1,8 @@
 import { existsSync } from "fs";
 import { access, rm } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
-import { pathToFileURL } from "url";
-import { build } from "esbuild";
+import { fileURLToPath, pathToFileURL } from "url";
+import { build, type Plugin } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
@@ -18,6 +18,10 @@ import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
 let importCounter = 0;
+const localJazzToolsSourceEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
+const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
+  ? localJazzToolsSourceEntry
+  : fileURLToPath(new URL("./index.js", import.meta.url));
 
 export interface LoadedSchemaProject {
   rootDir: string;
@@ -38,10 +42,24 @@ async function bundleToTempFile(filePath: string): Promise<string> {
     format: "esm",
     platform: "node",
     outfile: outFile,
-    packages: "external",
+    // jazz-napi must stay external: inlining its loader breaks the relative
+    // require of the platform .node binding once the bundle runs from outside
+    // the package directory.
+    external: ["jazz-napi", "*.node"],
+    plugins: [localJazzToolsPlugin()],
   });
 
   return outFile;
+}
+
+function localJazzToolsPlugin(): Plugin {
+  return {
+    name: "local-jazz-tools",
+    setup(build) {
+      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry }));
+      build.onResolve({ filter: /^file:\/\// }, (args) => ({ path: fileURLToPath(args.path) }));
+    },
+  };
 }
 
 async function loadTsModule(filePath: string): Promise<Record<string, unknown>> {
@@ -71,6 +89,8 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return "BOOLEAN";
     case "Integer":
       return "INTEGER";
+    case "BigInt":
+      return "BIGINT";
     case "Double":
       return "REAL";
     case "Timestamp":
@@ -85,8 +105,6 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return { kind: "ENUM", variants: [...columnType.variants] };
     case "Array":
       return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
-    case "BigInt":
-      throw new Error("Root schema loading does not yet support BIGINT columns.");
     case "Row":
       throw new Error("Root schema loading does not yet support row-valued columns.");
   }
@@ -144,7 +162,14 @@ function wasmColumnToAst(column: ColumnDescriptor): Column {
         : wasmValueToDefault(column.default, column.column_type),
     references: column.references,
     mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
+    largeValue: columnLargeValueToAst(column.large_value),
   };
+}
+
+function columnLargeValueToAst(largeValue: ColumnDescriptor["large_value"]): Column["largeValue"] {
+  if (largeValue === "Blob") return "blob";
+  if (largeValue === "Text") return "text";
+  return undefined;
 }
 
 function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][number] {
@@ -173,7 +198,12 @@ function isTypedAppLike(value: Record<string, unknown>): value is { wasmSchema: 
   return typeof schema === "object" && schema !== null && !Array.isArray(schema);
 }
 
-function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null {
+type LoadedSchemaInput = {
+  schema: Schema;
+  wasmSchema?: WasmSchema;
+};
+
+function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaInput | null {
   const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
     (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null,
@@ -181,11 +211,16 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null 
 
   for (const candidate of candidates) {
     if (isTypedAppLike(candidate)) {
-      return wasmSchemaToAst(candidate.wasmSchema);
+      return {
+        schema: wasmSchemaToAst(candidate.wasmSchema),
+        wasmSchema: candidate.wasmSchema,
+      };
     }
+  }
 
+  for (const candidate of candidates) {
     try {
-      return schemaDefinitionToAst(candidate as any);
+      return { schema: schemaDefinitionToAst(candidate as any) };
     } catch {
       // Try the next supported export shape.
     }
@@ -193,13 +228,13 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null 
 
   const collected = getCollectedSchema();
   if (collected.tables.length > 0) {
-    return collected;
+    return { schema: collected };
   }
 
   return null;
 }
 
-async function loadSchemaAst(filePath: string): Promise<Schema> {
+async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
   const loaded = await loadTsModule(filePath);
   const directSchema = schemaFromLoadedModule(loaded);
   if (directSchema) {
@@ -343,9 +378,10 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     );
   }
 
-  let schema = await loadSchemaAst(resolved.schemaFile);
+  const loadedSchema = await loadSchemaInput(resolved.schemaFile);
+  let schema = loadedSchema.schema;
   const tablesWithInlinePolicies = findInlinePolicyTables(schema);
-  if (tablesWithInlinePolicies.length > 0) {
+  if (tablesWithInlinePolicies.length > 0 && !loadedSchema.wasmSchema) {
     throw new Error(
       `Inline table permissions in ${basename(resolved.schemaFile)} are no longer supported. ` +
         "Move policies to permissions.ts. " +
@@ -381,6 +417,6 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     permissionsFile: resolvedPermissionsFile,
     permissions,
     schema,
-    wasmSchema: schemaToWasm(schema),
+    wasmSchema: loadedSchema.wasmSchema ?? schemaToWasm(schema),
   };
 }

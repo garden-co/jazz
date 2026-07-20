@@ -39,7 +39,10 @@ describe("toValue", () => {
 
   it("converts BigInt values", () => {
     const colType: ColumnType = { type: "BigInt" };
-    expect(toValue(9007199254740991, colType)).toEqual({ type: "BigInt", value: 9007199254740991 });
+    expect(toValue(9007199254740993n, colType)).toEqual({
+      type: "BigInt",
+      value: 9007199254740993n,
+    });
   });
 
   it("converts Timestamp values", () => {
@@ -174,6 +177,19 @@ describe("toWriteRecord", () => {
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "priority", column_type: { type: "Integer" }, nullable: true },
         { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+        {
+          name: "metadata",
+          column_type: {
+            type: "Json",
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string", minLength: 1 },
+              },
+            },
+          },
+          nullable: false,
+        },
       ],
     },
   };
@@ -239,6 +255,12 @@ describe("toWriteRecord", () => {
   it("throws when null is used for a required field", () => {
     expect(() => toWriteRecord({ title: null }, schema, "todos")).toThrow(
       "Cannot set required field 'title' to null",
+    );
+  });
+
+  it("validates Json values against column schemas", () => {
+    expect(() => toWriteRecord({ metadata: { title: "" } }, schema, "todos")).toThrow(
+      'encoding error: JSON schema validation failed for column `metadata`: "" is shorter than 1 character',
     );
   });
 });

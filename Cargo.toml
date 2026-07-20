@@ -1,16 +1,40 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/groove",
+  "crates/jazz",
+  "crates/jazz-server",
+  "crates/jazz-sim",
+  "crates/opfs-btree",
   "crates/jazz-tools",
   "crates/jazz-wasm",
   "crates/jazz-napi",
-  "crates/jazz-rn/rust",
+  # React Native is paused while we decide whether the new core runtime should
+  # use RocksDB on mobile or a dedicated mobile storage backend.
+  # "crates/jazz-rn/rust",
   "crates/wasm-tracing",
-  "examples/todo-server-rs",
-  "examples/docs/todo-server-rs",
-  "crates/opfs-btree",
+  # The old Axum todo server examples expect a Send + Sync JazzClient in shared
+  # router state. Core Db ownership is currently local-thread by design;
+  # keep these examples as integration targets, but out of workspace-wide green
+  # gates until they are rebuilt around the new server boundary.
+  # "examples/todo-server-rs",
+  # "examples/docs/todo-server-rs",
   "dev/benchmarks/storage/bench-core",
-  "dev/benchmarks/storage/native",
 ]
+exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
+
+[workspace.dependencies]
+groove = { path = "crates/groove", default-features = false }
+jazz = { path = "crates/jazz", default-features = false }
+jazz-server = { path = "crates/jazz-server", default-features = false }
+rustc-hash = "2.1.1"
+
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
+
+[profile.perf]
+inherits = "release"
+opt-level = 2
+lto = false
+debug = 1
+codegen-units = 256

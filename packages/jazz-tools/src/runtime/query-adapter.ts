@@ -1,17 +1,21 @@
 /**
- * Translate QueryBuilder JSON to WASM Query format.
+ * Translate public QueryBuilder JSON into the runtime query payload.
  *
  * QueryBuilder produces a compact JSON structure:
  * { table, conditions, includes, orderBy, limit, offset, hops?, gather? }
  *
- * Runtime semantics are driven by `relation_ir`. The wire payload keeps only
- * fields required for execution (`table`, `relation_ir`, and `array_subqueries`).
+ * Most queries are emitted as the flat runtime Query payload. Native relation IR
+ * is reserved for relation traversal shapes that cannot use the flat path.
  */
 
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import { isProvenanceMagicTimestampColumn, magicColumnType } from "../magic-columns.js";
+import {
+  isProvenanceMagicColumn,
+  isProvenanceMagicTimestampColumn,
+  magicColumnType,
+} from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltCondition,
@@ -30,6 +34,7 @@ import type {
 } from "../ir.js";
 
 function relColumn(column: string, scope?: string): RelColumnRef {
+  if (isProvenanceMagicColumn(column)) return { column };
   return scope ? { scope, column } : { column };
 }
 
@@ -108,9 +113,9 @@ function toRuntimeTimestampValue(value: unknown, columnName?: string): number {
 }
 
 /**
- * Translate a JavaScript value to WasmValue format.
+ * Translate a JavaScript value to the runtime value format.
  */
-function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string): object {
+function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: string): object {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
@@ -142,7 +147,7 @@ function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string
     }
     return {
       type: "Array",
-      value: value.map((item) => toWasmValue(item, columnType.element)),
+      value: value.map((item) => toRuntimeValue(item, columnType.element)),
     };
   }
   if (typeof value === "boolean") {
@@ -152,13 +157,21 @@ function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string
     if (columnType?.type === "Timestamp") {
       return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
     }
-    if (
-      columnType.type === "Double" ||
-      columnType.type === "BigInt" ||
-      columnType.type === "Integer"
-    ) {
+    if (columnType.type === "BigInt") {
+      if (!Number.isSafeInteger(value)) {
+        throw new Error("BIGINT query values must be bigint or safe integer numbers");
+      }
+      return { type: "BigInt", value: BigInt(value) };
+    }
+    if (columnType.type === "Double" || columnType.type === "Integer") {
       return { type: columnType.type, value };
     }
+  }
+  if (typeof value === "bigint") {
+    if (columnType.type !== "BigInt") {
+      throw new Error("Unexpected bigint value for non-BIGINT column");
+    }
+    return { type: "BigInt", value };
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {
@@ -188,12 +201,21 @@ function includeRequirementForRelation(
   return relation.isArray ? "MatchCorrelationCardinality" : "AtLeastOne";
 }
 
-function visibleSelectColumns(
-  resolvedSelect: readonly string[],
-  includeProjectionColumns: readonly string[] = [],
-): string[] | null {
-  const columns = [...resolvedSelect, ...includeProjectionColumns];
-  return columns.length > 0 ? columns : null;
+function visibleSelectColumns(resolvedSelect: readonly string[]): string[] | null {
+  return resolvedSelect.length > 0 ? [...resolvedSelect] : null;
+}
+
+function hasRequiredArraySubquery(subqueries: readonly object[]): boolean {
+  return subqueries.some((subquery) => {
+    const record = subquery as { requirement?: unknown; nested_arrays?: unknown };
+    if (
+      record.requirement === "AtLeastOne" ||
+      record.requirement === "MatchCorrelationCardinality"
+    ) {
+      return true;
+    }
+    return Array.isArray(record.nested_arrays) && hasRequiredArraySubquery(record.nested_arrays);
+  });
 }
 
 function validateIncludeBuilderSpec(
@@ -240,7 +262,7 @@ function conditionToArraySubqueryFilter(
 
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const literalValue = toWasmValue(cond.value, valueTypeForCondition, column);
+  const literalValue = toRuntimeValue(cond.value, valueTypeForCondition, column);
   const isNullValue = cond.value === undefined ? true : cond.value;
 
   switch (cond.op) {
@@ -299,9 +321,6 @@ function toArraySubqueries(
     const resolvedSelectColumns = hasExplicitSelect
       ? resolveSelectedColumns(rel.toTable, schema, spec.select)
       : [];
-    const includeProjectionColumns = hasExplicitSelect
-      ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-      : [];
     const filters = spec.conditions.map((condition) =>
       conditionToArraySubqueryFilter(condition, schema, rel.toTable),
     );
@@ -313,7 +332,7 @@ function toArraySubqueries(
       hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: spec.requireIncludes,
     });
-    const selectColumns = visibleSelectColumns(resolvedSelectColumns, includeProjectionColumns);
+    const selectColumns = visibleSelectColumns(resolvedSelectColumns);
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -374,7 +393,7 @@ function conditionToRelPredicate(
       In: {
         left: columnRef,
         values: cond.value.map((value) => ({
-          Literal: toWasmValue(value, columnType, column),
+          Literal: toRuntimeValue(value, columnType, column),
         })),
       },
     };
@@ -385,7 +404,7 @@ function conditionToRelPredicate(
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
-          Literal: toWasmValue(cond.value, valueTypeForCondition, column),
+          Literal: toRuntimeValue(cond.value, valueTypeForCondition, column),
         };
   const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
@@ -527,7 +546,7 @@ function lowerHopsToRelExpr(
     currentExpr = {
       Join: {
         left: currentExpr,
-        right: { TableScan: { table: relation.toTable } },
+        right: { TableScan: { table: relation.toTable, alias: hopAlias } },
         on: [joinOn],
         join_kind: "Inner",
       },
@@ -604,7 +623,7 @@ function gatherToRelExpr(
   const stepJoined: RelExpr = {
     Join: {
       left: stepFiltered,
-      right: { TableScan: { table: hopRelation.toTable } },
+      right: { TableScan: { table: hopRelation.toTable, alias: recursiveHopAlias } },
       on: [
         {
           left: relColumn(hopRelation.fromColumn, gather.step_table),
@@ -627,7 +646,7 @@ function gatherToRelExpr(
       seed: seedExpr,
       step: stepProjected,
       frontier_key: { RowId: "Current" },
-      max_depth: gather.max_depth,
+      bound: { MaxDepth: gather.max_depth },
       dedupe_key: [{ RowId: "Current" }],
     },
   };
@@ -709,8 +728,8 @@ function translateBuiltRelationToRelExpr(
  * - hopTo => Join + Project
  * - gather => Gather with step Join + Project
  */
-export function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
+function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): RelExpr {
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const hops = builder.hops;
 
@@ -790,34 +809,97 @@ export function translateBuilderToRelationIr(builderJson: string, schema: WasmSc
   return relation;
 }
 
+function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQuery>): boolean {
+  return builder.hops.length > 0 || builder.gather !== undefined;
+}
+
+function toRuntimeOrderBy(
+  orderBy: Array<[string, "asc" | "desc"]>,
+  schema: WasmSchema,
+  table: string,
+): Array<{ column: string; direction: "Asc" | "Desc" }> {
+  return orderBy.map(([column, direction]) => {
+    const strippedColumn = stripQualifier(column);
+    const columnType = getColumnType(schema, table, strippedColumn);
+    if (columnType?.type === "Bytea") {
+      throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+    }
+    if (columnType?.type === "Json") {
+      throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
+    }
+    return {
+      column: strippedColumn,
+      direction: direction === "desc" ? "Desc" : "Asc",
+    };
+  });
+}
+
+function toFlatConditions(conditions: BuiltCondition[]): BuiltCondition[] {
+  return conditions.map((condition) =>
+    condition.op === "isNull" && condition.value === undefined
+      ? { ...condition, value: true }
+      : condition,
+  );
+}
+
 /**
- * Translate QueryBuilder JSON to WASM Query JSON.
+ * Translate QueryBuilder JSON to runtime query JSON.
  *
  * @param builderJson JSON string from QueryBuilder._build()
  * @param schema WasmSchema for relation analysis
- * @returns JSON string for WASM runtime query()
+ * @returns JSON string for runtime query()
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
+  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
-  const relation = translateBuilderToRelationIr(builderJson, schema);
   const hasExplicitSelect = builder.select.length > 0;
   const selectColumns = hasExplicitSelect
     ? resolveSelectedColumns(builder.table, schema, builder.select)
     : [];
-  const includeProjectionColumns = hasExplicitSelect
-    ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-    : [];
-  const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
+  const projectedColumns = visibleSelectColumns(selectColumns);
+  const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
+    hideCurrentLevelColumnNames: hasExplicitSelect,
+    requireIncludes: builder.requireIncludes,
+  });
+
+  if (usesNativeRelationFeatures(builder)) {
+    const relation = translateBuilderToRelationIr(builderJson, schema);
+    return JSON.stringify({
+      table: builder.table,
+      array_subqueries: arraySubqueries,
+      relation_ir: relation,
+      ...(builder.includeDeleted ? { include_deleted: true } : {}),
+      ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+    });
+  }
+
+  const orderBy = toRuntimeOrderBy(builder.orderBy, schema, builder.table);
+  const clientPagesAfterRequiredIncludes =
+    arraySubqueries.length > 0 &&
+    hasRequiredArraySubquery(arraySubqueries) &&
+    typeof builder.limit === "number" &&
+    typeof builder.offset === "number" &&
+    builder.offset > 0;
+  const clientLimit = typeof builder.limit === "number" ? builder.limit : undefined;
+  const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {
     table: builder.table,
-    array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
-      hideCurrentLevelColumnNames: hasExplicitSelect,
-      requireIncludes: builder.requireIncludes,
-    }),
-    relation_ir: relation,
+    conditions: toFlatConditions(builder.conditions),
+    array_subqueries: arraySubqueries,
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+    ...(orderBy.length > 0 ? { order_by: orderBy } : {}),
+    ...(clientPagesAfterRequiredIncludes
+      ? {
+          limit: clientLimit! + clientOffset!,
+          offset: 0,
+          __jazz_client_limit: clientLimit,
+          __jazz_client_offset: clientOffset,
+        }
+      : {
+          ...(clientLimit !== undefined ? { limit: clientLimit } : {}),
+          ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
+        }),
   };
 
   return JSON.stringify(query);

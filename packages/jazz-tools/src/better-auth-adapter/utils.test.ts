@@ -79,25 +79,45 @@ describe("isQuerySupported", () => {
   it("supports in on columns with equality support", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "id", operator: "in", value: ["row-1", "row-2"], connector: "AND" },
+        {
+          field: "id",
+          operator: "in",
+          value: ["row-1", "row-2"],
+          connector: "AND",
+        },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "owner_id", operator: "in", value: ["row-1"], connector: "AND" },
+        {
+          field: "owner_id",
+          operator: "in",
+          value: ["row-1"],
+          connector: "AND",
+        },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "uuid_col", operator: "in", value: ["row-1"], connector: "AND" },
+        {
+          field: "uuid_col",
+          operator: "in",
+          value: ["row-1"],
+          connector: "AND",
+        },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "email_address", operator: "in", value: ["a@b.c"], connector: "AND" },
+        {
+          field: "email_address",
+          operator: "in",
+          value: ["a@b.c"],
+          connector: "AND",
+        },
       ]),
     ).toBe(true);
 
@@ -146,7 +166,12 @@ describe("isQuerySupported", () => {
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "session_expires_at", operator: "eq", value: null, connector: "AND" },
+        {
+          field: "session_expires_at",
+          operator: "eq",
+          value: null,
+          connector: "AND",
+        },
       ]),
     ).toBe(false);
   });

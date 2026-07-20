@@ -15,6 +15,7 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { fireAndReport } from "@/lib/db-write";
 import { logOut } from "@/lib/utils";
 import { app } from "../../../schema.js";
 
@@ -55,7 +56,10 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
 
   const handleNameChange = (newName: string) => {
     if (myProfile) {
-      db.update(app.profiles, myProfile.id, { name: newName });
+      fireAndReport(
+        db.update(app.profiles, myProfile.id, { name: newName }),
+        "failed to update profile",
+      );
     }
   };
 
@@ -65,15 +69,21 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      db.update(app.profiles, myProfile.id, { avatar: dataUrl });
+      fireAndReport(
+        db.update(app.profiles, myProfile.id, { avatar: dataUrl }),
+        "failed to update avatar",
+      );
     };
     reader.readAsDataURL(file);
   };
 
   const handleAvatarRemove = () => {
     if (!myProfile) return;
-    // TODO remove cast once https://github.com/garden-co/jazz2/pull/349 is merged
-    db.update(app.profiles, myProfile.id, { avatar: null as unknown as string });
+    // Caveat: avatar is typed as string in this example schema, so clearing it needs an explicit null cast.
+    fireAndReport(
+      db.update(app.profiles, myProfile.id, { avatar: null as unknown as string }),
+      "failed to remove avatar",
+    );
   };
 
   return (

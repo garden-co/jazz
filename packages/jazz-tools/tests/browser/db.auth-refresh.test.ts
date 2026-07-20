@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type QueryBuilder, type TableProxy } from "../../src/runtime/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import {
+  createDb,
+  fetchSchemaHashes,
+  publishStoredPermissions,
+  type QueryBuilder,
+  type TableProxy,
+} from "../../src/runtime/index.js";
+import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
@@ -58,12 +64,13 @@ describe("Db auth refresh browser integration", () => {
 
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
+    const userId = "00000000-0000-0000-0000-00000000a111";
     const invalidJwt = makeFakeJwt({
-      sub: "alice",
+      sub: userId,
       claims: { role: "member" },
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
-    const validJwt = await getJazzServerJwtForUser("alice", { role: "member" });
+    const validJwt = await getJazzServerJwtForUser(userId, { role: "member" });
 
     const writer = ctx.track(
       await createDb({
@@ -82,11 +89,29 @@ describe("Db auth refresh browser integration", () => {
       }),
     );
 
-    await deploy({
+    const { hash: publishedSchemaHash } = await publishStoredSchema(serverUrl, {
       appId,
-      serverUrl,
       adminSecret,
       schema,
+    });
+
+    let latestSchemaHash: string | null = publishedSchemaHash;
+    await waitForCondition(
+      async () => {
+        const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+        latestSchemaHash = hashes.at(-1) ?? publishedSchemaHash;
+        return latestSchemaHash !== null;
+      },
+      20_000,
+      "expected at least one published schema hash before publishing test permissions",
+    );
+
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
+
+    await publishStoredPermissions(serverUrl, {
+      appId,
+      adminSecret,
+      schemaHash: latestSchemaHash!,
       permissions: {
         todos: {
           select: { using: { type: "True" } },
@@ -98,6 +123,7 @@ describe("Db auth refresh browser integration", () => {
           delete: { using: { type: "True" } },
         },
       },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
 
     const marker = `queued-after-auth-loss-${Date.now()}`;
@@ -115,7 +141,7 @@ describe("Db auth refresh browser integration", () => {
     expect(writer.getAuthState()).toMatchObject({
       error: "invalid",
       session: {
-        user_id: "alice",
+        user_id: userId,
       },
     });
 
@@ -133,7 +159,7 @@ describe("Db auth refresh browser integration", () => {
       (rows) => rows.some((row) => row.title === marker),
       "queued write should flush after auth refresh",
       20_000,
-      "local",
+      "edge",
     );
   });
 });

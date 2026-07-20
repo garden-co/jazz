@@ -1,4 +1,4 @@
-import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
@@ -395,19 +395,24 @@ export class SubscriptionsOrchestrator {
         entry.query,
         (delta) => {
           const wasPending = entry.state.status === "pending";
+          const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
+          applySubscriptionDelta(data, delta);
           entry.state = {
             status: "fulfilled",
-            data: delta.all,
+            data,
             error: null,
           };
 
           if (wasPending) {
-            entry.resolvefulfilled(delta.all);
+            entry.resolvefulfilled(data);
           }
 
           for (const listener of Array.from(entry.listeners)) {
             if (wasPending) {
-              listener.onfulfilled?.(delta.all);
+              listener.onfulfilled?.(data);
+            } else if (delta.reset) {
+              listener.onReset?.();
+              listener.onfulfilled?.(data);
             } else {
               listener.onDelta?.(delta);
             }

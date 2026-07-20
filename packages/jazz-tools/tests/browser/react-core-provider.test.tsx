@@ -11,9 +11,9 @@ import {
   makeDeferred,
   type CacheEntryHandle,
   type QueryEntryCallbacks,
-  type SubscriptionsOrchestrator,
   type UseAllState,
 } from "../../src/subscriptions-orchestrator.js";
+import { attachSubscriptionStore } from "../../src/subscription-store-internal.js";
 import type { AuthState } from "../../src/runtime/auth-state.js";
 import type { Session } from "../../src/runtime/context.js";
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
@@ -594,12 +594,14 @@ function makeClient(opts?: TestClientOptions) {
     });
   }
 
-  return {
-    db,
-    manager: (opts?.manager ?? new ControlledManager()) as unknown as SubscriptionsOrchestrator,
-    session: opts?.session,
-    shutdown: async () => {},
-  };
+  return attachSubscriptionStore(
+    {
+      db,
+      session: opts?.session,
+      shutdown: async () => {},
+    },
+    opts?.manager ?? new ControlledManager(),
+  );
 }
 
 function makeAuthAwareClient(db: ReturnType<typeof createAuthAwareDb>) {
@@ -608,16 +610,18 @@ function makeAuthAwareClient(db: ReturnType<typeof createAuthAwareDb>) {
     session = nextSession;
   });
 
-  return {
-    db,
-    manager: new ControlledManager() as unknown as SubscriptionsOrchestrator,
-    get session() {
-      return session;
+  return attachSubscriptionStore(
+    {
+      db,
+      get session() {
+        return session;
+      },
+      shutdown: async () => {
+        stopSessionSync();
+      },
     },
-    shutdown: async () => {
-      stopSessionSync();
-    },
-  };
+    new ControlledManager(),
+  );
 }
 
 function createAuthAwareDb(initialSession: Session | null) {

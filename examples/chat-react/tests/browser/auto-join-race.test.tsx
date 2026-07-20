@@ -24,12 +24,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -68,8 +72,33 @@ describe("auto-join race on first message send", () => {
     return { container, root };
   }
 
-  function renderApp(root: Root, config: { appId: string; serverUrl: string }) {
-    root.render(<App config={{ dbName: crypto.randomUUID(), ...config }} />);
+  async function mountApp(
+    config: {
+      appId: string;
+      dbName: string;
+      driver?: { type: "memory" };
+      serverUrl: string;
+      secret: string;
+    },
+    initialPath?: string,
+  ): Promise<{ container: HTMLDivElement; root: Root }> {
+    const mounted = makeMount();
+    mounted.root.render(<App config={config} initialPath={initialPath} />);
+    await waitFor(
+      () => mounted.container.childNodes.length > 0,
+      10_000,
+      `App should commit initial DOM; hash=${window.location.hash}`,
+    );
+    return mounted;
+  }
+
+  async function unmountApp(container: HTMLDivElement): Promise<void> {
+    const idx = mounts.findIndex((mount) => mount.container === container);
+    if (idx === -1) return;
+    const [{ root }] = mounts.splice(idx, 1);
+    root.unmount();
+    container.remove();
+    await new Promise((r) => setTimeout(r, 200));
   }
 
   afterEach(async () => {
@@ -90,7 +119,7 @@ describe("auto-join race on first message send", () => {
   });
 
   it("composer is disabled until membership is confirmed, then message delivers", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
     const runId = Date.now();
     const bobMessage = `first-send-${runId}`;
 
@@ -104,15 +133,24 @@ describe("auto-join race on first message send", () => {
 
     try {
       // ── Alice: create a public chat ────────────────────────────────────────
-      const { container: aliceContainer, root: aliceRoot } = makeMount();
-      renderApp(aliceRoot, { appId: APP_ID, serverUrl });
+      const aliceConfig = {
+        appId: APP_ID,
+        dbName: uniqueDbName("autojoin-alice"),
+        driver: { type: "memory" },
+        serverUrl,
+        secret: await testSecret(`autojoin-alice-${runId}`),
+      };
+      let { container: aliceContainer } = await mountApp(aliceConfig);
 
       // The app redirects from / to /#/chat/:id once it has created the seed
       // public chat.  Wait for the hash to settle.
       await waitFor(
         () => /\/#\/chat\//.test(window.location.href),
         20_000,
-        "Alice should land on a chat URL after the seed chat is created",
+        `Alice should land on a chat URL after the seed chat is created; text=${aliceContainer.textContent?.slice(
+          0,
+          500,
+        )}; consoleErrors=${JSON.stringify(consoleErrors)}`,
       );
 
       // Wait for Alice's editor to be enabled, so we know the chat is fully
@@ -131,6 +169,8 @@ describe("auto-join race on first message send", () => {
       if (!match) throw new Error(`Could not extract chatId from hash: ${aliceHash}`);
       const chatId = match[1];
 
+      await unmountApp(aliceContainer);
+
       // ── Bob: install observer BEFORE mount, then render at the chat URL ───
       //
       // The observer captures the editor's contenteditable history as it goes
@@ -138,7 +178,7 @@ describe("auto-join race on first message send", () => {
       // before render is essential — by the time render() returns, the editor
       // is mounted asynchronously after data loads, so a polling installer
       // catches the very first contenteditable value.
-      const { container: bobContainer, root: bobRoot } = makeMount();
+      const { container: bobContainer } = makeMount();
 
       const editorHistory: string[] = [];
       const poll = setInterval(() => {
@@ -158,12 +198,23 @@ describe("auto-join race on first message send", () => {
         }).observe(pm, { attributes: true });
       }, 5);
 
-      // Set the hash so Bob's app routes directly to Alice's chat on first
-      // mount (matches the Playwright version, which navigates to the final
-      // URL so addInitScript fires before any client-side routing).
-      window.location.hash = `#/chat/${chatId}`;
-
-      renderApp(bobRoot, { appId: APP_ID, serverUrl });
+      const bobConfig = {
+        appId: APP_ID,
+        dbName: uniqueDbName("autojoin-bob"),
+        driver: { type: "memory" },
+        serverUrl,
+        secret: await testSecret(`autojoin-bob-${runId}`),
+      };
+      mounts[mounts.length - 1]?.root.render(
+        <App config={bobConfig} initialPath={`/chat/${chatId}`} />,
+      );
+      await waitFor(
+        () => bobContainer.childNodes.length > 0,
+        10_000,
+        `Bob app should commit initial DOM; hash=${window.location.hash}; consoleErrors=${JSON.stringify(
+          consoleErrors,
+        )}`,
+      );
 
       // ── Assert A: composer must transition through disabled before enabling ─
       //
@@ -178,7 +229,10 @@ describe("auto-join race on first message send", () => {
           return !!editor && editor.getAttribute("contenteditable") !== "false";
         },
         20_000,
-        "Bob's composer should eventually become enabled",
+        `Bob's composer should eventually become enabled; hash=${window.location.hash}; text=${bobContainer.textContent?.slice(
+          0,
+          500,
+        )}; editorHistory=${JSON.stringify(editorHistory)}; consoleErrors=${JSON.stringify(consoleErrors)}`,
       );
 
       clearInterval(poll); // belt-and-braces; the polling installer already cleared it
@@ -196,13 +250,17 @@ describe("auto-join race on first message send", () => {
       bobEditor.insertText(bobMessage);
       bobEditor.send();
 
+      ({ container: aliceContainer } = await mountApp(aliceConfig, `/chat/${chatId}`));
+
       await waitFor(
         () =>
           [...aliceContainer.querySelectorAll("article")].some((a) =>
             a.textContent?.includes(bobMessage),
           ),
         20_000,
-        `Alice should receive Bob's message "${bobMessage}"`,
+        `Alice should receive Bob's message "${bobMessage}"; consoleErrors=${JSON.stringify(
+          consoleErrors,
+        )}; bobText=${bobContainer.textContent?.slice(0, 500)}`,
       );
 
       // ── Assert C: no permission errors during/after send ──────────────────

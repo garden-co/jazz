@@ -1,9 +1,9 @@
 <!-- #region auth-external-svelte -->
 <script lang="ts">
-  import type { Db } from "jazz-tools";
   import {
     createJazzClient,
     JazzSvelteProvider,
+    type JazzContext,
   } from "jazz-tools/svelte";
 
   const appId = "my-app";
@@ -17,6 +17,7 @@
 
   const client = $derived(
     createJazzClient({
+      asyncSubscriptionsOnly: false,
       appId,
       serverUrl: jazzServerUrl,
       jwtToken,
@@ -26,7 +27,7 @@
 
 {#key jwtToken}
   <JazzSvelteProvider {client}>
-    {#snippet children({ db }: { db: Db })}
+    {#snippet children({ db }: { db: NonNullable<JazzContext["db"]> })}
       <button onclick={() => onSignedIn("<provider-jwt>")}>Sign in</button>
       <!-- Your app content here -->
     {/snippet}

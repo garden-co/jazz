@@ -1,8 +1,7 @@
 import type { AuthMode, Session } from "./context.js";
 import { resolveClientSessionStateSync, type ClientSessionInput } from "./client-session.js";
-import type { AuthFailureReason } from "./sync-transport.js";
 
-export type { AuthFailureReason } from "./sync-transport.js";
+export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
 
 export function mapAuthReason(reason: string): AuthFailureReason {
   const lower = reason.toLowerCase();

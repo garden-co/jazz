@@ -2,15 +2,13 @@
 
 //! HTTP routes for the Jazz server.
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
+use crate::AppId;
 use crate::object::ObjectId;
-use crate::query_manager::types::{SchemaHash, TableName, TablePolicies};
-use crate::schema_manager::AppId;
-use crate::server::ServerState;
+use crate::public_schema::{SchemaHash, TableName, TablePolicies};
 
 use super::http::PermissionsHeadView;
 
@@ -24,23 +22,6 @@ pub(super) fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, Str
     let mut hash_bytes = [0u8; 32];
     hash_bytes.copy_from_slice(&decoded_hash_bytes);
     Ok(SchemaHash::from_bytes(hash_bytes))
-}
-
-pub(super) fn connection_schema_diagnostics_from_handshake(
-    state: &Arc<ServerState>,
-    handshake: &crate::transport_manager::AuthHandshake,
-) -> Result<
-    Option<crate::sync_manager::ConnectionSchemaDiagnostics>,
-    crate::runtime_tokio::RuntimeError,
-> {
-    let Some(client_schema_hash) = handshake.declared_schema_hash() else {
-        return Ok(None);
-    };
-
-    let diagnostics = state
-        .runtime
-        .with_schema_manager(|sm| sm.connection_schema_diagnostics(client_schema_hash))?;
-    Ok(diagnostics.has_issues().then_some(diagnostics))
 }
 
 pub(super) fn parse_object_id_param(object_id_text: &str) -> Result<ObjectId, String> {
@@ -70,7 +51,7 @@ pub(super) fn parse_app_id_param(app_id_text: &str) -> Result<AppId, String> {
 }
 
 pub(super) fn permissions_head_view(
-    head: crate::schema_manager::manager::PermissionsHeadSummary,
+    head: crate::server::PermissionsHeadSummary,
 ) -> PermissionsHeadView {
     PermissionsHeadView {
         schema_hash: head.schema_hash.to_string(),

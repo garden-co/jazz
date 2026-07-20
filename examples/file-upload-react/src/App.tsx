@@ -1,5 +1,12 @@
 import { use, useEffect, useRef, useState } from "react";
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
+import {
+  attachDevTools,
+  JazzProvider,
+  useAll,
+  useDb,
+  useJazzClient,
+  useSession,
+} from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { app, type UploadWithIncludes, type File as JazzFile } from "../schema.js";
@@ -22,14 +29,15 @@ function canPreviewInline(mime: string): boolean {
 }
 
 function Preview({ file, objectUrl }: { file: JazzFile; objectUrl: string }) {
-  if (file.mimeType.startsWith("image/")) {
-    return <img className="preview-media" src={objectUrl} alt={file.name} />;
+  const label = file.name ?? "Uploaded file";
+  if (file.mime_type.startsWith("image/")) {
+    return <img className="preview-media" src={objectUrl} alt={label} />;
   }
-  if (file.mimeType.startsWith("video/")) {
+  if (file.mime_type.startsWith("video/")) {
     return <video className="preview-media" src={objectUrl} controls />;
   }
-  if (file.mimeType === "application/pdf") {
-    return <iframe className="preview-frame" src={objectUrl} title={file.name} />;
+  if (file.mime_type === "application/pdf") {
+    return <iframe className="preview-frame" src={objectUrl} title={label} />;
   }
   return null;
 }
@@ -51,6 +59,30 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
   };
 }
 
+const devToolsAttachedClients = new WeakSet<object>();
+
+function DevToolsRegistration() {
+  const client = useJazzClient();
+
+  useEffect(() => {
+    if (devToolsAttachedClients.has(client as object)) {
+      return;
+    }
+
+    void attachDevTools(client, app.wasmSchema);
+    devToolsAttachedClients.add(client as object);
+
+    if (location.origin.includes("localhost")) {
+      Object.defineProperty(window, "jazzClient", {
+        value: client,
+        writable: true,
+      });
+    }
+  }, [client]);
+
+  return null;
+}
+
 function FileUploadScreen() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -60,9 +92,7 @@ function FileUploadScreen() {
   const { data: uploads = [] } = useAll(
     app.uploads
       .include({
-        file: {
-          parts: true,
-        },
+        file: true,
       })
       .orderBy("lastModified", "desc")
       .limit(1)
@@ -141,11 +171,6 @@ function FileUploadScreen() {
   function deleteUpload(upload: UploadWithIncludes) {
     const fileRecord = upload.file;
     db.delete(app.uploads, upload.id);
-    if (fileRecord?.parts) {
-      for (const part of fileRecord.parts) {
-        db.delete(app.file_parts, part.id);
-      }
-    }
     if (fileRecord) {
       db.delete(app.files, fileRecord.id);
     }
@@ -206,7 +231,7 @@ function FileUploadScreen() {
 
             <div className="details-values">
               <p>{latestUpload.file.name}</p>
-              <p>{latestUpload.file.mimeType || "unknown"}</p>
+              <p>{latestUpload.file.mime_type || "unknown"}</p>
               <p>{formatBytes(latestUpload.size)}</p>
               <p className="hash-value">{latestUpload.file.id}</p>
             </div>
@@ -228,7 +253,7 @@ function FileUploadScreen() {
           </div>
 
           <div className="preview-wrap">
-            {canPreviewInline(latestUpload.file.mimeType) && objectUrl ? (
+            {canPreviewInline(latestUpload.file.mime_type) && objectUrl ? (
               <Preview file={latestUpload.file} objectUrl={objectUrl} />
             ) : (
               <div className="fallback-preview">
@@ -255,6 +280,7 @@ export function App({ config, fallback }: AppProps = {}) {
 
   return (
     <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+      <DevToolsRegistration />
       <FileUploadScreen />
     </JazzProvider>
   );

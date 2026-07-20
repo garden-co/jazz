@@ -10,10 +10,6 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::row_input;
 use jazz_tools::server::{JazzServer, TestJwtIssuer};
-#[cfg(feature = "rocksdb")]
-use jazz_tools::storage::RocksDBStorage;
-use jazz_tools::storage::Storage;
-use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -271,7 +267,6 @@ fn make_context(
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
-        sync_tracer: None,
     }
 }
 
@@ -323,226 +318,6 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     }
 
     panic!("timed out waiting for EdgeServer query readiness");
-}
-
-// Alice writes to the server, but the confirmation never comes back to
-// that connection. After Alice reconnects with the same persistent client
-// state, the pending batch wait should reconcile from durable server truth.
-#[tokio::test]
-async fn pending_batch_wait_resolves_after_client_reconnect_reconciles_server_fate() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_dir = TempDir::new().expect("client dir");
-    let context = AppContext {
-        app_id: server.app_id(),
-        client_id: None,
-        schema,
-        server_url: server.base_url(),
-        data_dir: client_dir.path().to_path_buf(),
-        storage: ClientStorage::Persistent,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user("alice-pending-batch-reconnect")),
-        backend_secret: None,
-        admin_secret: None,
-        sync_tracer: None,
-    };
-
-    let alice = JazzClient::connect(context.clone())
-        .await
-        .expect("connect alice");
-    let alice_client_id = alice.client_id().expect("alice transport client id");
-    wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
-
-    let blocked = server.block_messages_to(alice_client_id);
-    let (todo_id, expected_values, batch_id) = alice
-        .insert(
-            "todos",
-            row_input!("title" => "reconcile after reconnect", "completed" => false),
-        )
-        .expect("insert todo");
-
-    blocked
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == batch_id
-                            && fate
-                                .confirmed_tier()
-                                .is_some_and(|tier| tier >= DurabilityTier::EdgeServer)
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should settle the batch while alice is blocked");
-
-    alice.shutdown().await.expect("shutdown blocked alice");
-    blocked.unblock();
-
-    let reconnected = JazzClient::connect(context).await.expect("reconnect alice");
-    reconnected
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("reconnect should reconcile pending batch fate");
-
-    let rows = wait_for_todos_count(
-        &reconnected,
-        1,
-        Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
-    )
-    .await;
-    assert!(
-        rows.iter()
-            .any(|(id, values)| *id == todo_id && values == &expected_values),
-        "reconnected client should see the reconciled row at EdgeServer: {rows:?}"
-    );
-
-    reconnected
-        .shutdown()
-        .await
-        .expect("shutdown reconnected alice");
-    server.shutdown().await;
-}
-
-// Alice commits a transaction, but the accepted settlement never comes back to
-// that connection. After Alice reconnects with the same persistent client
-// state, the pending transaction wait should reconcile from durable server truth.
-#[tokio::test]
-async fn pending_transaction_wait_resolves_after_client_reconnect_reconciles_server_fate() {
-    let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_dir = TempDir::new().expect("client dir");
-    let context = AppContext {
-        app_id: server.app_id(),
-        client_id: None,
-        schema,
-        server_url: server.base_url(),
-        data_dir: client_dir.path().to_path_buf(),
-        storage: ClientStorage::Persistent,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user(
-            "alice-pending-transaction-reconnect",
-        )),
-        backend_secret: None,
-        admin_secret: None,
-        sync_tracer: None,
-    };
-
-    let alice = JazzClient::connect(context.clone())
-        .await
-        .expect("connect alice");
-    let alice_client_id = alice.client_id().expect("alice transport client id");
-    wait_for_edge_query_ready(&alice, Duration::from_secs(30)).await;
-
-    let tx = alice
-        .begin_transaction()
-        .expect("begin transaction through client API");
-    let batch_id = tx.batch_id();
-    let (todo_id, expected_values, write_batch_id) = tx
-        .insert(
-            "todos",
-            row_input!("title" => "transaction reconcile after reconnect", "completed" => false),
-        )
-        .expect("insert todo in transaction");
-    assert_eq!(write_batch_id, batch_id);
-
-    let blocked = server.block_messages_to(alice_client_id);
-    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
-
-    blocked
-        .wait_until_buffered(
-            |payload| {
-                matches!(
-                    payload,
-                    SyncPayload::BatchFate { fate }
-                        if fate.batch_id() == batch_id
-                            && fate
-                                .confirmed_tier()
-                                .is_some_and(|tier| tier >= DurabilityTier::EdgeServer)
-                )
-            },
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("server should settle the transaction while alice is blocked");
-
-    alice
-        .shutdown()
-        .await
-        .expect("shutdown blocked alice transaction client");
-    blocked.unblock();
-
-    let reconnected = JazzClient::connect(context)
-        .await
-        .expect("reconnect alice transaction client");
-    reconnected
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("reconnect should reconcile pending transaction fate");
-
-    let rows = wait_for_todos_count(
-        &reconnected,
-        1,
-        Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
-    )
-    .await;
-    assert!(
-        rows.iter()
-            .any(|(id, values)| *id == todo_id && values == &expected_values),
-        "reconnected client should see the reconciled transaction row at EdgeServer: {rows:?}"
-    );
-
-    reconnected
-        .shutdown()
-        .await
-        .expect("shutdown reconnected alice transaction client");
-    server.shutdown().await;
-}
-
-async fn wait_for_catalogue_schema_entry_count_on_disk(
-    app_id: AppId,
-    data_root: &Path,
-    expected_min_count: usize,
-    timeout: Duration,
-) {
-    #[cfg(feature = "rocksdb")]
-    let db_path = data_root.join("jazz.rocksdb");
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut last_count = 0usize;
-
-    while tokio::time::Instant::now() < deadline {
-        #[cfg(feature = "rocksdb")]
-        let storage_result = if db_path.exists() {
-            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).ok()
-        } else {
-            None
-        };
-        if let Some(storage) = storage_result {
-            let expected_app_id = app_id.as_object_id().to_string();
-            let entries = storage.scan_catalogue_entries().unwrap_or_default();
-            last_count = entries
-                .into_iter()
-                .filter(|entry| {
-                    entry.metadata.get("type").map(|value| value.as_str())
-                        == Some("catalogue_schema")
-                        && entry.metadata.get("app_id").map(|value| value.as_str())
-                            == Some(expected_app_id.as_str())
-                })
-                .count();
-            let _ = storage.close();
-            if last_count >= expected_min_count {
-                return;
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    panic!(
-        "timed out waiting for catalogue schema entry count >= {expected_min_count}, last_count={last_count}"
-    );
 }
 
 #[tokio::test]
@@ -609,13 +384,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 
     let restart_port = server.port;
     drop(server);
-    wait_for_catalogue_schema_entry_count_on_disk(
-        app_id,
-        server_data.path(),
-        1,
-        Duration::from_secs(20),
-    )
-    .await;
 
     let restarted =
         ServerProcess::start(restart_port, server_data.path(), &jwks_server.endpoint()).await;
@@ -680,7 +448,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
-        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context.clone())

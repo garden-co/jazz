@@ -1,7 +1,26 @@
-import type { Db } from "jazz-tools";
+import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "jazz-tools/client";
 import { app } from "../schema.js";
 
 type Todo = { id: string; title: string; done: boolean };
+type MaybePromise<T> = T | Promise<T>;
+type WriteHandle = { wait(options?: { tier?: "local" | "edge" | "global" }): Promise<unknown> };
+
+export interface TodoDb {
+  insert<T, Init>(
+    table: unknown,
+    data: Init,
+  ): MaybePromise<
+    WriteHandle | { wait(options?: { tier?: "local" | "edge" | "global" }): Promise<T> }
+  >;
+  update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<WriteHandle>;
+  delete(table: unknown, id: string): MaybePromise<WriteHandle>;
+}
+
+export type TodoSubscribeAll = <T extends { id: string }>(
+  query: QueryBuilder<T>,
+  callback: (delta: SubscriptionDelta<T>) => void,
+  options?: QueryOptions,
+) => () => void;
 
 function renderRow(todo: Todo): HTMLLIElement {
   const li = document.createElement("li");
@@ -27,7 +46,11 @@ function renderRow(todo: Todo): HTMLLIElement {
   return li;
 }
 
-export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
+export function mountTodoWidget(
+  parent: HTMLElement,
+  db: TodoDb,
+  subscribeAll: TodoSubscribeAll,
+): () => void {
   parent.innerHTML = `
     <section class="todo-widget">
       <h2>Your todos</h2>
@@ -42,11 +65,16 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
   const input = form.querySelector<HTMLInputElement>("input[name='title']")!;
   const list = parent.querySelector<HTMLUListElement>("ul")!;
 
-  form.addEventListener("submit", (event) => {
+  function renderTodos(todos: Todo[]) {
+    list.replaceChildren(...todos.map(renderRow));
+  }
+
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = input.value.trim();
     if (!title) return;
-    db.insert(app.todos, { title, done: false });
+    const write = await db.insert(app.todos, { title, done: false });
+    await write.wait({ tier: "edge" });
     form.reset();
   });
 
@@ -56,7 +84,7 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (!li) return;
     const id = li.dataset.id!;
     if (target.dataset.action === "delete") {
-      db.delete(app.todos, id);
+      void Promise.resolve(db.delete(app.todos, id)).then((write) => write.wait({ tier: "edge" }));
     }
   });
 
@@ -65,10 +93,12 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (target.dataset.action !== "toggle") return;
     const li = target.closest<HTMLLIElement>("li[data-id]");
     if (!li) return;
-    db.update(app.todos, li.dataset.id!, { done: target.checked });
+    void Promise.resolve(db.update(app.todos, li.dataset.id!, { done: target.checked })).then(
+      (write) => write.wait({ tier: "edge" }),
+    );
   });
 
-  return db.subscribeAll(app.todos, (delta) => {
+  return subscribeAll(app.todos, (delta) => {
     // The simplest possible approach: rebuild the whole list on every tick.
     // It's fine here — the list is small and there's no DOM state to preserve
     // (no inline editing, no focused inputs inside rows).
@@ -81,6 +111,6 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     //       { kind: Removed, id, index }         // row gone at `index`
     // Iterate delta.delta to apply per-row DOM patches instead of a full
     // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    list.replaceChildren(...delta.all.map(renderRow));
+    renderTodos(delta.all);
   });
 }

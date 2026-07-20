@@ -1,20 +1,29 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
+import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
+import {
+  createPersistentNapiNativeRuntimeAdapter,
+  loadNapiModule,
+} from "./testing/napi-runtime-test-utils.js";
 
-type RuntimeRowWithBatchId = Row & {
-  batchId: string;
+type RuntimeRowWithTransactionId = Row & {
+  transactionId: string;
+};
+
+type TestRuntimeWithTransport = {
+  connect(url: string, authJson: string): void;
+  close?: () => void | Promise<void>;
 };
 
 type SimpleTodo = {
@@ -52,28 +61,17 @@ type ByteChunkInit = {
   data: Uint8Array;
 };
 
-type StoredFilePart = {
-  id: string;
-  data: Uint8Array;
-};
-
-type StoredFilePartInit = {
-  data: Uint8Array;
-};
-
 type StoredFile = {
   id: string;
   name: string;
-  mimeType: string;
-  partIds: string[];
-  partSizes: number[];
+  mime_type: string;
+  data: Uint8Array;
 };
 
 type StoredFileInit = {
   name: string;
-  mimeType: string;
-  partIds: string[];
-  partSizes: number[];
+  mime_type: string;
+  data: Uint8Array;
 };
 
 type PolicyTodo = {
@@ -93,6 +91,33 @@ type PolicyTodoInit = {
   parentId?: string;
   projectId?: string;
   owner_id: string;
+};
+
+type PolicyGraphPerfLocation = {
+  id: string;
+  c1377?: string;
+};
+
+type PolicyGraphPerfLocationInit = Omit<PolicyGraphPerfLocation, "id">;
+
+type PolicyGraphPerfAccessEdge = {
+  id: string;
+  c456: string;
+  c457: string;
+  c458: "e17" | "e18" | "e19";
+  c459: boolean;
+};
+
+type PolicyGraphPerfTemplate = {
+  id: string;
+  c449: string;
+  c450: string;
+  c451: string;
+  c452: boolean;
+  c142: string;
+  c453: Date;
+  c454: Date;
+  c1431: unknown;
 };
 
 const TEST_SCHEMA: WasmSchema = {
@@ -124,24 +149,11 @@ const BYTEA_SCHEMA: WasmSchema = {
 };
 
 const FILE_STORAGE_SCHEMA: WasmSchema = {
-  file_parts: {
-    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
-  },
   files: {
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
-      { name: "mimeType", column_type: { type: "Text" }, nullable: false },
-      {
-        name: "partIds",
-        column_type: { type: "Array", element: { type: "Uuid" } },
-        nullable: false,
-        references: "file_parts",
-      },
-      {
-        name: "partSizes",
-        column_type: { type: "Array", element: { type: "Integer" } },
-        nullable: false,
-      },
+      { name: "mime_type", column_type: { type: "Text" }, nullable: false },
+      { name: "data", column_type: { type: "Bytea" }, nullable: false },
     ],
   },
 };
@@ -226,10 +238,6 @@ function makeWhereTable<Row, Init>(table: string, schema: WasmSchema): WhereTabl
 }
 
 const byteChunksTable = makeWhereTable<ByteChunk, ByteChunkInit>("byte_chunks", BYTEA_SCHEMA);
-const filePartsTable = makeWhereTable<StoredFilePart, StoredFilePartInit>(
-  "file_parts",
-  FILE_STORAGE_SCHEMA,
-);
 const filesTable = makeWhereTable<StoredFile, StoredFileInit>("files", FILE_STORAGE_SCHEMA);
 
 function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, PolicyTodoInit> {
@@ -258,11 +266,20 @@ function makePolicyTodoByIdQuery(schema: WasmSchema, id: string): QueryBuilder<P
   };
 }
 
+const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", import.meta.url));
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts", import.meta.url),
 );
+const POLICY_GRAPH_PERF_FIXTURE_DIR = new URL(
+  "../testing/fixtures/policy-graph-perf/",
+  import.meta.url,
+);
 
 beforeAll(async () => {
+  if (!globalThis.WebSocket) {
+    (globalThis as typeof globalThis & { WebSocket: typeof WebSocket }).WebSocket =
+      UndiciWebSocket as unknown as typeof WebSocket;
+  }
   await loadNapiModule();
 });
 
@@ -314,6 +331,54 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
+async function loadPolicyGraphPerfWasmSchema(): Promise<WasmSchema> {
+  const source = JSON.parse(
+    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
+  ) as { mergedSchema: WasmSchema };
+  return source.mergedSchema;
+}
+
+async function loadPolicyGraphPerfAppSchema(): Promise<WasmSchema> {
+  const source = JSON.parse(
+    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
+  ) as { wasmSchema: WasmSchema };
+  return source.wasmSchema;
+}
+
+async function createPolicyGraphPerfSchemaDir(options?: {
+  includePermissionsFile?: boolean;
+}): Promise<string> {
+  const schemaDir = await createTempDir("jazz-napi-policy-graph-perf-schema-");
+  const fixtureJsonPath = fileURLToPath(
+    new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR),
+  );
+  await writeFile(
+    join(schemaDir, "schema.ts"),
+    `
+      import { readFileSync } from "node:fs";
+
+      const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
+      export const app = { wasmSchema: source.wasmSchema };
+    `,
+  );
+  if (options?.includePermissionsFile ?? true) {
+    await writeFile(
+      join(schemaDir, "permissions.ts"),
+      `
+        import { readFileSync } from "node:fs";
+
+        const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
+        export default Object.fromEntries(
+          Object.entries(source.mergedSchema).flatMap(([tableName, table]: [string, any]) =>
+            table.policies ? [[tableName, table.policies]] : [],
+          ),
+        );
+      `,
+    );
+  }
+  return schemaDir;
+}
+
 async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
@@ -343,19 +408,63 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 }
 
 describe("NAPI integration", () => {
+  it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
+    const { wasmSchema } = await loadTodoServerProject();
+    const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");
+    const previousWebSocket = globalThis.WebSocket;
+    class OpenWebSocket {
+      readyState = 1;
+      addEventListener(): void {}
+      send(): void {}
+      close(): void {
+        this.readyState = 3;
+      }
+    }
+    (globalThis as typeof globalThis & { WebSocket: typeof WebSocket }).WebSocket =
+      OpenWebSocket as unknown as typeof WebSocket;
+
+    let first: TestRuntimeWithTransport | null = null;
+    let second: TestRuntimeWithTransport | null = null;
+    try {
+      first = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
+        appId: randomUUID(),
+        env: "test",
+        userBranch: "main",
+      })) as TestRuntimeWithTransport;
+
+      first.connect("ws://127.0.0.1/jazz/ws", "{}");
+      await first.close?.();
+      first = null;
+
+      second = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
+        appId: randomUUID(),
+        env: "test",
+        userBranch: "main",
+      })) as TestRuntimeWithTransport;
+      expect(second).toBeDefined();
+    } finally {
+      await first?.close?.();
+      await second?.close?.();
+      (globalThis as typeof globalThis & { WebSocket?: typeof WebSocket }).WebSocket =
+        previousWebSocket;
+      await cleanupTempRuntimeData(runtimeData);
+    }
+  });
+
   it("supports oversized indexed persistent mutations from JS callers", async () => {
-    const { NapiRuntime } = await loadNapiModule();
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");
-    const runtime = new NapiRuntime(
-      serializeRuntimeSchema(TEST_SCHEMA),
-      `napi-large-index-${randomUUID()}`,
-      "test",
-      "main",
-      dataPath,
-    ) as unknown as {
-      insert(table: string, values: unknown): RuntimeRowWithBatchId;
-      update(objectId: string, updates: Record<string, unknown>): { batchId: string };
+    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, dataPath, {
+      appId: `napi-large-index-${randomUUID()}`,
+      env: "test",
+      userBranch: "main",
+    })) as unknown as {
+      insert(table: string, values: unknown): RuntimeRowWithTransactionId;
+      update(
+        table: string,
+        objectId: string,
+        updates: Record<string, unknown>,
+      ): { transactionId: string };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -369,7 +478,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
-      expect(insertedRow.batchId).toEqual(expect.any(String));
+      expect(insertedRow.transactionId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -381,12 +490,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
-      expect(secondRow.batchId).toEqual(expect.any(String));
+      expect(secondRow.transactionId).toEqual(expect.any(String));
 
-      const updateResult = runtime.update(secondRow.id, {
+      const updateResult = runtime.update("todos", secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
-      expect(updateResult.batchId).toEqual(expect.any(String));
+      expect(updateResult.transactionId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);
@@ -422,20 +531,20 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      const todoServerProject = await loadTodoServerProject();
       await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
       });
+      const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
@@ -552,6 +661,738 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(runtimeData);
       await server.stop();
     }
+  }, 120_000);
+
+  it("resolves global waits for backend context writes through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-global-wait-secret";
+    const adminSecret = "napi-global-wait-admin-secret";
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+      });
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
+      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
+
+      runtimeData = await createTempRuntimeData("jazz-napi-global-wait-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: todoServerSchema },
+        permissions: todoServerProject.permissions ?? {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdTodo = await withTimeout(
+        backendDb
+          .insert(policyTodosTable, {
+            title: "global-wait-item",
+            done: false,
+            description: "global wait repro",
+            owner_id: "backend",
+          })
+          .wait({ tier: "global" }),
+        15_000,
+        "backend global insert wait timed out",
+      );
+
+      expect(createdTodo).toMatchObject({
+        title: "global-wait-item",
+        done: false,
+        owner_id: "backend",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("resolves global waits for backend writes with the policy graph perf fixture", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-global-wait-secret";
+    const adminSecret = "napi-policy_graph-global-wait-admin-secret";
+    const policyGraphSchemaForServer = await loadPolicyGraphPerfWasmSchema();
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+      schema: encodeNativeSchema(policyGraphSchemaForServer),
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const policyGraphSchema = policyGraphSchemaForServer;
+      const locationTable = makeWhereTable<PolicyGraphPerfLocation, PolicyGraphPerfLocationInit>(
+        "t111",
+        policyGraphSchema,
+      );
+
+      runtimeData = await createTempRuntimeData("jazz-napi-policy_graph-global-wait-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: policyGraphSchema },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdLocation = await withTimeout(
+        backendDb
+          .insert(
+            locationTable,
+            {
+              c1377: "policy graph perf fixture global wait",
+            },
+            { id: randomUUID() },
+          )
+          .wait({ tier: "global" }),
+        90_000,
+        "policy graph perf fixture backend global insert wait timed out",
+      );
+
+      expect(createdLocation).toMatchObject({
+        c1377: "policy graph perf fixture global wait",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 120_000);
+
+  it("resolves global waits after deploying the policy graph perf fixture", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-global-wait-deploy-secret";
+    const adminSecret = "napi-policy_graph-global-wait-deploy-admin-secret";
+    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const schemaDir = await createPolicyGraphPerfSchemaDir();
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+    let context: {
+      asBackend(): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const locationTable = makeWhereTable<PolicyGraphPerfLocation, PolicyGraphPerfLocationInit>(
+        "t111",
+        policyGraphSchema,
+      );
+
+      runtimeData = await createTempRuntimeData(
+        "jazz-napi-policy_graph-global-wait-deploy-runtime-",
+      );
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: policyGraphSchema },
+        permissions: {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const createdLocation = await withTimeout(
+        backendDb
+          .insert(
+            locationTable,
+            {
+              c1377: "policy graph deploy schemaDir global wait",
+            },
+            { id: randomUUID() },
+          )
+          .wait({ tier: "global" }),
+        90_000,
+        "policy graph deploy schemaDir backend global insert wait timed out",
+      );
+
+      expect(createdLocation).toMatchObject({
+        c1377: "policy graph deploy schemaDir global wait",
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await rm(schemaDir, { recursive: true, force: true });
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("serves policy graph resource-policy holders through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-holder-subscription-secret";
+    const adminSecret = "napi-policy_graph-holder-subscription-admin-secret";
+    const policyGraphSchema = await loadPolicyGraphPerfAppSchema();
+    const memberId = "00000000-0000-4000-8000-000000000001";
+    const corporationId = randomUUID();
+    const templateId = randomUUID();
+    const jwtIssuer = await startTestJwtIssuer();
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+      schema: encodeNativeSchema(policyGraphSchema),
+      jwksUrl: jwtIssuer.jwksUrl,
+    });
+    let context: {
+      asBackend(): Db;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forRequest(request: Request): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: policyGraphSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "t1",
+        policyGraphSchema,
+      );
+      const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "t188",
+        policyGraphSchema,
+      );
+      const templateTable = makeWhereTable<
+        PolicyGraphPerfTemplate,
+        Omit<PolicyGraphPerfTemplate, "id">
+      >("t105", policyGraphSchema);
+      const templateAccessEdgesTable = makeWhereTable<
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t190", policyGraphSchema);
+      const teamAccessEdgesTable = makeWhereTable<
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t187", policyGraphSchema);
+      const now = new Date("2026-07-10T00:00:00.000Z");
+      await backendDb
+        .insert(
+          teamTable,
+          {
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Example Corp",
+            c453: now,
+            c454: now,
+            c146: "fixture corporation",
+          },
+          { id: corporationId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamTable,
+          {
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Jon",
+            c453: now,
+            c454: now,
+            c146: "fixture member",
+          },
+          { id: memberId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamEntryTable,
+          {
+            c457: memberId,
+            c1948: corporationId,
+            c1949: memberId,
+            c459: false,
+            c1950: now,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          templateTable,
+          {
+            c449: corporationId,
+            c450: memberId,
+            c451: memberId,
+            c452: false,
+            c142: "Visible template",
+            c453: now,
+            c454: now,
+            c1431: {},
+          },
+          { id: templateId },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          templateAccessEdgesTable,
+          {
+            c456: templateId,
+            c457: corporationId,
+            c458: "e19",
+            c459: false,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+      await backendDb
+        .insert(
+          teamAccessEdgesTable,
+          {
+            c456: corporationId,
+            c457: corporationId,
+            c458: "e19",
+            c459: false,
+          },
+          { id: randomUUID() },
+        )
+        .wait({ tier: "global" });
+
+      const visibleTemplates = await waitForQueryRows(
+        backendDb,
+        templateTable.where({}),
+        (rows) => rows.some((row) => row.id === templateId),
+        10_000,
+        { tier: "global" },
+      );
+      expect(visibleTemplates).toEqual([expect.objectContaining({ id: templateId })]);
+
+      const visibleEdges = await waitForQueryRows(
+        backendDb,
+        teamAccessEdgesTable.where({}),
+        (rows) => rows.some((row) => row.c456 === corporationId),
+        10_000,
+        { tier: "global" },
+      );
+      expect(visibleEdges).toEqual([expect.objectContaining({ c456: corporationId })]);
+      expect(consoleError.mock.calls).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await server.stop();
+      await jwtIssuer.stop();
+    }
+  }, 60_000);
+
+  it("reopens a deployed policy graph schema data directory through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-reopen-secret";
+    const adminSecret = "napi-policy_graph-reopen-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-policy_graph-reopen-server-");
+    let schemaDir: string | null = null;
+    let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
+
+    try {
+      schemaDir = await createPolicyGraphPerfSchemaDir();
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+      });
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+      });
+      expect(server.url).toContain("http://");
+    } finally {
+      if (server) {
+        await server.stop();
+      }
+      if (schemaDir) {
+        await rm(schemaDir, { recursive: true, force: true });
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("serves policy graph holder queries after importing data and reopening the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-chain-secret";
+    const adminSecret = "napi-policy_graph-chain-admin-secret";
+    const dataDir = await createTempDir("jazz-napi-policy_graph-chain-server-");
+    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const memberId = "00000000-0000-4000-8000-000000000001";
+    const corporationId = randomUUID();
+    const schemaDir = await createPolicyGraphPerfSchemaDir();
+    const jwtIssuer = await startTestJwtIssuer();
+    let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
+    let context: {
+      asBackend(): Db;
+      forRequest(request: Request): Promise<Db>;
+      shutdown(): Promise<void>;
+    } | null = null;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+        jwksUrl: jwtIssuer.jwksUrl,
+      });
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: policyGraphSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const backendDb = context.asBackend();
+      const teamTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "t1",
+        policyGraphSchema,
+      );
+      const teamEntryTable = makeWhereTable<Record<string, unknown>, Record<string, unknown>>(
+        "t188",
+        policyGraphSchema,
+      );
+      const teamAccessEdgesTable = makeWhereTable<
+        PolicyGraphPerfAccessEdge,
+        Omit<PolicyGraphPerfAccessEdge, "id">
+      >("t187", policyGraphSchema);
+      const now = new Date("2026-07-10T00:00:00.000Z");
+
+      await backendDb
+        .transaction((tx) => {
+          tx.insert(
+            teamTable,
+            {
+              c449: corporationId,
+              c450: memberId,
+              c451: memberId,
+              c452: false,
+              c142: "Example Corp",
+              c453: now,
+              c454: now,
+              c146: "fixture corporation",
+            },
+            { id: corporationId },
+          );
+          tx.insert(
+            teamTable,
+            {
+              c449: corporationId,
+              c450: memberId,
+              c451: memberId,
+              c452: false,
+              c142: "Jon",
+              c453: now,
+              c454: now,
+              c146: "fixture member",
+            },
+            { id: memberId },
+          );
+          tx.insert(
+            teamEntryTable,
+            {
+              c457: memberId,
+              c1948: corporationId,
+              c1949: memberId,
+              c459: false,
+              c1950: now,
+            },
+            { id: randomUUID() },
+          );
+          tx.insert(
+            teamAccessEdgesTable,
+            {
+              c456: corporationId,
+              c457: corporationId,
+              c458: "e19",
+              c459: false,
+            },
+            { id: randomUUID() },
+          );
+        })
+        .wait({ tier: "global" });
+
+      await context.shutdown();
+      context = null;
+      await server.stop();
+      server = null;
+
+      server = await startLocalJazzServer({
+        appId,
+        backendSecret,
+        adminSecret,
+        dataDir,
+        jwksUrl: jwtIssuer.jwksUrl,
+      });
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: policyGraphSchema },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        adminSecret,
+        jwksUrl: jwtIssuer.jwksUrl,
+        env: "test",
+        userBranch: "main",
+        tier: "global",
+      });
+      await settleAsyncSyncWork();
+
+      const reopenedBackend = context.asBackend();
+      const teamRows = await waitForQueryRows(
+        reopenedBackend,
+        teamTable.where({}),
+        (rows) => rows.some((row) => row.id === corporationId),
+        10_000,
+        { tier: "global" },
+      );
+      expect(teamRows).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: corporationId })]),
+      );
+
+      const edgeRows = await waitForQueryRows(
+        reopenedBackend,
+        teamAccessEdgesTable.where({}),
+        (rows) => rows.some((row) => row.c456 === corporationId),
+        10_000,
+        { tier: "global" },
+      );
+      expect(edgeRows).toEqual([expect.objectContaining({ c456: corporationId })]);
+      expect(consoleError.mock.calls).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+      if (context) {
+        await context.shutdown();
+      }
+      if (server) {
+        await server.stop();
+      }
+      await jwtIssuer.stop();
+      await rm(schemaDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("publishes inherited seeded-reachability permissions through the local server route", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-policy_graph-permissions-secret";
+    const adminSecret = "napi-policy_graph-permissions-admin-secret";
+    const schemaDir = await createTempDir("jazz-napi-policy_graph-permissions-schema-");
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+
+    try {
+      const publicApiImport = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
+      await writeFile(
+        join(schemaDir, "schema.ts"),
+        `
+          import { schema as s } from ${JSON.stringify(publicApiImport)};
+
+          const schema = {
+            team: s.table({
+              identity_key: s.string(),
+            }),
+            team_entry: s.table({
+              team_id: s.ref("team"),
+              target_id: s.ref("team"),
+              administrator: s.boolean(),
+            }),
+            dropdowns: s.table({
+              name: s.string(),
+            }),
+            dropdowns_access_edges: s.table({
+              resource_id: s.ref("dropdowns"),
+              team_id: s.ref("team"),
+              grant_role: s.string(),
+              administrator: s.boolean(),
+            }),
+            dropdown_entry: s.table({
+              dropdowns_id: s.ref("dropdowns"),
+              label: s.string(),
+            }),
+          };
+
+          type AppSchema = s.Schema<typeof schema>;
+          export const app: s.App<AppSchema> = s.defineApp(schema);
+        `,
+      );
+      await writeFile(
+        join(schemaDir, "permissions.ts"),
+        `
+          import { schema as s } from ${JSON.stringify(publicApiImport)};
+          import { app } from "./schema.js";
+
+          export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
+            const directlyReachableTeams = policy.team_entry
+              .where({ team_id: session.user_id })
+              .hopTo("target");
+            const memberReachableTeams = directlyReachableTeams.gather({
+              step: ({ current }) =>
+                policy.team_entry
+                  .where({ team_id: current, administrator: false })
+                  .hopTo("target"),
+              maxDepth: 32,
+            });
+
+            policy.dropdowns.allowRead.where((dropdown) =>
+              policy.exists(
+                memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
+                  "dropdowns_access_edges.resource_id": dropdown.id,
+                  grant_role: { in: ["EDITOR"] },
+                  administrator: false,
+                }),
+              ),
+            );
+            policy.dropdowns.allowInsert.where({});
+            policy.dropdowns.allowUpdate
+              .whereOld((dropdown) =>
+                policy.exists(
+                  memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
+                    "dropdowns_access_edges.resource_id": dropdown.id,
+                    grant_role: { in: ["EDITOR"] },
+                    administrator: false,
+                  }),
+                ),
+              )
+              .whereNew({});
+            policy.dropdowns.allowDelete.where({});
+
+            policy.dropdowns_access_edges.allowRead.where({});
+            policy.dropdowns_access_edges.allowInsert.where({});
+            policy.dropdowns_access_edges.allowUpdate.where({});
+            policy.dropdowns_access_edges.allowDelete.where({});
+
+            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns_id"));
+            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowUpdate
+              .whereOld(allowedTo.update("dropdowns_id"))
+              .whereNew(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns_id"));
+          });
+        `,
+      );
+
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir,
+      });
+    } finally {
+      await rm(schemaDir, { recursive: true, force: true });
+      await server.stop();
+    }
   }, 60_000);
 
   it("can update an optional row field to null", async () => {
@@ -573,14 +1414,13 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      const todoServerProject = await loadTodoServerProject();
       await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
       });
+      const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
@@ -662,7 +1502,7 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: TEST_SCHEMA,
+        schemaDir: BASIC_SCHEMA_DIR,
       });
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
@@ -926,16 +1766,13 @@ describe("NAPI integration", () => {
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      const { NapiRuntime } = await loadNapiModule();
 
-      seedRuntime = new NapiRuntime(
-        serializeRuntimeSchema(BYTEA_SCHEMA),
+      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
         appId,
-        "dev",
-        "main",
-        dataPath,
-        "edge",
-      ) as unknown as {
+        env: "dev",
+        userBranch: "main",
+        tier: "edge",
+      })) as unknown as {
         insert(table: string, values: unknown): { id: string };
         close(): void;
       };
@@ -974,7 +1811,7 @@ describe("NAPI integration", () => {
     }
   }, 30_000);
 
-  it("stores Blob chunks in conventional file_parts.data when using createFileFromBlob", async () => {
+  it("stores Blob bytes in files.data when using createFileFromBlob", async () => {
     const dataRoot = await createTempDir("jazz-napi-bytea-file-");
     const dataPath = join(dataRoot, "runtime.skv");
     let context: {
@@ -995,18 +1832,18 @@ describe("NAPI integration", () => {
       const file = await context.db().createFileFromBlob(
         {
           files: filesTable,
-          file_parts: filePartsTable,
         },
         new Blob([new Uint8Array([7, 8, 9])], { type: "application/octet-stream" }),
         { name: "probe.bin" },
       );
 
-      const part = await context.db().one(filePartsTable.where({ id: file.partIds[0] }), {
+      const storedFile = await context.db().one(filesTable.where({ id: file.id }), {
         tier: "local",
       });
 
-      expect(part).not.toBeNull();
-      expect(Array.from(part?.data ?? [])).toEqual([7, 8, 9]);
+      expect(storedFile).not.toBeNull();
+      expect(storedFile?.mime_type).toBe("application/octet-stream");
+      expect(Array.from(storedFile?.data ?? [])).toEqual([7, 8, 9]);
     } finally {
       if (context) {
         await context.shutdown();

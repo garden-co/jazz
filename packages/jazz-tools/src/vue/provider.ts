@@ -15,13 +15,11 @@ import {
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
 export interface JazzProviderProps {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
-  autoAttachDevTools?: boolean;
 }
 
 const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = Symbol("jazz");
@@ -36,10 +34,6 @@ export const JazzProvider = defineComponent({
     client: {
       type: Object as PropType<JazzProviderProps["client"]>,
       required: true,
-    },
-    autoAttachDevTools: {
-      type: Boolean,
-      default: true,
     },
   },
   setup(props, { slots }) {
@@ -86,10 +80,6 @@ export const JazzProvider = defineComponent({
               }
               triggerRef(clientRef);
             });
-
-            if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools) {
-              startInspectorOnce(client.db);
-            }
           })
           .catch((reason) => {
             if (cancelled || activeRunId !== runId) {
@@ -128,8 +118,8 @@ export const JazzProvider = defineComponent({
 });
 
 /**
- * Get the current Jazz client, including the backing {@link Db}, subscription manager,
- * session snapshot, and shutdown helper.
+ * Get the current Jazz client, including the backing {@link Db}, session snapshot,
+ * and shutdown helper.
  */
 export function useJazzClient(): JazzClientContextValue {
   const ctx = inject(JazzContextKey, null);

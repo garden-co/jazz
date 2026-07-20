@@ -2,8 +2,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { deploy as deployProject } from "../dev/catalogue-project.js";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { wasmSchema as wasmSchemaExample } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
 
@@ -18,7 +17,7 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-adapter-methods",
       });
 
-      await deployProject({
+      await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
@@ -408,7 +407,7 @@ describe("jazzAdapter", () => {
     it("accepts app-like schema sources from root schema.ts modules", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
-        db: () => context.db(authSchema),
+        db: () => context.asBackend(authSchema),
         schema: authSchema,
       })({});
 
@@ -473,7 +472,7 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-common-user-flows",
       });
 
-      await deployProject({
+      await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
@@ -842,7 +841,7 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-better-auth-usage",
       });
 
-      await deployProject({
+      await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
@@ -922,7 +921,7 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-integration-tests",
       });
 
-      await deployProject({
+      await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
@@ -988,7 +987,7 @@ describe("jazzAdapter", () => {
     });
 
     test("creates and reads records through the sync server", async () => {
-      await deployProject({
+      await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,

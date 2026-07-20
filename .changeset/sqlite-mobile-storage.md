@@ -1,5 +1,4 @@
 ---
-"jazz-rn": patch
 ---
 
 Switch the mobile persistent storage engine to SQLite.

@@ -16,6 +16,10 @@ import type { DbConfig } from "jazz-tools";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -40,30 +44,20 @@ describe("React Todo App E2E", () => {
   const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
   /** Mount the real App. Returns the container element. */
-  async function mountApp(
-    config: {
-      appId?: string;
-      serverUrl?: string;
-      auth?: { localFirstSecret: string };
-      adminSecret?: string;
-      driver?: DbConfig["driver"];
-    } = {},
-  ): Promise<HTMLDivElement> {
+  async function mountApp(config: {
+    appId?: string;
+    serverUrl?: string;
+    secret?: string;
+    adminSecret?: string;
+    driver?: DbConfig["driver"];
+  }): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
     await act(async () => {
-      r.render(
-        <App
-          config={{
-            appId: config.appId ?? "test-app",
-            driver: { type: "persistent", dbName: crypto.randomUUID() },
-            ...config,
-          }}
-        />,
-      );
+      r.render(<App config={{ appId: config.appId ?? "test-app", ...config }} />);
     });
 
     // Wait for JazzProvider to initialize and TodoList to render
@@ -105,7 +99,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("empty") } });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -117,7 +111,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("add") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -143,7 +137,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 
     // Add a todo first
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -178,7 +172,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("delete") } });
 
     // Add a todo
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -210,7 +204,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos with correct state", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ driver: { type: "persistent", dbName: uniqueDbName("multi") } });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -238,7 +232,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("persists todos across app unmount and remount (OPFS)", async () => {
-    const dbName = crypto.randomUUID();
+    const dbName = uniqueDbName("opfs");
 
     // First session: mount app, add a todo via the form
     const el1 = await mountApp({ driver: { type: "persistent", dbName } });
@@ -281,15 +275,17 @@ describe("React Todo App E2E", () => {
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
+      secret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const el2 = await mountApp({
       appId: APP_ID,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
+      secret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -331,13 +327,15 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
+      adminSecret: ADMIN_SECRET,
+      secret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
+      adminSecret: ADMIN_SECRET,
+      secret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
       driver: { type: "memory" },
     });
 

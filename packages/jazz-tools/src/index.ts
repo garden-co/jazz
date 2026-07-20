@@ -16,7 +16,6 @@ import {
   defineSliceableApp,
   defineTable,
   TypedTableQueryBuilder,
-  permissionIntrospectionColumns,
 } from "./typed-app.js";
 import type {
   App as TypedApp,
@@ -111,7 +110,6 @@ export {
   defineApp,
   defineSliceableApp,
   TypedTableQueryBuilder,
-  permissionIntrospectionColumns,
 } from "./typed-app.js";
 export { defineMigration, renameTableFrom } from "./migrations.js";
 export {
@@ -170,7 +168,6 @@ type RuntimeSchemaNamespace = typeof col & {
   defineMigration: typeof defineMigration;
   renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
-  permissionIntrospectionColumns: typeof permissionIntrospectionColumns;
 };
 
 export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
@@ -181,7 +178,6 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   defineMigration,
   renameTableFrom,
   definePermissions,
-  permissionIntrospectionColumns,
 } as const);
 
 export namespace schema {
@@ -227,5 +223,8 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
+export * from "./dev-tools/index.js";
+// Inspector overlay host contract (types + global) and the host bridge that
+// publishes the handle for the same-origin overlay iframe.
 export * from "./dev/inspector-overlay/inspector-host-types.js";
-export { installInspectorHost } from "./dev/inspector-overlay/host-bridge.js";
+export { installInspectorHost, type InspectorHostDb } from "./dev/inspector-overlay/host-bridge.js";

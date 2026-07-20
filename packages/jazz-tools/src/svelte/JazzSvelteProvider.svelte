@@ -4,31 +4,32 @@ Pass a pre-created client or a promise that resolves to one.
 -->
 <script lang="ts">
 	import type { Db } from '../runtime/db.js';
+	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
-	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
+
+	type SvelteJazzClient = JazzClient<false>;
 
 	interface Props {
-		client: JazzClient | Promise<JazzClient>;
+		client: SvelteJazzClient | Promise<SvelteJazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
-		autoAttachDevTools?: boolean;
 	}
 
-	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
+	let { client, children, fallback }: Props = $props();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
 
 	$effect(() => {
 		let cancelled = false;
-		let resolvedClient: JazzClient | null = null;
+		let resolvedClient: SvelteJazzClient | null = null;
 		let stopSessionSync: (() => void) | null = null;
 
 		error = null;
 		ctx.db = null;
 		ctx.session = null;
-		ctx.manager = null;
+		ctx.subscriptionStore = null;
 
 		Promise.resolve(client)
 			.then((resolved) => {
@@ -40,7 +41,7 @@ Pass a pre-created client or a promise that resolves to one.
 				resolvedClient = resolved;
 				ctx.db = resolved.db;
 				ctx.session = resolved.session ?? null;
-				ctx.manager = resolved.manager;
+				ctx.subscriptionStore = getSubscriptionStore(resolved);
 				stopSessionSync = resolved.db.onAuthChanged(({ session }) => {
 					if (cancelled) {
 						return;
@@ -48,10 +49,6 @@ Pass a pre-created client or a promise that resolves to one.
 
 					ctx.session = session ?? null;
 				});
-
-				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(resolved.db);
-				}
 			})
 			.catch((reason) => {
 				if (cancelled) {

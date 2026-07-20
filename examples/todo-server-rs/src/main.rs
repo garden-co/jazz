@@ -30,6 +30,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod client_worker;
 mod routes;
 
 use std::net::SocketAddr;
@@ -38,17 +39,18 @@ use std::process::Command;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz_tools::{AppContext, AppId, ClientStorage, JazzClient, Schema};
+use jazz_tools::{AppContext, AppId, ClientStorage, Schema};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use client_worker::TodoClient;
 use routes::Todo;
 
 /// Application state shared across request handlers.
 pub struct AppState {
-    pub client: JazzClient,
+    pub client: TodoClient,
     /// Broadcast channel for SSE updates. Sends the full list of todos.
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
@@ -112,10 +114,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
-        sync_tracer: None,
     };
 
-    let client = JazzClient::connect(context).await?;
+    let client = TodoClient::connect(context).await?;
     info!("Connected to Jazz");
 
     // Create broadcast channel for SSE updates

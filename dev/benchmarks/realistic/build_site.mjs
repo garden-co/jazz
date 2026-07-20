@@ -408,11 +408,12 @@ function buildHtml() {
 
   <script>
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-    const SUITE_ORDER = ["native", "native-criterion", "browser"];
+    const SUITE_ORDER = ["native", "native-criterion", "jazz-sim", "browser"];
     const SUITE_LABELS = {
       native: "Native",
       browser: "Browser",
       "native-criterion": "Native CR",
+      "jazz-sim": "Jazz-sim",
     };
     const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "opfs-btree"];
     const STORAGE_ENGINE_LABELS = {
@@ -628,6 +629,18 @@ function buildHtml() {
           subrank: 0,
         };
       }
+      if (metric.startsWith("extra:")) {
+        const metricName = metric.slice("extra:".length);
+        return {
+          label: prettyToken(metricName),
+          detail: "",
+          unit: "",
+          direction: metricName.includes("_per_sec") ? "higher" : metricName.includes("_us") || metricName.includes("_ms") ? "lower" : "neutral",
+          rank: 3,
+          opName: metricName,
+          subrank: 0,
+        };
+      }
       if (!metric.startsWith("op:")) {
         return { label: metric, detail: "", unit: "", direction: "neutral", rank: 99, subrank: 99 };
       }
@@ -675,6 +688,13 @@ function buildHtml() {
         if (Number.isFinite(Number(summary.avg_ms))) keys.push("op:" + opName + "/avg_ms");
         if (Number.isFinite(Number(summary.p95_ms))) keys.push("op:" + opName + "/p95_ms");
       }
+      const extraMetrics =
+        scenario && scenario.extra && scenario.extra.metrics && typeof scenario.extra.metrics === "object"
+          ? scenario.extra.metrics
+          : {};
+      for (const metricName of Object.keys(extraMetrics).sort(compareText)) {
+        if (Number.isFinite(Number(extraMetrics[metricName]))) keys.push("extra:" + metricName);
+      }
       return keys.sort(compareMetrics);
     }
 
@@ -682,6 +702,10 @@ function buildHtml() {
       if (!scenario || typeof scenario !== "object") return NaN;
       if (metric === "wall_time_ms") return Number(scenario.wall_time_ms);
       if (metric === "throughput_ops_per_sec") return Number(scenario.throughput_ops_per_sec);
+      if (metric.startsWith("extra:")) {
+        const metricName = metric.slice("extra:".length);
+        return Number(scenario.extra && scenario.extra.metrics && scenario.extra.metrics[metricName]);
+      }
       if (!metric.startsWith("op:")) return NaN;
       const slash = metric.lastIndexOf("/");
       if (slash <= 3) return NaN;

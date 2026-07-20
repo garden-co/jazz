@@ -97,13 +97,31 @@ describe("Db devMode active query tracing", () => {
     const db = await makeDb(true);
     const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, {
       tier: "edge",
-      propagation: "local-only",
+      propagate: false,
     });
 
     expect(db.getActiveQuerySubscriptions()[0]?.tier).toBe("edge");
     expect(db.getActiveQuerySubscriptions()[0]?.propagation).toBe("local-only");
 
     unsubscribe();
+  });
+
+  it("reports unknown for trace payloads without parseable table metadata", async () => {
+    const db = await makeDb(true, "feature-branch");
+    const parseTracePayload = (
+      db as unknown as {
+        parseRuntimeQueryTracePayload(queryJson: string): { table: string; branches: string[] };
+      }
+    ).parseRuntimeQueryTracePayload.bind(db);
+
+    expect(parseTracePayload(JSON.stringify({ branches: ["dev"] }))).toEqual({
+      table: "unknown",
+      branches: ["dev"],
+    });
+    expect(parseTracePayload("{not-json")).toEqual({
+      table: "unknown",
+      branches: ["feature-branch"],
+    });
   });
 
   it("clears traces on shutdown", async () => {

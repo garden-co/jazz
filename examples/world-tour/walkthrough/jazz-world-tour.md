@@ -308,7 +308,7 @@ No `await`. The insert returns immediately because writes hit the local DB first
 
 ```typescript
 const db = useDb();
-const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: { parts: true } }).limit(1));
+const { data: bandsWithLogo } = useAll(app.bands.include({ logoFile: true }).limit(1));
 
 // Upload: binary file → Jazz file → link to band
 async function onFileSelected(event: Event) {
@@ -323,8 +323,8 @@ const blob = await db.loadFileAsBlob(app, logoFile);
 logoUrl.value = URL.createObjectURL(blob);
 ```
 
-- **Nested includes**: `.include({ logoFile: { parts: true } })` loads the file and its binary parts in one query.
-- **`createFileFromBlob`** / **`loadFileAsBlob`** handle chunked binary storage transparently.
+- **Nested includes**: `.include({ logoFile: true })` loads the linked file row in one query.
+- **`createFileFromBlob`** / **`loadFileAsBlob`** handle binary storage transparently.
 
 ---
 
@@ -341,6 +341,6 @@ logoUrl.value = URL.createObjectURL(blob);
 | `useAll(query)`                            | **Vue-specific** reactive live query, re-renders on every change |
 | `db.insert` / `db.update` / `db.delete`    | Synchronous local writes, sync to edge happens in the background |
 | `db.all(query)`                            | Async read, used for one-time checks (seeding, deduplication)    |
-| `db.createFileFromBlob` / `loadFileAsBlob` | Chunked binary file storage and retrieval                        |
+| `db.createFileFromBlob` / `loadFileAsBlob` | Binary file storage and retrieval                                |
 | `definePermissions`                        | Row-level security policies enforced by the Jazz runtime         |
 | `.where()` / `.include()` / `.orderBy()`   | Fluent, typed query builder with relation eager-loading          |

@@ -1,5 +1,6 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { ActiveQuerySubscriptionTrace, DbConfig } from "../../runtime/db.js";
+import type { SubscriptionChannel } from "../../runtime/subscription-channel.js";
 
 /** Active subscription as sent to the overlay — the trace minus the JS stack. */
 export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
@@ -7,14 +8,23 @@ export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
 /** Read-once handle the host publishes on `window` for the same-origin overlay. */
 export interface JazzInspectorHost {
   /**
-   * A ready-to-use config for the overlay's own worker client: the host's
-   * identity plus the resolved store coordinates (OPFS namespace + broker
-   * worker URL), so the overlay joins the host's store. Built entirely on the
-   * host side — the overlay passes it to its provider verbatim. No schemaHash:
-   * the host injects its runtime schema directly (plain data), so the overlay
-   * skips the server schema fetch.
+   * A ready-to-use config for the overlay client: the app id plus the live
+   * subscription channel from {@link getSubscriptionChannel}. Built entirely on
+   * the host side — the overlay passes it to its provider verbatim, so it never
+   * opens its own storage, worker, or server connection, and no credential is
+   * exposed on the handle. No schemaHash: the host injects its runtime schema
+   * directly (plain data), so the overlay skips the server schema fetch.
    */
   getConnectionConfig(): DbConfig;
+  /**
+   * A live subscription channel into the host's own store. The overlay is a
+   * same-origin iframe, so it can call the host realm's channel directly; its
+   * client plugs this into `subscriptionChannel` and thereby sees exactly what
+   * the host sees — local unsynced rows included, offline included — without
+   * contending for the host's OPFS/worker leadership. The channel's shutdown is
+   * masked: the overlay tearing down its client must not shut the host down.
+   */
+  getSubscriptionChannel(): SubscriptionChannel;
   /** The host's runtime schema (plain serializable data — safe across realms). */
   getWasmSchema(): WasmSchema;
   /**

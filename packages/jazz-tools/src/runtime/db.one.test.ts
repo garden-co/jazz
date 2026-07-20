@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createDbFromClient } from "./db.js";
+import { Db, type DbConfig } from "./db.js";
 import type { JazzClient, Row } from "./client.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 const todoSchema = {
   todos: s.table({
@@ -22,16 +24,36 @@ const todoRow: Row = {
 
 type QuerySpy = ReturnType<typeof vi.fn<(queryJson: string, options?: unknown) => Promise<Row[]>>>;
 
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
+
+class TestDb extends Db {
+  constructor(client: JazzClient) {
+    super({ appId: "db-one-limit-test" }, new TestRuntimeSource(client));
+  }
+
+  protected override getClient(_schema: WasmSchema): JazzClient {
+    return super.getClient(_schema);
+  }
+}
+
 function makeClient() {
   const query = vi.fn(async (_queryJson: string, _options?: unknown) => [todoRow]);
-  const beginBatch = vi.fn(() => "batch-1");
+  const beginTransaction = vi.fn(() => "transaction-1");
   const client = {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
-    beginBatch,
+    beginTransaction,
   } as unknown as JazzClient;
 
-  return { client, query, beginBatch };
+  return { client, query, beginTransaction };
 }
 
 function firstQueryJson(query: QuerySpy): string {
@@ -42,16 +64,16 @@ function firstQueryJson(query: QuerySpy): string {
 
 function rootLimit(queryJson: string): number | undefined {
   const parsed = JSON.parse(queryJson) as {
-    relation_ir?: { Limit?: { limit?: unknown } };
+    limit?: unknown;
   };
-  const limit = parsed.relation_ir?.Limit?.limit;
+  const limit = parsed.limit;
   return typeof limit === "number" ? limit : undefined;
 }
 
 describe("Db.one", () => {
   it("adds limit 1 before executing an unbounded query", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.where({ done: false }));
 
@@ -60,7 +82,7 @@ describe("Db.one", () => {
 
   it("narrows explicit limits above one", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.limit(10));
 
@@ -69,24 +91,24 @@ describe("Db.one", () => {
 
   it("overrides explicit limit 0", async () => {
     const { client, query } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
+    const db = new TestDb(client);
 
     await db.one(app.todos.limit(0));
 
     expect(rootLimit(firstQueryJson(query))).toBe(1);
   });
 
-  it("adds limit 1 before executing an explicit batch query", async () => {
-    const { client, query, beginBatch } = makeClient();
-    const db = createDbFromClient({ appId: "db-one-limit-test" }, client);
-    const batch = db.beginBatch();
+  it("adds limit 1 before executing an explicit mergeable transaction query", async () => {
+    const { client, query, beginTransaction } = makeClient();
+    const db = new TestDb(client);
+    const tx = db.beginTransaction();
 
-    await batch.one(app.todos.where({ done: false }));
+    await tx.one(app.todos.where({ done: false }));
 
-    expect(beginBatch).toHaveBeenCalledWith("direct");
+    expect(beginTransaction).toHaveBeenCalledWith("mergeable");
     expect(rootLimit(firstQueryJson(query))).toBe(1);
     expect(query.mock.calls[0]?.[1]).toMatchObject({
-      transactionBatchId: "batch-1",
+      transactionId: "transaction-1",
     });
   });
 });

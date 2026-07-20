@@ -1,5 +1,5 @@
-import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
-import { Suspense } from "react";
+import { JazzProvider, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
+import { Suspense, useEffect } from "react";
 import type { DbConfig } from "jazz-tools";
 
 import { Loader2Icon } from "lucide-react";
@@ -10,30 +10,47 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { InviteHandler } from "@/components/InviteHandler";
 import { NavBar } from "@/components/navbar/NavBar";
 import Router from "@/components/Router";
+import { RouterScope } from "@/hooks/useRouter";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const subscriptionMode = import.meta.env.VITE_JAZZ_SUBSCRIPTION_MODE ?? "async";
 
-type AppConfig = Partial<DbConfig> & {
-  authSecretStorageKey?: string;
-};
-
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
+function defaultConfig(
+  secret: string,
+  overrides: Partial<DbConfig> = {},
+): DbConfig & {
+  asyncSubscriptionsOnly: boolean;
+} {
   return {
     appId,
     env: "dev",
     userBranch: "main",
     serverUrl,
     secret,
+    asyncSubscriptionsOnly: subscriptionMode !== "sync",
     ...overrides,
   };
 }
 
-export function App({ config }: { config?: AppConfig } = {}) {
-  const { authSecretStorageKey, ...dbConfig } = config ?? {};
-  const { secret, isLoading } = useLocalFirstAuth(
-    authSecretStorageKey ? { authSecretStorageKey: authSecretStorageKey } : undefined,
+interface AppProps {
+  config?: Partial<DbConfig>;
+  initialPath?: string;
+}
+
+export function App({ config, initialPath }: AppProps = {}) {
+  const app = <AppInner config={config} />;
+  return initialPath === undefined ? (
+    app
+  ) : (
+    <RouterScope initialPath={initialPath}>{app}</RouterScope>
   );
+}
+
+function AppInner({ config }: { config?: Partial<DbConfig> }) {
+  const auth = useLocalFirstAuth();
+  const secret = config?.secret ?? auth.secret;
+  const isLoading = config?.secret === undefined && auth.isLoading;
 
   if (isLoading || !secret) {
     return <p id="joining-chat">Loading...</p>;
@@ -41,12 +58,24 @@ export function App({ config }: { config?: AppConfig } = {}) {
 
   return (
     <JazzProvider
-      config={defaultConfig(secret, dbConfig)}
+      config={defaultConfig(secret, config)}
       fallback={<p id="joining-chat">Loading...</p>}
     >
+      <ExposeDevClient />
       <AppContent />
     </JazzProvider>
   );
+}
+
+function ExposeDevClient() {
+  const client = useJazzClient();
+
+  useEffect(() => {
+    if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) return;
+    (window as unknown as { jazzClient?: typeof client }).jazzClient = client;
+  }, [client]);
+
+  return null;
 }
 
 function AppContent() {

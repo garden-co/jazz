@@ -1,11 +1,12 @@
 import * as React from "react";
-import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { type DbConfig } from "jazz-tools";
+import { JazzProvider } from "jazz-tools/react";
 import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
+import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
-// These are injected by withJazzExpo in metro.config.js.
+// Set these in the shell that starts Metro.
 declare const process: { env: Record<string, string | undefined> };
 
 function buildConfig(secret: string): DbConfig {

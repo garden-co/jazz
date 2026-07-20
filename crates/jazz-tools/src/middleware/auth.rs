@@ -39,11 +39,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::AppId;
 use crate::identity;
-use crate::query_manager::session::Session;
-use crate::schema_manager::AppId;
+use crate::public_api::session::Session;
 use crate::server::ServerState;
-use crate::transport_protocol::UnauthenticatedResponse;
+use crate::transport_error::UnauthenticatedResponse;
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -681,7 +681,10 @@ fn map_key_algorithm(alg: KeyAlgorithm) -> Option<Algorithm> {
         KeyAlgorithm::PS384 => Some(Algorithm::PS384),
         KeyAlgorithm::PS512 => Some(Algorithm::PS512),
         KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
-        KeyAlgorithm::RSA1_5 | KeyAlgorithm::RSA_OAEP | KeyAlgorithm::RSA_OAEP_256 => None,
+        KeyAlgorithm::RSA1_5
+        | KeyAlgorithm::RSA_OAEP
+        | KeyAlgorithm::RSA_OAEP_256
+        | KeyAlgorithm::UNKNOWN_ALGORITHM => None,
     }
 }
 
@@ -920,7 +923,7 @@ pub fn resolve_verified_jwt_session(
     Ok(Session {
         user_id: subject.to_string(),
         claims,
-        auth_mode: crate::query_manager::session::AuthMode::External,
+        auth_mode: crate::public_api::session::AuthMode::External,
     })
 }
 
@@ -1029,8 +1032,8 @@ pub async fn extract_session(
             )
             .map_err(local_first_auth_error)?;
             let auth_mode = match issuer {
-                identity::ANONYMOUS_ISSUER => crate::query_manager::session::AuthMode::Anonymous,
-                _ => crate::query_manager::session::AuthMode::LocalFirst,
+                identity::ANONYMOUS_ISSUER => crate::public_api::session::AuthMode::Anonymous,
+                _ => crate::public_api::session::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
                 user_id: verified.user_id,
@@ -1118,7 +1121,7 @@ pub fn validate_admin_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport_protocol::UnauthenticatedCode;
+    use crate::transport_error::UnauthenticatedCode;
     use jsonwebtoken::{EncodingKey, Header, encode};
 
     const TEST_JWKS_KID: &str = "test-kid";
@@ -1350,7 +1353,7 @@ mod tests {
         assert_eq!(session.user_id, "user-42");
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::External
+            crate::public_api::session::AuthMode::External
         );
         assert_eq!(session.claims["subject"], "user-42");
         assert_eq!(session.claims["issuer"], "https://issuer.example");
@@ -1465,7 +1468,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::LocalFirst
+            crate::public_api::session::AuthMode::LocalFirst
         );
         if let serde_json::Value::Object(map) = &session.claims {
             assert!(
@@ -1598,6 +1601,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn anonymous_session_has_auth_mode_anonymous() {
         let app_id = AppId::from_name("test-app");
@@ -1628,7 +1632,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::query_manager::session::AuthMode::Anonymous
+            crate::public_api::session::AuthMode::Anonymous
         );
     }
 }

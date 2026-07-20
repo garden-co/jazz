@@ -39,6 +39,7 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/crates/**/Cargo.toml",
         "$TURBO_ROOT$/Cargo.toml",
         "$TURBO_ROOT$/Cargo.lock"
       ],

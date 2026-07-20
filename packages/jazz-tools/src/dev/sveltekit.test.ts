@@ -3,7 +3,6 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
-import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { jazzSvelteKit, __resetJazzSvelteKitPluginForTests } from "./sveltekit.js";
 import type { ViteDevServer } from "./vite.js";
@@ -141,7 +140,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-top-level-telemetry-test-");
@@ -175,7 +174,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-config-hook-");
@@ -210,7 +209,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-no-restart-");
@@ -262,7 +261,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({
@@ -283,7 +282,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-jwks-test-");
@@ -318,7 +317,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     try {
@@ -353,7 +352,7 @@ describe("jazzSvelteKit", () => {
     process.env.PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000010";
 
     vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({ adminSecret: "env-test-admin" });
@@ -361,7 +360,7 @@ describe("jazzSvelteKit", () => {
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
-    expect(catalogueProject.deploy).toHaveBeenCalledWith(
+    expect(devServer.deploy).toHaveBeenCalledWith(
       expect.objectContaining({
         serverUrl: "http://jazz-test-server:4000",
         appId: "00000000-0000-0000-0000-000000000010",
@@ -372,7 +371,7 @@ describe("jazzSvelteKit", () => {
 
   it("connects to an existing server via options.server string URL", async () => {
     vi.spyOn(devServer, "startLocalJazzServer");
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const plugin = jazzSvelteKit({
@@ -383,7 +382,7 @@ describe("jazzSvelteKit", () => {
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
-    expect(catalogueProject.deploy).toHaveBeenCalledWith(
+    expect(devServer.deploy).toHaveBeenCalledWith(
       expect.objectContaining({
         serverUrl: "http://explicit-server:5000",
         appId: "00000000-0000-0000-0000-000000000020",
@@ -430,7 +429,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockResolvedValue(deployed("abc123def4567890"));
+    vi.spyOn(devServer, "deploy").mockResolvedValue(deployed("abc123def4567890"));
     let capturedOnPush: ((hash: string) => void) | undefined;
     vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
       capturedOnPush = opts.onPush;
@@ -467,7 +466,7 @@ describe("jazzSvelteKit", () => {
       backendSecret: "test-backend-secret",
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(catalogueProject, "deploy").mockRejectedValue(new Error("schema push failed"));
+    vi.spyOn(devServer, "deploy").mockRejectedValue(new Error("schema push failed"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-hmr-test-");
@@ -513,14 +512,12 @@ it("config hook preserves existing ssr.external entries", () => {
   expect(result.ssr?.external).toContain("some-other-pkg");
 });
 
-it("config hook injects worker format and optimizeDeps exclude", () => {
+it("config hook injects optimizeDeps exclude", () => {
   const plugin = jazzSvelteKit();
   const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
   const result = config!({}) as {
-    worker?: { format?: string };
     optimizeDeps?: { exclude?: string[] };
   };
-  expect(result.worker?.format).toBe("es");
   expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
 });
 

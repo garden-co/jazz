@@ -1,5 +1,9 @@
 pre-commit:
   commands:
+    no-sensitive-data:
+      # Patterns live in jazz-private (cleartext there instead of decodable
+      # base64 here); hook is a no-op on machines without that checkout.
+      run: sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh"; if [ -x "$GATE" ]; then "$GATE"; else exit 0; fi'
     rustfmt:
       glob: "*.rs"
       run: cargo fmt
@@ -9,7 +13,8 @@ pre-commit:
       run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
-      run: pnpm format {staged_files}
+      exclude: "dev/benchmarks/SMOKE_LEDGER.md"
+      run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"

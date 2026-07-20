@@ -63,7 +63,11 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
       </main>
     `;
     root.querySelector('[data-action="signout"]')?.addEventListener("click", handleSignOut);
-    unsubscribeTodos = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
+    unsubscribeTodos = mountTodoWidget(
+      root.querySelector<HTMLElement>('[data-slot="todo"]')!,
+      db,
+      (query, callback, options) => db.subscribeAll(query, callback, options),
+    );
   }
 
   render();

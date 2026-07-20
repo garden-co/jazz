@@ -3,7 +3,6 @@
   "tag": "alpha",
   "initialVersions": {
     "jazz-napi": "2.0.0-alpha.6",
-    "jazz-rn": "2.0.0-alpha.6",
     "jazz-wasm": "2.0.0-alpha.6",
     "docs": "0.0.0",
     "todo-client-localfirst-react-docs": "0.1.0",

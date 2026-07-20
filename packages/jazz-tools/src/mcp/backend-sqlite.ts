@@ -1,6 +1,4 @@
-// NOTE: no top-level `import … from "node:sqlite"` — this module must be safe
-// to parse/import on runtimes without node:sqlite. DatabaseSync is obtained
-// via dynamic import inside createSqliteBackend().
+import { DatabaseSync } from "node:sqlite";
 
 export interface SearchResult {
   title: string;
@@ -30,8 +28,6 @@ export interface DocsBackend {
 }
 
 export async function createSqliteBackend(dbPath: string): Promise<DocsBackend> {
-  // Dynamic import keeps node:sqlite off the top-level parse graph
-  const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(dbPath, { readOnly: true });
 
   // ------------------------------------------------------------------

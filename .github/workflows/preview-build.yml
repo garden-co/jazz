@@ -60,11 +60,6 @@ jobs:
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: pkg-jazz-rn
-          path: crates/jazz-rn
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
           name: pkg-create-jazz
           path: packages/create-jazz
 
@@ -90,5 +85,4 @@ jobs:
             './crates/jazz-napi/npm/darwin-x64' \
             './crates/jazz-napi/npm/darwin-arm64' \
             './crates/jazz-napi/npm/win32-x64-msvc' \
-            './crates/jazz-rn' \
             './packages/create-jazz'

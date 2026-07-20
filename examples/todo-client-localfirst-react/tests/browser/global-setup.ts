@@ -1,99 +1,30 @@
+import { join } from "node:path";
 import { startLocalJazzServer, deploy } from "jazz-tools/testing";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
-import {
-  EDGE_TEST_PORT,
-  CORE_TEST_PORT,
-  TEST_PORT,
-  JWT_SECRET,
-  ADMIN_SECRET,
-  APP_ID,
-} from "./test-constants.js";
+import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
 
 type LocalServer = Awaited<ReturnType<typeof startLocalJazzServer>>;
 
-let coreServer: LocalServer | null = null;
-let edgeServer: LocalServer | null = null;
+let server: LocalServer | null = null;
 let setupPromise: Promise<void> | null = null;
-
-async function waitUntil(
-  message: string,
-  check: () => Promise<boolean>,
-  timeoutMs = 30_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-
-  while (Date.now() < deadline) {
-    try {
-      if (await check()) return;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
-  throw new Error(`Timed out waiting for ${message}${detail}`);
-}
-
-async function fetchJson<T>(url: string): Promise<T | null> {
-  const response = await fetch(url, {
-    headers: {
-      "X-Jazz-Admin-Secret": ADMIN_SECRET,
-    },
-  });
-
-  if (!response.ok) return null;
-  return (await response.json()) as T;
-}
-
-async function waitForCatalogueOnEdge(edge: LocalServer, schemaHash: string): Promise<void> {
-  await waitUntil(`schema ${schemaHash} to propagate to the edge server`, async () => {
-    const body = await fetchJson<{ hashes?: string[] }>(`${edge.url}/apps/${edge.appId}/schemas`);
-    return body?.hashes?.includes(schemaHash) ?? false;
-  });
-
-  await waitUntil(
-    `permissions for schema ${schemaHash} to propagate to the edge server`,
-    async () => {
-      const body = await fetchJson<{ head?: { schemaHash?: string } | null }>(
-        `${edge.url}/apps/${edge.appId}/admin/permissions/head`,
-      );
-      return body?.head?.schemaHash === schemaHash;
-    },
-  );
-}
 
 export async function setup(): Promise<void> {
   if (!setupPromise) {
     setupPromise = (async () => {
-      coreServer = await startLocalJazzServer({
+      server = await startLocalJazzServer({
         appId: APP_ID,
-        port: CORE_TEST_PORT,
+        port: TEST_PORT,
         adminSecret: ADMIN_SECRET,
         inMemory: true,
       });
 
-      edgeServer = await startLocalJazzServer({
-        appId: APP_ID,
-        port: EDGE_TEST_PORT,
-        adminSecret: ADMIN_SECRET,
-        upstreamUrl: coreServer.url,
-        inMemory: true,
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret!,
+        schemaDir: join(import.meta.dirname, "../.."),
       });
-
-      const result = await deploy({
-        serverUrl: coreServer.url,
-        appId: coreServer.appId,
-        adminSecret: coreServer.adminSecret!,
-        schema: app,
-        permissions,
-      });
-
-      await waitForCatalogueOnEdge(edgeServer, result.schema.hash);
     })();
   }
 
@@ -101,9 +32,7 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  await edgeServer?.stop();
-  await coreServer?.stop();
-  edgeServer = null;
-  coreServer = null;
+  await server?.stop();
+  server = null;
   setupPromise = null;
 }

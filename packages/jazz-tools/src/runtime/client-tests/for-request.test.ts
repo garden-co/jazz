@@ -6,8 +6,7 @@ import {
   makeClientWithContext,
   mockMutation,
   mockRow,
-  runtimeBatchRecordStubs,
-  schemaWithTodos,
+  runtimeTransactionRecordStubs,
   type AppContext,
   type Runtime,
 } from "./support.js";
@@ -36,45 +35,15 @@ describe("JazzClient runtime helpers", () => {
     expect(() => client.asBackend()).toThrow("serverUrl required for backend mode");
   });
 
-  it("accepts query builders for subscribe calls", async () => {
+  it("accepts runtime query JSON strings for subscribe calls", async () => {
     const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
+    const queryJson = '{"relation_ir":{"table":"todos"}}';
 
-    const builder = {
-      _build() {
-        return '{"table":"todos"}';
-      },
-    };
-
-    client.subscribe(builder, () => {});
+    client.subscribe(queryJson, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(createSubscriptionCalls[0]![0]).toBe(builder._build());
-    expect(executeSubscriptionCalls).toHaveLength(0);
-    await flushMicrotasks();
+    expect(createSubscriptionCalls[0]![0]).toBe(queryJson);
     expect(executeSubscriptionCalls).toHaveLength(1);
-  });
-
-  it("translates schema-aware query builders for subscribe calls", async () => {
-    const { client, createSubscriptionCalls } = makeClient();
-
-    const builder = {
-      _schema: schemaWithTodos,
-      _build() {
-        return JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-        });
-      },
-    };
-
-    client.subscribe(builder, () => {});
-
-    expect(createSubscriptionCalls).toHaveLength(1);
-    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<string, unknown>;
-    expect(parsed.table).toBe("todos");
-    expect(parsed).toHaveProperty("relation_ir");
   });
 
   it("forwards structured RN delta payloads to subscription callbacks", async () => {
@@ -175,7 +144,7 @@ describe("JazzClient runtime helpers", () => {
     let writeContextJson: string | null | undefined;
 
     const runtime: Runtime = {
-      ...runtimeBatchRecordStubs,
+      ...runtimeTransactionRecordStubs,
       insert: (_table, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
@@ -203,8 +172,6 @@ describe("JazzClient runtime helpers", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      getSchema: () => ({}),
-      getSchemaHash: () => "schema-hash",
     };
 
     const JazzClientCtor = JazzClient as unknown as {
@@ -225,20 +192,20 @@ describe("JazzClient runtime helpers", () => {
       "edge",
     );
 
-    const batchId = client.beginBatch("transactional");
+    const transactionId = client.beginTransaction("exclusive");
     client.insertInternal(
       "todos",
       { done: { type: "Boolean", value: false } },
       undefined,
       undefined,
       undefined,
-      batchId,
+      transactionId,
     );
     await client.query(
       '{"table":"todos"}',
       {
         localUpdates: "deferred",
-        transactionBatchId: batchId,
+        transactionId,
       },
       undefined,
     );
@@ -260,18 +227,32 @@ describe("JazzClient runtime helpers", () => {
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
+  it("maps propagate false to local-only runtime subscriptions", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagate: false,
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("lets explicit propagation override propagate shorthand", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagate: false,
+      propagation: "full",
+    });
+    expect(createSubscriptionCalls[0]![3]).toBeUndefined();
+  });
+
   // =========================================================================
   // 2-phase subscribe lifecycle
   // =========================================================================
 
-  it("createSubscription is called synchronously, executeSubscription is deferred", async () => {
+  it("createSubscription and executeSubscription are called synchronously", () => {
     const { client, createSubscriptionCalls, executeSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(executeSubscriptionCalls).toHaveLength(0);
-
-    await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 
@@ -283,15 +264,12 @@ describe("JazzClient runtime helpers", () => {
     expect(subId2).toBe(1);
   });
 
-  it("unsubscribe before execute calls runtime.unsubscribe with the handle", async () => {
+  it("unsubscribe calls runtime.unsubscribe with the handle", () => {
     const { client, executeSubscriptionCalls, unsubscribeCalls } = makeClient();
     const subId = client.subscribe('{"table":"todos"}', () => {});
     client.unsubscribe(subId);
 
     expect(unsubscribeCalls).toEqual([0]);
-
-    await flushMicrotasks();
-    // executeSubscription still fires (the runtime no-ops since handle was already unsubscribed)
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 

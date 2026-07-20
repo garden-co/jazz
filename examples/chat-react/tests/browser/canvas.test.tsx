@@ -8,12 +8,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function uniqueDbName(label: string): string {
+  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -63,7 +67,7 @@ describe("Canvas E2E", () => {
     const appId =
       config.appId ?? `test-canvas-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    r.render(<App config={{ appId, dbName: crypto.randomUUID(), ...config }} />);
+    r.render(<App config={{ appId, ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -103,7 +107,7 @@ describe("Canvas E2E", () => {
   // -------------------------------------------------------------------------
 
   it("can create a canvas and draw on it", async () => {
-    const el = await mountApp();
+    const el = await mountApp({ dbName: uniqueDbName("canvas-draw") });
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null,
@@ -197,12 +201,14 @@ describe("Canvas E2E", () => {
   // -------------------------------------------------------------------------
 
   it("draws collaboratively between two sessions", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
 
     // --- User A: create a canvas -------------------------------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
+      dbName: uniqueDbName("collab-canvas-a"),
       serverUrl,
+      secret: await testSecret(`canvas-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -257,7 +263,9 @@ describe("Canvas E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
+      dbName: uniqueDbName("collab-canvas-b"),
       serverUrl,
+      secret: await testSecret(`canvas-user-b-${Date.now()}`),
     });
 
     // User B should see the canvas

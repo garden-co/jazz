@@ -4,8 +4,8 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { onTestFinished } from "vitest";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 
 export type TestRuntime = Runtime & { free?(): void };
 
@@ -96,18 +96,37 @@ export async function createWasmRuntime(
   },
 ): Promise<TestRuntime> {
   const wasmModule = await loadWasmModule();
-  const runtime = new wasmModule.WasmRuntime(
-    serializeRuntimeSchema(schema),
-    opts?.appId ?? "test-app",
-    opts?.env ?? "test",
-    opts?.userBranch ?? "main",
-    opts?.tier,
-    opts?.useBinaryEncoding,
+  const appId = opts?.appId ?? "test-app";
+  const env = opts?.env ?? "test";
+  const userBranch = opts?.userBranch ?? "main";
+  const runtime = new NativeRuntimeAdapter(
+    wasmModule.WasmDb,
+    schema,
+    deterministicBytes(`${appId}:${env}:${userBranch}:node`),
+    deterministicBytes(`${appId}:${env}:${userBranch}:author`),
+    1,
+    true,
   );
+  void opts?.tier;
+  void opts?.useBinaryEncoding;
 
   onTestFinished(async () => {
     await freeRuntimeSafely(runtime);
   });
 
   return runtime;
+}
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
 }

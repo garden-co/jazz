@@ -311,7 +311,7 @@ const handleToggle = (emoji: string) => {
 
 ## Attachments — Jazz file storage
 
-Jazz splits files into chunks and handles reassembly. Uploads wait for server confirmation so the data is available to other users immediately.
+Jazz stores each attachment as a binary large value in a `files` row. Uploads wait for server confirmation so the data is available to other users immediately.
 
 ```typescript
 // Upload: store on the edge, wait for confirmation

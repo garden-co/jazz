@@ -2,7 +2,7 @@
 
 //! HTTP routes for the Jazz server.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -11,13 +11,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::jazz_transport::ErrorResponse;
 use crate::middleware::auth::validate_admin_secret;
-use crate::query_manager::types::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
-};
-use crate::schema_manager::{Lens, LensOp, LensTransform};
+use crate::public_api::types::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
+use crate::schema_lens::{Lens, LensOp, LensTransform};
 use crate::server::{ServerState, ShutdownPhase};
+use crate::transport_error::ErrorResponse;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -63,7 +61,7 @@ pub(super) struct SchemaConnectivityParams {
 pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
-    queries: Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup>,
+    queries: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -151,6 +149,11 @@ pub(super) struct StoredPermissionsResponse {
 #[derive(Debug, Serialize)]
 pub(super) struct SchemaConnectivityResponse {
     connected: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ShutdownResponse {
+    status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -277,9 +280,19 @@ fn schema_connectivity_forward_path(params: &SchemaConnectivityParams) -> String
 /// Requires a valid admin secret; returns 404 if no schema exists for the hash.
 pub(super) async fn schema_handler(
     State(state): State<Arc<ServerState>>,
-    Path(hash_text): Path<String>,
+    Path(params): Path<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let Some(hash_text) = params.get("hash") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "missing schema hash".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
     let admin_secret = headers
         .get("X-Jazz-Admin-Secret")
         .and_then(|v| v.to_str().ok());
@@ -306,7 +319,7 @@ pub(super) async fn schema_handler(
         };
     }
 
-    let schema_hash = match parse_schema_hash_param(&hash_text) {
+    let schema_hash = match parse_schema_hash_param(hash_text) {
         Ok(hash) => hash,
         Err(message) => {
             return (
@@ -317,9 +330,15 @@ pub(super) async fn schema_handler(
         }
     };
 
-    match state.runtime.known_schema(&schema_hash) {
+    match state
+        .catalogue
+        .known_schema(&state.catalogue_store, &schema_hash)
+    {
         Ok(Some(schema)) => {
-            let published_at = match state.runtime.schema_published_at(&schema_hash) {
+            let published_at = match state
+                .catalogue
+                .schema_published_at(&state.catalogue_store, &schema_hash)
+            {
                 Ok(timestamp) => timestamp,
                 Err(err) => {
                     return (
@@ -392,11 +411,14 @@ pub(super) async fn schema_hashes_handler(
         };
     }
 
-    match state.runtime.known_schema_hashes() {
+    match state.catalogue.known_schema_hashes(&state.catalogue_store) {
         Ok(hashes) => {
             let mut schemas = Vec::with_capacity(hashes.len());
             for hash in &hashes {
-                let published_at = match state.runtime.schema_published_at(hash) {
+                let published_at = match state
+                    .catalogue
+                    .schema_published_at(&state.catalogue_store, hash)
+                {
                     Ok(timestamp) => timestamp,
                     Err(err) => {
                         return Err((
@@ -486,9 +508,10 @@ pub(super) async fn schema_connectivity_handler(
         }
     };
 
-    match state.runtime.with_schema_manager(|schema_manager| {
-        schema_manager.are_schema_hashes_connected(from_hash, to_hash)
-    }) {
+    match state
+        .catalogue
+        .are_schema_hashes_connected(&state.catalogue_store, from_hash, to_hash)
+    {
         Ok(connected) => (
             StatusCode::OK,
             Json(SchemaConnectivityResponse { connected }),
@@ -560,8 +583,57 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
+    let public_schema_convert = match state.core_server_shell().is_some()
+        || state.core_server_shell_storage_config.is_some()
+    {
+        true => {
+            match crate::server::public_schema_convert::convert_public_schema(&request.schema) {
+                Ok(schema) => Some(schema),
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::bad_request(format!(
+                            "schema is not supported by the server shell: {err}"
+                        ))),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        false => None,
+    };
+
     let schema_hash = SchemaHash::compute(&request.schema);
-    let object_id = match state.runtime.publish_schema(request.schema) {
+    if let Some(schema) = public_schema_convert.clone() {
+        let core_server_shell = match state.core_server_shell() {
+            Some(core_server_shell) => core_server_shell,
+            None => match state.start_core_server_shell(schema.clone()) {
+                Ok(core_server_shell) => core_server_shell,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::internal(format!(
+                            "failed to start server shell: {err}"
+                        ))),
+                    )
+                        .into_response();
+                }
+            },
+        };
+        if let Err(err) = core_server_shell.publish_schema(schema).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to publish schema to server shell: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    }
+    let object_id = match state
+        .catalogue
+        .publish_schema(&state.catalogue_store, request.schema)
+    {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
@@ -614,12 +686,14 @@ pub(super) async fn permissions_head_handler(
         };
     }
 
-    match state.runtime.with_schema_manager(|schema_manager| {
-        schema_manager
-            .current_permissions_head()
-            .map(permissions_head_view)
-    }) {
-        Ok(head) => (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response(),
+    match state
+        .catalogue
+        .current_permissions_head(&state.catalogue_store)
+    {
+        Ok(head) => {
+            let head = head.map(permissions_head_view);
+            (StatusCode::OK, Json(PermissionsHeadResponse { head })).into_response()
+        }
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
@@ -660,10 +734,7 @@ pub(super) async fn permissions_handler(
         };
     }
 
-    match state
-        .runtime
-        .with_schema_manager(|schema_manager| schema_manager.current_permissions())
-    {
+    match state.catalogue.current_permissions(&state.catalogue_store) {
         Ok(current) => (
             StatusCode::OK,
             Json(match current {
@@ -756,8 +827,11 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    match state.runtime.known_schema(&schema_hash) {
-        Ok(Some(_)) => {}
+    let mut schema_with_permissions = match state
+        .catalogue
+        .known_schema(&state.catalogue_store, &schema_hash)
+    {
+        Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -777,25 +851,88 @@ pub(super) async fn publish_permissions_handler(
             )
                 .into_response();
         }
-    }
+    };
 
     let permissions = request
         .permissions
         .into_iter()
         .map(|(table_name, policies)| (TableName::new(table_name), policies))
-        .collect();
+        .collect::<std::collections::HashMap<_, _>>();
 
-    match state.runtime.publish_permissions_bundle(
+    for (table_name, policies) in &permissions {
+        let Some(table) = schema_with_permissions.get_mut(table_name) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "permissions reference unknown table {}",
+                    table_name.as_str()
+                ))),
+            )
+                .into_response();
+        };
+        table.policies = policies.clone();
+    }
+
+    let public_schema_convert = match state.core_server_shell().is_some()
+        || state.core_server_shell_storage_config.is_some()
+    {
+        true => {
+            match crate::server::public_schema_convert::convert_public_schema(
+                &schema_with_permissions,
+            ) {
+                Ok(schema) => Some(schema),
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::bad_request(format!(
+                            "permissions schema is not supported by the server shell: {err}"
+                        ))),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        false => None,
+    };
+
+    match state.catalogue.publish_permissions_bundle(
+        &state.catalogue_store,
         schema_hash,
         permissions,
         expected_parent_bundle_object_id,
     ) {
-        Ok(_) => match state.runtime.with_schema_manager(|schema_manager| {
-            schema_manager
-                .current_permissions_head()
-                .map(permissions_head_view)
-        }) {
+        Ok(_) => match state
+            .catalogue
+            .current_permissions_head(&state.catalogue_store)
+        {
             Ok(head) => {
+                if let Some(schema) = public_schema_convert {
+                    let core_server_shell = match state.core_server_shell() {
+                        Some(core_server_shell) => core_server_shell,
+                        None => match state.start_core_server_shell(schema.clone()) {
+                            Ok(core_server_shell) => core_server_shell,
+                            Err(err) => {
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(ErrorResponse::internal(format!(
+                                        "failed to start server shell: {err}"
+                                    ))),
+                                )
+                                    .into_response();
+                            }
+                        },
+                    };
+                    if let Err(err) = core_server_shell.publish_schema(schema).await {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse::internal(format!(
+                                "failed to publish permissions schema to server shell: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                }
+                let head = head.map(permissions_head_view);
                 (StatusCode::CREATED, Json(PermissionsHeadResponse { head })).into_response()
             }
             Err(err) => (
@@ -806,7 +943,7 @@ pub(super) async fn publish_permissions_handler(
             )
                 .into_response(),
         },
-        Err(crate::runtime_tokio::RuntimeError::WriteError(message))
+        Err(crate::server::catalogue::CatalogueError::WriteError(message))
             if message.starts_with("stale permissions parent") =>
         {
             (
@@ -894,7 +1031,10 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let source_schema = match state.runtime.known_schema(&source_hash) {
+    let source_schema = match state
+        .catalogue
+        .known_schema(&state.catalogue_store, &source_hash)
+    {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -917,7 +1057,10 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    let target_schema = match state.runtime.known_schema(&target_hash) {
+    let target_schema = match state
+        .catalogue
+        .known_schema(&state.catalogue_store, &target_hash)
+    {
         Ok(Some(schema)) => schema,
         Ok(None) => {
             return (
@@ -1061,7 +1204,7 @@ pub(super) async fn publish_migration_handler(
     }
 
     let lens = Lens::new(source_hash, target_hash, forward);
-    let object_id = match state.runtime.publish_lens(&lens) {
+    let object_id = match state.catalogue.publish_lens(&state.catalogue_store, &lens) {
         Ok(object_id) => object_id,
         Err(err) => {
             return (
@@ -1074,7 +1217,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    if let Err(err) = state.runtime.flush().await {
+    if let Err(err) = state.catalogue.flush(&state.catalogue_store) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
@@ -1143,21 +1286,37 @@ pub(super) async fn admin_subscription_introspection_handler(
             .into_response();
     }
 
-    match state.runtime.server_subscription_telemetry() {
-        Ok(queries) => Json(AdminSubscriptionIntrospectionResponse {
-            app_id: state.app_id.to_string(),
-            generated_at: unix_timestamp_millis(),
-            queries,
-        })
-        .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "failed to read subscription telemetry: {err}"
-            ))),
-        )
-            .into_response(),
+    Json(AdminSubscriptionIntrospectionResponse {
+        app_id: state.app_id.to_string(),
+        generated_at: unix_timestamp_millis(),
+        queries: Vec::new(),
+    })
+    .into_response()
+}
+
+pub(super) async fn internal_shutdown_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
     }
+
+    let first_request = state.shutdown.request_shutdown();
+    let status = if first_request {
+        "shutting_down"
+    } else {
+        "already_shutting_down"
+    };
+
+    (StatusCode::ACCEPTED, Json(ShutdownResponse { status })).into_response()
 }
 
 pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {

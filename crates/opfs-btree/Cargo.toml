@@ -9,12 +9,20 @@ repository = "https://github.com/garden-co/jazz2"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+wasm-bench = []
+
 [dependencies]
 rustc-hash = "2"
 thiserror = "2"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -34,3 +42,6 @@ web-sys = { version = "0.3", features = [
   "DomException",
 ] }
 
+[[bench]]
+name = "hot_paths"
+harness = false

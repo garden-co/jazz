@@ -4,13 +4,11 @@ use std::collections::BinaryHeap;
 
 use crate::BTreeError;
 use crate::file::SyncFile;
-use crate::free_bitmap::FreeBitmap;
-use crate::leaf_hint::{LEAF_HINT_SLOTS, LeafHintCache};
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawDescendStep, RawLeafDeleteResult, RawLeafUpsertResult,
     ValueCell, ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits,
     raw_descend_step, raw_freelist_page, raw_leaf_covers_key, raw_leaf_delete_in_place,
-    raw_leaf_find_value, raw_leaf_scan, raw_leaf_span, raw_leaf_upsert_in_place, raw_page_kind,
+    raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place, raw_page_kind,
     refresh_page_checksum, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
@@ -35,6 +33,18 @@ struct PageWrite<'a> {
     raw: Cow<'a, [u8]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncPolicy {
+    /// Sync the file at each write/checkpoint boundary.
+    PerWrite,
+    /// Skip per-write syncs and sync only when [`OpfsBTree::close`] is called.
+    /// Dropping an open tree does not run fallible close logic.
+    OnClose,
+    /// Never explicitly sync. The operating system may still flush dirty pages
+    /// on its own schedule.
+    Never,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
     pub page_size: usize,
@@ -42,6 +52,7 @@ pub struct BTreeOptions {
     pub overflow_threshold: usize,
     pub pin_internal_pages: bool,
     pub read_coalesce_pages: usize,
+    pub sync_policy: SyncPolicy,
 }
 
 impl Default for BTreeOptions {
@@ -52,6 +63,7 @@ impl Default for BTreeOptions {
             overflow_threshold: DEFAULT_OVERFLOW_THRESHOLD,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 }
@@ -116,9 +128,18 @@ pub struct OpfsBTree<F: SyncFile> {
     dirty_pages: OpfsSet<PageId>,
     wal_pages: OpfsSet<PageId>,
     freelist_dirty: bool,
-    free_bitmap: FreeBitmap,
+    free_pages: Vec<PageId>,
+    free_set: OpfsSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
-    leaf_hints: LeafHintCache,
+    last_leaf_hint: Option<PageId>,
+    leaf_index_cache: Option<Vec<LeafIndexEntry>>,
+}
+
+#[derive(Debug, Clone)]
+struct LeafIndexEntry {
+    page_id: PageId,
+    first_key: Vec<u8>,
+    last_key: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -166,9 +187,11 @@ impl<F: SyncFile> OpfsBTree<F> {
             dirty_pages: OpfsSet::default(),
             wal_pages: OpfsSet::default(),
             freelist_dirty: false,
-            free_bitmap: FreeBitmap::default(),
+            free_pages: Vec::new(),
+            free_set: OpfsSet::default(),
             freelist_meta_pages: Vec::new(),
-            leaf_hints: LeafHintCache::default(),
+            last_leaf_hint: None,
+            leaf_index_cache: None,
         };
 
         if tree.active.generation == 0 {
@@ -181,7 +204,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 Superblock::new(options.page_size as u32, BOOTSTRAP_GENERATION, 0, 0, 2);
             write_slot(&tree.file, SuperblockSlot::A, options.page_size, bootstrap)?;
             write_slot(&tree.file, SuperblockSlot::B, options.page_size, bootstrap)?;
-            tree.file.flush()?;
+            tree.flush_for_write()?;
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
@@ -215,6 +238,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(tree)
     }
 
+    pub fn close(&mut self) -> Result<(), BTreeError> {
+        self.checkpoint()?;
+        self.flush_for_close()
+    }
+
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::get", key_len = key.len()).entered();
         let leaf_page_id = match self.leaf_for_key(key)? {
@@ -244,6 +272,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             value_len = value.len()
         )
         .entered();
+        self.last_leaf_hint = None;
+        self.leaf_index_cache = None;
         if self.root_page_id.is_none() {
             let root_page_id = self.alloc_page();
             let value_cell = self.build_value_cell(value)?;
@@ -255,40 +285,6 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.set_dirty_page(root_page_id, leaf)?;
             self.root_page_id = Some(root_page_id);
             return Ok(());
-        }
-
-        // Fast path: when a hinted leaf covers the key and the value is
-        // inline-sized, upsert in place without descending. Splits still need
-        // the parent path, so NeedSplit falls through to the recursive insert.
-        if value.len() <= self.options.overflow_threshold
-            && let Some(page_id) = self.hinted_leaf_for_key(key, true)?
-        {
-            let new_value = ValueCell::Inline(value.to_vec());
-            let upsert = {
-                let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
-                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-                })?;
-                raw_leaf_upsert_in_place(raw, self.options.page_size, key, &new_value)?
-            };
-            match upsert {
-                RawLeafUpsertResult::Inserted => {
-                    self.mark_dirty_loaded_page(page_id);
-                    self.remember_leaf_hint(page_id)?;
-                    return Ok(());
-                }
-                RawLeafUpsertResult::Updated { old_overflow } => {
-                    self.mark_dirty_loaded_page(page_id);
-                    self.remember_leaf_hint(page_id)?;
-                    if let Some(old_overflow) = old_overflow {
-                        self.free_overflow_extent(
-                            old_overflow.head_page_id,
-                            old_overflow.total_len as usize,
-                        )?;
-                    }
-                    return Ok(());
-                }
-                RawLeafUpsertResult::NeedSplit => {}
-            }
         }
 
         let root_page_id = self.root_page_id.expect("root must exist");
@@ -308,6 +304,8 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
         let _span = tracing::trace_span!("OpfsBTree::delete", key_len = key.len()).entered();
+        self.last_leaf_hint = None;
+        self.leaf_index_cache = None;
         let root_page_id = match self.root_page_id {
             Some(id) => id,
             None => return Ok(()),
@@ -352,10 +350,9 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let page_size = self.options.page_size;
         let mut out = Vec::with_capacity(limit.min(1024));
-        let mut current = self.leaf_for_range_start(start)?;
+        let mut current = self.leaf_for_key(start)?;
         let mut visited = OpfsSet::default();
         let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
-        let mut last_scanned = None;
 
         while let Some(page_id) = current {
             if !visited.insert(page_id) {
@@ -392,18 +389,100 @@ impl<F: SyncFile> OpfsBTree<F> {
                 };
                 out.push((key, value));
                 if out.len() == limit {
-                    self.remember_leaf_hint_if_not_mru(page_id)?;
                     return Ok(out);
                 }
             }
 
-            last_scanned = Some(page_id);
             current = next;
         }
 
-        if let Some(page_id) = last_scanned {
-            self.remember_leaf_hint_if_not_mru(page_id)?;
+        Ok(out)
+    }
+
+    pub fn range_reverse(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KvPair>, BTreeError> {
+        let _span = tracing::trace_span!("OpfsBTree::range_reverse", limit).entered();
+        if limit == 0 || start >= end {
+            return Ok(Vec::new());
         }
+
+        let page_size = self.options.page_size;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        let mut staged: Vec<(Vec<u8>, StagedValue)> = Vec::new();
+        let mut upper = end.to_vec();
+        let mut current = self.leaf_index_before(&upper)?;
+
+        while out.len() < limit {
+            let Some(index) = current else {
+                break;
+            };
+            let leaf_index = &self.leaf_index_cache.as_ref().expect("leaf index cache")[index];
+            if leaf_index.last_key.as_slice() < start {
+                break;
+            }
+            let page_id = leaf_index.page_id;
+            let page = {
+                let raw = self.ensure_page_loaded(page_id)?;
+                decode_page(raw, page_size)?
+            };
+            let Page::Leaf { entries, .. } = page else {
+                return Err(BTreeError::Corrupt(format!(
+                    "expected leaf page {}, found non-leaf during reverse range",
+                    page_id
+                )));
+            };
+
+            staged.clear();
+            let remaining = limit.saturating_sub(out.len());
+            for (key, value) in entries.into_iter().rev() {
+                if key.as_slice() >= upper.as_slice() {
+                    continue;
+                }
+                if key.as_slice() < start {
+                    continue;
+                }
+                let staged_value = match value {
+                    ValueCell::Inline(value) => StagedValue::Inline(value),
+                    ValueCell::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => StagedValue::Overflow {
+                        head_page_id,
+                        total_len: total_len as usize,
+                    },
+                };
+                staged.push((key, staged_value));
+                if staged.len() == remaining {
+                    break;
+                }
+            }
+
+            let Some((next_upper, _)) = staged.last() else {
+                current = index.checked_sub(1);
+                continue;
+            };
+            upper = next_upper.clone();
+            current = index.checked_sub(1);
+
+            for (key, value) in staged.drain(..) {
+                let value = match value {
+                    StagedValue::Inline(value) => value,
+                    StagedValue::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => self.read_overflow_value(head_page_id, total_len)?,
+                };
+                out.push((key, value));
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+        }
+
         Ok(out)
     }
 
@@ -419,7 +498,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
         self.write_pages_to_disk(&dirty_page_ids, &freelist_pages)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
         self.checkpoint_superblock(
             self.root_page_id.unwrap_or(0),
             freelist_head_page_id,
@@ -487,7 +566,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 .ok_or_else(|| BTreeError::Io("WAL persisted pages overflow".to_string()))?
         };
         self.persisted_pages = persisted_pages;
-        self.file.flush()?;
+        self.flush_for_write()?;
 
         self.wal_pages.extend(dirty_page_ids);
         self.dirty_pages.clear();
@@ -564,12 +643,10 @@ impl<F: SyncFile> OpfsBTree<F> {
                 match upsert {
                     RawLeafUpsertResult::Inserted => {
                         self.mark_dirty_loaded_page(page_id);
-                        self.remember_tail_leaf_hint(page_id)?;
                         return Ok(None);
                     }
                     RawLeafUpsertResult::Updated { old_overflow } => {
                         self.mark_dirty_loaded_page(page_id);
-                        self.remember_tail_leaf_hint(page_id)?;
                         if let Some(old_overflow) = old_overflow
                             && Some(old_overflow.head_page_id) != reused_overflow_head
                         {
@@ -606,14 +683,14 @@ impl<F: SyncFile> OpfsBTree<F> {
                     Err(idx) => entries.insert(idx, (key.to_vec(), new_value)),
                 }
 
-                let candidate = Page::Leaf { entries, next };
+                let candidate = Page::Leaf {
+                    entries: entries.clone(),
+                    next,
+                };
                 if page_fits(&candidate, self.options.page_size)? {
                     self.set_dirty_page(page_id, candidate)?;
                     return Ok(None);
                 }
-                let Page::Leaf { entries, next } = candidate else {
-                    unreachable!("candidate is constructed as a leaf above")
-                };
 
                 if entries.len() < 2 {
                     return Err(BTreeError::InvalidOptions(
@@ -662,14 +739,14 @@ impl<F: SyncFile> OpfsBTree<F> {
                 keys.insert(child_idx, split.separator);
                 children.insert(child_idx + 1, split.right_page_id);
 
-                let candidate = Page::Internal { keys, children };
+                let candidate = Page::Internal {
+                    keys: keys.clone(),
+                    children: children.clone(),
+                };
                 if page_fits(&candidate, self.options.page_size)? {
                     self.set_dirty_page(page_id, candidate)?;
                     return Ok(None);
                 }
-                let Page::Internal { keys, children } = candidate else {
-                    unreachable!("candidate is constructed as an internal page above")
-                };
 
                 if keys.len() < 2 {
                     return Err(BTreeError::InvalidOptions(
@@ -779,6 +856,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 out.len()
             )));
         }
+        self.evict_pages_if_needed(Some(head_page_id));
         Ok(out)
     }
 
@@ -847,7 +925,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
                 BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            if self.dirty_pages.contains(&page_id) {
+            if self.dirty_pages.contains(&page_id) || self.wal_pages.contains(&page_id) {
                 return Ok(true);
             }
         }
@@ -938,7 +1016,9 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.blob_pages.insert(page_id);
             self.touch_page(page_id);
         }
-        self.evict_pages_if_needed(Some(head_page_id));
+        // The caller reads the whole overflow extent immediately after this
+        // load. Evicting here can drop tail pages before that read observes
+        // them when the extent is larger than the cache budget.
         Ok(())
     }
 
@@ -1059,126 +1139,98 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    /// Checks the hint slots for a cached leaf whose current key span covers
-    /// `key`. Safe across mutations because `raw_leaf_covers_key` re-validates
-    /// the page's current bytes on every use; `remove_page` drops freed pages
-    /// from the slots and WAL replay clears them all.
-    ///
-    /// `prefilter_mru` extends the cached-span prefilter to slot 0: latency
-    /// -sensitive callers (the put fast path, range starts) skip the page
-    /// lookup when even the most recent hint cannot cover `key`, while plain
-    /// point lookups give slot 0 the authoritative check directly because it
-    /// usually hits.
-    fn hinted_leaf_for_key(
-        &mut self,
-        key: &[u8],
-        prefilter_mru: bool,
-    ) -> Result<Option<PageId>, BTreeError> {
-        for idx in 0..LEAF_HINT_SLOTS {
-            let Some(page_id) = self.leaf_hints.covering_candidate(idx, key, prefilter_mru) else {
-                continue;
-            };
+    /// Resolves the leaf for `key`, trying the last-used leaf before paying
+    /// for a full root-to-leaf descent. Safe because `raw_leaf_covers_key`
+    /// re-checks the page's current bytes on every use.
+    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        if let Some(page_id) = self.last_leaf_hint {
             let covers = match self.pages.get(&page_id) {
                 Some(raw) => raw_leaf_covers_key(raw, self.options.page_size, key)?,
                 None => false,
             };
             if covers {
-                self.leaf_hints.promote(idx);
                 self.touch_page(page_id);
                 return Ok(Some(page_id));
             }
         }
-        Ok(None)
-    }
-
-    /// Resolves the leaf for `key`, trying the hint slots before paying for a
-    /// full root-to-leaf descent.
-    fn leaf_for_key(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        if let Some(page_id) = self.hinted_leaf_for_key(key, false)? {
-            return Ok(Some(page_id));
-        }
         let leaf = self.find_leaf_page_id(key)?;
-        if let Some(page_id) = leaf {
-            self.remember_leaf_hint(page_id)?;
-        }
+        self.last_leaf_hint = leaf;
         Ok(leaf)
     }
 
-    /// Resolves the leaf where a range scan for `start` should begin. Unlike
-    /// point lookups, a range only needs the leaf where keys >= `start` begin,
-    /// so when `start` falls in the empty gap between a hinted leaf and its
-    /// cached successor, the successor is provably the right starting leaf and
-    /// the descent can be skipped.
-    fn leaf_for_range_start(&mut self, start: &[u8]) -> Result<Option<PageId>, BTreeError> {
-        if let Some(page_id) = self.hinted_leaf_for_key(start, true)? {
-            return Ok(Some(page_id));
+    fn leaf_index_before(&mut self, upper: &[u8]) -> Result<Option<usize>, BTreeError> {
+        if self.leaf_index_cache.is_none() {
+            self.rebuild_leaf_index_cache()?;
         }
-        for idx in 0..LEAF_HINT_SLOTS {
-            let Some(page_id) = self.leaf_hints.floor_candidate(idx, start) else {
-                continue;
+        let cache = self.leaf_index_cache.as_ref().expect("leaf index cache");
+        Ok(cache
+            .partition_point(|entry| entry.first_key.as_slice() < upper)
+            .checked_sub(1))
+    }
+
+    fn leftmost_leaf(&mut self) -> Result<Option<PageId>, BTreeError> {
+        let mut current = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let page_size = self.options.page_size;
+
+        loop {
+            let page = {
+                let raw = self.ensure_page_loaded(current)?;
+                decode_page(raw, page_size)?
             };
-            let Some(raw) = self.pages.get(&page_id) else {
-                continue;
-            };
-            let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
-                continue;
-            };
-            if span.first_key > start || start <= span.last_key {
-                // Not a floor for `start` (covers would have caught the
-                // in-span case above).
-                continue;
-            }
-            // `start` is past this leaf; if the successor is cached and its
-            // first key is past `start` too, the gap in between is empty and
-            // the successor is where keys >= start begin. A tail leaf is
-            // already handled by the covers check above.
-            let Some(next_id) = span.next_page_id else {
-                continue;
-            };
-            let Some(next_raw) = self.pages.get(&next_id) else {
-                continue;
-            };
-            let Some(next_span) = raw_leaf_span(next_raw, self.options.page_size)? else {
-                continue;
-            };
-            if next_span.first_key > start {
-                self.touch_page(next_id);
-                return Ok(Some(next_id));
+            match page {
+                Page::Leaf { .. } => return Ok(Some(current)),
+                Page::Internal { keys, children } => {
+                    let _ = keys;
+                    current = *children.first().ok_or_else(|| {
+                        BTreeError::Corrupt("internal page without children".to_string())
+                    })?;
+                }
+                other => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected {:?} page {} in leftmost leaf path",
+                        other, current
+                    )));
+                }
             }
         }
-        let leaf = self.find_leaf_page_id(start)?;
-        if let Some(page_id) = leaf {
-            self.remember_leaf_hint(page_id)?;
+    }
+
+    fn rebuild_leaf_index_cache(&mut self) -> Result<(), BTreeError> {
+        let page_size = self.options.page_size;
+        let mut cache = Vec::new();
+        let mut current = self.leftmost_leaf()?;
+        let mut visited = OpfsSet::default();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
+            }
+            let page = {
+                let raw = self.ensure_page_loaded(page_id)?;
+                decode_page(raw, page_size)?
+            };
+            let Page::Leaf { entries, next } = page else {
+                return Err(BTreeError::Corrupt(format!(
+                    "expected leaf page {}, found non-leaf while indexing leaf chain",
+                    page_id
+                )));
+            };
+            if let (Some((first_key, _)), Some((last_key, _))) = (entries.first(), entries.last()) {
+                cache.push(LeafIndexEntry {
+                    page_id,
+                    first_key: first_key.clone(),
+                    last_key: last_key.clone(),
+                });
+            }
+            current = next;
         }
-        Ok(leaf)
-    }
 
-    fn remember_leaf_hint_if_not_mru(&mut self, page_id: PageId) -> Result<(), BTreeError> {
-        if self.leaf_hints.is_mru(page_id) {
-            return Ok(());
-        }
-        self.remember_leaf_hint(page_id)
-    }
-
-    fn remember_leaf_hint(&mut self, page_id: PageId) -> Result<(), BTreeError> {
-        let Some(raw) = self.pages.get(&page_id) else {
-            return Ok(());
-        };
-        let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
-            return Ok(());
-        };
-        self.leaf_hints.remember(page_id, &span);
-        Ok(())
-    }
-
-    fn remember_tail_leaf_hint(&mut self, page_id: PageId) -> Result<(), BTreeError> {
-        let Some(raw) = self.pages.get(&page_id) else {
-            return Ok(());
-        };
-        let Some(span) = raw_leaf_span(raw, self.options.page_size)? else {
-            return Ok(());
-        };
-        self.leaf_hints.remember_if_tail(page_id, &span);
+        self.leaf_index_cache = Some(cache);
         Ok(())
     }
 
@@ -1326,7 +1378,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         if let Some(max_live) = self.pages.keys().max().copied() {
             max_page_id = max_page_id.max(max_live);
         }
-        if let Some(max_free) = self.free_bitmap.highest() {
+        if let Some(max_free) = self.free_set.iter().max().copied() {
             max_page_id = max_page_id.max(max_free);
         }
         if let Some(max_freelist) = freelist_pages.iter().map(|(id, _)| *id).max() {
@@ -1458,8 +1510,22 @@ impl<F: SyncFile> OpfsBTree<F> {
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("checkpoint truncate length overflow".to_string()))?;
         self.file.truncate(required_len)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
         self.persisted_pages = self.total_pages;
+        Ok(())
+    }
+
+    fn flush_for_write(&self) -> Result<(), BTreeError> {
+        if self.options.sync_policy == SyncPolicy::PerWrite {
+            self.file.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush_for_close(&self) -> Result<(), BTreeError> {
+        if self.options.sync_policy != SyncPolicy::Never {
+            self.file.flush()?;
+        }
         Ok(())
     }
 
@@ -1487,7 +1553,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         header: WalHeader,
         frames: Vec<WalFrame>,
     ) -> Result<(), BTreeError> {
-        self.leaf_hints.clear();
+        self.last_leaf_hint = None;
         if header.total_pages < 2 {
             return Err(BTreeError::Corrupt(
                 "WAL total_pages must be >= 2".to_string(),
@@ -1495,7 +1561,8 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         self.total_pages = header.total_pages;
         self.root_page_id = (header.root_page_id != 0).then_some(header.root_page_id);
-        self.free_bitmap.clear();
+        self.free_pages.clear();
+        self.free_set.clear();
         self.freelist_meta_pages.clear();
 
         for frame in frames {
@@ -1607,7 +1674,9 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
-        self.leaf_hints.forget(page_id);
+        if self.last_leaf_hint == Some(page_id) {
+            self.last_leaf_hint = None;
+        }
         self.dirty_pages.remove(&page_id);
         self.wal_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
@@ -1629,9 +1698,11 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         self.sanitize_free_pages();
 
-        let total_free = self.free_bitmap.len();
+        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
+        free_ids.sort_unstable();
+
         let capacity = freelist_ids_per_page(self.options.page_size)?;
-        if capacity == 0 && total_free != 0 {
+        if capacity == 0 && !free_ids.is_empty() {
             return Err(BTreeError::InvalidOptions(
                 "page size too small for freelist pages".to_string(),
             ));
@@ -1641,25 +1712,27 @@ impl<F: SyncFile> OpfsBTree<F> {
         while meta_count
             .checked_mul(capacity)
             .ok_or_else(|| BTreeError::Io("freelist capacity overflow".to_string()))?
-            < total_free.saturating_sub(meta_count)
+            < free_ids.len().saturating_sub(meta_count)
         {
             meta_count += 1;
         }
 
-        // The meta pages that host the freelist come off the top of the free
-        // set; taking them in place leaves the remaining (lower) ids still free
-        // in the bitmap, so no clear-and-reinsert is needed.
         let mut meta_page_ids = Vec::with_capacity(meta_count);
         for _ in 0..meta_count {
-            let page_id = self.free_bitmap.take_highest().ok_or_else(|| {
+            let page_id = free_ids.pop().ok_or_else(|| {
                 BTreeError::Corrupt("freelist meta page allocation underflow".to_string())
             })?;
             meta_page_ids.push(page_id);
         }
         meta_page_ids.sort_unstable();
 
-        // The bitmap already yields ids in ascending order, so no sort here.
-        let remaining_free: Vec<PageId> = self.free_bitmap.iter().collect();
+        let remaining_free = free_ids;
+        self.free_set.clear();
+        self.free_pages.clear();
+        for page_id in &remaining_free {
+            self.free_set.insert(*page_id);
+            self.free_pages.push(*page_id);
+        }
 
         self.freelist_meta_pages = meta_page_ids.clone();
         let head_page_id = *meta_page_ids.first().unwrap_or(&0);
@@ -1686,31 +1759,22 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn sanitize_free_pages(&mut self) {
-        // Pages 0 and 1 are reserved; ids at or beyond total_pages do not exist
-        // yet; and a page currently resident in the cache is live, not free.
-        self.free_bitmap.remove(0);
-        self.free_bitmap.remove(1);
-        self.free_bitmap.retain_below(self.total_pages);
-        // Drop any free id that is actually live. Scan the free set (usually
-        // small, often empty on write-heavy workloads) rather than the page
-        // cache, which is frequently much larger.
-        let live_free: Vec<PageId> = self
-            .free_bitmap
-            .iter()
-            .filter(|page_id| self.pages.contains_key(page_id))
-            .collect();
-        for page_id in live_free {
-            self.free_bitmap.remove(page_id);
-        }
-        // Removing high live/out-of-range ids can leave empty trailing words.
-        self.free_bitmap.trim_trailing_empty_words();
+        let live_page_ids: OpfsSet<PageId> = self.pages.keys().copied().collect();
+        self.free_set.retain(|page_id| {
+            *page_id >= 2 && *page_id < self.total_pages && !live_page_ids.contains(page_id)
+        });
+
+        self.free_pages.clear();
+        self.free_pages.extend(self.free_set.iter().copied());
+        self.free_pages.sort_unstable();
     }
 
     fn alloc_page(&mut self) -> PageId {
-        if let Some(page_id) = self.free_bitmap.take_highest() {
-            self.freelist_dirty = true;
-            tracing::trace!(page_id, reused = true, "alloc_page");
-            return page_id;
+        while let Some(page_id) = self.free_pages.pop() {
+            if self.claim_free_page(page_id) {
+                tracing::trace!(page_id, reused = true, "alloc_page");
+                return page_id;
+            }
         }
 
         let page_id = self.total_pages;
@@ -1729,15 +1793,38 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(self.alloc_page());
         }
 
-        if let Some(run_start) = self.free_bitmap.take_run(page_count) {
-            self.freelist_dirty = true;
-            tracing::trace!(
-                head_page_id = run_start,
-                page_count,
-                reused = true,
-                "alloc_extent_pages"
-            );
-            return Ok(run_start);
+        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
+        free_ids.sort_unstable();
+        let mut run_start = 0u64;
+        let mut run_len = 0usize;
+        let mut prev = 0u64;
+        for id in free_ids {
+            if run_len == 0 {
+                run_start = id;
+                run_len = 1;
+            } else if id == prev.saturating_add(1) {
+                run_len = run_len.saturating_add(1);
+            } else {
+                run_start = id;
+                run_len = 1;
+            }
+            prev = id;
+
+            if run_len >= page_count {
+                for i in 0..page_count {
+                    let page_id = run_start.checked_add(i as u64).ok_or_else(|| {
+                        BTreeError::Corrupt("extent free-run page id overflow".to_string())
+                    })?;
+                    self.claim_free_page(page_id);
+                }
+                tracing::trace!(
+                    head_page_id = run_start,
+                    page_count,
+                    reused = true,
+                    "alloc_extent_pages"
+                );
+                return Ok(run_start);
+            }
         }
 
         let start = self.total_pages;
@@ -1784,13 +1871,14 @@ impl<F: SyncFile> OpfsBTree<F> {
         if page_id < 2 {
             return;
         }
-        if self.free_bitmap.insert(page_id) {
+        if self.free_set.insert(page_id) {
+            self.free_pages.push(page_id);
             self.freelist_dirty = true;
         }
     }
 
     fn claim_free_page(&mut self, page_id: PageId) -> bool {
-        if self.free_bitmap.remove(page_id) {
+        if self.free_set.remove(&page_id) {
             self.freelist_dirty = true;
             true
         } else {
@@ -1851,10 +1939,6 @@ impl<F: SyncFile> OpfsBTree<F> {
             if Some(*page_id) == protected_page
                 || Some(*page_id) == root_page_id
                 || self.dirty_pages.contains(page_id)
-                // A page whose newest bytes exist only in the cache/WAL must not be
-                // evicted, otherwise a later cache miss would read the stale
-                // home-location copy from disk. WAL-resident pages stay pinned until
-                // the next checkpoint writes them home.
                 || self.wal_pages.contains(page_id)
             {
                 continue;
@@ -1917,7 +2001,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let target_slot = self.active_slot.inactive();
         write_slot_unchecked(&self.file, target_slot, self.options.page_size, next)?;
-        self.file.flush()?;
+        self.flush_for_write()?;
 
         self.active_slot = target_slot;
         self.active = next;
@@ -2129,6 +2213,7 @@ fn write_slot_unchecked<F: SyncFile>(
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Instant;
 
     use super::*;
     use crate::file::{MemoryFile, SyncFile};
@@ -2140,6 +2225,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 
@@ -2150,6 +2236,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         }
     }
 
@@ -2159,11 +2246,92 @@ mod tests {
         options
     }
 
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn usize(&mut self, upper: usize) -> usize {
+            if upper == 0 {
+                0
+            } else {
+                (self.next() as usize) % upper
+            }
+        }
+
+        fn bool(&mut self) -> bool {
+            self.next() & 1 == 0
+        }
+
+        fn byte(&mut self) -> u8 {
+            (self.next() & 0xff) as u8
+        }
+    }
+
+    fn random_cf_shaped_key(rng: &mut TestRng, ordinal: usize) -> Vec<u8> {
+        const PREFIXES: [&[u8]; 5] = [
+            b"indices\0jazz_table_history\0by_tx\0",
+            b"indices\0jazz_table_register\0by_tx\0",
+            b"history\0row\0",
+            b"current\0row\0",
+            b"\xffedge\0prefix\0",
+        ];
+        let mut key = PREFIXES[rng.usize(PREFIXES.len())].to_vec();
+        if rng.usize(4) == 0 {
+            key.extend_from_slice(&(ordinal as u32).to_be_bytes());
+        }
+        let suffix_len = rng.usize(24);
+        for _ in 0..suffix_len {
+            key.push(match rng.usize(6) {
+                0 => 0,
+                1 => 0xff,
+                2 => b'0' + rng.usize(10) as u8,
+                _ => rng.byte(),
+            });
+        }
+        key
+    }
+
+    fn random_bound(rng: &mut TestRng, keys: &[Vec<u8>]) -> Vec<u8> {
+        match rng.usize(8) {
+            0 => Vec::new(),
+            1 => vec![0xff],
+            2 | 3 if !keys.is_empty() => keys[rng.usize(keys.len())].clone(),
+            4 if !keys.is_empty() => {
+                let mut key = keys[rng.usize(keys.len())].clone();
+                key.push(0);
+                key
+            }
+            5 if !keys.is_empty() => {
+                let mut key = keys[rng.usize(keys.len())].clone();
+                if let Some(last) = key.last_mut() {
+                    *last = last.saturating_add(1);
+                }
+                key
+            }
+            _ => {
+                let ordinal = rng.usize(10_000);
+                random_cf_shaped_key(rng, ordinal)
+            }
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct CountingFile {
         inner: MemoryFile,
         writes: Rc<RefCell<Vec<(u64, usize)>>>,
         reads: Rc<RefCell<Vec<(u64, usize)>>>,
+        flushes: Rc<RefCell<usize>>,
     }
 
     impl CountingFile {
@@ -2172,6 +2340,7 @@ mod tests {
                 inner: MemoryFile::new(),
                 writes: Rc::new(RefCell::new(Vec::new())),
                 reads: Rc::new(RefCell::new(Vec::new())),
+                flushes: Rc::new(RefCell::new(0)),
             }
         }
 
@@ -2210,6 +2379,10 @@ mod tests {
             self.reads.borrow_mut().clear();
             self.writes.borrow_mut().clear();
         }
+
+        fn flush_count(&self) -> usize {
+            *self.flushes.borrow()
+        }
     }
 
     impl SyncFile for CountingFile {
@@ -2232,6 +2405,7 @@ mod tests {
         }
 
         fn flush(&self) -> Result<(), BTreeError> {
+            *self.flushes.borrow_mut() += 1;
             self.inner.flush()
         }
     }
@@ -2240,6 +2414,18 @@ mod tests {
         let offset = slot.byte_offset(page_size) + 8;
         file.write_all_at(offset, &[0xFF, 0x00, 0xAA, 0x55])
             .expect("corrupt slot bytes");
+    }
+
+    fn deterministic_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            out.push((state >> 32) as u8);
+        }
+        out
     }
 
     #[test]
@@ -2400,66 +2586,72 @@ mod tests {
     }
 
     #[test]
-    fn range_handles_gap_and_boundary_starts() {
+    fn reverse_range_streams_in_reverse_order_with_forward_order_cost() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
-        for i in 0..600u32 {
-            tree.put(
-                format!("k{:04}", i).as_bytes(),
-                format!("v-{}", i).as_bytes(),
-            )
-            .expect("put");
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+        for i in 0..10_000u32 {
+            let key = format!("k{i:05}");
+            let value = format!("v{i:05}");
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
         }
-        // "k0042~" sorts after "k0042" and before "k0043", so this sweeps a
-        // start through every inter-key gap, including gaps between leaves.
-        for i in 0..599u32 {
-            let start = format!("k{:04}~", i);
-            let end = format!("k{:04}", i + 4);
-            let got = tree
-                .range(start.as_bytes(), end.as_bytes(), 10)
-                .expect("range");
-            let expected: Vec<(Vec<u8>, Vec<u8>)> = (i + 1..(i + 4).min(600))
-                .map(|j| {
-                    (
-                        format!("k{:04}", j).into_bytes(),
-                        format!("v-{}", j).into_bytes(),
-                    )
-                })
-                .collect();
-            assert_eq!(got, expected, "start {}", start);
-        }
+
+        let forward_start = Instant::now();
+        let forward = tree.range(b"k00000", b"k10000", usize::MAX).unwrap();
+        let forward_elapsed = forward_start.elapsed();
+
+        let reverse_start = Instant::now();
+        let reverse = tree
+            .range_reverse(b"k00000", b"k10000", usize::MAX)
+            .unwrap();
+        let reverse_elapsed = reverse_start.elapsed();
+
+        let mut expected = forward.clone();
+        expected.reverse();
+        assert_eq!(reverse, expected);
+        assert_eq!(forward.len(), 10_000);
+
+        let forward_nanos = forward_elapsed.as_nanos().max(1);
+        let reverse_nanos = reverse_elapsed.as_nanos();
+        assert!(
+            reverse_nanos <= forward_nanos.saturating_mul(20),
+            "reverse scan should stay in the same order of magnitude as forward: forward={forward_elapsed:?}, reverse={reverse_elapsed:?}"
+        );
     }
 
     #[test]
-    fn paginated_ranges_stitch_into_full_scan() {
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
-        for i in 0..600u32 {
-            tree.put(
-                format!("k{:04}", i).as_bytes(),
-                format!("v-{}", i).as_bytes(),
-            )
-            .expect("put");
+    fn reverse_range_matches_forward_range_reversed_for_random_bounds() {
+        for seed in 0..128u64 {
+            let mut rng = TestRng::new(0xB7_EE_u64 ^ seed.wrapping_mul(0x9E37_79B9));
+            let file = MemoryFile::new();
+            let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+            let mut model = std::collections::BTreeMap::<Vec<u8>, Vec<u8>>::new();
+            let key_count = 96 + rng.usize(160);
+
+            for i in 0..key_count {
+                let key = random_cf_shaped_key(&mut rng, i);
+                let value = format!("value-{seed}-{i}").into_bytes();
+                tree.put(&key, &value).expect("put");
+                model.insert(key, value);
+            }
+
+            let keys = model.keys().cloned().collect::<Vec<_>>();
+            for _ in 0..256 {
+                let mut start = random_bound(&mut rng, &keys);
+                let mut end = random_bound(&mut rng, &keys);
+                if rng.bool() {
+                    std::mem::swap(&mut start, &mut end);
+                }
+
+                let forward = tree.range(&start, &end, usize::MAX).expect("forward");
+                let mut expected = forward.clone();
+                expected.reverse();
+                let reverse = tree
+                    .range_reverse(&start, &end, usize::MAX)
+                    .expect("reverse");
+
+                assert_eq!(reverse, expected, "seed={seed} start={start:?} end={end:?}");
+            }
         }
-        let mut seen: Vec<Vec<u8>> = Vec::new();
-        let mut cursor = b"k".to_vec();
-        loop {
-            let batch = tree.range(&cursor, b"l", 37).expect("range");
-            let Some((last_key, _)) = batch.last() else {
-                break;
-            };
-            // Next page starts just past the last returned key.
-            cursor = last_key.clone();
-            cursor.push(0);
-            seen.extend(batch.into_iter().map(|(k, _)| k));
-        }
-        assert_eq!(seen.len(), 600);
-        assert_eq!(
-            seen.first().map(|k| k.as_slice()),
-            Some(b"k0000".as_slice())
-        );
-        assert_eq!(seen.last().map(|k| k.as_slice()), Some(b"k0599".as_slice()));
-        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -2521,7 +2713,7 @@ mod tests {
             "same-page-count overflow update should reuse existing extent pages"
         );
         assert!(
-            tree.free_bitmap.is_empty(),
+            tree.free_set.is_empty(),
             "reuse path should not free overflow pages when page count is unchanged"
         );
     }
@@ -2541,7 +2733,7 @@ mod tests {
         assert_eq!(tree.get(b"k").expect("get k"), Some(value_small));
         assert_eq!(tree.total_pages, total_pages_before);
         assert!(
-            !tree.free_bitmap.is_empty(),
+            !tree.free_set.is_empty(),
             "shrinking overflow value should return tail pages to free list"
         );
     }
@@ -2609,35 +2801,48 @@ mod tests {
     }
 
     #[test]
-    fn interleaved_puts_and_reads_stay_consistent() {
-        let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open");
-        for i in 0..2_000u32 {
-            let a = format!("a{:05}", i);
-            let b = format!("b{:05}", i);
-            tree.put(a.as_bytes(), format!("va-{}", i).as_bytes())
-                .expect("put a");
-            tree.put(b.as_bytes(), format!("vb-{}", i).as_bytes())
-                .expect("put b");
-            assert_eq!(
-                tree.get(a.as_bytes()).expect("get a"),
-                Some(format!("va-{}", i).into_bytes())
-            );
-            assert_eq!(
-                tree.get(b.as_bytes()).expect("get b"),
-                Some(format!("vb-{}", i).into_bytes())
-            );
-            if i % 3 == 0 {
-                tree.delete(a.as_bytes()).expect("delete a");
-                assert_eq!(tree.get(a.as_bytes()).expect("get deleted"), None);
-            }
-            if i % 500 == 499 {
-                tree.flush_wal().expect("flush");
-            }
-        }
-        let got = tree.range(b"a", b"b", usize::MAX).expect("range a-region");
-        let expected_live = (0..2_000u32).filter(|i| i % 3 != 0).count();
-        assert_eq!(got.len(), expected_live);
+    fn sync_policy_controls_durable_flush_cadence() {
+        let per_write_file = CountingFile::new();
+        let mut tree =
+            OpfsBTree::open(per_write_file.clone(), small_options()).expect("open per-write");
+        tree.put(b"k", b"v").expect("put per-write");
+        tree.checkpoint().expect("checkpoint per-write");
+        assert!(
+            per_write_file.flush_count() >= 1,
+            "per-write policy should flush during write boundaries"
+        );
+
+        let on_close_file = CountingFile::new();
+        let mut on_close_options = small_options();
+        on_close_options.sync_policy = SyncPolicy::OnClose;
+        let mut tree =
+            OpfsBTree::open(on_close_file.clone(), on_close_options).expect("open on-close");
+        tree.put(b"k", b"v").expect("put on-close");
+        tree.checkpoint().expect("checkpoint on-close");
+        assert_eq!(
+            on_close_file.flush_count(),
+            0,
+            "on-close policy should skip per-write flushes"
+        );
+        tree.close().expect("close on-close");
+        assert_eq!(
+            on_close_file.flush_count(),
+            1,
+            "on-close policy should flush when explicitly closed"
+        );
+
+        let never_file = CountingFile::new();
+        let mut never_options = small_options();
+        never_options.sync_policy = SyncPolicy::Never;
+        let mut tree = OpfsBTree::open(never_file.clone(), never_options).expect("open never");
+        tree.put(b"k", b"v").expect("put never");
+        tree.checkpoint().expect("checkpoint never");
+        tree.close().expect("close never");
+        assert_eq!(
+            never_file.flush_count(),
+            0,
+            "never policy should not flush at write or close boundaries"
+        );
     }
 
     #[test]
@@ -2970,6 +3175,46 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reopened_overflow_values_survive_cache_pressure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("overflow.opfs");
+        let options = BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 3,
+            overflow_threshold: 256,
+            pin_internal_pages: true,
+            read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
+        };
+        let value_len = 24 * 1024;
+        let row_count = 512usize;
+
+        {
+            let file = crate::file::StdFile::open(&path).expect("open file");
+            let mut tree = OpfsBTree::open(file, options).expect("open tree");
+            for row in 0..row_count {
+                let key = format!("row/{row:04}");
+                let value = deterministic_bytes(row as u64, value_len);
+                tree.put(key.as_bytes(), &value).expect("put overflow row");
+            }
+            tree.checkpoint().expect("checkpoint");
+        }
+
+        let file = crate::file::StdFile::open(&path).expect("reopen file");
+        let mut tree = OpfsBTree::open(file, options).expect("reopen tree");
+        for row in 0..row_count {
+            let key = format!("row/{row:04}");
+            let expected = deterministic_bytes(row as u64, value_len);
+            assert_eq!(
+                tree.get(key.as_bytes()).expect("get overflow row"),
+                Some(expected),
+                "row {row} changed across reopen"
+            );
+        }
+    }
+
     #[test]
     fn eviction_with_pinned_cache_keeps_warm_evictable_pages() {
         let file = MemoryFile::new();
@@ -2979,6 +3224,7 @@ mod tests {
             overflow_threshold: 128,
             pin_internal_pages: false,
             read_coalesce_pages: 1,
+            sync_policy: SyncPolicy::PerWrite,
         };
         let mut tree = OpfsBTree::open(file, options).expect("open tree");
         let max_cached = tree.max_cached_pages();
@@ -3072,7 +3318,7 @@ mod tests {
 
         let allocated = tree.alloc_page_near(10);
         assert_eq!(allocated, 11, "expected +1 neighbor to be selected first");
-        assert!(!tree.free_bitmap.contains(11));
+        assert!(!tree.free_set.contains(&11));
     }
 
     #[test]

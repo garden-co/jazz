@@ -3,27 +3,36 @@ name = "jazz-napi"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["jazz/rocksdb", "jazz_tools/rocksdb", "jazz-server/rocksdb"]
+
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
   "test-utils",
-  "transport-websocket",
   "otel-core",
 ] }
+jazz = { path = "../jazz", default-features = false }
+jazz-server = { path = "../jazz-server", default-features = false }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }
 napi-derive = "3"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_bytes = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
-mimalloc-safe = "0.1"
+# local_dynamic_tls: a dlopen'd cdylib with mimalloc's default initial-exec
+# TLS exhausts glibc's static TLS reserve ("cannot allocate memory in static
+# TLS block") once enough other libraries load first. Dynamic TLS is the
+# supported mode for shared libraries; see dev/CI_NOTES.md (2026-07-19).
+mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls"] }
 
 [build-dependencies]
 napi-build = "2"

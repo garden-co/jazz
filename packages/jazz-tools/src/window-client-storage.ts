@@ -17,7 +17,7 @@ export interface WindowJazzClientApi {
   listLiveStorageNamespaces(): string[];
   /**
    * Shut down live Jazz client storage contexts and await full cleanup
-   * (worker termination, OPFS lock release).  Pass a namespace to target
+   * (runtime teardown, OPFS lock release).  Pass a namespace to target
    * one context; with no argument, shuts down every live context.
    *
    * Resolves once all targets have completed shutdown.  Db.shutdown is

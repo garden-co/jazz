@@ -4,6 +4,7 @@
   import TodoList from './TodoList.svelte';
 
   const client = createJazzClient({
+    asyncSubscriptionsOnly: false,
     appId: '<your-app-id>',
   });
 </script>

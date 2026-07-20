@@ -2,12 +2,8 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   files: s.table({
-    name: s.string(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
-  }),
-  file_parts: s.table({
+    name: s.string().optional(),
+    mime_type: s.string(),
     data: s.bytes(),
   }),
   uploads: s.table({
@@ -23,9 +19,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
 const uploadWithPartsQuery = app.uploads
   .include({
-    file: {
-      parts: true,
-    },
+    file: true,
   })
   .requireIncludes();
 

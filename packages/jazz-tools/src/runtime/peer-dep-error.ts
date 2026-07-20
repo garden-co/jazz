@@ -8,7 +8,7 @@ const MODULE_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
 ]);
 
 // When a `specifier` is provided, also verify the error names that exact
-// package — otherwise a transitive failure (e.g. jazz-rn loaded fine but its
+// package — otherwise a transitive failure (e.g. a peer package loaded fine but its
 // own dependency is missing) would be misreported as the peer dep itself
 // being absent. Node emits messages in a few shapes:
 //   Cannot find module 'X'

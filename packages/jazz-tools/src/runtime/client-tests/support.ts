@@ -1,9 +1,4 @@
-import {
-  JazzClient,
-  type DirectInsertResult,
-  type DirectMutationResult,
-  type Runtime,
-} from "../client.js";
+import { JazzClient, type InsertResult, type MutationResult, type Runtime } from "../client.js";
 import type { AppContext } from "../context.js";
 
 export { JazzClient, type Runtime };
@@ -35,21 +30,20 @@ export async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-export function mockRow(id = "todo-1"): DirectInsertResult {
-  return { id, values: [], batchId: `batch-${id}` };
+export function mockRow(id = "todo-1"): InsertResult {
+  return { id, values: [], transactionId: `transaction-${id}` };
 }
 
-export function mockMutation(batchId = "batch-id"): DirectMutationResult {
-  return { batchId };
+export function mockMutation(transactionId = "transaction-id"): MutationResult {
+  return { transactionId };
 }
 
-export const runtimeBatchRecordStubs = {
-  beginBatch: (batchMode: "direct" | "transactional") => `batch-${batchMode}`,
-  upsert: () => mockMutation("upsert-batch-id"),
-  commitBatch: () => {},
-  waitForBatch: async () => {},
-  rollbackBatch: () => false,
-  onMutationError: () => {},
+export const runtimeTransactionRecordStubs = {
+  beginTransaction: (kind: "mergeable" | "exclusive") => `transaction-${kind}`,
+  upsert: () => mockMutation("upsert-transaction-id"),
+  commitTransaction: () => {},
+  waitForTransaction: async () => {},
+  rollbackTransaction: () => false,
   connect: () => {},
   disconnect: () => {},
   updateAuth: () => {},
@@ -67,22 +61,22 @@ export function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      transactionId: "plain-insert-transaction",
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      transactionId: "plain-restore-transaction",
     }),
     update: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     delete: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     query: async (
       queryJson: string,
@@ -118,8 +112,6 @@ export function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const context: AppContext = {
@@ -148,29 +140,27 @@ export function makeClient() {
 export function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      transactionId: "plain-insert-transaction",
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      transactionId: "plain-restore-transaction",
     }),
     update: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     delete: () => ({
-      batchId: "batch-id",
+      transactionId: "transaction-id",
     }),
     query: async () => [],
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const JazzClientCtor = JazzClient as unknown as {

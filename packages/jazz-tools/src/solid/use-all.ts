@@ -3,6 +3,7 @@ import { createStore, produce, reconcile } from "solid-js/store";
 import { applyDelta } from "../reconcile-array.js";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 
 export type UseAllResult<T extends { id: string }> = {
@@ -18,6 +19,7 @@ export function useAll<T extends { id: string }>(
   }>,
 ): UseAllResult<T> {
   const client = useJazzClient();
+  const store = getSubscriptionStore(client);
   const [state, setState] = createStore<UseAllResult<T>>({
     data: undefined,
     isLoading: false,
@@ -36,8 +38,8 @@ export function useAll<T extends { id: string }>(
     }
 
     try {
-      const key = client.manager.makeQueryKey(query, options);
-      const entry = client.manager.getCacheEntry<T>(key);
+      const key = store.makeQueryKey(query, options);
+      const entry = store.getCacheEntry<T>(key);
 
       setState({
         data: entry.state.data,
@@ -68,8 +70,12 @@ export function useAll<T extends { id: string }>(
                   applyDelta(current, delta);
                 }),
               );
-            } else {
+            } else if (delta.reset) {
               setState("data", reconcile(delta.all));
+            } else {
+              const current: T[] = [];
+              applyDelta(current, delta);
+              setState("data", reconcile(current));
             }
             setState("isLoading", false);
             setState("error", null);

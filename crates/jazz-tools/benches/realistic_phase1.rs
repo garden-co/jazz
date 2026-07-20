@@ -1,73 +1,46 @@
-#[path = "common/mod.rs"]
-mod permission_bench_common;
+//! Small active core realistic benchmark slice.
+//!
+//! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
+//! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
-use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs;
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
+#![allow(clippy::single_element_loop, dead_code)]
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+#[cfg(feature = "rocksdb")]
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-use std::time::Instant;
+use std::rc::Rc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use futures::executor::block_on;
-use jazz_tools::catalogue::CatalogueEntry;
-use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
-use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
-use jazz_tools::query_manager::query::{Query, QueryBuilder};
-use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{
-    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TablePolicies, TableSchema, Value,
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent, WireTransportAdapter, block_on,
 };
-use jazz_tools::row_format::encode_row;
-use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, apply_row_batch};
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
-use jazz_tools::schema_manager::encoding::encode_schema;
-use jazz_tools::schema_manager::{AppId, SchemaManager};
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-use jazz_tools::storage::RocksDBStorage;
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-use jazz_tools::storage::SqliteStorage;
-use jazz_tools::storage::Storage;
-use jazz_tools::storage::{MemoryStorage, RowLocator};
-use jazz_tools::sync_manager::{
-    ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
+use jazz::groove::records::Value;
+use jazz::groove::schema::{ColumnSchema, ColumnType};
+#[cfg(feature = "rocksdb")]
+use jazz::groove::storage::RocksDbStorage;
+use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::{Query, all_of, claim, col, eq, lit};
+use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::tx::DurabilityTier;
+use jazz::wire::{
+    FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
+    WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
 };
-use serde::Deserialize;
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
+#[cfg(feature = "rocksdb")]
 use tempfile::TempDir;
 
-type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
-const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-const STORAGE_BENCH_CACHE_SIZE_BYTES: usize = 32 * 1024 * 1024;
-const MANY_BRANCHES_TABLE: &str = "__bench_many_branches";
+type BenchDb = Db<MemoryStorage>;
+#[cfg(feature = "rocksdb")]
+type RocksBenchDb = Db<RocksDbStorage>;
 
-fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
-    pairs
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect()
-}
+const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
-#[derive(Debug, Clone, Deserialize)]
-struct ProfileConfig {
-    id: String,
-    seed: u64,
+#[derive(Debug, Clone, Copy)]
+struct SmallProfile {
     users: usize,
     organizations: usize,
     projects: usize,
@@ -77,4087 +50,1601 @@ struct ProfileConfig {
     activity_events: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct WeightedOperation {
-    operation: String,
-    weight: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R1ScenarioConfig {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    mix: Vec<WeightedOperation>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R2ScenarioConfig {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    mix: Vec<WeightedOperation>,
-    #[serde(default)]
-    background_write_ratio: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-struct R3ScenarioConfig {
-    id: String,
-    seed: u64,
-    profile_path: String,
-    cache_size_bytes: usize,
-    target_project_index: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R4ScenarioConfig {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    fanout_clients: Vec<usize>,
-    target_project_index: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R5ScenarioConfig {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    mix: Vec<WeightedOperation>,
-    recursive_depths: Vec<usize>,
-    shared_chain_depth: usize,
-    docs_per_folder: usize,
-    denied_docs: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R7ScenarioConfig {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    hot_task_count: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R8ScenarioConfig {
-    id: String,
-    seed: u64,
-    branch_count: usize,
-    commits_per_branch: usize,
-    merge_fanin: usize,
-    payload_bytes: usize,
-    #[cfg(any(
-        all(feature = "rocksdb", not(target_arch = "wasm32")),
-        all(feature = "sqlite", not(target_arch = "wasm32"))
-    ))]
-    #[serde(default = "default_many_branches_cache_size_bytes")]
-    cache_size_bytes: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct R9ScenarioConfig {
-    id: String,
-    scale: usize,
-    subscription_count: usize,
-}
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Copy)]
-enum CrudOperation {
-    InsertTask,
-    UpdateTask,
-    DeleteTask,
-}
-
-#[derive(Debug, Clone)]
-struct R1Scenario {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    operations: Vec<CrudOperation>,
-    weights: Vec<u32>,
-}
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Copy)]
-enum ReadOperation {
-    QueryBoard,
-    QueryMyWork,
-    QueryTaskDetail,
-    QueryActivityFeed,
-}
-
-#[derive(Debug, Clone)]
-struct R2Scenario {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    operations: Vec<ReadOperation>,
-    weights: Vec<u32>,
-    background_write_ratio: f64,
-}
-
-#[derive(Debug, Clone)]
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-struct R3Scenario {
-    id: String,
-    seed: u64,
-    profile_path: String,
-    #[allow(dead_code)]
-    cache_size_bytes: usize,
-    target_project_index: usize,
-}
-
-#[derive(Debug, Clone)]
-struct R4Scenario {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    fanout_clients: Vec<usize>,
-    target_project_index: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PermissionOperation {
-    QueryVisibleDocs,
-    UpdateAllowedDoc,
-    UpdateDeniedDoc,
-}
-
-#[derive(Debug, Clone)]
-struct R5Scenario {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    operations: Vec<PermissionOperation>,
-    weights: Vec<u32>,
-    recursive_depths: Vec<usize>,
-    shared_chain_depth: usize,
-    docs_per_folder: usize,
-    denied_docs: usize,
-}
-
-#[derive(Debug, Clone)]
-struct R7Scenario {
-    id: String,
-    seed: u64,
-    operation_count: usize,
-    hot_task_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct R8Scenario {
-    id: String,
-    seed: u64,
-    branch_count: usize,
-    commits_per_branch: usize,
-    merge_fanin: usize,
-    payload_bytes: usize,
-    #[cfg(any(
-        all(feature = "rocksdb", not(target_arch = "wasm32")),
-        all(feature = "sqlite", not(target_arch = "wasm32"))
-    ))]
-    #[allow(dead_code)]
-    cache_size_bytes: usize,
-}
-
-#[derive(Debug, Clone)]
-struct R9Scenario {
-    id: String,
-    scale: usize,
-    subscription_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct ManyBranchesDataset {
-    object_id: ObjectId,
-    prefix: String,
-    branch_names: Vec<String>,
-    leaf_branch_names: HashSet<String>,
-    total_commits: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BranchHeadScan {
-    branches_scanned: usize,
-    heads_found: usize,
-    checksum: u64,
-}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-fn default_many_branches_cache_size_bytes() -> usize {
-    32 * 1024 * 1024
-}
-
-impl R8Scenario {
-    fn total_commits(&self) -> usize {
-        self.branch_count * self.commits_per_branch.max(1)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
-
-    fn next_usize(&mut self, upper: usize) -> usize {
-        if upper <= 1 {
-            return 0;
-        }
-        (self.next_u64() as usize) % upper
-    }
-
-    fn pick_weighted_index(&mut self, weights: &[u32]) -> usize {
-        let total: u32 = weights.iter().sum();
-        if total == 0 {
-            return 0;
-        }
-        let mut cursor = (self.next_u64() % total as u64) as u32;
-        for (idx, weight) in weights.iter().copied().enumerate() {
-            if cursor < weight {
-                return idx;
-            }
-            cursor -= weight;
-        }
-        weights.len().saturating_sub(1)
-    }
-}
-
-struct R1State<S: Storage = MemoryStorage> {
-    runtime: RuntimeCore<S, NoopScheduler>,
-    rng: Lcg,
-    users: Vec<ObjectId>,
-    organizations: Vec<ObjectId>,
-    projects: Vec<ObjectId>,
-    active_tasks: Vec<ObjectId>,
-    deleted_tasks: Vec<ObjectId>,
-    next_task_seq: usize,
-    next_comment_seq: usize,
-    timestamp: u64,
-    min_task_floor: usize,
-}
-
-struct SingleHopR1State<S: Storage = MemoryStorage> {
-    client: R1State<S>,
-    server: BenchRuntime<S>,
-    client_id_on_server: ClientId,
-    server_id_on_client: ServerId,
-    total_routed_messages: usize,
-}
-
-struct FanoutReader<S: Storage = MemoryStorage> {
-    runtime: BenchRuntime<S>,
-    client_id_on_server: ClientId,
-    server_id_on_client: ServerId,
-}
-
-struct FanoutR4State<S: Storage = MemoryStorage> {
-    writer: R1State<S>,
-    server: BenchRuntime<S>,
-    writer_client_id_on_server: ClientId,
-    writer_server_id_on_client: ServerId,
-    readers: Vec<FanoutReader<S>>,
-    hot_task_ids: Vec<ObjectId>,
-    hot_task_cursor: usize,
-    total_routed_messages: usize,
-    delivered_notifications: Arc<AtomicUsize>,
-}
-
-struct PermissionBatchResult {
-    total_rows: usize,
-    allowed_updates: usize,
-    denied_updates: usize,
-}
-
-struct PermissionR5State<S: Storage = MemoryStorage> {
-    runtime: BenchRuntime<S>,
-    rng: Lcg,
-    session_alice: Session,
-    allowed_doc_ids: Vec<ObjectId>,
-    denied_doc_ids: Vec<ObjectId>,
-    timestamp: u64,
-}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-struct SeededProjectBoard {
-    projects: Vec<ObjectId>,
-    active_tasks: Vec<ObjectId>,
-}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-struct ColdLoadSeededDb {
-    _tempdir: TempDir,
-    db_path: PathBuf,
-    target_project_id: ObjectId,
-    #[allow(dead_code)]
-    cache_size_bytes: usize,
-}
-
-impl R1State<MemoryStorage> {
-    fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
-        Self::seeded(profile, profile.seed ^ scenario.seed)
-    }
-
-    fn seeded(profile: &ProfileConfig, seed: u64) -> Self {
-        Self::with_runtime(create_runtime(project_board_schema()), profile, seed)
-    }
-}
-
-impl<S: Storage> R1State<S> {
-    fn with_runtime(
-        runtime: RuntimeCore<S, NoopScheduler>,
-        profile: &ProfileConfig,
-        seed: u64,
-    ) -> Self {
-        let mut state = Self {
-            runtime,
-            rng: Lcg::new(seed),
-            users: Vec::with_capacity(profile.users),
-            organizations: Vec::with_capacity(profile.organizations),
-            projects: Vec::with_capacity(profile.projects),
-            active_tasks: Vec::with_capacity(profile.tasks.max(1)),
-            deleted_tasks: Vec::with_capacity(profile.tasks / 4),
-            next_task_seq: 0,
-            next_comment_seq: 0,
-            timestamp: 1_770_000_000_000_000,
-            min_task_floor: (profile.tasks / 2).max(1),
-        };
-        state.seed_dataset(profile);
-        state
-    }
-
-    fn seed_dataset(&mut self, profile: &ProfileConfig) {
-        for user_idx in 0..profile.users {
-            let ((user_id, _row_values), _batch_id) = self
-                .runtime
-                .insert(
-                    "users",
-                    row([
-                        ("display_name", Value::Text(format!("User {user_idx}"))),
-                        ("email", Value::Text(format!("user{user_idx}@bench.local"))),
-                    ]),
-                    None,
-                )
-                .expect("seed users");
-            self.users.push(user_id);
-        }
-
-        for org_idx in 0..profile.organizations {
-            let created_at = self.bump_timestamp();
-            let ((org_id, _row_values), _batch_id) = self
-                .runtime
-                .insert(
-                    "organizations",
-                    row([
-                        ("name", Value::Text(format!("Org {org_idx}"))),
-                        ("created_at", Value::Timestamp(created_at)),
-                    ]),
-                    None,
-                )
-                .expect("seed organizations");
-            self.organizations.push(org_id);
-        }
-
-        for user_idx in 0..self.users.len() {
-            let org_id = self.organizations[user_idx % self.organizations.len()];
-            let role = match user_idx % 3 {
-                0 => "owner",
-                1 => "editor",
-                _ => "member",
-            };
-            let _membership_id = self
-                .runtime
-                .insert(
-                    "memberships",
-                    row([
-                        ("organization_id", Value::Uuid(org_id)),
-                        ("user_id", Value::Uuid(self.users[user_idx])),
-                        ("role", Value::Text(role.to_string())),
-                    ]),
-                    None,
-                )
-                .expect("seed memberships");
-        }
-
-        for project_idx in 0..profile.projects {
-            let org_id = self.organizations[project_idx % self.organizations.len()];
-            let updated_at = self.bump_timestamp();
-            let ((project_id, _row_values), _batch_id) = self
-                .runtime
-                .insert(
-                    "projects",
-                    row([
-                        ("organization_id", Value::Uuid(org_id)),
-                        ("name", Value::Text(format!("Project {project_idx}"))),
-                        ("archived", Value::Boolean(false)),
-                        ("updated_at", Value::Timestamp(updated_at)),
-                    ]),
-                    None,
-                )
-                .expect("seed projects");
-            self.projects.push(project_id);
-        }
-
-        for task_idx in 0..profile.tasks {
-            let project_id = self.projects[task_idx % self.projects.len()];
-            let assignee_id = self.users[task_idx % self.users.len()];
-            let status = match task_idx % 4 {
-                0 => "todo",
-                1 => "in_progress",
-                2 => "in_review",
-                _ => "done",
-            };
-            let priority = ((task_idx % 5) + 1) as i32;
-            let updated_at = self.bump_timestamp();
-            let ((task_id, _row_values), _batch_id) = self
-                .runtime
-                .insert(
-                    "tasks",
-                    row([
-                        ("project_id", Value::Uuid(project_id)),
-                        ("title", Value::Text(format!("Task {task_idx}"))),
-                        ("status", Value::Text(status.to_string())),
-                        ("priority", Value::Integer(priority)),
-                        ("assignee_id", Value::Uuid(assignee_id)),
-                        ("updated_at", Value::Timestamp(updated_at)),
-                        ("due_at", Value::Null),
-                    ]),
-                    None,
-                )
-                .expect("seed tasks");
-            self.active_tasks.push(task_id);
-        }
-
-        for task_id in self.active_tasks.iter().copied() {
-            for watcher_offset in 0..profile.watchers_per_task.max(1) {
-                let user_id = self.users
-                    [(watcher_offset + self.rng.next_usize(self.users.len())) % self.users.len()];
-                let _watcher_id = self
-                    .runtime
-                    .insert(
-                        "task_watchers",
-                        row([
-                            ("task_id", Value::Uuid(task_id)),
-                            ("user_id", Value::Uuid(user_id)),
-                        ]),
-                        None,
-                    )
-                    .expect("seed task_watchers");
-            }
-        }
-
-        for _comment_idx in 0..profile.comments {
-            let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
-            let author_id = self.users[self.rng.next_usize(self.users.len())];
-            let created_at = self.bump_timestamp();
-            let _comment_id = self
-                .runtime
-                .insert(
-                    "task_comments",
-                    row([
-                        ("task_id", Value::Uuid(task_id)),
-                        ("author_id", Value::Uuid(author_id)),
-                        (
-                            "body",
-                            Value::Text(format!("seed comment {}", self.next_comment_seq)),
-                        ),
-                        ("created_at", Value::Timestamp(created_at)),
-                    ]),
-                    None,
-                )
-                .expect("seed task_comments");
-            self.next_comment_seq += 1;
-        }
-
-        for event_idx in 0..profile.activity_events {
-            let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
-            let project_id = self.projects[event_idx % self.projects.len()];
-            let actor_id = self.users[event_idx % self.users.len()];
-            let created_at = self.bump_timestamp();
-            let _event_id = self
-                .runtime
-                .insert(
-                    "activity_events",
-                    row([
-                        ("project_id", Value::Uuid(project_id)),
-                        ("task_id", Value::Uuid(task_id)),
-                        ("actor_id", Value::Uuid(actor_id)),
-                        ("kind", Value::Text("status_change".to_string())),
-                        ("created_at", Value::Timestamp(created_at)),
-                        ("payload", Value::Text("{\"kind\":\"seed\"}".to_string())),
-                    ]),
-                    None,
-                )
-                .expect("seed activity_events");
-        }
-    }
-
-    fn run_crud_batch(&mut self, scenario: &R1Scenario) -> usize {
-        let mut executed = 0usize;
-        for _ in 0..scenario.operation_count {
-            self.run_one_crud_operation(scenario);
-            executed += 1;
-        }
-        executed
-    }
-
-    fn run_read_batch(&mut self, scenario: &R2Scenario) -> usize {
-        let mut total_rows = 0usize;
-        for _ in 0..scenario.operation_count {
-            let op_idx = self.rng.pick_weighted_index(&scenario.weights);
-            let op = scenario.operations[op_idx];
-            total_rows += self.execute_read(op);
-        }
-        total_rows
-    }
-
-    fn run_read_batch_with_churn(
-        &mut self,
-        read_scenario: &R2Scenario,
-        write_scenario: &R1Scenario,
-    ) -> usize {
-        let mut total_rows = 0usize;
-        let write_threshold =
-            ((read_scenario.background_write_ratio.clamp(0.0, 1.0)) * 10_000.0) as usize;
-
-        for _ in 0..read_scenario.operation_count {
-            if write_threshold > 0 && self.rng.next_usize(10_000) < write_threshold {
-                self.run_one_crud_operation(write_scenario);
-            }
-            let op_idx = self.rng.pick_weighted_index(&read_scenario.weights);
-            let op = read_scenario.operations[op_idx];
-            total_rows += self.execute_read(op);
-        }
-        total_rows
-    }
-
-    fn run_hotspot_update_batch(
-        &mut self,
-        hot_task_ids: &[ObjectId],
-        operation_count: usize,
-    ) -> usize {
-        if hot_task_ids.is_empty() {
-            return 0;
-        }
-
-        let mut updates = 0usize;
-        for op_idx in 0..operation_count {
-            let task_id = hot_task_ids[op_idx % hot_task_ids.len()];
-            self.update_task_with_id(task_id);
-            updates += 1;
-        }
-        updates
-    }
-
-    fn run_one_crud_operation(&mut self, scenario: &R1Scenario) {
-        let op_idx = self.rng.pick_weighted_index(&scenario.weights);
-        let op = scenario.operations[op_idx];
-        match op {
-            CrudOperation::InsertTask => self.insert_task(),
-            CrudOperation::UpdateTask => self.update_task(),
-            CrudOperation::DeleteTask => self.delete_task(),
-        }
-    }
-
-    fn execute_read(&mut self, op: ReadOperation) -> usize {
-        let query = match op {
-            ReadOperation::QueryBoard => {
-                let project_id = self.projects[self.rng.next_usize(self.projects.len())];
-                QueryBuilder::new("tasks")
-                    .filter_eq("project_id", Value::Uuid(project_id))
-                    .filter_ne("status", Value::Text("done".to_string()))
-                    .order_by_desc("updated_at")
-                    .limit(50)
-                    .build()
-            }
-            ReadOperation::QueryMyWork => {
-                let assignee_id = self.users[self.rng.next_usize(self.users.len())];
-                QueryBuilder::new("tasks")
-                    .filter_eq("assignee_id", Value::Uuid(assignee_id))
-                    .filter_ne("status", Value::Text("done".to_string()))
-                    .order_by_desc("updated_at")
-                    .limit(50)
-                    .build()
-            }
-            ReadOperation::QueryTaskDetail => {
-                let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
-                QueryBuilder::new("task_comments")
-                    .filter_eq("task_id", Value::Uuid(task_id))
-                    .order_by_desc("created_at")
-                    .limit(20)
-                    .build()
-            }
-            ReadOperation::QueryActivityFeed => {
-                let project_id = self.projects[self.rng.next_usize(self.projects.len())];
-                QueryBuilder::new("activity_events")
-                    .filter_eq("project_id", Value::Uuid(project_id))
-                    .order_by_desc("created_at")
-                    .limit(100)
-                    .build()
-            }
-        };
-
-        let rows = block_on(self.runtime.query(query, None)).expect("read query");
-        rows.len()
-    }
-
-    fn insert_task(&mut self) {
-        let project_id = self.projects[self.rng.next_usize(self.projects.len())];
-        let assignee_id = self.users[self.rng.next_usize(self.users.len())];
-        let priority = ((self.rng.next_usize(5) + 1) as i32).clamp(1, 5);
-        let due_at = if self.rng.next_usize(4) == 0 {
-            Value::Timestamp(self.bump_timestamp() + 86_400_000_000)
-        } else {
-            Value::Null
-        };
-        let updated_at = self.bump_timestamp();
-
-        let ((task_id, _row_values), _batch_id) = self
-            .runtime
-            .insert(
-                "tasks",
-                row([
-                    ("project_id", Value::Uuid(project_id)),
-                    (
-                        "title",
-                        Value::Text(format!("r1 task {}", self.next_task_seq)),
-                    ),
-                    ("status", Value::Text("todo".to_string())),
-                    ("priority", Value::Integer(priority)),
-                    ("assignee_id", Value::Uuid(assignee_id)),
-                    ("updated_at", Value::Timestamp(updated_at)),
-                    ("due_at", due_at),
-                ]),
-                None,
-            )
-            .expect("insert task");
-
-        self.next_task_seq += 1;
-        self.active_tasks.push(task_id);
-    }
-
-    fn update_task(&mut self) {
-        if self.active_tasks.is_empty() {
-            self.insert_task();
-            return;
-        }
-
-        let task_id = self.active_tasks[self.rng.next_usize(self.active_tasks.len())];
-        self.update_task_with_id(task_id);
-    }
-
-    fn update_task_with_id(&mut self, task_id: ObjectId) {
-        let assignee_id = self.users[self.rng.next_usize(self.users.len())];
-        let status = match self.rng.next_usize(4) {
-            0 => "todo",
-            1 => "in_progress",
-            2 => "in_review",
-            _ => "done",
-        };
-        let priority = ((self.rng.next_usize(5) + 1) as i32).clamp(1, 5);
-        let updated_at = self.bump_timestamp();
-
-        self.runtime
-            .update(
-                task_id,
-                vec![
-                    ("status".to_string(), Value::Text(status.to_string())),
-                    ("priority".to_string(), Value::Integer(priority)),
-                    ("assignee_id".to_string(), Value::Uuid(assignee_id)),
-                    ("updated_at".to_string(), Value::Timestamp(updated_at)),
-                ],
-                None,
-            )
-            .expect("update task");
-    }
-
-    fn delete_task(&mut self) {
-        if self.active_tasks.len() <= self.min_task_floor {
-            self.insert_task();
-            return;
-        }
-
-        let idx = self.rng.next_usize(self.active_tasks.len());
-        let task_id = self.active_tasks.swap_remove(idx);
-        self.runtime.delete(task_id, None).expect("delete task");
-        self.deleted_tasks.push(task_id);
-    }
-
-    fn bump_timestamp(&mut self) -> u64 {
-        self.timestamp += 1;
-        self.timestamp
-    }
-}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-fn seed_project_board_dataset<S: Storage>(
-    runtime: &mut RuntimeCore<S, NoopScheduler>,
-    profile: &ProfileConfig,
-    seed: u64,
-) -> SeededProjectBoard {
-    let mut rng = Lcg::new(seed);
-    let mut users = Vec::with_capacity(profile.users.max(1));
-    let mut organizations = Vec::with_capacity(profile.organizations.max(1));
-    let mut projects = Vec::with_capacity(profile.projects.max(1));
-    let mut active_tasks = Vec::with_capacity(profile.tasks.max(1));
-    let mut next_comment_seq = 0usize;
-    let mut timestamp = 1_770_000_000_000_000u64;
-    let mut next_timestamp = || {
-        timestamp += 1;
-        timestamp
-    };
-
-    for user_idx in 0..profile.users {
-        let ((user_id, _row_values), _batch_id) = runtime
-            .insert(
-                "users",
-                row([
-                    ("display_name", Value::Text(format!("User {user_idx}"))),
-                    ("email", Value::Text(format!("user{user_idx}@bench.local"))),
-                ]),
-                None,
-            )
-            .expect("seed users");
-        users.push(user_id);
-    }
-
-    for org_idx in 0..profile.organizations {
-        let ((org_id, _row_values), _batch_id) = runtime
-            .insert(
-                "organizations",
-                row([
-                    ("name", Value::Text(format!("Org {org_idx}"))),
-                    ("created_at", Value::Timestamp(next_timestamp())),
-                ]),
-                None,
-            )
-            .expect("seed organizations");
-        organizations.push(org_id);
-    }
-
-    for user_idx in 0..users.len() {
-        let org_id = organizations[user_idx % organizations.len()];
-        let role = match user_idx % 3 {
-            0 => "owner",
-            1 => "editor",
-            _ => "member",
-        };
-        runtime
-            .insert(
-                "memberships",
-                row([
-                    ("organization_id", Value::Uuid(org_id)),
-                    ("user_id", Value::Uuid(users[user_idx])),
-                    ("role", Value::Text(role.to_string())),
-                ]),
-                None,
-            )
-            .expect("seed memberships");
-    }
-
-    for project_idx in 0..profile.projects {
-        let org_id = organizations[project_idx % organizations.len()];
-        let ((project_id, _row_values), _batch_id) = runtime
-            .insert(
-                "projects",
-                row([
-                    ("organization_id", Value::Uuid(org_id)),
-                    ("name", Value::Text(format!("Project {project_idx}"))),
-                    ("archived", Value::Boolean(false)),
-                    ("updated_at", Value::Timestamp(next_timestamp())),
-                ]),
-                None,
-            )
-            .expect("seed projects");
-        projects.push(project_id);
-    }
-
-    for task_idx in 0..profile.tasks {
-        let project_id = projects[task_idx % projects.len()];
-        let assignee_id = users[task_idx % users.len()];
-        let status = match task_idx % 4 {
-            0 => "todo",
-            1 => "in_progress",
-            2 => "in_review",
-            _ => "done",
-        };
-        let priority = ((task_idx % 5) + 1) as i32;
-        let ((task_id, _row_values), _batch_id) = runtime
-            .insert(
-                "tasks",
-                row([
-                    ("project_id", Value::Uuid(project_id)),
-                    ("title", Value::Text(format!("Task {task_idx}"))),
-                    ("status", Value::Text(status.to_string())),
-                    ("priority", Value::Integer(priority)),
-                    ("assignee_id", Value::Uuid(assignee_id)),
-                    ("updated_at", Value::Timestamp(next_timestamp())),
-                    ("due_at", Value::Null),
-                ]),
-                None,
-            )
-            .expect("seed tasks");
-        active_tasks.push(task_id);
-    }
-
-    for task_id in active_tasks.iter().copied() {
-        for watcher_offset in 0..profile.watchers_per_task.max(1) {
-            let user_id = users[(watcher_offset + rng.next_usize(users.len())) % users.len()];
-            runtime
-                .insert(
-                    "task_watchers",
-                    row([
-                        ("task_id", Value::Uuid(task_id)),
-                        ("user_id", Value::Uuid(user_id)),
-                    ]),
-                    None,
-                )
-                .expect("seed task_watchers");
-        }
-    }
-
-    for _ in 0..profile.comments {
-        let task_id = active_tasks[rng.next_usize(active_tasks.len())];
-        let author_id = users[rng.next_usize(users.len())];
-        runtime
-            .insert(
-                "task_comments",
-                row([
-                    ("task_id", Value::Uuid(task_id)),
-                    ("author_id", Value::Uuid(author_id)),
-                    (
-                        "body",
-                        Value::Text(format!("seed comment {next_comment_seq}")),
-                    ),
-                    ("created_at", Value::Timestamp(next_timestamp())),
-                ]),
-                None,
-            )
-            .expect("seed task_comments");
-        next_comment_seq += 1;
-    }
-
-    for event_idx in 0..profile.activity_events {
-        let task_id = active_tasks[rng.next_usize(active_tasks.len())];
-        let project_id = projects[event_idx % projects.len()];
-        let actor_id = users[event_idx % users.len()];
-        runtime
-            .insert(
-                "activity_events",
-                row([
-                    ("project_id", Value::Uuid(project_id)),
-                    ("task_id", Value::Uuid(task_id)),
-                    ("actor_id", Value::Uuid(actor_id)),
-                    ("kind", Value::Text("status_change".to_string())),
-                    ("created_at", Value::Timestamp(next_timestamp())),
-                    ("payload", Value::Text("{\"kind\":\"seed\"}".to_string())),
-                ]),
-                None,
-            )
-            .expect("seed activity_events");
-    }
-
-    SeededProjectBoard {
-        projects,
-        active_tasks,
-    }
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-impl ColdLoadSeededDb {
-    fn new_rocksdb(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
-        let db_path = tempdir.path().join("r3_cold_load.rocksdb");
-
-        let seeded = {
-            let mut runtime =
-                create_rocksdb_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
-            let seeded =
-                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
-            runtime.flush_storage().unwrap();
-            runtime.storage().close().expect("close seeded rocksdb");
-            seeded
-        };
-
-        assert!(
-            !seeded.active_tasks.is_empty(),
-            "cold-load dataset must contain tasks"
-        );
-        let target_project_id =
-            seeded.projects[scenario.target_project_index % seeded.projects.len()];
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            target_project_id,
-            cache_size_bytes: scenario.cache_size_bytes,
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-impl ColdLoadSeededDb {
-    fn new_sqlite(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
-        let db_path = tempdir.path().join("r3_cold_load.sqlite");
-
-        let seeded = {
-            let mut runtime = create_sqlite_runtime(project_board_schema(), &db_path);
-            let seeded =
-                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
-            runtime.flush_storage().unwrap();
-            runtime.storage().close().expect("close seeded sqlite");
-            seeded
-        };
-
-        assert!(
-            !seeded.active_tasks.is_empty(),
-            "cold-load dataset must contain tasks"
-        );
-        let target_project_id =
-            seeded.projects[scenario.target_project_index % seeded.projects.len()];
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            target_project_id,
-            cache_size_bytes: 0,
-        }
-    }
-}
-
-impl SingleHopR1State<MemoryStorage> {
-    fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
-        Self::with_runtime_factory(profile, scenario, || create_runtime(project_board_schema()))
-    }
-}
-
-impl<S: Storage> SingleHopR1State<S> {
-    fn with_runtime_factory<F>(
-        profile: &ProfileConfig,
-        scenario: &R1Scenario,
-        mut make_runtime: F,
-    ) -> Self
-    where
-        F: FnMut() -> BenchRuntime<S>,
-    {
-        let mut client_runtime = make_runtime();
-        let mut server_runtime = make_runtime();
-        let client_id_on_server = ClientId::new();
-        let server_id_on_client = ServerId::new();
-
-        server_runtime.add_client(client_id_on_server, None);
-        server_runtime.set_client_role_by_name(client_id_on_server, ClientRole::Peer);
-        client_runtime.add_server(server_id_on_client);
-
-        let client = R1State::with_runtime(client_runtime, profile, profile.seed ^ scenario.seed);
-        let mut state = Self {
-            client,
-            server: server_runtime,
-            client_id_on_server,
-            server_id_on_client,
-            total_routed_messages: 0,
-        };
-
-        state.total_routed_messages += state.pump_until_quiescent(64);
-        state
-    }
-
-    fn run_crud_batch(&mut self, scenario: &R1Scenario) -> usize {
-        let executed = self.client.run_crud_batch(scenario);
-        self.total_routed_messages += self.pump_until_quiescent(16);
-        executed
-    }
-
-    fn run_read_batch(&mut self, scenario: &R2Scenario) -> usize {
-        let total_rows = self.client.run_read_batch(scenario);
-        self.total_routed_messages += self.pump_until_quiescent(16);
-        total_rows
-    }
-
-    fn pump_until_quiescent(&mut self, max_rounds: usize) -> usize {
-        let mut routed_messages = 0usize;
-        for _ in 0..max_rounds {
-            let (client_to_server, server_to_client) = self.pump_single_round();
-            routed_messages += client_to_server + server_to_client;
-            if client_to_server == 0 && server_to_client == 0 {
-                break;
-            }
-        }
-        routed_messages
-    }
-
-    fn pump_single_round(&mut self) -> (usize, usize) {
-        let mut client_to_server = 0usize;
-        let mut server_to_client = 0usize;
-
-        self.client.runtime.batched_tick();
-        for entry in self
-            .client
-            .runtime
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox()
-        {
-            if entry.destination == Destination::Server(self.server_id_on_client) {
-                self.server.park_sync_message(InboxEntry {
-                    source: Source::Client(self.client_id_on_server),
-                    payload: entry.payload,
-                });
-                client_to_server += 1;
-            }
-        }
-
-        self.server.batched_tick();
-        for entry in self
-            .server
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox()
-        {
-            if entry.destination == Destination::Client(self.client_id_on_server) {
-                self.client.runtime.park_sync_message(InboxEntry {
-                    source: Source::Server(self.server_id_on_client),
-                    payload: entry.payload,
-                });
-                server_to_client += 1;
-            }
-        }
-
-        self.client.runtime.batched_tick();
-        (client_to_server, server_to_client)
-    }
-}
-
-impl FanoutR4State<MemoryStorage> {
-    fn new(
-        profile: &ProfileConfig,
-        seed: u64,
-        target_project_index: usize,
-        fanout_clients: usize,
-    ) -> Self {
-        Self::with_runtime_factory(profile, seed, target_project_index, fanout_clients, || {
-            create_runtime(project_board_schema())
-        })
-    }
-}
-
-impl<S: Storage> FanoutR4State<S> {
-    fn with_runtime_factory<F>(
-        profile: &ProfileConfig,
-        seed: u64,
-        target_project_index: usize,
-        fanout_clients: usize,
-        mut make_runtime: F,
-    ) -> Self
-    where
-        F: FnMut() -> BenchRuntime<S>,
-    {
-        let mut writer_runtime = make_runtime();
-        let mut server_runtime = make_runtime();
-        let writer_client_id_on_server = ClientId::new();
-        let writer_server_id_on_client = ServerId::new();
-
-        server_runtime.add_client(writer_client_id_on_server, None);
-        server_runtime.set_client_role_by_name(writer_client_id_on_server, ClientRole::Peer);
-        writer_runtime.add_server(writer_server_id_on_client);
-
-        let writer = R1State::with_runtime(writer_runtime, profile, profile.seed ^ seed);
-        let mut state = Self {
-            writer,
-            server: server_runtime,
-            writer_client_id_on_server,
-            writer_server_id_on_client,
-            readers: Vec::with_capacity(fanout_clients),
-            hot_task_ids: Vec::new(),
-            hot_task_cursor: 0,
-            total_routed_messages: 0,
-            delivered_notifications: Arc::new(AtomicUsize::new(0)),
-        };
-
-        state.total_routed_messages += state.pump_until_quiescent(64);
-
-        let target_project_id =
-            state.writer.projects[target_project_index % state.writer.projects.len()];
-        state.hot_task_ids = state.collect_project_task_ids(target_project_id);
-        if state.hot_task_ids.is_empty() {
-            state.hot_task_ids = state.writer.active_tasks.clone();
-        }
-
-        for _ in 0..fanout_clients {
-            let mut reader_runtime = make_runtime();
-            let reader_client_id_on_server = ClientId::new();
-            let reader_server_id_on_client = ServerId::new();
-
-            state.server.add_client(reader_client_id_on_server, None);
-            state
-                .server
-                .set_client_role_by_name(reader_client_id_on_server, ClientRole::Peer);
-            reader_runtime.add_server(reader_server_id_on_client);
-
-            let notification_counter = Arc::clone(&state.delivered_notifications);
-            let query = QueryBuilder::new("tasks")
-                .filter_eq("project_id", Value::Uuid(target_project_id))
-                .filter_ne("status", Value::Text("done".to_string()))
-                .order_by_desc("updated_at")
-                .limit(200)
-                .build();
-            let _subscription = reader_runtime
-                .subscribe(
-                    query,
-                    move |_delta| {
-                        notification_counter.fetch_add(1, Ordering::Relaxed);
-                    },
-                    None,
-                )
-                .expect("fanout subscription");
-
-            state.readers.push(FanoutReader {
-                runtime: reader_runtime,
-                client_id_on_server: reader_client_id_on_server,
-                server_id_on_client: reader_server_id_on_client,
-            });
-        }
-
-        state.total_routed_messages += state.pump_until_quiescent(128);
-        state.delivered_notifications.store(0, Ordering::Relaxed);
-        state
-    }
-
-    fn run_update_batch(&mut self, operation_count: usize) -> (usize, usize) {
-        let notifications_before = self.delivered_notifications.load(Ordering::Relaxed);
-        let mut updates = 0usize;
-
-        for _ in 0..operation_count {
-            if self.hot_task_ids.is_empty() {
-                break;
-            }
-            let task_id = self.hot_task_ids[self.hot_task_cursor % self.hot_task_ids.len()];
-            self.hot_task_cursor = self.hot_task_cursor.wrapping_add(1);
-            self.writer.update_task_with_id(task_id);
-            updates += 1;
-        }
-
-        self.total_routed_messages += self.pump_until_quiescent(64);
-        let notifications_after = self.delivered_notifications.load(Ordering::Relaxed);
-        (
-            updates,
-            notifications_after.saturating_sub(notifications_before),
-        )
-    }
-
-    fn collect_project_task_ids(&mut self, project_id: ObjectId) -> Vec<ObjectId> {
-        let query = QueryBuilder::new("tasks")
-            .filter_eq("project_id", Value::Uuid(project_id))
-            .limit(10_000)
-            .build();
-        let rows = block_on(self.writer.runtime.query(query, None)).expect("load hot tasks");
-        rows.into_iter().map(|(object_id, _)| object_id).collect()
-    }
-
-    fn pump_until_quiescent(&mut self, max_rounds: usize) -> usize {
-        let mut routed = 0usize;
-        for _ in 0..max_rounds {
-            let round_routed = self.pump_single_round();
-            routed += round_routed;
-            if round_routed == 0 {
-                break;
-            }
-        }
-        routed
-    }
-
-    fn pump_single_round(&mut self) -> usize {
-        let mut routed = 0usize;
-
-        self.writer.runtime.batched_tick();
-        for entry in self
-            .writer
-            .runtime
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox()
-        {
-            if entry.destination == Destination::Server(self.writer_server_id_on_client) {
-                self.server.park_sync_message(InboxEntry {
-                    source: Source::Client(self.writer_client_id_on_server),
-                    payload: entry.payload,
-                });
-                routed += 1;
-            }
-        }
-
-        for reader in &mut self.readers {
-            reader.runtime.batched_tick();
-            for entry in reader
-                .runtime
-                .schema_manager_mut()
-                .query_manager_mut()
-                .sync_manager_mut()
-                .take_outbox()
-            {
-                if entry.destination == Destination::Server(reader.server_id_on_client) {
-                    self.server.park_sync_message(InboxEntry {
-                        source: Source::Client(reader.client_id_on_server),
-                        payload: entry.payload,
-                    });
-                    routed += 1;
-                }
-            }
-        }
-
-        self.server.batched_tick();
-        for entry in self
-            .server
-            .schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox()
-        {
-            match entry.destination {
-                Destination::Client(client_id) if client_id == self.writer_client_id_on_server => {
-                    self.writer.runtime.park_sync_message(InboxEntry {
-                        source: Source::Server(self.writer_server_id_on_client),
-                        payload: entry.payload,
-                    });
-                    routed += 1;
-                }
-                Destination::Client(client_id) => {
-                    if let Some(reader) = self
-                        .readers
-                        .iter_mut()
-                        .find(|reader| reader.client_id_on_server == client_id)
-                    {
-                        reader.runtime.park_sync_message(InboxEntry {
-                            source: Source::Server(reader.server_id_on_client),
-                            payload: entry.payload,
-                        });
-                        routed += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        self.writer.runtime.batched_tick();
-        for reader in &mut self.readers {
-            reader.runtime.batched_tick();
-        }
-        routed
-    }
-}
-
-impl PermissionR5State<MemoryStorage> {
-    fn new(scenario: &R5Scenario, recursive_depth: usize) -> Self {
-        let runtime = create_runtime(permission_recursive_schema(recursive_depth));
-        Self::with_runtime(scenario, recursive_depth, runtime)
-    }
-}
-
-impl<S: Storage> PermissionR5State<S> {
-    fn with_runtime(
-        scenario: &R5Scenario,
-        recursive_depth: usize,
-        runtime: BenchRuntime<S>,
-    ) -> Self {
-        let session_alice = Session::new("alice");
-        let mut state = Self {
-            runtime,
-            rng: Lcg::new(scenario.seed ^ recursive_depth as u64),
-            session_alice,
-            allowed_doc_ids: Vec::new(),
-            denied_doc_ids: Vec::new(),
-            timestamp: 1_770_000_000_000_000,
-        };
-
-        let ((alice_root, _row_values), _batch_id) = state
-            .runtime
-            .insert(
-                "folders",
-                row([
-                    ("owner_id", Value::Text("alice".to_string())),
-                    ("name", Value::Text("alice-root".to_string())),
-                    ("parent_id", Value::Null),
-                ]),
-                None,
-            )
-            .expect("seed alice root folder");
-        let mut shared_folders = vec![alice_root];
-        let mut parent = alice_root;
-        for idx in 0..scenario.shared_chain_depth {
-            let ((folder_id, _row_values), _batch_id) = state
-                .runtime
-                .insert(
-                    "folders",
-                    row([
-                        ("owner_id", Value::Text("bob".to_string())),
-                        ("name", Value::Text(format!("shared-folder-{idx}"))),
-                        ("parent_id", Value::Uuid(parent)),
-                    ]),
-                    None,
-                )
-                .expect("seed shared folder");
-            shared_folders.push(folder_id);
-            parent = folder_id;
-        }
-
-        for (depth_idx, folder_id) in shared_folders.iter().copied().enumerate() {
-            for doc_idx in 0..scenario.docs_per_folder {
-                let updated_at = state.next_timestamp();
-                let owner_id = if doc_idx % 8 == 0 { "alice" } else { "bob" };
-                let ((doc_id, _row_values), _batch_id) = state
-                    .runtime
-                    .insert(
-                        "documents",
-                        row([
-                            ("owner_id", Value::Text(owner_id.to_string())),
-                            ("folder_id", Value::Uuid(folder_id)),
-                            (
-                                "title",
-                                Value::Text(format!("shared-doc-{depth_idx}-{doc_idx}")),
-                            ),
-                            ("status", Value::Text("open".to_string())),
-                            ("updated_at", Value::Timestamp(updated_at)),
-                            ("payload", Value::Text("{\"kind\":\"shared\"}".to_string())),
-                        ]),
-                        None,
-                    )
-                    .expect("seed shared docs");
-                if owner_id == "alice" {
-                    state.allowed_doc_ids.push(doc_id);
-                }
-            }
-        }
-
-        let ((private_root, _row_values), _batch_id) = state
-            .runtime
-            .insert(
-                "folders",
-                row([
-                    ("owner_id", Value::Text("bob".to_string())),
-                    ("name", Value::Text("private-root".to_string())),
-                    ("parent_id", Value::Null),
-                ]),
-                None,
-            )
-            .expect("seed private root folder");
-        for doc_idx in 0..scenario.denied_docs {
-            let updated_at = state.next_timestamp();
-            let ((doc_id, _row_values), _batch_id) = state
-                .runtime
-                .insert(
-                    "documents",
-                    row([
-                        ("owner_id", Value::Text("bob".to_string())),
-                        ("folder_id", Value::Uuid(private_root)),
-                        ("title", Value::Text(format!("private-doc-{doc_idx}"))),
-                        ("status", Value::Text("open".to_string())),
-                        ("updated_at", Value::Timestamp(updated_at)),
-                        ("payload", Value::Text("{\"kind\":\"private\"}".to_string())),
-                    ]),
-                    None,
-                )
-                .expect("seed private docs");
-            state.denied_doc_ids.push(doc_id);
-        }
-
-        assert!(
-            !state.allowed_doc_ids.is_empty(),
-            "permission benchmark needs allowed documents"
-        );
-        assert!(
-            !state.denied_doc_ids.is_empty(),
-            "permission benchmark needs denied documents"
-        );
-        state
-    }
-
-    fn run_batch(&mut self, scenario: &R5Scenario) -> PermissionBatchResult {
-        let mut result = PermissionBatchResult {
-            total_rows: 0,
-            allowed_updates: 0,
-            denied_updates: 0,
-        };
-
-        for _ in 0..scenario.operation_count {
-            let op_idx = self.rng.pick_weighted_index(&scenario.weights);
-            let op = scenario.operations[op_idx];
-            match op {
-                PermissionOperation::QueryVisibleDocs => {
-                    result.total_rows += self.query_visible_docs();
-                }
-                PermissionOperation::UpdateAllowedDoc => {
-                    self.update_allowed_doc();
-                    result.allowed_updates += 1;
-                }
-                PermissionOperation::UpdateDeniedDoc => {
-                    self.update_denied_doc();
-                    result.denied_updates += 1;
-                }
-            }
-        }
-
-        result
-    }
-
-    fn query_visible_docs(&mut self) -> usize {
-        let query = QueryBuilder::new("documents")
-            .filter_ne("status", Value::Text("archived".to_string()))
-            .order_by_desc("updated_at")
-            .limit(200)
-            .build();
-        let rows = block_on(self.runtime.query(query, Some(self.session_alice.clone())))
-            .expect("permission query");
-        rows.len()
-    }
-
-    fn update_allowed_doc(&mut self) {
-        let doc_id = self.allowed_doc_ids[self.rng.next_usize(self.allowed_doc_ids.len())];
-        let updated_at = self.next_timestamp();
-        let write_context = WriteContext::from_session(self.session_alice.clone());
-        self.runtime
-            .update(
-                doc_id,
-                vec![
-                    ("status".to_string(), Value::Text("in_review".to_string())),
-                    ("updated_at".to_string(), Value::Timestamp(updated_at)),
-                ],
-                Some(&write_context),
-            )
-            .expect("allowed permission update");
-    }
-
-    fn update_denied_doc(&mut self) {
-        let doc_id = self.denied_doc_ids[self.rng.next_usize(self.denied_doc_ids.len())];
-        let updated_at = self.next_timestamp();
-        let write_context = WriteContext::from_session(self.session_alice.clone());
-        let result = self.runtime.update(
-            doc_id,
-            vec![
-                ("status".to_string(), Value::Text("archived".to_string())),
-                ("updated_at".to_string(), Value::Timestamp(updated_at)),
+const CI_S_PROFILE: SmallProfile = SmallProfile {
+    users: 4,
+    organizations: 2,
+    projects: 8,
+    tasks: 120,
+    comments: 360,
+    watchers_per_task: 1,
+    activity_events: 240,
+};
+
+fn schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new(
+            "users",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("handle", ColumnType::String),
             ],
-            Some(&write_context),
-        );
-        assert!(result.is_err(), "expected denied permission update");
-    }
-
-    fn next_timestamp(&mut self) -> u64 {
-        self.timestamp += 1;
-        self.timestamp
-    }
-}
-
-fn realistic_r1_crud(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut state = R1State::new(&profile, scenario);
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r1_crud_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut state = SingleHopR1State::new(&profile, scenario);
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-                black_box(state.total_routed_messages);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r2_reads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r2_reads_single_hop(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let seed_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut state = SingleHopR1State::new(&profile, &seed_scenario);
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-                black_box(state.total_routed_messages);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
-    let write_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_with_churn",
-        read_scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &read_scenario,
-        |b, scenario| {
-            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
-                black_box(total_rows);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r1_crud_single_hop_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb single-hop benchmark");
-            let mut runtime_idx = 0usize;
-            let mut state = SingleHopR1State::with_runtime_factory(&profile, scenario, || {
-                let db_path = tempdir
-                    .path()
-                    .join(format!("single_hop_{runtime_idx}.rocksdb"));
-                runtime_idx += 1;
-                create_rocksdb_runtime(
-                    project_board_schema(),
-                    &db_path,
-                    STORAGE_BENCH_CACHE_SIZE_BYTES,
-                )
-            });
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-                black_box(state.total_routed_messages);
-            });
-            flush_and_close_runtime(&mut state.client.runtime);
-            flush_and_close_runtime(&mut state.server);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r1_crud_single_hop_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r1_crud_single_hop_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_single_hop_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite single-hop benchmark");
-            let mut runtime_idx = 0usize;
-            let mut state = SingleHopR1State::with_runtime_factory(&profile, scenario, || {
-                let db_path = tempdir
-                    .path()
-                    .join(format!("single_hop_{runtime_idx}.sqlite"));
-                runtime_idx += 1;
-                create_sqlite_runtime(project_board_schema(), &db_path)
-            });
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-                black_box(state.total_routed_messages);
-            });
-            flush_and_close_runtime(&mut state.client.runtime);
-            flush_and_close_runtime(&mut state.server);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r1_crud_single_hop_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_single_hop_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let seed_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb single-hop reads");
-            let mut runtime_idx = 0usize;
-            let mut state =
-                SingleHopR1State::with_runtime_factory(&profile, &seed_scenario, || {
-                    let db_path = tempdir
-                        .path()
-                        .join(format!("reads_single_hop_{runtime_idx}.rocksdb"));
-                    runtime_idx += 1;
-                    create_rocksdb_runtime(
-                        project_board_schema(),
-                        &db_path,
-                        STORAGE_BENCH_CACHE_SIZE_BYTES,
-                    )
-                });
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-                black_box(state.total_routed_messages);
-            });
-            flush_and_close_runtime(&mut state.client.runtime);
-            flush_and_close_runtime(&mut state.server);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_single_hop_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_single_hop_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let seed_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_single_hop_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_single_hop_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite single-hop reads");
-            let mut runtime_idx = 0usize;
-            let mut state =
-                SingleHopR1State::with_runtime_factory(&profile, &seed_scenario, || {
-                    let db_path = tempdir
-                        .path()
-                        .join(format!("reads_single_hop_{runtime_idx}.sqlite"));
-                    runtime_idx += 1;
-                    create_sqlite_runtime(project_board_schema(), &db_path)
-                });
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-                black_box(state.total_routed_messages);
-            });
-            flush_and_close_runtime(&mut state.client.runtime);
-            flush_and_close_runtime(&mut state.server);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_single_hop_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_with_write_churn_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
-    let write_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_with_churn_rocksdb",
-        read_scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &read_scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb read churn benchmark");
-            let db_path = tempdir.path().join("reads_with_churn.rocksdb");
-            let runtime = create_rocksdb_runtime(
-                project_board_schema(),
-                &db_path,
-                STORAGE_BENCH_CACHE_SIZE_BYTES,
-            );
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
-                black_box(total_rows);
-            });
-            flush_and_close_runtime(&mut state.runtime);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_with_write_churn_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_with_write_churn_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let read_scenario = load_r2_scenario(r2_reads_with_churn_scenario_path());
-    let write_scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_with_churn_sqlite",
-        read_scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_with_write_churn_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(read_scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &read_scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite read churn benchmark");
-            let db_path = tempdir.path().join("reads_with_churn.sqlite");
-            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch_with_churn(scenario, &write_scenario);
-                black_box(total_rows);
-            });
-            flush_and_close_runtime(&mut state.runtime);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_with_write_churn_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for rocksdb crud benchmark");
-    let db_path = tempdir.path().join("r1_crud.rocksdb");
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let runtime =
-                create_rocksdb_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-            });
-            state.runtime.flush_storage().unwrap();
-            state.runtime.storage().close().expect("close rocksdb");
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r1_crud_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r1_crud_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r1_scenario(r1_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for sqlite crud benchmark");
-    let db_path = tempdir.path().join("r1_crud.sqlite");
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let executed = state.run_crud_batch(scenario);
-                black_box(executed);
-            });
-            state.runtime.flush_storage().unwrap();
-            state.runtime.storage().close().expect("close sqlite");
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r1_crud_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for rocksdb reads benchmark");
-    let db_path = tempdir.path().join("r2_reads.rocksdb");
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let runtime =
-                create_rocksdb_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-            });
-            state.runtime.flush_storage().unwrap();
-            state.runtime.storage().close().expect("close rocksdb");
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r2_reads_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r2_scenario(r2_sustained_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    let tempdir = TempDir::new().expect("create tempdir for sqlite reads benchmark");
-    let db_path = tempdir.path().join("r2_reads.sqlite");
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            b.iter(|| {
-                let total_rows = state.run_read_batch(scenario);
-                black_box(total_rows);
-            });
-            state.runtime.flush_storage().unwrap();
-            state.runtime.storage().close().expect("close sqlite");
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r2_reads_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
-    let scenario = load_r3_scenario("dev/benchmarks/realistic/scenarios/r3_cold_load.json");
-    let profile: ProfileConfig = load_json(&scenario.profile_path);
-    let seeded = ColdLoadSeededDb::new_rocksdb(&profile, &scenario);
-    let benchmark_name = format!(
-        "{}_{}_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/cold_load_rocksdb");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, _scenario| {
-            b.iter(|| {
-                let open_start = Instant::now();
-                let mut runtime = create_rocksdb_runtime(
-                    project_board_schema(),
-                    &seeded.db_path,
-                    seeded.cache_size_bytes,
-                );
-                let open_elapsed = open_start.elapsed();
-
-                let query = QueryBuilder::new("tasks")
-                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
-                    .filter_ne("status", Value::Text("done".to_string()))
-                    .order_by_desc("updated_at")
-                    .limit(200)
-                    .build();
-
-                let query_start = Instant::now();
-                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
-                let query_elapsed = query_start.elapsed();
-
-                runtime.flush_storage().unwrap();
-                runtime.storage().close().expect("close cold-load rocksdb");
-
-                black_box(open_elapsed);
-                black_box(query_elapsed);
-                black_box(rows.len());
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r3_cold_load_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
-    let scenario = load_r3_scenario("dev/benchmarks/realistic/scenarios/r3_cold_load.json");
-    let profile: ProfileConfig = load_json(&scenario.profile_path);
-    let seeded = ColdLoadSeededDb::new_sqlite(&profile, &scenario);
-    let benchmark_name = format!(
-        "{}_{}_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase()
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/cold_load_sqlite");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, _scenario| {
-            b.iter(|| {
-                let open_start = Instant::now();
-                let mut runtime = create_sqlite_runtime(project_board_schema(), &seeded.db_path);
-                let open_elapsed = open_start.elapsed();
-
-                let query = QueryBuilder::new("tasks")
-                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
-                    .filter_ne("status", Value::Text("done".to_string()))
-                    .order_by_desc("updated_at")
-                    .limit(200)
-                    .build();
-
-                let query_start = Instant::now();
-                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
-                let query_elapsed = query_start.elapsed();
-
-                runtime.flush_storage().unwrap();
-                runtime.storage().close().expect("close cold-load sqlite");
-
-                black_box(open_elapsed);
-                black_box(query_elapsed);
-                black_box(rows.len());
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r3_cold_load_sqlite(_c: &mut Criterion) {}
-
-fn realistic_r4_fanout_updates(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r4_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
-    ));
-
-    let mut group = c.benchmark_group("realistic_phase1/fanout_updates");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    for fanout_clients in &scenario.fanout_clients {
-        let bench_id = format!(
-            "{}_{}_n{}",
-            scenario.id.to_lowercase(),
-            profile.id.to_lowercase(),
-            fanout_clients
-        );
-        let scenario_seed = scenario.seed;
-        let target_project_index = scenario.target_project_index;
-        let operation_count = scenario.operation_count;
-        group.bench_with_input(
-            BenchmarkId::from_parameter(bench_id),
-            fanout_clients,
-            |b, fanout_clients| {
-                let mut state = FanoutR4State::new(
-                    &profile,
-                    scenario_seed,
-                    target_project_index,
-                    *fanout_clients,
-                );
-                b.iter(|| {
-                    let (updates, notifications) = state.run_update_batch(operation_count);
-                    black_box(updates);
-                    black_box(notifications);
-                    black_box(state.total_routed_messages);
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r4_fanout_updates_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r4_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
-    ));
-
-    let mut group = c.benchmark_group("realistic_phase1/fanout_updates_rocksdb");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    for fanout_clients in &scenario.fanout_clients {
-        let bench_id = format!(
-            "{}_{}_n{}_rocksdb",
-            scenario.id.to_lowercase(),
-            profile.id.to_lowercase(),
-            fanout_clients
-        );
-        let scenario_seed = scenario.seed;
-        let target_project_index = scenario.target_project_index;
-        let operation_count = scenario.operation_count;
-        group.bench_with_input(
-            BenchmarkId::from_parameter(bench_id),
-            fanout_clients,
-            |b, fanout_clients| {
-                let tempdir = TempDir::new().expect("create tempdir for rocksdb fanout benchmark");
-                let mut runtime_idx = 0usize;
-                let mut state = FanoutR4State::with_runtime_factory(
-                    &profile,
-                    scenario_seed,
-                    target_project_index,
-                    *fanout_clients,
-                    || {
-                        let db_path = tempdir.path().join(format!("fanout_{runtime_idx}.rocksdb"));
-                        runtime_idx += 1;
-                        create_rocksdb_runtime(
-                            project_board_schema(),
-                            &db_path,
-                            STORAGE_BENCH_CACHE_SIZE_BYTES,
-                        )
-                    },
-                );
-                b.iter(|| {
-                    let (updates, notifications) = state.run_update_batch(operation_count);
-                    black_box(updates);
-                    black_box(notifications);
-                    black_box(state.total_routed_messages);
-                });
-                flush_and_close_runtime(&mut state.writer.runtime);
-                for reader in &mut state.readers {
-                    flush_and_close_runtime(&mut reader.runtime);
-                }
-                flush_and_close_runtime(&mut state.server);
-            },
-        );
-    }
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r4_fanout_updates_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r4_fanout_updates_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r4_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
-    ));
-
-    let mut group = c.benchmark_group("realistic_phase1/fanout_updates_sqlite");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    for fanout_clients in &scenario.fanout_clients {
-        let bench_id = format!(
-            "{}_{}_n{}_sqlite",
-            scenario.id.to_lowercase(),
-            profile.id.to_lowercase(),
-            fanout_clients
-        );
-        let scenario_seed = scenario.seed;
-        let target_project_index = scenario.target_project_index;
-        let operation_count = scenario.operation_count;
-        group.bench_with_input(
-            BenchmarkId::from_parameter(bench_id),
-            fanout_clients,
-            |b, fanout_clients| {
-                let tempdir = TempDir::new().expect("create tempdir for sqlite fanout benchmark");
-                let mut runtime_idx = 0usize;
-                let mut state = FanoutR4State::with_runtime_factory(
-                    &profile,
-                    scenario_seed,
-                    target_project_index,
-                    *fanout_clients,
-                    || {
-                        let db_path = tempdir.path().join(format!("fanout_{runtime_idx}.sqlite"));
-                        runtime_idx += 1;
-                        create_sqlite_runtime(project_board_schema(), &db_path)
-                    },
-                );
-                b.iter(|| {
-                    let (updates, notifications) = state.run_update_batch(operation_count);
-                    black_box(updates);
-                    black_box(notifications);
-                    black_box(state.total_routed_messages);
-                });
-                flush_and_close_runtime(&mut state.writer.runtime);
-                for reader in &mut state.readers {
-                    flush_and_close_runtime(&mut reader.runtime);
-                }
-                flush_and_close_runtime(&mut state.server);
-            },
-        );
-    }
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r4_fanout_updates_sqlite(_c: &mut Criterion) {}
-
-fn run_permission_scenario(c: &mut Criterion, group_name: &str, scenario_path: &str) {
-    let scenario = load_r5_scenario(scenario_path);
-    let mut group = c.benchmark_group(group_name);
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    for recursive_depth in &scenario.recursive_depths {
-        let bench_id = format!("{}_depth{recursive_depth}", scenario.id.to_lowercase());
-        group.bench_with_input(
-            BenchmarkId::from_parameter(bench_id),
-            recursive_depth,
-            |b, recursive_depth| {
-                let mut state = PermissionR5State::new(&scenario, *recursive_depth);
-                b.iter(|| {
-                    let result = state.run_batch(&scenario);
-                    black_box(result.total_rows);
-                    black_box(result.allowed_updates);
-                    black_box(result.denied_updates);
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-fn run_storage_permission_scenario<S: Storage, F: Copy + Fn(usize) -> BenchRuntime<S>>(
-    c: &mut Criterion,
-    group_name: &str,
-    scenario_path: &str,
-    make_runtime: F,
-) {
-    let scenario = load_r5_scenario(scenario_path);
-    let mut group = c.benchmark_group(group_name);
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    for recursive_depth in &scenario.recursive_depths {
-        let bench_id = format!("{}_depth{recursive_depth}", scenario.id.to_lowercase());
-        group.bench_with_input(
-            BenchmarkId::from_parameter(bench_id),
-            recursive_depth,
-            |b, recursive_depth| {
-                let mut state = PermissionR5State::with_runtime(
-                    &scenario,
-                    *recursive_depth,
-                    make_runtime(*recursive_depth),
-                );
-                b.iter(|| {
-                    let result = state.run_batch(&scenario);
-                    black_box(result.total_rows);
-                    black_box(result.allowed_updates);
-                    black_box(result.denied_updates);
-                });
-                flush_and_close_runtime(&mut state.runtime);
-            },
-        );
-    }
-
-    group.finish();
-}
-
-fn realistic_r5_permission_recursive(c: &mut Criterion) {
-    run_permission_scenario(
-        c,
-        "realistic_phase1/permission_recursive",
-        r5_permission_recursive_scenario_path(),
-    );
-}
-
-fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
-    run_permission_scenario(
-        c,
-        "realistic_phase1/permission_write_heavy",
-        select_ci_path(
-            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
-        ),
-    );
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r5_permission_recursive_rocksdb(c: &mut Criterion) {
-    run_storage_permission_scenario(
-        c,
-        "realistic_phase1/permission_recursive_rocksdb",
-        r5_permission_recursive_scenario_path(),
-        |recursive_depth| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb permission benchmark");
-            let db_path = tempdir.path().join(format!(
-                "permission_recursive_depth_{recursive_depth}.rocksdb"
-            ));
-            std::mem::forget(tempdir);
-            create_rocksdb_runtime(
-                permission_recursive_schema(recursive_depth),
-                &db_path,
-                STORAGE_BENCH_CACHE_SIZE_BYTES,
-            )
-        },
-    );
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r5_permission_recursive_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r5_permission_recursive_sqlite(c: &mut Criterion) {
-    run_storage_permission_scenario(
-        c,
-        "realistic_phase1/permission_recursive_sqlite",
-        r5_permission_recursive_scenario_path(),
-        |recursive_depth| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite permission benchmark");
-            let db_path = tempdir.path().join(format!(
-                "permission_recursive_depth_{recursive_depth}.sqlite"
-            ));
-            std::mem::forget(tempdir);
-            create_sqlite_runtime(permission_recursive_schema(recursive_depth), &db_path)
-        },
-    );
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r5_permission_recursive_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r6_permission_write_heavy_rocksdb(c: &mut Criterion) {
-    run_storage_permission_scenario(
-        c,
-        "realistic_phase1/permission_write_heavy_rocksdb",
-        select_ci_path(
-            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
-        ),
-        |recursive_depth| {
-            let tempdir =
-                TempDir::new().expect("create tempdir for rocksdb permission write-heavy");
-            let db_path = tempdir.path().join(format!(
-                "permission_write_heavy_depth_{recursive_depth}.rocksdb"
-            ));
-            std::mem::forget(tempdir);
-            create_rocksdb_runtime(
-                permission_recursive_schema(recursive_depth),
-                &db_path,
-                STORAGE_BENCH_CACHE_SIZE_BYTES,
-            )
-        },
-    );
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r6_permission_write_heavy_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r6_permission_write_heavy_sqlite(c: &mut Criterion) {
-    run_storage_permission_scenario(
-        c,
-        "realistic_phase1/permission_write_heavy_sqlite",
-        select_ci_path(
-            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
-        ),
-        |recursive_depth| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite permission write-heavy");
-            let db_path = tempdir.path().join(format!(
-                "permission_write_heavy_depth_{recursive_depth}.sqlite"
-            ));
-            std::mem::forget(tempdir);
-            create_sqlite_runtime(permission_recursive_schema(recursive_depth), &db_path)
-        },
-    );
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r6_permission_write_heavy_sqlite(_c: &mut Criterion) {}
-
-fn realistic_r7_hotspot_history(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_hot{}",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.hot_task_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/hotspot_history");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut state = R1State::seeded(&profile, profile.seed ^ scenario.seed);
-            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
-            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
-            b.iter(|| {
-                let updates =
-                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
-                black_box(updates);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r7_hotspot_history_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_hot{}_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.hot_task_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/hotspot_history_rocksdb");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb hotspot benchmark");
-            let db_path = tempdir.path().join("hotspot_history.rocksdb");
-            let runtime = create_rocksdb_runtime(
-                project_board_schema(),
-                &db_path,
-                STORAGE_BENCH_CACHE_SIZE_BYTES,
-            );
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
-            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
-            b.iter(|| {
-                let updates =
-                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
-                black_box(updates);
-            });
-            flush_and_close_runtime(&mut state.runtime);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r7_hotspot_history_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r7_hotspot_history_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r7_scenario(r7_hotspot_history_scenario_path());
-    let benchmark_name = format!(
-        "{}_{}_hot{}_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.hot_task_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/hotspot_history_sqlite");
-    configure_group(&mut group, 20, 10);
-    group.throughput(Throughput::Elements(scenario.operation_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite hotspot benchmark");
-            let db_path = tempdir.path().join("hotspot_history.sqlite");
-            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
-            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
-            let hot_count = scenario.hot_task_count.max(1).min(state.active_tasks.len());
-            let hot_task_ids = state.active_tasks[..hot_count].to_vec();
-            b.iter(|| {
-                let updates =
-                    state.run_hotspot_update_batch(&hot_task_ids, scenario.operation_count);
-                black_box(updates);
-            });
-            flush_and_close_runtime(&mut state.runtime);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r7_hotspot_history_sqlite(_c: &mut Criterion) {}
-
-fn realistic_r8_many_branches_write(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "write");
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_write");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.total_commits() as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            b.iter(|| {
-                let mut storage = MemoryStorage::new();
-                let dataset = build_many_branches_dataset(&mut storage, scenario);
-                black_box(dataset.object_id);
-                black_box(dataset.branch_names.len());
-                black_box(dataset.leaf_branch_names.len());
-                black_box(dataset.total_commits);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_all_heads");
-
-    let mut storage = MemoryStorage::new();
-    let dataset = build_many_branches_dataset(&mut storage, &scenario);
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_heads");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.branch_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &dataset,
-        |b, dataset| {
-            b.iter(|| {
-                let scan = scan_branch_heads(
-                    &storage,
-                    dataset.object_id,
-                    &dataset.branch_names,
-                    &dataset.prefix,
-                );
-                black_box(scan);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_leaf_heads");
-
-    let mut storage = MemoryStorage::new();
-    let dataset = build_many_branches_dataset(&mut storage, &scenario);
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_scan_leaf_heads");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.branch_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &dataset,
-        |b, dataset| {
-            b.iter(|| {
-                let scan = scan_leaf_like_branch_heads(
-                    &storage,
-                    dataset.object_id,
-                    &dataset.branch_names,
-                    &dataset.prefix,
-                    &dataset.leaf_branch_names,
-                );
-                black_box(scan);
-            });
-        },
-    );
-
-    group.finish();
-}
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "rocksdb_cold_load");
-    let seeded = ManyBranchesSeededDb::new_rocksdb(&scenario);
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_rocksdb");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.branch_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
-                    .expect("open rocksdb for many-branches cold-load benchmark");
-                black_box(
-                    storage
-                        .load_row_locator(seeded.object_id)
-                        .expect("load row locator for many-branches cold-load benchmark")
-                        .expect("cold-load many-branches object"),
-                );
-                let scan = scan_branch_heads(
-                    &storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                storage.flush().unwrap();
-                storage
-                    .close()
-                    .expect("close many-branches rocksdb storage");
-                black_box(scan);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "sqlite_cold_load");
-    let seeded = ManyBranchesSeededDb::new_sqlite(&scenario);
-
-    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_sqlite");
-    configure_group(&mut group, 10, 5);
-    group.throughput(Throughput::Elements(scenario.branch_count as u64));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let storage = SqliteStorage::open(&seeded.db_path)
-                    .expect("open sqlite for many-branches cold-load benchmark");
-                black_box(
-                    storage
-                        .load_row_locator(seeded.object_id)
-                        .expect("load row locator for many-branches cold-load benchmark")
-                        .expect("cold-load many-branches object"),
-                );
-                let scan = scan_branch_heads(
-                    &storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                storage.flush().unwrap();
-                storage.close().expect("close many-branches sqlite storage");
-                black_box(scan);
-            });
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r8_many_branches_cold_load_sqlite(_c: &mut Criterion) {}
-
-fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r9_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
-    ));
-    let benchmark_name = format!(
-        "{}_{}_docs{}_subs{}",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.scale,
-        scenario.subscription_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let mut core = permission_bench_common::create_runtime();
-            let data = permission_bench_common::setup_data(
-                &mut core,
-                scenario.scale,
-                OBSERVER_BENCH_USER_ID,
-            );
-            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
-            let mut handles = Vec::with_capacity(scenario.subscription_count);
-
-            for _ in 0..scenario.subscription_count {
-                let handle = core
-                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
-                    .expect("subscribe observe_all");
-                handles.push(handle);
-            }
-            core.immediate_tick();
-            core.batched_tick();
-
-            let doc_ids = data.owned_documents;
-            let mut doc_idx = 0usize;
-            let mut update_counter = 0u64;
-            let write_context = WriteContext::from_session(session.clone());
-
-            b.iter(|| {
-                update_counter += 1;
-                let doc_id = doc_ids[doc_idx % doc_ids.len()];
-                doc_idx += 1;
-
-                core.update(
-                    doc_id,
-                    vec![
-                        (
-                            "content".to_string(),
-                            Value::Text(format!("Observed updated content {}", update_counter)),
-                        ),
-                        (
-                            "created_at".to_string(),
-                            Value::Timestamp(
-                                permission_bench_common::current_timestamp() + update_counter,
-                            ),
-                        ),
-                    ],
-                    Some(&write_context),
-                )
-                .expect("update with observer should succeed");
-            });
-
-            black_box(handles.len());
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-
-    let mut write_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_write");
-    configure_group(&mut write_group, 10, 5);
-    write_group.throughput(Throughput::Elements(scenario.total_commits() as u64));
-    write_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "rocksdb_write",
-        )),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb many-branches write");
-            let mut dataset_idx = 0usize;
-            b.iter(|| {
-                let db_path = tempdir
-                    .path()
-                    .join(format!("many_branches_write_{dataset_idx}.rocksdb"));
-                dataset_idx += 1;
-                let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
-                    .expect("open rocksdb for many-branches write benchmark");
-                let dataset = build_many_branches_dataset(&mut storage, scenario);
-                storage.flush().unwrap();
-                storage.close().expect("close many-branches rocksdb write");
-                black_box(dataset.object_id);
-                black_box(dataset.branch_names.len());
-                black_box(dataset.leaf_branch_names.len());
-                black_box(dataset.total_commits);
-            });
-        },
-    );
-    write_group.finish();
-
-    let seeded = ManyBranchesSeededDb::new_rocksdb(&scenario);
-    let loaded_storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
-        .expect("open rocksdb for many-branches scan");
-
-    let mut scan_heads_group =
-        c.benchmark_group("realistic_phase1/many_branches_rocksdb_scan_heads");
-    configure_group(&mut scan_heads_group, 10, 5);
-    scan_heads_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    scan_heads_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "rocksdb_scan_heads",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let scan = scan_branch_heads(
-                    &loaded_storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                black_box(scan);
-            });
-        },
-    );
-    scan_heads_group.finish();
-
-    let mut scan_leaf_group =
-        c.benchmark_group("realistic_phase1/many_branches_rocksdb_scan_leaf_heads");
-    configure_group(&mut scan_leaf_group, 10, 5);
-    scan_leaf_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    scan_leaf_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "rocksdb_scan_leaf_heads",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let scan = scan_leaf_like_branch_heads(
-                    &loaded_storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                    &seeded.leaf_branch_names,
-                );
-                black_box(scan);
-            });
-        },
-    );
-    scan_leaf_group.finish();
-    loaded_storage.flush().unwrap();
-    loaded_storage
-        .close()
-        .expect("close many-branches rocksdb scan storage");
-
-    let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_cold_load");
-    configure_group(&mut cold_load_group, 10, 5);
-    cold_load_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    cold_load_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "rocksdb_cold_load",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
-                    .expect("open rocksdb for many-branches cold-load benchmark");
-                let scan = scan_branch_heads(
-                    &storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                storage.flush().unwrap();
-                storage
-                    .close()
-                    .expect("close many-branches rocksdb cold-load");
-                black_box(scan);
-            });
-        },
-    );
-    cold_load_group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r8_many_branches_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r8_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
-        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
-    ));
-
-    let mut write_group = c.benchmark_group("realistic_phase1/many_branches_sqlite_write");
-    configure_group(&mut write_group, 10, 5);
-    write_group.throughput(Throughput::Elements(scenario.total_commits() as u64));
-    write_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "sqlite_write",
-        )),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite many-branches write");
-            let mut dataset_idx = 0usize;
-            b.iter(|| {
-                let db_path = tempdir
-                    .path()
-                    .join(format!("many_branches_write_{dataset_idx}.sqlite"));
-                dataset_idx += 1;
-                let mut storage = SqliteStorage::open(&db_path)
-                    .expect("open sqlite for many-branches write benchmark");
-                let dataset = build_many_branches_dataset(&mut storage, scenario);
-                storage.flush().unwrap();
-                storage.close().expect("close many-branches sqlite write");
-                black_box(dataset.object_id);
-                black_box(dataset.branch_names.len());
-                black_box(dataset.leaf_branch_names.len());
-                black_box(dataset.total_commits);
-            });
-        },
-    );
-    write_group.finish();
-
-    let seeded = ManyBranchesSeededDb::new_sqlite(&scenario);
-    let loaded_storage =
-        SqliteStorage::open(&seeded.db_path).expect("open sqlite for many-branches scan");
-
-    let mut scan_heads_group =
-        c.benchmark_group("realistic_phase1/many_branches_sqlite_scan_heads");
-    configure_group(&mut scan_heads_group, 10, 5);
-    scan_heads_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    scan_heads_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "sqlite_scan_heads",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let scan = scan_branch_heads(
-                    &loaded_storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                black_box(scan);
-            });
-        },
-    );
-    scan_heads_group.finish();
-
-    let mut scan_leaf_group =
-        c.benchmark_group("realistic_phase1/many_branches_sqlite_scan_leaf_heads");
-    configure_group(&mut scan_leaf_group, 10, 5);
-    scan_leaf_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    scan_leaf_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "sqlite_scan_leaf_heads",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let scan = scan_leaf_like_branch_heads(
-                    &loaded_storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                    &seeded.leaf_branch_names,
-                );
-                black_box(scan);
-            });
-        },
-    );
-    scan_leaf_group.finish();
-
-    let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_sqlite_cold_load");
-    configure_group(&mut cold_load_group, 10, 5);
-    cold_load_group.throughput(Throughput::Elements(scenario.branch_count as u64));
-    cold_load_group.bench_with_input(
-        BenchmarkId::from_parameter(many_branches_benchmark_name(
-            &scenario,
-            &profile,
-            "sqlite_cold_load",
-        )),
-        &seeded,
-        |b, seeded| {
-            b.iter(|| {
-                let storage = SqliteStorage::open(&seeded.db_path)
-                    .expect("open sqlite for many-branches cold-load benchmark");
-                let scan = scan_branch_heads(
-                    &storage,
-                    seeded.object_id,
-                    &seeded.branch_names,
-                    &seeded.prefix,
-                );
-                storage.flush().unwrap();
-                storage
-                    .close()
-                    .expect("close many-branches sqlite cold-load");
-                black_box(scan);
-            });
-        },
-    );
-    cold_load_group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r8_many_branches_sqlite(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn realistic_r9_subscribed_write_path_rocksdb(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r9_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
-    ));
-    let benchmark_name = format!(
-        "{}_{}_docs{}_subs{}_rocksdb",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.scale,
-        scenario.subscription_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path_rocksdb");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for rocksdb subscribed write path");
-            let db_path = tempdir.path().join("subscribed_write_path.rocksdb");
-            let storage = RocksDBStorage::open(&db_path, STORAGE_BENCH_CACHE_SIZE_BYTES)
-                .expect("open rocksdb for subscribed write path benchmark");
-            let mut core = permission_bench_common::create_runtime_with_storage(storage);
-            let data = permission_bench_common::setup_data(
-                &mut core,
-                scenario.scale,
-                OBSERVER_BENCH_USER_ID,
-            );
-            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
-            let mut handles = Vec::with_capacity(scenario.subscription_count);
-
-            for _ in 0..scenario.subscription_count {
-                let handle = core
-                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
-                    .expect("subscribe observe_all");
-                handles.push(handle);
-            }
-            core.immediate_tick();
-            core.batched_tick();
-
-            let doc_ids = data.owned_documents;
-            let mut doc_idx = 0usize;
-            let mut update_counter = 0u64;
-            let write_context = WriteContext::from_session(session.clone());
-
-            b.iter(|| {
-                update_counter += 1;
-                let doc_id = doc_ids[doc_idx % doc_ids.len()];
-                doc_idx += 1;
-
-                core.update(
-                    doc_id,
-                    vec![
-                        (
-                            "content".to_string(),
-                            Value::Text(format!("Observed updated content {}", update_counter)),
-                        ),
-                        (
-                            "created_at".to_string(),
-                            Value::Timestamp(
-                                permission_bench_common::current_timestamp() + update_counter,
-                            ),
-                        ),
-                    ],
-                    Some(&write_context),
-                )
-                .expect("update with observer should succeed");
-            });
-
-            black_box(handles.len());
-            flush_and_close_runtime(&mut core);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-fn realistic_r9_subscribed_write_path_rocksdb(_c: &mut Criterion) {}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn realistic_r9_subscribed_write_path_sqlite(c: &mut Criterion) {
-    let profile: ProfileConfig = load_json(profile_config_path());
-    let scenario = load_r9_scenario(select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
-    ));
-    let benchmark_name = format!(
-        "{}_{}_docs{}_subs{}_sqlite",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.scale,
-        scenario.subscription_count
-    );
-
-    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path_sqlite");
-    configure_group(&mut group, 10, 10);
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_with_input(
-        BenchmarkId::from_parameter(benchmark_name),
-        &scenario,
-        |b, scenario| {
-            let tempdir = TempDir::new().expect("create tempdir for sqlite subscribed write path");
-            let db_path = tempdir.path().join("subscribed_write_path.sqlite");
-            let storage = SqliteStorage::open(&db_path)
-                .expect("open sqlite for subscribed write path benchmark");
-            let mut core = permission_bench_common::create_runtime_with_storage(storage);
-            let data = permission_bench_common::setup_data(
-                &mut core,
-                scenario.scale,
-                OBSERVER_BENCH_USER_ID,
-            );
-            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
-            let mut handles = Vec::with_capacity(scenario.subscription_count);
-
-            for _ in 0..scenario.subscription_count {
-                let handle = core
-                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
-                    .expect("subscribe observe_all");
-                handles.push(handle);
-            }
-            core.immediate_tick();
-            core.batched_tick();
-
-            let doc_ids = data.owned_documents;
-            let mut doc_idx = 0usize;
-            let mut update_counter = 0u64;
-            let write_context = WriteContext::from_session(session.clone());
-
-            b.iter(|| {
-                update_counter += 1;
-                let doc_id = doc_ids[doc_idx % doc_ids.len()];
-                doc_idx += 1;
-
-                core.update(
-                    doc_id,
-                    vec![
-                        (
-                            "content".to_string(),
-                            Value::Text(format!("Observed updated content {}", update_counter)),
-                        ),
-                        (
-                            "created_at".to_string(),
-                            Value::Timestamp(
-                                permission_bench_common::current_timestamp() + update_counter,
-                            ),
-                        ),
-                    ],
-                    Some(&write_context),
-                )
-                .expect("update with observer should succeed");
-            });
-
-            black_box(handles.len());
-            flush_and_close_runtime(&mut core);
-        },
-    );
-
-    group.finish();
-}
-
-#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
-fn realistic_r9_subscribed_write_path_sqlite(_c: &mut Criterion) {}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-struct ManyBranchesSeededDb {
-    _tempdir: TempDir,
-    db_path: PathBuf,
-    object_id: ObjectId,
-    branch_names: Vec<String>,
-    leaf_branch_names: HashSet<String>,
-    prefix: String,
-    #[allow(dead_code)]
-    cache_size_bytes: usize,
-}
-
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-impl ManyBranchesSeededDb {
-    fn new_rocksdb(scenario: &R8Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
-        let db_path = tempdir.path().join("many_branches_rocksdb");
-        let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
-            .expect("open rocksdb for many-branches seed");
-        let dataset = build_many_branches_dataset(&mut storage, scenario);
-        storage.flush().unwrap();
-        storage
-            .close()
-            .expect("close seeded many-branches rocksdb storage");
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            leaf_branch_names: dataset.leaf_branch_names,
-            prefix: dataset.prefix,
-            cache_size_bytes: scenario.cache_size_bytes,
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-impl ManyBranchesSeededDb {
-    fn new_sqlite(scenario: &R8Scenario) -> Self {
-        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
-        let db_path = tempdir.path().join("many_branches_sqlite");
-        let mut storage =
-            SqliteStorage::open(&db_path).expect("open sqlite for many-branches seed");
-        let dataset = build_many_branches_dataset(&mut storage, scenario);
-        storage.flush().unwrap();
-        storage
-            .close()
-            .expect("close seeded many-branches sqlite storage");
-        Self {
-            _tempdir: tempdir,
-            db_path,
-            object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            leaf_branch_names: dataset.leaf_branch_names,
-            prefix: dataset.prefix,
-            cache_size_bytes: 0,
-        }
-    }
-}
-
-fn many_branches_benchmark_name(
-    scenario: &R8Scenario,
-    profile: &ProfileConfig,
-    suffix: &str,
-) -> String {
-    format!(
-        "{}_{}_b{}_c{}_f{}_{}",
-        scenario.id.to_lowercase(),
-        profile.id.to_lowercase(),
-        scenario.branch_count,
-        scenario.commits_per_branch,
-        scenario.merge_fanin,
-        suffix
-    )
-}
-
-fn many_branches_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder(MANY_BRANCHES_TABLE).column("payload", ColumnType::Bytea))
-        .build()
-}
-
-fn many_branches_schema_hash() -> SchemaHash {
-    SchemaHash::compute(&many_branches_schema())
-}
-
-fn persist_many_branches_schema<H: Storage>(storage: &mut H) -> RowDescriptor {
-    let schema = many_branches_schema();
-    let schema_hash = SchemaHash::compute(&schema);
-    storage
-        .upsert_catalogue_entry(&CatalogueEntry {
-            object_id: schema_hash.to_object_id(),
-            metadata: HashMap::from([
-                (
-                    MetadataKey::Type.to_string(),
-                    ObjectType::CatalogueSchema.to_string(),
-                ),
-                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-            ]),
-            content: encode_schema(&schema),
-        })
-        .expect("seed many-branches schema");
-    schema[&MANY_BRANCHES_TABLE.into()].columns.clone()
-}
-
-fn many_branches_row_data(
-    row_descriptor: &RowDescriptor,
-    scenario: &R8Scenario,
-    branch_idx: usize,
-    commit_idx: usize,
-) -> Vec<u8> {
-    encode_row(
-        row_descriptor,
-        &[Value::Bytea(many_branches_payload_bytes(
-            scenario, branch_idx, commit_idx,
-        ))],
-    )
-    .expect("encode many-branches row data")
-}
-
-fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
-    storage: &mut H,
-    scenario: &R8Scenario,
-) -> ManyBranchesDataset {
-    let object_id = ObjectId::new();
-    let row_descriptor = persist_many_branches_schema(storage);
-    storage
-        .put_row_locator(
-            object_id,
-            Some(&RowLocator {
-                table: MANY_BRANCHES_TABLE.into(),
-                origin_schema_hash: Some(many_branches_schema_hash()),
-            }),
         )
-        .expect("seed many-branches row locator");
-    let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
-    let author = ObjectId::new().to_string();
-    let mut branch_names = Vec::with_capacity(scenario.branch_count);
-    let mut used_as_parent = vec![false; scenario.branch_count];
-    let mut next_timestamp = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
-
-    for branch_idx in 0..scenario.branch_count {
-        let branch_name = format!("{prefix}b{branch_idx:08}");
-        let parent_start = branch_idx.saturating_sub(scenario.merge_fanin);
-        used_as_parent[parent_start..branch_idx].fill(true);
-
-        let root_timestamp = next_timestamp;
-        next_timestamp += 1;
-
-        let mut head_id = BatchId::new();
-        let root_row = StoredRowBatch::new_with_batch_id(
-            head_id,
-            object_id,
-            branch_name.clone(),
-            Vec::new(),
-            many_branches_row_data(&row_descriptor, scenario, branch_idx, 0),
-            RowProvenance::for_insert(author.clone(), root_timestamp),
-            HashMap::new(),
-            RowState::VisibleDirect,
-            None,
-        );
-        apply_row_batch(
-            storage,
-            object_id,
-            &jazz_tools::object::BranchName::new(&branch_name),
-            root_row,
-            &[],
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "organizations",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("created_at", ColumnType::U64),
+            ],
         )
-        .expect("seed many-branches root row version");
-
-        for commit_idx in 1..scenario.commits_per_branch {
-            let updated_at = next_timestamp;
-            next_timestamp += 1;
-            let next_batch_id = BatchId::new();
-            let row = StoredRowBatch::new_with_batch_id(
-                next_batch_id,
-                object_id,
-                branch_name.clone(),
-                vec![head_id],
-                many_branches_row_data(&row_descriptor, scenario, branch_idx, commit_idx),
-                RowProvenance {
-                    created_by: author.clone(),
-                    created_at: root_timestamp,
-                    updated_by: author.clone(),
-                    updated_at,
-                },
-                HashMap::new(),
-                RowState::VisibleDirect,
-                None,
-            );
-            apply_row_batch(
-                storage,
-                object_id,
-                &jazz_tools::object::BranchName::new(&branch_name),
-                row,
-                &[],
-            )
-            .expect("append linear row version in many-branches benchmark");
-            head_id = next_batch_id;
-        }
-
-        branch_names.push(branch_name);
-    }
-
-    let leaf_branch_names = branch_names
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !used_as_parent[*idx])
-        .map(|(_, branch_name)| branch_name.clone())
-        .collect();
-
-    ManyBranchesDataset {
-        object_id,
-        prefix,
-        branch_names,
-        leaf_branch_names,
-        total_commits: scenario.total_commits(),
-    }
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "memberships",
+            [
+                ColumnSchema::new("organization", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+                ColumnSchema::new("role", ColumnType::String),
+            ],
+        )
+        .with_reference("organization", "organizations")
+        .with_reference("user", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "projects",
+            [
+                ColumnSchema::new("organization", ColumnType::Uuid),
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("slug", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("organization", "organizations")
+        .with_reference("owner", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "tasks",
+            [
+                ColumnSchema::new("project", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("status", ColumnType::String),
+                ColumnSchema::new("priority", ColumnType::U64),
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+                ColumnSchema::new("updated_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("project", "projects")
+        .with_reference("assignee", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("task", ColumnType::Uuid),
+                ColumnSchema::new("author", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("created_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("task", "tasks")
+        .with_reference("author", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "watchers",
+            [
+                ColumnSchema::new("task", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("task", "tasks")
+        .with_reference("user", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "activity",
+            [
+                ColumnSchema::new("project", ColumnType::Uuid),
+                ColumnSchema::new("task", ColumnType::Uuid),
+                ColumnSchema::new("actor", ColumnType::Uuid),
+                ColumnSchema::new("kind", ColumnType::String),
+                ColumnSchema::new("created_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("project", "projects")
+        .with_reference("task", "tasks")
+        .with_reference("actor", "users")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
 }
 
-fn many_branches_payload_bytes(
-    scenario: &R8Scenario,
-    branch_idx: usize,
-    commit_idx: usize,
-) -> Vec<u8> {
-    let mut payload = vec![0u8; scenario.payload_bytes.max(32)];
-    let header = format!("branch={branch_idx};commit={commit_idx};");
-    let header_bytes = header.as_bytes();
-    let copy_len = header_bytes.len().min(payload.len());
-    payload[..copy_len].copy_from_slice(&header_bytes[..copy_len]);
-    for (offset, byte) in payload.iter_mut().enumerate().skip(copy_len) {
-        *byte = branch_idx
-            .wrapping_mul(31)
-            .wrapping_add(commit_idx.wrapping_mul(17))
-            .wrapping_add(offset) as u8;
-    }
-    payload
+fn recursive_permissions_schema() -> JazzSchema {
+    let recursive_policy = Policy::shape(Query::from("docs").reachable_via(
+        "doc_access",
+        "doc",
+        "team",
+        claim("sub"),
+        "team_edges",
+        "member",
+        "parent",
+        [],
+    ));
+
+    JazzSchema::new([
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("kind", ColumnType::String),
+            ],
+        )
+        .with_read_policy(recursive_policy),
+        TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(Policy::public())
+            .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "doc_access",
+            [
+                ColumnSchema::new("doc", ColumnType::Uuid),
+                ColumnSchema::new("team", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("doc", "docs")
+        .with_reference("team", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "team_edges",
+            [
+                ColumnSchema::new("member", ColumnType::Uuid),
+                ColumnSchema::new("parent", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("member", "teams")
+        .with_reference("parent", "teams")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ])
 }
 
-fn scan_branch_heads(
-    storage: &impl Storage,
-    object_id: ObjectId,
-    branch_names: &[String],
-    prefix: &str,
-) -> BranchHeadScan {
-    let mut scan = BranchHeadScan {
-        branches_scanned: 0,
-        heads_found: 0,
-        checksum: 0,
-    };
-
-    for branch_name in branch_names {
-        if !branch_name.starts_with(prefix) {
-            continue;
-        }
-        scan.branches_scanned += 1;
-        let tips = storage
-            .scan_row_branch_tip_ids(MANY_BRANCHES_TABLE, branch_name.as_str(), object_id)
-            .expect("branch tips should be present for seeded benchmark data");
-        for head_id in &tips {
-            scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
-        }
-    }
-
-    scan
+fn open_db(seed: u64) -> BenchDb {
+    open_db_with_author(seed, AUTHOR, false)
 }
 
-fn scan_leaf_like_branch_heads(
-    storage: &impl Storage,
-    object_id: ObjectId,
-    branch_names: &[String],
-    prefix: &str,
-    leaf_branch_names: &HashSet<String>,
-) -> BranchHeadScan {
-    let mut scan = BranchHeadScan {
-        branches_scanned: 0,
-        heads_found: 0,
-        checksum: 0,
-    };
-
-    for branch_name in branch_names {
-        if !branch_name.starts_with(prefix) {
-            continue;
-        }
-        scan.branches_scanned += 1;
-        if !leaf_branch_names.contains(branch_name.as_str()) {
-            continue;
-        }
-        let tips = storage
-            .scan_row_branch_tip_ids(MANY_BRANCHES_TABLE, branch_name.as_str(), object_id)
-            .expect("branch tips should be present for seeded benchmark data");
-        for head_id in &tips {
-            scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
-        }
-    }
-
-    scan
+fn open_core_db(seed: u64) -> BenchDb {
+    open_db_with_author(seed, AuthorId::SYSTEM, true)
 }
 
-fn branch_head_checksum(branch_name: &str, head_id: BatchId) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&head_id.0[..8]);
-    u64::from_le_bytes(bytes) ^ (branch_name.len() as u64)
+fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+    open_db_with_schema(seed, author, history_complete, schema())
 }
 
-fn load_r1_scenario(path: &str) -> R1Scenario {
-    let raw: R1ScenarioConfig = load_json(path);
-    let mut operations = Vec::with_capacity(raw.mix.len());
-    let mut weights = Vec::with_capacity(raw.mix.len());
-    for op in raw.mix {
-        let parsed = match op.operation.as_str() {
-            "insert_task" => CrudOperation::InsertTask,
-            "update_task" => CrudOperation::UpdateTask,
-            "delete_task" => CrudOperation::DeleteTask,
-            unknown => panic!("unsupported R1 operation: {unknown}"),
-        };
-        operations.push(parsed);
-        weights.push(op.weight);
-    }
-
-    R1Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        operation_count: raw.operation_count,
-        operations,
-        weights,
-    }
-}
-
-fn load_r2_scenario(path: &str) -> R2Scenario {
-    let raw: R2ScenarioConfig = load_json(path);
-    let mut operations = Vec::with_capacity(raw.mix.len());
-    let mut weights = Vec::with_capacity(raw.mix.len());
-    for op in raw.mix {
-        let parsed = match op.operation.as_str() {
-            "query_board" => ReadOperation::QueryBoard,
-            "query_my_work" => ReadOperation::QueryMyWork,
-            "query_task_detail" => ReadOperation::QueryTaskDetail,
-            "query_activity_feed" => ReadOperation::QueryActivityFeed,
-            unknown => panic!("unsupported R2 operation: {unknown}"),
-        };
-        operations.push(parsed);
-        weights.push(op.weight);
-    }
-
-    R2Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        operation_count: raw.operation_count,
-        operations,
-        weights,
-        background_write_ratio: raw.background_write_ratio,
-    }
-}
-
-#[cfg(any(
-    all(feature = "rocksdb", not(target_arch = "wasm32")),
-    all(feature = "sqlite", not(target_arch = "wasm32"))
-))]
-fn load_r3_scenario(path: &str) -> R3Scenario {
-    let raw: R3ScenarioConfig = load_json(path);
-    R3Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        profile_path: raw.profile_path,
-        cache_size_bytes: raw.cache_size_bytes,
-        target_project_index: raw.target_project_index,
-    }
-}
-
-fn load_r4_scenario(path: &str) -> R4Scenario {
-    let raw: R4ScenarioConfig = load_json(path);
-    R4Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        operation_count: raw.operation_count,
-        fanout_clients: raw.fanout_clients,
-        target_project_index: raw.target_project_index,
-    }
-}
-
-fn load_r5_scenario(path: &str) -> R5Scenario {
-    let raw: R5ScenarioConfig = load_json(path);
-    let mut operations = Vec::with_capacity(raw.mix.len());
-    let mut weights = Vec::with_capacity(raw.mix.len());
-    for op in raw.mix {
-        let parsed = match op.operation.as_str() {
-            "query_visible_docs" => PermissionOperation::QueryVisibleDocs,
-            "update_allowed_doc" => PermissionOperation::UpdateAllowedDoc,
-            "update_denied_doc" => PermissionOperation::UpdateDeniedDoc,
-            unknown => panic!("unsupported R5 operation: {unknown}"),
-        };
-        operations.push(parsed);
-        weights.push(op.weight);
-    }
-
-    R5Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        operation_count: raw.operation_count,
-        operations,
-        weights,
-        recursive_depths: raw.recursive_depths,
-        shared_chain_depth: raw.shared_chain_depth,
-        docs_per_folder: raw.docs_per_folder,
-        denied_docs: raw.denied_docs,
-    }
-}
-
-fn load_r7_scenario(path: &str) -> R7Scenario {
-    let raw: R7ScenarioConfig = load_json(path);
-    R7Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        operation_count: raw.operation_count,
-        hot_task_count: raw.hot_task_count,
-    }
-}
-
-fn load_r8_scenario(path: &str) -> R8Scenario {
-    let raw: R8ScenarioConfig = load_json(path);
-    R8Scenario {
-        id: raw.id,
-        seed: raw.seed,
-        branch_count: raw.branch_count,
-        commits_per_branch: raw.commits_per_branch.max(1),
-        merge_fanin: raw.merge_fanin,
-        payload_bytes: raw.payload_bytes.max(32),
-        #[cfg(any(
-            all(feature = "rocksdb", not(target_arch = "wasm32")),
-            all(feature = "sqlite", not(target_arch = "wasm32"))
-        ))]
-        cache_size_bytes: raw.cache_size_bytes.max(1),
-    }
-}
-
-fn load_r9_scenario(path: &str) -> R9Scenario {
-    let raw: R9ScenarioConfig = load_json(path);
-    R9Scenario {
-        id: raw.id,
-        scale: raw.scale.max(1),
-        subscription_count: raw.subscription_count.max(1),
-    }
-}
-
-fn ci_variant_enabled() -> bool {
-    matches!(
-        env::var("JAZZ_REALISTIC_VARIANT"),
-        Ok(value) if value.eq_ignore_ascii_case("ci")
+fn open_db_with_schema(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    schema: JazzSchema,
+) -> BenchDb {
+    open_db_with_storage(
+        seed,
+        author,
+        history_complete,
+        schema,
+        MemoryStorage::new,
+        "open core realistic benchmark db",
     )
 }
 
-fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
-    if ci_variant_enabled() {
-        ci_path
-    } else {
-        default_path
-    }
-}
-
-fn r1_scenario_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r1_crud_sustained.json",
-        "dev/benchmarks/realistic/ci/scenarios/r1_crud_sustained.json",
+#[cfg(feature = "rocksdb")]
+fn open_rocks_db_with_author(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    path: &Path,
+) -> RocksBenchDb {
+    open_db_with_storage(
+        seed,
+        author,
+        history_complete,
+        schema(),
+        |refs| RocksDbStorage::open(path, refs).expect("open realistic RocksDB storage"),
+        "open core realistic RocksDB benchmark db",
     )
 }
 
-fn r2_sustained_scenario_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r2_reads_sustained.json",
-        "dev/benchmarks/realistic/ci/scenarios/r2_reads_sustained.json",
-    )
-}
-
-fn r2_reads_with_churn_scenario_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r2_reads_with_churn.json",
-        "dev/benchmarks/realistic/ci/scenarios/r2_reads_with_churn.json",
-    )
-}
-
-fn r5_permission_recursive_scenario_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r5_permission_recursive.json",
-        "dev/benchmarks/realistic/ci/scenarios/r5_permission_recursive.json",
-    )
-}
-
-fn r7_hotspot_history_scenario_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/scenarios/r7_hotspot_history.json",
-        "dev/benchmarks/realistic/ci/scenarios/r7_hotspot_history.json",
-    )
-}
-
-fn profile_config_path() -> &'static str {
-    select_ci_path(
-        "dev/benchmarks/realistic/profiles/s.json",
-        "dev/benchmarks/realistic/ci/profiles/s.json",
-    )
-}
-
-fn configured_sample_size(default_size: usize) -> usize {
-    if ci_variant_enabled() {
-        10
-    } else {
-        default_size
-    }
-}
-
-fn configured_measurement_time(default_seconds: u64) -> Duration {
-    if ci_variant_enabled() {
-        Duration::from_secs(5)
-    } else {
-        Duration::from_secs(default_seconds)
-    }
-}
-
-fn configured_warm_up_time() -> Duration {
-    if ci_variant_enabled() {
-        Duration::from_secs(1)
-    } else {
-        Duration::from_secs(3)
-    }
-}
-
-fn configure_group<M>(
-    group: &mut criterion::BenchmarkGroup<'_, M>,
-    sample_size: usize,
-    measurement_seconds: u64,
-) where
-    M: criterion::measurement::Measurement,
+fn open_db_with_storage<S>(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+    schema: JazzSchema,
+    storage: impl FnOnce(&[&str]) -> S,
+    context: &str,
+) -> Db<S>
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
-    group.sample_size(configured_sample_size(sample_size));
-    group.measurement_time(configured_measurement_time(measurement_seconds));
-    group.warm_up_time(configured_warm_up_time());
-}
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
 
-fn load_json<T: for<'de> Deserialize<'de>>(path: &str) -> T {
-    let file = workspace_path(path);
-    let bytes =
-        fs::read(&file).unwrap_or_else(|e| panic!("failed to read {}: {e}", file.display()));
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", file.display()))
-}
-
-fn workspace_path(path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(path)
-}
-
-fn flush_and_close_runtime<S: Storage>(runtime: &mut BenchRuntime<S>) {
-    runtime.flush_storage().unwrap();
-    runtime.storage().close().expect("close benchmark storage");
-}
-
-fn create_runtime_with_storage<S: Storage>(schema: Schema, storage: S) -> BenchRuntime<S> {
-    let sync_manager = SyncManager::new();
-    let schema_manager = SchemaManager::new(
-        sync_manager,
+    let config = DbConfig::new(
         schema,
-        AppId::from_name("realistic-phase1-bench"),
-        "dev",
-        "main",
+        storage(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([seed as u8; 16]),
+            author,
+        },
     )
-    .expect("create schema manager");
+    .with_id_source(SeededRowIdSource::new(seed));
 
-    RuntimeCore::new(schema_manager, storage, NoopScheduler)
+    let opened = if history_complete {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    };
+    opened.expect(context)
 }
 
-fn create_runtime(schema: Schema) -> BenchRuntime {
-    create_runtime_with_storage(schema, MemoryStorage::new())
+struct ByteDuplexTransport {
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
 }
 
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-fn create_rocksdb_runtime(
-    schema: Schema,
-    db_path: &Path,
-    cache_size_bytes: usize,
-) -> RuntimeCore<RocksDBStorage, NoopScheduler> {
-    create_runtime_with_storage(
-        schema,
-        RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
-    )
+impl WireTransport for ByteDuplexTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
 }
 
-#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
-fn create_sqlite_runtime(
-    schema: Schema,
-    db_path: &Path,
-) -> RuntimeCore<SqliteStorage, NoopScheduler> {
-    create_runtime_with_storage(
-        schema,
-        SqliteStorage::open(db_path).expect("open sqlite for benchmark"),
+fn byte_duplex() -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let left_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&left),
+        inbound: Rc::clone(&right),
+    };
+    let right_transport = ByteDuplexTransport {
+        outbound: right,
+        inbound: left,
+    };
+    (
+        Box::new(WireTransportAdapter::current(left_transport)),
+        Box::new(WireTransportAdapter::current(right_transport)),
     )
 }
 
-fn permission_recursive_schema(recursive_depth: usize) -> Schema {
-    let folder_select = PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(PolicyOperation::Select, "parent_id", recursive_depth),
-    ]);
-    let folder_update = PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(PolicyOperation::Update, "parent_id", recursive_depth),
-    ]);
-    let folder_policies = TablePolicies::new()
-        .with_select(folder_select)
-        .with_update(Some(folder_update), PolicyExpr::True);
-
-    let doc_select = PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(PolicyOperation::Select, "folder_id", recursive_depth),
-    ]);
-    let doc_update = PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(PolicyOperation::Update, "folder_id", recursive_depth),
-    ]);
-    let doc_update_check = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
-    let doc_policies = TablePolicies::new()
-        .with_select(doc_select)
-        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_update(Some(doc_update), doc_update_check);
-
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("folders")
-                .column("owner_id", ColumnType::Text)
-                .column("name", ColumnType::Text)
-                .nullable_fk_column("parent_id", "folders")
-                .policies(folder_policies),
-        )
-        .table(
-            TableSchema::builder("documents")
-                .column("owner_id", ColumnType::Text)
-                .fk_column("folder_id", "folders")
-                .column("title", ColumnType::Text)
-                .column("status", ColumnType::Text)
-                .column("updated_at", ColumnType::Timestamp)
-                .column("payload", ColumnType::Text)
-                .policies(doc_policies),
-        )
-        .build()
+fn byte_duplex_with_session(
+    identity: AuthorId,
+    epoch: u64,
+) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let left_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&left),
+        inbound: Rc::clone(&right),
+    };
+    let right_transport = ByteDuplexTransport {
+        outbound: right,
+        inbound: left,
+    };
+    let session = WireSession {
+        session_id: "realistic-phase1-direct-resume".to_owned(),
+        epoch,
+        identity: Some(identity),
+    };
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME | FEATURE_STRUCTURED_ERRORS;
+    (
+        Box::new(WireTransportAdapter::new(
+            left_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session.clone()),
+        )),
+        Box::new(WireTransportAdapter::new(
+            right_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session),
+        )),
+    )
 }
 
-fn project_board_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("display_name", ColumnType::Text)
-                .column("email", ColumnType::Text),
-        )
-        .table(
-            TableSchema::builder("organizations")
-                .column("name", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp),
-        )
-        .table(
-            TableSchema::builder("memberships")
-                .fk_column("organization_id", "organizations")
-                .fk_column("user_id", "users")
-                .column("role", ColumnType::Text),
-        )
-        .table(
-            TableSchema::builder("projects")
-                .fk_column("organization_id", "organizations")
-                .column("name", ColumnType::Text)
-                .column("archived", ColumnType::Boolean)
-                .column("updated_at", ColumnType::Timestamp),
-        )
-        .table(
-            TableSchema::builder("tasks")
-                .fk_column("project_id", "projects")
-                .column("title", ColumnType::Text)
-                .column("status", ColumnType::Text)
-                .column("priority", ColumnType::Integer)
-                .fk_column("assignee_id", "users")
-                .column("updated_at", ColumnType::Timestamp)
-                .nullable_column("due_at", ColumnType::Timestamp),
-        )
-        .table(
-            TableSchema::builder("task_comments")
-                .fk_column("task_id", "tasks")
-                .fk_column("author_id", "users")
-                .column("body", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp),
-        )
-        .table(
-            TableSchema::builder("task_watchers")
-                .fk_column("task_id", "tasks")
-                .fk_column("user_id", "users"),
-        )
-        .table(
-            TableSchema::builder("activity_events")
-                .fk_column("project_id", "projects")
-                .nullable_fk_column("task_id", "tasks")
-                .fk_column("actor_id", "users")
-                .column("kind", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp)
-                .column("payload", ColumnType::Text),
-        )
-        .build()
+fn global_subscribe_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
 }
 
-criterion_group!(
-    benches,
-    realistic_r1_crud,
-    realistic_r1_crud_rocksdb,
-    realistic_r1_crud_sqlite,
-    realistic_r1_crud_single_hop,
-    realistic_r1_crud_single_hop_rocksdb,
-    realistic_r1_crud_single_hop_sqlite,
-    realistic_r2_reads,
-    realistic_r2_reads_rocksdb,
-    realistic_r2_reads_sqlite,
-    realistic_r2_reads_single_hop,
-    realistic_r2_reads_single_hop_rocksdb,
-    realistic_r2_reads_single_hop_sqlite,
-    realistic_r2_reads_with_write_churn,
-    realistic_r2_reads_with_write_churn_rocksdb,
-    realistic_r2_reads_with_write_churn_sqlite,
-    realistic_r3_cold_load_rocksdb,
-    realistic_r3_cold_load_sqlite,
-    realistic_r4_fanout_updates,
-    realistic_r4_fanout_updates_rocksdb,
-    realistic_r4_fanout_updates_sqlite,
-    realistic_r5_permission_recursive,
-    realistic_r5_permission_recursive_rocksdb,
-    realistic_r5_permission_recursive_sqlite,
-    realistic_r6_permission_write_heavy,
-    realistic_r6_permission_write_heavy_rocksdb,
-    realistic_r6_permission_write_heavy_sqlite,
-    realistic_r7_hotspot_history,
-    realistic_r7_hotspot_history_rocksdb,
-    realistic_r7_hotspot_history_sqlite,
-    realistic_r8_many_branches_write,
-    realistic_r8_many_branches_scan_heads,
-    realistic_r8_many_branches_scan_leaf_heads,
-    realistic_r8_many_branches_cold_load_rocksdb,
-    realistic_r8_many_branches_cold_load_sqlite,
-    realistic_r8_many_branches_rocksdb,
-    realistic_r8_many_branches_sqlite,
-    realistic_r9_subscribed_write_path,
-    realistic_r9_subscribed_write_path_rocksdb,
-    realistic_r9_subscribed_write_path_sqlite
-);
+fn row_uuid(tag: u8, index: usize) -> RowUuid {
+    let mut bytes = [tag; 16];
+    bytes[8..16].copy_from_slice(&(index as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn wait_local<S>(write: jazz::db::WriteHandle<S>)
+where
+    S: OrderedKvStorage,
+{
+    block_on(write.wait(DurabilityTier::Local)).expect("write should be local");
+}
+
+fn user_cells(index: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("name".to_owned(), Value::String(format!("User {index}"))),
+        ("handle".to_owned(), Value::String(format!("user-{index}"))),
+    ])
+}
+
+fn organization_cells(index: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "name".to_owned(),
+            Value::String(format!("Organization {index}")),
+        ),
+        ("created_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+fn membership_cells(
+    index: usize,
+    organizations: &[RowUuid],
+    users: &[RowUuid],
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "organization".to_owned(),
+            Value::Uuid(organizations[index % organizations.len()].0),
+        ),
+        ("user".to_owned(), Value::Uuid(users[index % users.len()].0)),
+        (
+            "role".to_owned(),
+            Value::String(
+                if index.is_multiple_of(5) {
+                    "admin"
+                } else {
+                    "member"
+                }
+                .to_owned(),
+            ),
+        ),
+    ])
+}
+
+fn project_cells(
+    index: usize,
+    organizations: &[RowUuid],
+    users: &[RowUuid],
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "organization".to_owned(),
+            Value::Uuid(organizations[index % organizations.len()].0),
+        ),
+        ("name".to_owned(), Value::String(format!("Project {index}"))),
+        ("slug".to_owned(), Value::String(format!("project-{index}"))),
+        (
+            "owner".to_owned(),
+            Value::Uuid(users[index % users.len()].0),
+        ),
+    ])
+}
+
+fn task_cells(index: usize, projects: &[RowUuid], users: &[RowUuid]) -> BTreeMap<String, Value> {
+    let status = match index % 4 {
+        0 => "todo",
+        1 => "doing",
+        2 => "review",
+        _ => "done",
+    };
+    BTreeMap::from([
+        (
+            "project".to_owned(),
+            Value::Uuid(projects[index % projects.len()].0),
+        ),
+        ("title".to_owned(), Value::String(format!("Task {index}"))),
+        ("status".to_owned(), Value::String(status.to_owned())),
+        ("priority".to_owned(), Value::U64((index % 5) as u64)),
+        (
+            "assignee".to_owned(),
+            Value::Uuid(users[index % users.len()].0),
+        ),
+        ("updated_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+fn comment_cells(index: usize, tasks: &[RowUuid], users: &[RowUuid]) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("task".to_owned(), Value::Uuid(tasks[index % tasks.len()].0)),
+        (
+            "author".to_owned(),
+            Value::Uuid(users[(index * 3) % users.len()].0),
+        ),
+        (
+            "body".to_owned(),
+            Value::String(format!("Comment {index} on project-board work")),
+        ),
+        ("created_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+fn watcher_cells(task: RowUuid, user: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("task".to_owned(), Value::Uuid(task.0)),
+        ("user".to_owned(), Value::Uuid(user.0)),
+    ])
+}
+
+fn activity_cells(
+    index: usize,
+    projects: &[RowUuid],
+    tasks: &[RowUuid],
+    users: &[RowUuid],
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "project".to_owned(),
+            Value::Uuid(projects[index % projects.len()].0),
+        ),
+        ("task".to_owned(), Value::Uuid(tasks[index % tasks.len()].0)),
+        (
+            "actor".to_owned(),
+            Value::Uuid(users[(index * 5) % users.len()].0),
+        ),
+        (
+            "kind".to_owned(),
+            Value::String(
+                if index.is_multiple_of(2) {
+                    "updated"
+                } else {
+                    "commented"
+                }
+                .to_owned(),
+            ),
+        ),
+        ("created_at".to_owned(), Value::U64(index as u64)),
+    ])
+}
+
+#[derive(Debug)]
+struct Fixture {
+    users: Vec<RowUuid>,
+    projects: Vec<RowUuid>,
+    tasks: Vec<RowUuid>,
+}
+
+fn seed_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    let users = (0..profile.users)
+        .map(|index| {
+            let row = row_uuid(0x11, index);
+            wait_local(
+                db.insert_with_id("users", row, user_cells(index))
+                    .expect("seed user"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let organizations = (0..profile.organizations)
+        .map(|index| {
+            let row = row_uuid(0x1f, index);
+            wait_local(
+                db.insert_with_id("organizations", row, organization_cells(index))
+                    .expect("seed organization"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    for index in 0..(profile.organizations * profile.users) {
+        wait_local(
+            db.insert(
+                "memberships",
+                membership_cells(index, &organizations, &users),
+            )
+            .expect("seed membership"),
+        );
+    }
+
+    let projects = (0..profile.projects)
+        .map(|index| {
+            let row = row_uuid(0x22, index);
+            wait_local(
+                db.insert_with_id(
+                    "projects",
+                    row,
+                    project_cells(index, &organizations, &users),
+                )
+                .expect("seed project"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let tasks = (0..profile.tasks)
+        .map(|index| {
+            let row = row_uuid(0x33, index);
+            wait_local(
+                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
+                    .expect("seed task"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    for index in 0..profile.comments {
+        wait_local(
+            db.insert("comments", comment_cells(index, &tasks, &users))
+                .expect("seed comment"),
+        );
+    }
+
+    for (task_index, task) in tasks.iter().enumerate() {
+        for watcher_offset in 0..profile.watchers_per_task {
+            let user = users[(task_index + watcher_offset) % users.len()];
+            wait_local(
+                db.insert("watchers", watcher_cells(*task, user))
+                    .expect("seed watcher"),
+            );
+        }
+    }
+
+    for index in 0..profile.activity_events {
+        wait_local(
+            db.insert("activity", activity_cells(index, &projects, &tasks, &users))
+                .expect("seed activity"),
+        );
+    }
+
+    Fixture {
+        users,
+        projects,
+        tasks,
+    }
+}
+
+fn seed_resume_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    let users = (0..profile.users)
+        .map(|index| {
+            let row = row_uuid(0x41, index);
+            wait_local(
+                db.insert_with_id("users", row, user_cells(index))
+                    .expect("seed resume user"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let organizations = (0..profile.organizations)
+        .map(|index| {
+            let row = row_uuid(0x42, index);
+            wait_local(
+                db.insert_with_id("organizations", row, organization_cells(index))
+                    .expect("seed resume organization"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let projects = (0..profile.projects)
+        .map(|index| {
+            let row = row_uuid(0x43, index);
+            wait_local(
+                db.insert_with_id(
+                    "projects",
+                    row,
+                    project_cells(index, &organizations, &users),
+                )
+                .expect("seed resume project"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let tasks = (0..profile.tasks)
+        .map(|index| {
+            let row = row_uuid(0x44, index);
+            wait_local(
+                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
+                    .expect("seed resume task"),
+            );
+            row
+        })
+        .collect::<Vec<_>>();
+
+    Fixture {
+        users,
+        projects,
+        tasks,
+    }
+}
+
+fn project_board_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("tasks").filter(eq(col("project"), lit(project.0))))
+        .expect("prepare project board query")
+}
+
+fn my_work_query<S>(db: &Db<S>, user: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("tasks").filter(all_of([
+        eq(col("assignee"), lit(user.0)),
+        eq(col("status"), lit("doing")),
+    ])))
+    .expect("prepare my work query")
+}
+
+fn task_comments_query<S>(db: &Db<S>, task: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("comments").filter(eq(col("task"), lit(task.0))))
+        .expect("prepare task comments query")
+}
+
+fn activity_feed_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("activity").filter(eq(col("project"), lit(project.0))))
+        .expect("prepare activity feed query")
+}
+
+const RECURSIVE_DOC_DIRECT: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
+const RECURSIVE_DOC_CLOSURE: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
+const RECURSIVE_DOC_HIDDEN: RowUuid = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
+const RESUME_DOC_DIRECT: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000001"));
+const RESUME_DOC_REVOKED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000002"));
+const RESUME_DOC_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000003"));
+const RESUME_DOC_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000004"));
+const RECURSIVE_READER_TEAM: RowUuid = RowUuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const RECURSIVE_PARENT_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000002"));
+const RECURSIVE_HIDDEN_TEAM: RowUuid = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
+const RESUME_ACCESS_DIRECT: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000101"));
+const RESUME_ACCESS_REVOKED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000102"));
+const RESUME_ACCESS_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000103"));
+const RESUME_ACCESS_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000104"));
+const RESUME_EDGE_READER_PARENT: RowUuid =
+    RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000201"));
+
+fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        ("kind".to_owned(), Value::String(kind.to_owned())),
+    ])
+}
+
+fn recursive_team_cells(name: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
+}
+
+fn recursive_doc_access_cells(doc: RowUuid, team: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("doc".to_owned(), Value::Uuid(doc.0)),
+        ("team".to_owned(), Value::Uuid(team.0)),
+    ])
+}
+
+fn recursive_team_edge_cells(member: RowUuid, parent: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("member".to_owned(), Value::Uuid(member.0)),
+        ("parent".to_owned(), Value::Uuid(parent.0)),
+    ])
+}
+
+fn open_recursive_permissions_db(seed: u64) -> BenchDb {
+    open_db_with_schema(
+        seed,
+        AuthorId::SYSTEM,
+        false,
+        recursive_permissions_schema(),
+    )
+}
+
+fn open_recursive_permissions_db_with_author(
+    seed: u64,
+    author: AuthorId,
+    history_complete: bool,
+) -> BenchDb {
+    open_db_with_schema(
+        seed,
+        author,
+        history_complete,
+        recursive_permissions_schema(),
+    )
+}
+
+fn seed_recursive_permissions_fixture(db: &BenchDb) {
+    for (team, name) in [
+        (RECURSIVE_READER_TEAM, "reader"),
+        (RECURSIVE_PARENT_TEAM, "parent"),
+        (RECURSIVE_HIDDEN_TEAM, "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("teams", team, recursive_team_cells(name))
+                .expect("seed recursive team"),
+        );
+    }
+
+    for (doc, title, kind) in [
+        (RECURSIVE_DOC_DIRECT, "direct", "visible"),
+        (RECURSIVE_DOC_CLOSURE, "closure", "visible"),
+        (RECURSIVE_DOC_HIDDEN, "hidden", "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
+                .expect("seed recursive doc"),
+        );
+    }
+
+    for (doc, team) in [
+        (RECURSIVE_DOC_DIRECT, RECURSIVE_READER_TEAM),
+        (RECURSIVE_DOC_CLOSURE, RECURSIVE_PARENT_TEAM),
+        (RECURSIVE_DOC_HIDDEN, RECURSIVE_HIDDEN_TEAM),
+    ] {
+        wait_local(
+            db.insert("doc_access", recursive_doc_access_cells(doc, team))
+                .expect("seed recursive doc access"),
+        );
+    }
+
+    wait_local(
+        db.insert(
+            "team_edges",
+            recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+        )
+        .expect("seed recursive team edge"),
+    );
+}
+
+fn seed_permission_resume_fixture(db: &BenchDb) {
+    for (team, name) in [
+        (RECURSIVE_READER_TEAM, "reader"),
+        (RECURSIVE_PARENT_TEAM, "parent"),
+        (RECURSIVE_HIDDEN_TEAM, "hidden"),
+    ] {
+        wait_local(
+            db.insert_with_id("teams", team, recursive_team_cells(name))
+                .expect("seed resume permission team"),
+        );
+    }
+
+    wait_local(
+        db.insert_with_id(
+            "team_edges",
+            RESUME_EDGE_READER_PARENT,
+            recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+        )
+        .expect("seed resume permission team edge"),
+    );
+
+    for (doc, title, kind) in [
+        (RESUME_DOC_DIRECT, "direct", "visible"),
+        (RESUME_DOC_REVOKED, "revoked", "visible-then-revoked"),
+        (RESUME_DOC_GRANTED, "granted", "hidden-then-granted"),
+        (RESUME_DOC_NEVER, "never", "never-visible"),
+    ] {
+        wait_local(
+            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
+                .expect("seed resume permission doc"),
+        );
+    }
+
+    for (access, doc, team) in [
+        (
+            RESUME_ACCESS_DIRECT,
+            RESUME_DOC_DIRECT,
+            RECURSIVE_READER_TEAM,
+        ),
+        (
+            RESUME_ACCESS_REVOKED,
+            RESUME_DOC_REVOKED,
+            RECURSIVE_PARENT_TEAM,
+        ),
+        (RESUME_ACCESS_NEVER, RESUME_DOC_NEVER, RECURSIVE_HIDDEN_TEAM),
+    ] {
+        wait_local(
+            db.insert_with_id("doc_access", access, recursive_doc_access_cells(doc, team))
+                .expect("seed resume permission access"),
+        );
+    }
+}
+
+fn recursive_docs_query<S>(db: &Db<S>) -> jazz::db::PreparedQuery
+where
+    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+{
+    db.prepare_query(&Query::from("docs"))
+        .expect("prepare recursive docs query")
+}
+
+fn assert_recursive_docs_visible(rows: &[jazz::node::CurrentRow]) {
+    assert!(
+        rows.iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_DIRECT)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_CLOSURE)
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.row_uuid() == RECURSIVE_DOC_HIDDEN)
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+fn assert_permission_resume_docs(rows: &[jazz::node::CurrentRow], visible: &[RowUuid]) {
+    for doc in [
+        RESUME_DOC_DIRECT,
+        RESUME_DOC_REVOKED,
+        RESUME_DOC_GRANTED,
+        RESUME_DOC_NEVER,
+    ] {
+        let expected = visible.contains(&doc);
+        assert_eq!(
+            rows.iter().any(|row| row.row_uuid() == doc),
+            expected,
+            "unexpected visibility for {doc:?}"
+        );
+    }
+    assert_eq!(rows.len(), visible.len());
+}
+
+fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, usize, usize) {
+    match event {
+        Some(SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        }) => {
+            for row in added.iter().chain(updated.iter()) {
+                assert_ne!(row.row_uuid(), RESUME_DOC_REVOKED);
+                assert_ne!(row.row_uuid(), RESUME_DOC_NEVER);
+            }
+            assert!(removed.iter().any(|row| row.row_uuid == RESUME_DOC_REVOKED));
+            assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
+            (added.len(), updated.len(), removed.len())
+        }
+        None => (0, 0, 0),
+        other => panic!("expected permission-filtered resume delta event, got {other:?}"),
+    }
+}
+
+fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
+    match event {
+        Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
+        None => 0,
+        other => panic!("unexpected permission snapshot subscription event {other:?}"),
+    }
+}
+
+fn drain_opened(event: Option<SubscriptionEvent>, name: &str) -> usize {
+    match event {
+        Some(SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            ..
+        }) => added.len() + updated.len(),
+        other => panic!("expected reset {name} subscription event, got {other:?}"),
+    }
+}
+
+fn drain_delta(event: Option<SubscriptionEvent>, name: &str) -> usize {
+    match event {
+        Some(SubscriptionEvent::Delta { added, updated, .. }) => added.len() + updated.len(),
+        other => panic!("expected {name} subscription delta event, got {other:?}"),
+    }
+}
+
+fn r1_crud(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r1_crud");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let db = open_db(1);
+                let fixture = seed_fixture(&db, profile);
+                let mut next_task = profile.tasks;
+                let mut update_index = 0usize;
+
+                b.iter(|| {
+                    let inserted = db
+                        .insert(
+                            "tasks",
+                            task_cells(next_task, &fixture.projects, &fixture.users),
+                        )
+                        .expect("insert task");
+                    let inserted_row = inserted.row_uuid();
+                    wait_local(inserted);
+                    next_task += 1;
+
+                    let update_row = fixture.tasks[update_index % fixture.tasks.len()];
+                    wait_local(
+                        db.update(
+                            "tasks",
+                            update_row,
+                            BTreeMap::from([
+                                ("status".to_owned(), Value::String("review".to_owned())),
+                                ("updated_at".to_owned(), Value::U64(next_task as u64)),
+                            ]),
+                        )
+                        .expect("update task"),
+                    );
+                    update_index += 1;
+
+                    wait_local(db.delete("tasks", inserted_row).expect("delete task"));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn r2_reads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r2_reads");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(profile.tasks as u64));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let db = open_db(2);
+                let fixture = seed_fixture(&db, profile);
+                let queries = [
+                    project_board_query(&db, fixture.projects[0]),
+                    my_work_query(&db, fixture.users[0]),
+                    task_comments_query(&db, fixture.tasks[0]),
+                    activity_feed_query(&db, fixture.projects[0]),
+                ];
+                let mut query_index = 0usize;
+
+                b.iter(|| {
+                    let rows = db
+                        .read(&queries[query_index % queries.len()])
+                        .expect("read realistic query");
+                    query_index += 1;
+                    black_box(rows.len())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+#[cfg(feature = "rocksdb")]
+fn r3_rocksdb_cold_load(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r3_rocksdb_cold_load");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(profile.tasks as u64));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
+                let db_path = tempdir.path().join("realistic_phase1.rocksdb");
+                let project = {
+                    let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+                    let fixture = seed_fixture(&db, profile);
+                    fixture.projects[0]
+                };
+
+                b.iter(|| {
+                    let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
+                    let query = project_board_query(&db, project);
+                    let rows = db.read(&query).expect("read cold project board");
+                    assert!(!rows.is_empty());
+                    black_box(rows.len())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+#[cfg(not(feature = "rocksdb"))]
+fn r3_rocksdb_cold_load(_c: &mut Criterion) {}
+
+fn r4_hot_task_history(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r4_hot_task_history");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(3));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let db = open_db(4);
+                let fixture = seed_fixture(&db, profile);
+                let hot_task = fixture.tasks[0];
+                let hot_project = fixture.projects[0];
+                let mut project_board = block_on(
+                    db.subscribe(&project_board_query(&db, hot_project), ReadOpts::default()),
+                )
+                .expect("subscribe project board");
+                let mut task_comments = block_on(
+                    db.subscribe(&task_comments_query(&db, hot_task), ReadOpts::default()),
+                )
+                .expect("subscribe task comments");
+                let mut activity_feed = block_on(
+                    db.subscribe(&activity_feed_query(&db, hot_project), ReadOpts::default()),
+                )
+                .expect("subscribe activity feed");
+
+                black_box(drain_opened(
+                    block_on(project_board.next_event()),
+                    "project board",
+                ));
+                black_box(drain_opened(
+                    block_on(task_comments.next_event()),
+                    "task comments",
+                ));
+                black_box(drain_opened(
+                    block_on(activity_feed.next_event()),
+                    "activity feed",
+                ));
+
+                let mut event_index = profile.activity_events;
+                b.iter(|| {
+                    wait_local(
+                        db.update(
+                            "tasks",
+                            hot_task,
+                            BTreeMap::from([
+                                (
+                                    "status".to_owned(),
+                                    Value::String(
+                                        if event_index.is_multiple_of(2) {
+                                            "doing"
+                                        } else {
+                                            "review"
+                                        }
+                                        .to_owned(),
+                                    ),
+                                ),
+                                ("updated_at".to_owned(), Value::U64(event_index as u64)),
+                            ]),
+                        )
+                        .expect("hot task update"),
+                    );
+                    wait_local(
+                        db.insert(
+                            "comments",
+                            comment_cells(event_index, &[hot_task], &fixture.users),
+                        )
+                        .expect("hot task comment"),
+                    );
+                    wait_local(
+                        db.insert(
+                            "activity",
+                            activity_cells(
+                                event_index,
+                                &[hot_project],
+                                &[hot_task],
+                                &fixture.users,
+                            ),
+                        )
+                        .expect("hot task activity"),
+                    );
+                    event_index += 1;
+
+                    let delivered =
+                        drain_delta(block_on(project_board.next_event()), "project board")
+                            + drain_delta(block_on(task_comments.next_event()), "task comments")
+                            + drain_delta(block_on(activity_feed.next_event()), "activity feed");
+                    black_box(delivered)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn r9_subscribed_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r9_subscribed_write");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let db = open_db(3);
+                let fixture = seed_fixture(&db, profile);
+                let query = project_board_query(&db, fixture.projects[0]);
+                let mut subscription =
+                    block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe board");
+                match block_on(subscription.next_event()) {
+                    Some(SubscriptionEvent::Delta {
+                        reset: true,
+                        added,
+                        updated,
+                        ..
+                    }) => {
+                        assert!(!added.is_empty() || !updated.is_empty());
+                    }
+                    other => panic!("expected reset subscription event, got {other:?}"),
+                }
+
+                let mut task_index = 0usize;
+                b.iter(|| {
+                    let row = fixture.tasks[task_index % fixture.tasks.len()];
+                    task_index += profile.projects;
+                    wait_local(
+                        db.update(
+                            "tasks",
+                            row,
+                            BTreeMap::from([
+                                ("status".to_owned(), Value::String("doing".to_owned())),
+                                ("updated_at".to_owned(), Value::U64(task_index as u64)),
+                            ]),
+                        )
+                        .expect("subscribed task update"),
+                    );
+                    match block_on(subscription.next_event()) {
+                        Some(SubscriptionEvent::Delta { updated, .. }) => black_box(updated.len()),
+                        other => panic!("expected subscription delta event, got {other:?}"),
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn r10_sync_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r10_sync_fanout");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("project_board_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                let writer = open_db(10);
+                let server = open_core_db(11);
+                let reader = open_db_with_author(12, READER_AUTHOR, false);
+
+                let fixture = seed_fixture(&writer, profile);
+                let project = fixture.projects[0];
+                let subscribed_row = fixture.tasks[0];
+
+                let (writer_transport, server_writer_transport) = byte_duplex();
+                let _writer_upstream = writer.connect_upstream(writer_transport);
+                let _writer_subscriber = server.accept_subscriber(server_writer_transport, AUTHOR);
+
+                let (reader_transport, server_reader_transport) = byte_duplex();
+                let _reader_upstream = reader.connect_upstream(reader_transport);
+                let _reader_subscriber =
+                    server.accept_subscriber(server_reader_transport, READER_AUTHOR);
+
+                let query = project_board_query(&reader, project);
+                let mut subscription = block_on(reader.subscribe(&query, global_subscribe_opts()))
+                    .expect("subscribe reader project board");
+                assert!(drain_opened(block_on(subscription.next_event()), "reader board") == 0);
+
+                writer.tick().expect("ship seeded writer rows");
+                server.tick().expect("ingest seeded writer rows");
+                reader.tick().expect("announce reader subscription");
+                server.tick().expect("serve reader subscription");
+                reader.tick().expect("apply reader subscription snapshot");
+                assert!(
+                    drain_delta(block_on(subscription.next_event()), "reader board seeded") > 0
+                );
+
+                let mut update_index = 0usize;
+                b.iter(|| {
+                    wait_local(
+                        writer
+                            .update(
+                                "tasks",
+                                subscribed_row,
+                                BTreeMap::from([
+                                    (
+                                        "status".to_owned(),
+                                        Value::String(
+                                            if update_index.is_multiple_of(2) {
+                                                "doing"
+                                            } else {
+                                                "review"
+                                            }
+                                            .to_owned(),
+                                        ),
+                                    ),
+                                    (
+                                        "updated_at".to_owned(),
+                                        Value::U64((profile.tasks + update_index) as u64),
+                                    ),
+                                ]),
+                            )
+                            .expect("writer project-board update"),
+                    );
+                    update_index += 1;
+
+                    writer.tick().expect("ship writer update");
+                    server.tick().expect("fan out writer update");
+                    reader.tick().expect("apply reader update");
+
+                    let delivered =
+                        drain_delta(block_on(subscription.next_event()), "reader board update");
+                    assert!(delivered > 0);
+                    black_box(delivered)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn r11_byte_wire_resume(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r11_byte_wire_resume");
+
+    for profile in [CI_S_PROFILE] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("tasks_s", profile.tasks),
+            &profile,
+            |b, &profile| {
+                b.iter(|| {
+                    let writer = open_db(110);
+                    let server = open_core_db(111);
+                    let client = open_db_with_author(112, READER_AUTHOR, false);
+                    let fixture = seed_resume_fixture(&writer, profile);
+                    let subscribed_row = fixture.tasks[0];
+                    let prepared = client
+                        .prepare_query(&Query::from("tasks"))
+                        .expect("prepare resumed tasks query");
+
+                    let (writer_transport, server_writer_transport) =
+                        byte_duplex_with_session(AUTHOR, 1);
+                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_subscriber =
+                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                    writer.tick().expect("ship resume seed rows");
+                    server.tick().expect("ingest resume seed rows");
+                    assert!(writer.detach_connection(&writer_upstream));
+                    assert!(server.detach_connection(&writer_subscriber));
+
+                    let (client_transport, server_transport) =
+                        byte_duplex_with_session(READER_AUTHOR, 2);
+                    let upstream = client.connect_upstream(client_transport);
+                    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+
+                    let mut subscription =
+                        block_on(client.subscribe(&prepared, global_subscribe_opts()))
+                            .expect("subscribe client tasks");
+
+                    assert_eq!(
+                        drain_opened(block_on(subscription.next_event()), "client tasks"),
+                        0
+                    );
+
+                    client.tick().expect("announce client tasks subscription");
+                    server.tick().expect("serve full task snapshot");
+                    let full_bytes = subscriber
+                        .borrow()
+                        .last_resume_bytes()
+                        .expect("full current-row bytes");
+                    client.tick().expect("apply full task snapshot");
+                    client.tick().expect("materialize full task snapshot event");
+
+                    let current_rows =
+                        drain_delta(subscription.try_next_event(), "client tasks seeded");
+                    assert_eq!(current_rows, profile.tasks);
+                    assert!(full_bytes > 0);
+
+                    server.tick().expect("refresh served current rows");
+                    client.tick().expect("apply served cursor state");
+
+                    let cursor = subscriber
+                        .borrow_mut()
+                        .take_resume_cursor()
+                        .expect("take subscriber resume cursor");
+                    assert!(client.detach_connection(&upstream));
+                    assert!(server.detach_connection(&subscriber));
+
+                    let changed_status = "resume-canary";
+                    wait_local(
+                        writer
+                            .update(
+                                "tasks",
+                                subscribed_row,
+                                BTreeMap::from([
+                                    (
+                                        "status".to_owned(),
+                                        Value::String(changed_status.to_owned()),
+                                    ),
+                                    ("updated_at".to_owned(), Value::U64(9_001)),
+                                ]),
+                            )
+                            .expect("writer disconnected task update"),
+                    );
+                    let (writer_transport, server_writer_transport) =
+                        byte_duplex_with_session(AUTHOR, 3);
+                    let writer_upstream = writer.connect_upstream(writer_transport);
+                    let writer_subscriber =
+                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                    writer.tick().expect("ship disconnected task update");
+                    server.tick().expect("ingest disconnected task update");
+                    assert!(writer.detach_connection(&writer_upstream));
+                    assert!(server.detach_connection(&writer_subscriber));
+
+                    let (client_transport, server_transport) =
+                        byte_duplex_with_session(READER_AUTHOR, 4);
+                    let _resumed_upstream = client.connect_upstream(client_transport);
+                    let resumed =
+                        server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+                    client.tick().expect("announce resumed tasks subscription");
+                    server.tick().expect("serve task resume catch-up");
+                    client.tick().expect("apply task resume catch-up");
+                    client.tick().expect("materialize task resume event");
+
+                    let resume_bytes = resumed
+                        .borrow()
+                        .last_resume_bytes()
+                        .expect("resume catch-up bytes");
+                    assert!(resume_bytes > 0);
+                    assert!(
+                        resume_bytes < full_bytes,
+                        "resume catch-up ({resume_bytes}) should be smaller than full send ({full_bytes})"
+                    );
+
+                    let delivered =
+                        drain_delta(block_on(subscription.next_event()), "client tasks resumed");
+                    assert!(delivered > 0);
+                    let rows = client.read(&prepared).expect("read resumed task rows");
+                    let changed = rows
+                        .iter()
+                        .find(|row| row.row_uuid() == subscribed_row)
+                        .expect("changed task visible on client");
+                    assert_eq!(
+                        changed.cell_at(2),
+                        Some(Value::String(changed_status.to_owned()))
+                    );
+                    black_box(resume_bytes)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn r12_recursive_permissions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r12_recursive_permissions");
+    group.throughput(Throughput::Elements(2));
+
+    group.bench_function("docs_recursive_read_s", |b| {
+        let db = open_recursive_permissions_db(120);
+        seed_recursive_permissions_fixture(&db);
+        let query = recursive_docs_query(&db);
+        let read_opts = ReadOpts::default();
+
+        b.iter(|| {
+            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+                .expect("read recursive docs for reader");
+            assert_recursive_docs_visible(&rows);
+
+            let mut subscription =
+                block_on(db.subscribe_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+                    .expect("subscribe recursive docs for reader");
+            match block_on(subscription.next_event()) {
+                Some(SubscriptionEvent::Delta {
+                    reset: true,
+                    added,
+                    updated,
+                    ..
+                }) => {
+                    let mut rows = added;
+                    rows.extend(updated);
+                    assert_recursive_docs_visible(&rows);
+                }
+                other => panic!("expected recursive docs reset event, got {other:?}"),
+            }
+
+            black_box(rows.len())
+        });
+    });
+
+    group.finish();
+}
+
+fn r13_permission_filtered_resume(c: &mut Criterion) {
+    let mut group = c.benchmark_group("realistic_phase1/r13_permission_filtered_resume");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("docs_recursive_resume_s", |b| {
+        b.iter(|| {
+            let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
+            let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+            let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+            seed_permission_resume_fixture(&writer);
+            let prepared = client
+                .prepare_query(&Query::from("docs"))
+                .expect("prepare permission-filtered docs query");
+
+            let (writer_transport, server_writer_transport) =
+                byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+            let writer_upstream = writer.connect_upstream(writer_transport);
+            let writer_subscriber =
+                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+            writer.tick().expect("ship permission seed rows");
+            server.tick().expect("ingest permission seed rows");
+            assert!(writer.detach_connection(&writer_upstream));
+            assert!(server.detach_connection(&writer_subscriber));
+
+            let (client_transport, server_transport) =
+                byte_duplex_with_session(READER_AUTHOR, 13_002);
+            let upstream = client.connect_upstream(client_transport);
+            let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+            let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+                .expect("subscribe permission-filtered docs");
+            assert_eq!(
+                drain_opened(block_on(subscription.next_event()), "permission docs"),
+                0
+            );
+
+            client
+                .tick()
+                .expect("announce permission docs subscription");
+            server.tick().expect("serve full permission docs snapshot");
+            let full_bytes = subscriber
+                .borrow()
+                .last_resume_bytes()
+                .expect("full permission current-row bytes");
+            client.tick().expect("apply full permission docs snapshot");
+            client
+                .tick()
+                .expect("materialize full permission docs snapshot event");
+            let seeded = drain_optional_permission_rows(subscription.try_next_event());
+            assert!(full_bytes > 0);
+            let rows = client
+                .read(&prepared)
+                .expect("read initial permission-filtered docs");
+            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
+            if seeded > 0 {
+                assert_eq!(seeded, rows.len());
+            }
+
+            server.tick().expect("refresh permission docs cursor");
+            client.tick().expect("apply permission docs cursor state");
+            let cursor = subscriber
+                .borrow_mut()
+                .take_resume_cursor()
+                .expect("take permission subscriber resume cursor");
+            assert!(client.detach_connection(&upstream));
+            assert!(server.detach_connection(&subscriber));
+
+            wait_local(
+                writer
+                    .update(
+                        "doc_access",
+                        RESUME_ACCESS_REVOKED,
+                        recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                    )
+                    .expect("hide disconnected doc access before revoke"),
+            );
+            wait_local(
+                writer
+                    .delete("doc_access", RESUME_ACCESS_REVOKED)
+                    .expect("revoke disconnected doc access"),
+            );
+            wait_local(
+                writer
+                    .insert_with_id(
+                        "doc_access",
+                        RESUME_ACCESS_GRANTED,
+                        recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                    )
+                    .expect("grant disconnected doc access"),
+            );
+
+            let (writer_transport, server_writer_transport) =
+                byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+            let writer_upstream = writer.connect_upstream(writer_transport);
+            let writer_subscriber =
+                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+            writer.tick().expect("ship disconnected permission changes");
+            server
+                .tick()
+                .expect("ingest disconnected permission changes");
+            writer
+                .tick()
+                .expect("ship settled disconnected permission changes");
+            server
+                .tick()
+                .expect("ingest settled disconnected permission changes");
+            assert!(writer.detach_connection(&writer_upstream));
+            assert!(server.detach_connection(&writer_subscriber));
+
+            let (client_transport, server_transport) =
+                byte_duplex_with_session(READER_AUTHOR, 13_004);
+            let _resumed_upstream = client.connect_upstream(client_transport);
+            let resumed =
+                server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+            client
+                .tick()
+                .expect("announce resumed permission docs subscription");
+            server.tick().expect("serve permission resume catch-up");
+            client.tick().expect("apply permission resume catch-up");
+            client.tick().expect("materialize permission resume event");
+            server
+                .tick()
+                .expect("serve settled permission resume state");
+            client
+                .tick()
+                .expect("apply settled permission resume state");
+            client
+                .tick()
+                .expect("materialize settled permission resume state");
+
+            let resume_bytes = resumed
+                .borrow()
+                .last_resume_bytes()
+                .expect("permission resume catch-up bytes");
+            assert!(resume_bytes > 0);
+
+            let (added, updated, removed) =
+                drain_permission_resume_delta(subscription.try_next_event());
+            if added + updated + removed > 0 {
+                assert_eq!(added + updated, 1);
+                assert_eq!(removed, 1);
+            }
+            let rows = client
+                .read(&prepared)
+                .expect("read final permission-filtered docs");
+            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_GRANTED]);
+
+            black_box((resume_bytes, full_bytes, added, updated, removed))
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = r1_crud, r2_reads, r3_rocksdb_cold_load, r4_hot_task_history, r9_subscribed_write, r10_sync_fanout, r11_byte_wire_resume, r12_recursive_permissions, r13_permission_filtered_resume
+}
 criterion_main!(benches);

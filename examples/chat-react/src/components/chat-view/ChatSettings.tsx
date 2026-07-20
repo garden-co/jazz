@@ -26,6 +26,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { navigate } from "@/hooks/useRouter";
+import { fireAndReport } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 
 interface ChatSettingsProps {
@@ -80,14 +81,17 @@ function ChatSettingsContent({
 
   const handleNameChange = (newName: string) => {
     setDraftName(newName);
-    db.update(app.chats, chatId, {
-      name: newName || (null as unknown as string),
-    });
+    fireAndReport(
+      db.update(app.chats, chatId, {
+        name: newName || (null as unknown as string),
+      }),
+      "failed to update chat name",
+    );
   };
 
   const handleLeave = () => {
     if (!myMembership) return;
-    db.delete(app.chatMembers, myMembership.id);
+    fireAndReport(db.delete(app.chatMembers, myMembership.id), "failed to leave chat");
     onOpenChange(false);
     navigate("/#/chats");
   };

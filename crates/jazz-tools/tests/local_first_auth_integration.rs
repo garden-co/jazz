@@ -6,8 +6,8 @@
 //! token syncs correctly, that seeds map deterministically to principals
 //! across devices, and that state persists across reconnects.
 //!
-//! Narrow middleware-level assertions (wrong audience, expired token,
-//! disabled flag) live in `local_first_auth.rs` and `src/middleware/auth.rs`.
+//! Narrow auth assertions (wrong audience, expired token, disabled flag) are
+//! covered closer to the auth implementation.
 
 mod support;
 

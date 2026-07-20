@@ -1,5 +1,4 @@
-import { installInspectorHost } from "./host-bridge.js";
-import type { Db } from "../../runtime/db.js";
+import { installInspectorHost, type InspectorHostDb } from "./host-bridge.js";
 
 const ELEMENT_NAME = "jazz-inspector-overlay";
 
@@ -225,11 +224,11 @@ const TEMPLATE = `
  * a disposer exists iff a pair is bound.
  */
 class HostBinding {
-  #db: Db | undefined;
+  #db: InspectorHostDb | undefined;
   #iframeWindow: Window | undefined;
-  #bound: { db: Db; iframeWindow: Window; dispose: () => void } | undefined;
+  #bound: { db: InspectorHostDb; iframeWindow: Window; dispose: () => void } | undefined;
 
-  setDb(db: Db): void {
+  setDb(db: InspectorHostDb): void {
     this.#db = db;
     this.#rebind();
   }
@@ -445,8 +444,8 @@ class JazzInspectorOverlay extends HTMLElement {
     apply();
 
     // Publish the host handle + push the active-subscription list to the iframe.
-    // The overlay reads the config off window.__jazzInspectorHost and opens its
-    // own worker connection; we only push the stack-less subscription list.
+    // The overlay reads the config and subscription channel off
+    // window.__jazzInspectorHost; we only push the stack-less subscription list.
     hostBinding.setIframeWindow(iframe.contentWindow ?? undefined);
     signal.addEventListener("abort", () => hostBinding.unbind(), { once: true });
 
@@ -483,14 +482,15 @@ function mount(): void {
  * Start the inspector for an app db: record the db and mount the overlay UI
  * (floating toggle + bottom dock + iframe). The first call's mount() triggers
  * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
- * and pushes the active subscription list to the iframe; the overlay opens its
- * own worker connection from the published config. Safe to call again — with an
+ * and pushes the active subscription list to the iframe; the overlay connects
+ * through the handle's subscription channel into the host's own store. Safe to
+ * call again — with an
  * unchanged db the binding is a no-op, and with a new db (e.g. the host
  * recreated its client on login/logout) it rebinds the already-mounted iframe.
  * No-op at module load — providers call this from a dev-only dynamic import, so
  * it's absent from prod builds.
  */
-export function startInspectorOverlay(db: Db): void {
+export function startInspectorOverlay(db: InspectorHostDb): void {
   hostBinding.setDb(db);
   mount();
 }

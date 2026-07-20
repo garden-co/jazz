@@ -1,13 +1,13 @@
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
 
-const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
+const EXAMPLE_TASK_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 
 // #region oneshot-vue
 export async function readTodosOneshot(db: Db) {
   const todos = await db.all(app.todos.where({ done: false }));
-  const todo = await db.one(app.todos.where({ id: EXAMPLE_TODO_ID }));
+  const todo = await db.one(app.todos.where({ id: EXAMPLE_TASK_ID }));
   return { todos, todo };
 }
 // #endregion oneshot-vue
@@ -15,7 +15,7 @@ export async function readTodosOneshot(db: Db) {
 // #region subscribe-vue
 export function subscribeTodos(db: Db, onUpdate: (results: unknown[]) => void) {
   const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
-    onUpdate(all);
+    onUpdate(all ?? []);
   });
 
   return unsubscribe;
@@ -72,7 +72,7 @@ export async function combinedQuery(db: Db) {
 
 // #region reading-tier-vue
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length), {
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all?.length ?? 0), {
     tier: "edge",
     localUpdates: "immediate",
   });

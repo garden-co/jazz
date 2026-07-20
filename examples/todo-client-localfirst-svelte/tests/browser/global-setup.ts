@@ -1,6 +1,5 @@
+import { join } from "node:path";
 import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
-import permissions from "../../src/lib/permissions.js";
-import { app } from "../../src/lib/schema.js";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 export { TEST_PORT, ADMIN_SECRET, APP_ID };
@@ -25,8 +24,7 @@ export async function setup(): Promise<void> {
     serverUrl: serverHandle.url,
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
-    schema: app,
-    permissions,
+    schemaDir: join(import.meta.dirname, "../../src/lib"),
   });
 }
 

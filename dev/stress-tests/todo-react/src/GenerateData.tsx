@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import type { Db } from "jazz-tools";
 import { useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
 
@@ -222,7 +223,10 @@ function randomTodoTitle(): string {
 type Status = "idle" | "generating" | "done" | "error";
 
 export function GenerateData() {
-  const db = useDb();
+  // App.tsx opts into the sync in-process client (asyncSubscriptionsOnly:
+  // false), so the db here is the full Db with transaction support, not the
+  // async channel facade useDb is typed as.
+  const db = useDb() as unknown as Db;
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 
@@ -239,14 +243,14 @@ export function GenerateData() {
     setError(null);
 
     try {
-      // Generate projects in batches
+      // Generate projects in mergeable transactions
       const projectIds: string[] = [];
       let batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_PROJECTS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_PROJECTS);
-        db.batch((batch) => {
+        db.transaction((tx) => {
           for (let j = i; j < batchEnd; j++) {
-            const row = batch.insert(app.projects, { name: randomProjectName() });
+            const row = tx.insert(app.projects, { name: randomProjectName() });
             projectIds.push(row.id);
           }
         });
@@ -258,13 +262,13 @@ export function GenerateData() {
         }
       }
 
-      // Generate todos in batches, round-robin across projects
+      // Generate todos in mergeable transactions, round-robin across projects
       batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_TODOS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_TODOS);
-        db.batch((batch) => {
+        db.transaction((tx) => {
           for (let j = i; j < batchEnd; j++) {
-            batch.insert(app.todos, {
+            tx.insert(app.todos, {
               title: randomTodoTitle(),
               done: j % 5 === 0,
               owner_id: sessionUserId,

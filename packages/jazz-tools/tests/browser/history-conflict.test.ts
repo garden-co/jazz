@@ -1,7 +1,7 @@
 /**
  * Browser integration tests for history & conflict management.
  *
- * Exercises the full browser stack: WASM bindings, Web Worker bridge,
+ * Exercises the full browser stack: WASM bindings,
  * OPFS persistence, and binary sync transport — layers the Rust E2E
  * tests don't cover.
  *
@@ -13,7 +13,11 @@ import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../../src/runtime/schema-fetch.js";
 import {
   getJazzServerInfo,
   unblockJazzServerNetwork,
@@ -74,11 +78,16 @@ describe("History & Conflict Management", () => {
     testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
     const { appId, serverUrl, adminSecret } = testingServer;
     await unblockJazzServerNetwork(serverUrl);
-    await deploy({
+    const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
       appId,
-      serverUrl,
       adminSecret,
       schema,
+    });
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
+    await publishStoredPermissions(serverUrl, {
+      appId,
+      adminSecret,
+      schemaHash,
       permissions: {
         todos: {
           select: { using: { type: "True" } },
@@ -90,6 +99,7 @@ describe("History & Conflict Management", () => {
           delete: { using: { type: "True" } },
         },
       },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
   });
 
@@ -116,7 +126,7 @@ describe("History & Conflict Management", () => {
     const { id } = await withTimeout(
       dbAlice.insert(todos, { title: uniqueTitle, done: false }).wait({ tier: "local" }),
       10000,
-      "Alice insert(worker) did not resolve",
+      "Alice insert(local runtime) did not resolve",
     );
 
     // Wait for Bob to see it
@@ -478,7 +488,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
   const { id: aliceToBobId } = await withTimeout(
     dbAlice
       .insert(todos, { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Alice->Bob peer sync insert did not resolve`,
   );
@@ -489,12 +499,13 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
+    "edge",
   );
 
   const { id: bobToAliceId } = await withTimeout(
     dbBob
       .insert(todos, { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Bob->Alice peer sync insert did not resolve`,
   );
@@ -505,5 +516,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
+    "edge",
   );
 }

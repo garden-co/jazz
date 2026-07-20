@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 
 import {
   buildIndex,
@@ -11,6 +12,8 @@ import {
   resolveIncludes,
   splitIntoSections,
 } from "./build-index.js";
+
+const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -264,10 +267,9 @@ describe("buildIndex", () => {
     await cleanupFixtureTree(tmpDir);
   });
 
-  it("produces docs-index.db and docs-index.txt", async () => {
+  it("produces docs-index.db", async () => {
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(outputDir(), "docs-index.db"))).toBe(true);
-    expect(existsSync(join(outputDir(), "docs-index.txt"))).toBe(true);
   });
 
   it("pages table has correct schema", async () => {
@@ -365,19 +367,6 @@ describe("buildIndex", () => {
     db.close();
   });
 
-  it("docs-index.txt contains ===PAGE:slug=== markers for all pages", async () => {
-    const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
-    expect(txt).toContain("===PAGE:getting-started===");
-    expect(txt).toContain("===PAGE:api-reference===");
-    expect(txt).toContain("===PAGE:quickstarts/react===");
-  });
-
-  it("docs-index.txt includes TITLE and DESCRIPTION lines per page", async () => {
-    const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
-    expect(txt).toContain("TITLE:Getting Started");
-    expect(txt).toContain("DESCRIPTION:Learn how to get started with Jazz.");
-  });
-
   // The more content we have in the docs, the longer this test will take,
   // and the more likely it is to fail due to timeouts.
   it.skip("is deterministic: running twice produces identical output", async () => {
@@ -391,18 +380,45 @@ describe("buildIndex", () => {
     try {
       await mkdir(outputDir, { recursive: true });
       await buildIndex(opts);
-      const txt1 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
+      const db1 = await readFile(join(outputDir, "docs-index.db"));
 
-      // Remove db and txt, rebuild
+      // Remove db, rebuild
       await rm(join(outputDir, "docs-index.db"));
-      await rm(join(outputDir, "docs-index.txt"));
 
       await buildIndex(opts);
-      const txt2 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
+      const db2 = await readFile(join(outputDir, "docs-index.db"));
 
-      expect(txt1).toBe(txt2);
+      expect(db1.equals(db2)).toBe(true);
     } finally {
       await cleanupFixtureTree(tmpDir);
     }
   }, 10_000);
+});
+
+describe("packaged docs index", () => {
+  it("ships current authentication docs in docs-index.db", async () => {
+    const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
+    const row = db
+      .prepare("SELECT description, body FROM pages WHERE slug = 'auth/authentication'")
+      .get() as { description: string; body: string } | undefined;
+    db.close();
+
+    expect(row).toBeDefined();
+    expect(row!.description).toBe(
+      '"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
+    );
+    expect(row!.body).toContain(
+      "Jazz has three auth modes: `anonymous`, `local-first`, and `external`.",
+    );
+    expect(row!.body).toContain('jwtToken: "<provider-jwt>"');
+    expect(row!.body).toContain("db.updateAuthToken(jwt)");
+    expect(row!.body).toContain("recreate `JazzProvider` or `Db` with a new auth config");
+    expect(row!.body).toContain("### Managing JWT changes on a live client");
+    expect(row!.body).toContain("### Reacting to expiry and unauthenticated responses");
+
+    expect(row!.body).not.toContain("allowSelfSigned");
+    expect(row!.body).not.toContain(
+      "jazz-server --jwks-url https://your-app.example.com/api/auth/jwks",
+    );
+  });
 });

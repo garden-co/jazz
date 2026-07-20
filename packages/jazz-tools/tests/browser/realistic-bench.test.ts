@@ -1751,9 +1751,9 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const deniedLocalSecret = generateAuthSecret();
     const intermediateLocalSecret = generateAuthSecret();
     const wasmModule = await loadWasmModule();
-    const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-    const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-    const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+    const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+    const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+    const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
     const allowedSession = {
       user_id: allowedPrincipalId,
       claims: {
@@ -2238,16 +2238,15 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = db as any;
       const client = anyDb.getClient(schema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2272,16 +2271,6 @@ describe("realistic browser benchmark harness", () => {
           return await originalQueryInternal(...args);
         } finally {
           phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2333,9 +2322,9 @@ describe("realistic browser benchmark harness", () => {
       const deniedLocalSecret = generateAuthSecret();
       const intermediateLocalSecret = generateAuthSecret();
       const wasmModule = await loadWasmModule();
-      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+      const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+      const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
 
       seedDb = await createServerDb(
         appId,
@@ -2420,16 +2409,15 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = allowedDb as any;
       const client = anyDb.getClient(permissionSchema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2454,16 +2442,6 @@ describe("realistic browser benchmark harness", () => {
           return await originalQueryInternal(...args);
         } finally {
           phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2505,7 +2483,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 180_000);
 
-  it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
+  it("runs local and server-backed realistic scenarios against browser OPFS runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
     progressLog(`bench start profile=${cfg.id}`);

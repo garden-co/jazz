@@ -474,7 +474,7 @@ describe("useAllSuspense browser integration", () => {
     );
   });
 
-  it("accepts QueryOptions for suspense subscriptions", async () => {
+  it("accepts core-supported QueryOptions for suspense subscriptions", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("options"),
@@ -486,7 +486,7 @@ describe("useAllSuspense browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "local-only" }}
+          options={{ localUpdates: "deferred", propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,
@@ -505,6 +505,27 @@ describe("useAllSuspense browser integration", () => {
       5000,
       "expected useAllSuspense with QueryOptions to receive rows",
     );
+  });
+
+  it("supports local-only read propagation", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("local-only"),
+        driver: { type: "persistent", dbName: uniqueId("local-only") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "local-only-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["local"],
+    });
+
+    await expect(
+      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+    ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 
   it("does not include rows for non-matching text contains", async () => {

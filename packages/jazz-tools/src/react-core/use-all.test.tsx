@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
+import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzClientProvider } from "./provider.js";
 import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 
@@ -32,7 +33,7 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
   }> = [];
 
   const db = {
-    getAuthState: () => ({ authMode: "local-first", session: null }),
+    getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
     subscribeAll: (_query: any, callback: (d: SubscriptionDelta<any>) => void) => {
@@ -49,7 +50,7 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
   };
 
   const manager = new SubscriptionsOrchestrator({ appId }, db as any);
-  const client = { db, manager, session: null, shutdown: async () => {} } as any;
+  const client = attachSubscriptionStore({ db, session: null, shutdown: async () => {} }, manager);
   return { client, manager, subscribeCalls };
 }
 

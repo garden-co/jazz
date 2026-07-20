@@ -1,6 +1,12 @@
-export { createJazzClient, type JazzClient } from "../web/create-jazz-client.js";
+export {
+  createJazzClient,
+  createExtensionJazzClient,
+  type JazzClient,
+} from "../web/create-jazz-client.js";
+export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
 export {
   createSolidJazzClient,
+  createSolidExtensionJazzClient,
   type PendingSolidJazzClient,
   type SolidJazzClient,
 } from "./create-solid-jazz-client.js";

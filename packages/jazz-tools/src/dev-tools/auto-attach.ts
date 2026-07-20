@@ -1,12 +1,11 @@
-// Auto-starts the inspector overlay for an app db. Shared by the
-// react/svelte/vue/solid providers so the loader's module path lives in one
-// place.
+// Auto-starts the inspector overlay for an app db. Shared by the framework
+// providers so the loader's module path lives in one place.
 //
 // The dynamic import("../dev/inspector-overlay/loader.js") is the lazy-chunk
-// boundary that keeps the inspector (and dev-tools) out of the main bundle. The
-// providers call this only inside a `process.env.NODE_ENV !== "production"`
-// branch, so in production the call — and this whole module — is dropped, and
-// the inspector never ships to prod.
+// boundary that keeps the inspector out of the main bundle. The providers call
+// this only inside a `process.env.NODE_ENV !== "production"` branch, so in
+// production the call — and this whole module — is dropped, and the inspector
+// never ships to prod.
 
 // The overlay mounts only when the jazz dev plugin is active: the plugin exposes
 // a public flag to the browser in dev (Vite-family on import.meta.env, Next on
@@ -15,9 +14,9 @@
 // guard). Without the plugin there's no flag and no toggle — correct, since
 // nothing would serve the iframe. Read process.env.NEXT_PUBLIC_JAZZ_INSPECTOR as
 // a literal: Next only static-inlines that exact member access, not an alias.
-import type { Db } from "../runtime/db.js";
+import type { InspectorHostDb } from "../dev/inspector-overlay/host-bridge.js";
 
-function jazzDevPluginActive(): boolean {
+export function jazzDevPluginActive(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const nextFlag =
     typeof process !== "undefined" ? process.env.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;
@@ -31,7 +30,7 @@ function jazzDevPluginActive(): boolean {
  * globally and the host handle is installed once per db, so repeat calls are
  * idempotent.
  */
-export function startInspectorOnce(db: Db): void {
+export function startInspectorOnce(db: InspectorHostDb): void {
   if (!jazzDevPluginActive()) return;
   void import("../dev/inspector-overlay/loader.js").then(({ startInspectorOverlay }) =>
     startInspectorOverlay(db),

@@ -4,6 +4,7 @@
 
 import type {
   Schema,
+  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -28,6 +29,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
+  BIGINT: { type: "BigInt" },
   REAL: { type: "Double" },
   TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
@@ -73,6 +75,9 @@ function literalToWasmValue(value: unknown): Value {
     if (value >= -2147483648 && value <= 2147483647) {
       return { type: "Integer", value };
     }
+    return { type: "BigInt", value: BigInt(value) };
+  }
+  if (typeof value === "bigint") {
     return { type: "BigInt", value };
   }
   if (Array.isArray(value)) {
@@ -262,6 +267,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       if (col.mergeStrategy) {
         descriptor.merge_strategy = columnMergeStrategyToWasm(col.mergeStrategy);
       }
+      if (col.largeValue) {
+        descriptor.large_value = columnLargeValueToWasm(col.largeValue);
+      }
       return descriptor;
     });
 
@@ -273,4 +281,10 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   }
 
   return tables;
+}
+
+function columnLargeValueToWasm(largeValue: Column["largeValue"]): ColumnDescriptor["large_value"] {
+  if (largeValue === "blob") return "Blob";
+  if (largeValue === "text") return "Text";
+  return undefined;
 }

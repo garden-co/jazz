@@ -3,8 +3,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use jazz::node::EdgeCacheBudget;
+use jazz_tools::AppId;
 use jazz_tools::middleware::AuthConfig;
-use jazz_tools::schema_manager::AppId;
 use jazz_tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -12,6 +13,7 @@ use tracing::info;
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
 /// Run the Jazz server.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     app_id_str: &str,
     port: u16,
@@ -19,6 +21,7 @@ pub async fn run(
     in_memory: bool,
     auth_config: AuthConfig,
     upstream_url: Option<String>,
+    edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -38,6 +41,10 @@ pub async fn run(
         .with_shutdown_timeout(shutdown_timeout);
     let builder = match upstream_url {
         Some(upstream_url) => builder.with_upstream_url(upstream_url),
+        None => builder,
+    };
+    let builder = match edge_cache_budget {
+        Some(edge_cache_budget) => builder.with_edge_cache_budget(edge_cache_budget),
         None => builder,
     };
     let built = if in_memory {

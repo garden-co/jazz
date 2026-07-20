@@ -1,8 +1,11 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { TransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { deploy } from "../dev/catalogue.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../runtime/schema-fetch.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -12,7 +15,7 @@ type ExpectLike = (value: unknown) => {
   };
   toThrow(expected?: unknown): void;
 };
-type TestDbMethodCallback = (db: TransactionScope) => unknown;
+type TestDbMethodCallback = (db: Db) => unknown;
 
 /**
  * Db used for testing permissions.
@@ -40,15 +43,16 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
         const tx = db.beginTransaction();
-        expect(() => callback(tx)).not.toThrow();
-        tx.rollback();
+        try {
+          expect(() => callback(tx as unknown as Db)).not.toThrow();
+        } finally {
+          tx.rollback();
+        }
       },
     },
     expectDenied: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
-        expect(() => callback(tx)).toThrow('WriteError("policy denied');
-        tx.rollback();
+        expect(() => callback(db)).toThrow('WriteError("policy denied');
       },
     },
   });
@@ -73,7 +77,7 @@ export class PolicyTestApp {
    * The callback is executed in an admin database context.
    */
   seed<T>(callback: (db: Db) => T): T {
-    const db = this.jazzContext.asBackend(this.app);
+    const db = this.jazzContext.asBackend();
     return callback(db);
   }
 
@@ -81,7 +85,7 @@ export class PolicyTestApp {
    * Get a database client for the given session.
    */
   as(session: Session): TestDb {
-    const db = this.jazzContext.forSession(session, this.app);
+    const db = this.jazzContext.forSession(session);
     return asTestDb(db, this.expect);
   }
 
@@ -114,12 +118,21 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  await deploy({
+  const { hash: schemaHash } = await publishStoredSchema(server.url, {
     appId: server.appId,
-    serverUrl: server.url,
     adminSecret,
-    schema: app,
+    schema: app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(server.url, {
+    appId: server.appId,
+    adminSecret,
+  });
+  await publishStoredPermissions(server.url, {
+    appId: server.appId,
+    adminSecret,
+    schemaHash,
     permissions,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
   const jazzContext = createJazzContext({

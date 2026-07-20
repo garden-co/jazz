@@ -16,6 +16,11 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
+function writeText(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, value);
+}
+
 test("update_history ingests engine-specific native and browser manifests from artifact roots", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-bench-history-"));
   const historyPath = path.join(tempRoot, "history.json");
@@ -41,7 +46,7 @@ test("update_history ingests engine-specific native and browser manifests from a
   writeJson(path.join(nativeRocksdbDir, "suite_status.json"), {
     benchmarks: [
       { id: "native:rocksdb:w4_cold_start", status: "passed" },
-      { id: "native-criterion:rocksdb:r1_crud_sustained", status: "passed" },
+      { id: "native-criterion:rocksdb:r1_crud", status: "passed" },
     ],
   });
   writeJson(path.join(nativeRocksdbDir, "w4_cold_start.json"), {
@@ -58,9 +63,9 @@ test("update_history ingests engine-specific native and browser manifests from a
     generated_at: "2026-04-08T10:00:00Z",
     benchmarks: [
       {
-        full_id: "realistic_phase1/crud_sustained_rocksdb/r1_s_rocksdb",
-        group_id: "realistic_phase1/crud_sustained_rocksdb",
-        benchmark_id: "r1_s_rocksdb",
+        full_id: "realistic_phase1/r1_crud",
+        group_id: "realistic_phase1/r1_crud",
+        benchmark_id: "r1_crud",
         throughput_elements: 100,
         scenario_id: "R1",
         scenario_name: "crud",
@@ -95,7 +100,7 @@ test("update_history ingests engine-specific native and browser manifests from a
   writeJson(path.join(nativeSqliteDir, "suite_status.json"), {
     benchmarks: [
       { id: "native:sqlite:w4_cold_start", status: "passed" },
-      { id: "native-criterion:sqlite:r1_crud_sustained", status: "passed" },
+      { id: "native-criterion:sqlite:r1_crud", status: "passed" },
     ],
   });
   writeJson(path.join(nativeSqliteDir, "w4_cold_start.json"), {
@@ -112,9 +117,9 @@ test("update_history ingests engine-specific native and browser manifests from a
     generated_at: "2026-04-08T10:00:00Z",
     benchmarks: [
       {
-        full_id: "realistic_phase1/crud_sustained_sqlite/r1_s_sqlite",
-        group_id: "realistic_phase1/crud_sustained_sqlite",
-        benchmark_id: "r1_s_sqlite",
+        full_id: "realistic_phase1/r1_crud",
+        group_id: "realistic_phase1/r1_crud",
+        benchmark_id: "r1_crud",
         throughput_elements: 100,
         scenario_id: "R1",
         scenario_name: "crud",
@@ -206,11 +211,115 @@ test("update_history ingests engine-specific native and browser manifests from a
 
   assert.ok(nativeSqliteCriterionRun, "expected native criterion SQLite run");
   assert.equal(nativeSqliteCriterionRun.id, "native-criterion:sqlite:100:1:abc123:s");
-  assert.equal(
-    nativeSqliteCriterionRun.scenarios[0].topology,
-    "realistic_phase1/crud_sustained_sqlite",
-  );
+  assert.equal(nativeSqliteCriterionRun.scenarios[0].topology, "realistic_phase1/r1_crud");
 
   assert.ok(browserRun, "expected browser OPFS-btree run");
   assert.equal(browserRun.id, "browser:opfs-btree:100:1:abc123:s");
+});
+
+test("update_history ingests jazz-sim JSONL metrics from manifest files", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-bench-history-"));
+  const historyPath = path.join(tempRoot, "history.json");
+  const nativeRoot = path.join(tempRoot, "native");
+  const jazzSimDir = path.join(nativeRoot, "jazz-sim");
+
+  writeJson(path.join(jazzSimDir, "metadata.json"), {
+    repository: "garden-co/jazz2",
+    run_id: "200",
+    run_attempt: "1",
+    sha: "def456",
+    ref: "refs/heads/feature",
+    branch: "feature",
+    profile: "s",
+  });
+  writeJson(path.join(jazzSimDir, "manifest.json"), {
+    kind: "realistic-bench-jazz-sim",
+    generated_at: "2026-04-09T10:00:00Z",
+    run_id: "200",
+    run_attempt: "1",
+    sha: "def456",
+    branch: "feature",
+    profile: "s",
+    storage_engine: null,
+    files: [
+      { path: "suite_status.json" },
+      { path: "s2_canvas.jsonl", sha256: "abc" },
+      { path: "wire_frames/s2_canvas.jsonl", sha256: "def" },
+      { path: "logs/s2_canvas.log", sha256: "ignored" },
+    ],
+  });
+  writeJson(path.join(jazzSimDir, "suite_status.json"), {
+    generated_at: "2026-04-09T10:00:01Z",
+    suite: "jazz-sim",
+    profile: "s",
+    benchmarks: [
+      { id: "jazz-sim:s2_canvas", status: "passed" },
+      { id: "jazz-sim:s2_canvas:wire_frames", status: "failed" },
+    ],
+  });
+  writeText(
+    path.join(jazzSimDir, "s2_canvas.jsonl"),
+    [
+      JSON.stringify({
+        scenario: "s2_canvas",
+        phase: "canvas_replay",
+        edits: 100,
+        elapsed_us: 2500,
+        replay_edits_per_sec: 40000,
+        local_echo_p95_us: 120,
+        seed: 1,
+      }),
+      JSON.stringify({
+        scenario: "s2_canvas",
+        phase: "edge_acceptance",
+        acceptance_p95_us: 90,
+      }),
+      "",
+    ].join("\n"),
+  );
+  writeText(
+    path.join(jazzSimDir, "wire_frames/s2_canvas.jsonl"),
+    `${JSON.stringify({
+      scenario: "s2_canvas",
+      phase: "canvas_replay",
+      elapsed_us: 9999,
+    })}\n`,
+  );
+
+  execFileSync(
+    "node",
+    [
+      "dev/benchmarks/realistic/update_history.mjs",
+      "--history",
+      historyPath,
+      "--native",
+      nativeRoot,
+    ],
+    {
+      cwd: REPO_ROOT,
+      stdio: "pipe",
+    },
+  );
+
+  const history = readJson(historyPath);
+  assert.equal(history.runs.length, 1);
+  const run = history.runs[0];
+  assert.equal(run.suite, "jazz-sim");
+  assert.equal(run.storage_engine, null);
+  assert.equal(run.id, "jazz-sim:200:1:def456:s");
+  assert.equal(run.scenarios.length, 2);
+
+  const replay = run.scenarios.find((scenario) => scenario.topology === "canvas_replay");
+  assert.ok(replay, "expected canvas replay phase");
+  assert.equal(replay.scenario_id, "s2_canvas");
+  assert.equal(replay.wall_time_ms, 2.5);
+  assert.equal(replay.throughput_ops_per_sec, 40000);
+  assert.equal(replay.extra.benchmark_id, "jazz-sim:s2_canvas:canvas_replay");
+  assert.equal(replay.extra.metrics.local_echo_p95_us, 120);
+
+  assert.equal(
+    run.scenarios.some((scenario) => scenario.wall_time_ms === 9.999),
+    false,
+    "failed wire_frames benchmark should not be ingested",
+  );
 });

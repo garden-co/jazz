@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -51,7 +53,7 @@ export default s.definePermissions(app, ({ policy, session }) => [
 }
 
 describe("dev catalogue API exports", () => {
-  it("exports catalogue operations from jazz-tools/dev", async () => {
+  it("exports project-level catalogue operations from jazz-tools/dev", async () => {
     const dev = await import("./index.js");
 
     expect(typeof dev.pushSchema).toBe("function");
@@ -65,6 +67,35 @@ describe("dev catalogue API exports", () => {
     const testing = await import("../testing/index.js");
 
     expect(testing.deploy).toBe(dev.deploy);
+  });
+});
+
+describe("dev catalogue runtime schema identity", () => {
+  it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
+    const schema = {
+      users: s.table({
+        name: s.string(),
+      }),
+      files: s.table({
+        ownerId: s.ref("users"),
+        contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
+        mediaType: s.enum("image/png", "text/plain").default("text/plain"),
+        tags: s.array(s.string()).default(["draft", "review"]),
+      }),
+      comments: s
+        .table({
+          fileId: s.ref("files"),
+          authorId: s.ref("users").optional().default(null),
+          body: s.string(),
+          attachmentIds: s.array(s.ref("files")).default([]),
+          status: s.enum("open", "resolved").default("open"),
+        })
+        .indexOnly(["fileId", "status"]),
+    };
+    const app = s.defineApp(schema);
+    await createNapiNativeRuntimeAdapter(app.wasmSchema);
+
+    expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
   });
 });
 
@@ -111,7 +142,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
+    const { deploy } = await import("./index.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -196,7 +227,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
+    const { deploy } = await import("./index.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -289,7 +320,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
+    const { deploy } = await import("./index.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -360,7 +391,7 @@ describe("dev catalogue push behavior", () => {
     );
 
     const events: unknown[] = [];
-    const { pushMigration } = await import("./catalogue-project.js");
+    const { pushMigration } = await import("./index.js");
     const result = await pushMigration({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -386,20 +417,8 @@ describe("dev catalogue push behavior", () => {
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
 
-    const fromSchema = {
-      users: s.table({
-        email: s.string(),
-      }),
-    };
-    const toSchema = {
-      users: s.table({
-        email_address: s.string(),
-      }),
-    };
-    const { computeSchemaHash } = await import("./catalogue.js");
-    const fromHash = await computeSchemaHash(s.defineApp(fromSchema).wasmSchema);
-    const toHash = await computeSchemaHash(s.defineApp(toSchema).wasmSchema);
-
+    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const toHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     await writeFile(
       join(migrationsDir, `20260318-rename-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
       `
@@ -449,7 +468,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { pushMigration } = await import("./catalogue-project.js");
+    const { pushMigration } = await import("./index.js");
     const result = await pushMigration({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -499,7 +518,7 @@ export default s.defineMigration({
     );
 
     const events: unknown[] = [];
-    const { pushSchema } = await import("./catalogue-project.js");
+    const { pushSchema } = await import("./index.js");
     const result = await pushSchema({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -557,7 +576,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { pushPermissions } = await import("./catalogue-project.js");
+    const { pushPermissions } = await import("./index.js");
     const result = await pushPermissions({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -606,7 +625,7 @@ export default s.defineMigration({
     );
 
     const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
+    const { deploy } = await import("./index.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,
@@ -694,7 +713,7 @@ export default s.defineMigration({
       }),
     );
 
-    const { deploy } = await import("./catalogue-project.js");
+    const { deploy } = await import("./index.js");
     const result = await deploy({
       appId: APP_ID,
       serverUrl: SERVER_URL,

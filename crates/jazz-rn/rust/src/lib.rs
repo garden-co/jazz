@@ -15,9 +15,9 @@ use serde::Deserialize;
 
 use jazz_tools::binding_support::{
     default_read_durability_options as default_binding_read_durability_options,
-    parse_batch_id_input, parse_batch_mode_input, parse_durability_tier as parse_binding_tier,
-    parse_external_object_id, parse_query_input, parse_read_durability_options,
-    parse_session_input, parse_write_context_input, serialize_mutation_error_event,
+    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
+    parse_read_durability_options, parse_session_input, parse_transaction_id_input,
+    parse_transaction_kind_input, parse_write_context_input, serialize_mutation_error_event,
     subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
@@ -256,7 +256,7 @@ pub trait AuthFailureCallback: Send + Sync {
 
 #[uniffi::export(callback_interface)]
 pub trait MutationErrorCallback: Send + Sync {
-    /// Invoked when a rejected local mutation was not handled by wait_for_batch.
+    /// Invoked when a rejected local mutation was not handled by wait_for_transaction.
     fn on_error(&self, event_json: String);
 }
 
@@ -616,13 +616,13 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let ((id, row_values), batch_id) = core
+            let ((id, row_values), transaction_id) = core
                 .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
-                "batchId": batch_id.to_string(),
+                "transactionId": transaction_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("insert serialization failed: {e}"),
@@ -647,13 +647,13 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let ((id, row_values), batch_id) = core
+            let ((id, row_values), transaction_id) = core
                 .restore(&table, oid, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
-                "batchId": batch_id.to_string(),
+                "transactionId": transaction_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("restore serialization failed: {e}"),
@@ -663,6 +663,7 @@ impl RnRuntime {
 
     pub fn update(
         &self,
+        _table: String,
         object_id: String,
         values_json: String,
         write_context_json: Option<String>,
@@ -677,11 +678,11 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let batch_id = core
+            let transaction_id = core
                 .update(oid, updates, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
-                "batchId": batch_id.to_string(),
+                "transactionId": transaction_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("update serialization failed: {e}"),
@@ -706,11 +707,11 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let batch_id = core
+            let transaction_id = core
                 .upsert(&table, oid, named_values, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
-                "batchId": batch_id.to_string(),
+                "transactionId": transaction_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("upsert serialization failed: {e}"),
@@ -718,31 +719,32 @@ impl RnRuntime {
         })
     }
 
-    pub fn begin_batch(&self, batch_mode: String) -> Result<String, JazzRnError> {
-        with_panic_boundary("begin_batch", || {
-            let batch_mode = parse_batch_mode_input(&batch_mode)
+    pub fn begin_transaction(&self, transaction_kind: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("begin_transaction", || {
+            let transaction_kind = parse_transaction_kind_input(&transaction_kind)
                 .map_err(|message| JazzRnError::InvalidJson { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            Ok(core.begin_batch(batch_mode).to_string())
+            Ok(core.begin_batch(transaction_kind).to_string())
         })
     }
 
-    pub fn rollback_batch(&self, batch_id: String) -> Result<bool, JazzRnError> {
-        with_panic_boundary("rollback_batch", || {
-            let batch_id = parse_batch_id_input(&batch_id)
+    pub fn rollback_transaction(&self, transaction_id: String) -> Result<bool, JazzRnError> {
+        with_panic_boundary("rollback_transaction", || {
+            let transaction_id = parse_transaction_id_input(&transaction_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.rollback_batch(batch_id).map_err(runtime_err)
+            core.rollback_batch(transaction_id).map_err(runtime_err)
         })
     }
 
     #[uniffi::method(name = "delete")]
     pub fn delete_row(
         &self,
+        _table: String,
         object_id: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
@@ -755,11 +757,11 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let batch_id = core
+            let transaction_id = core
                 .delete(oid, write_context.as_ref())
                 .map_err(runtime_err)?;
             serde_json::to_string(&serde_json::json!({
-                "batchId": batch_id.to_string(),
+                "transactionId": transaction_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("delete serialization failed: {e}"),
@@ -767,29 +769,34 @@ impl RnRuntime {
         })
     }
 
-    /// Wait for a local batch to settle at the requested durability tier.
-    pub async fn wait_for_batch(&self, batch_id: String, tier: String) -> Result<(), JazzRnError> {
-        with_async_panic_boundary("wait_for_batch", || async move {
-            let batch_id = parse_batch_id_input(&batch_id)
+    /// Wait for a local transaction to settle at the requested durability tier.
+    pub async fn wait_for_transaction(
+        &self,
+        transaction_id: String,
+        tier: String,
+    ) -> Result<(), JazzRnError> {
+        with_async_panic_boundary("wait_for_transaction", || async move {
+            let transaction_id = parse_transaction_id_input(&transaction_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let tier = parse_tier(&tier)?;
             let receiver = {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                core.wait_for_batch(batch_id, tier).map_err(runtime_err)?
+                core.wait_for_batch(transaction_id, tier)
+                    .map_err(runtime_err)?
             };
 
             match receiver.await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(rejection)) => Err(JazzRnError::Runtime {
                     message: format!(
-                        "Persisted batch {} was rejected ({}): {}",
+                        "Persisted transaction {} was rejected ({}): {}",
                         rejection.batch_id, rejection.code, rejection.reason
                     ),
                 }),
                 Err(_) => Err(JazzRnError::Runtime {
-                    message: "Wait for batch cancelled".into(),
+                    message: "Wait for transaction cancelled".into(),
                 }),
             }
         })
@@ -945,14 +952,14 @@ impl RnRuntime {
         })
     }
 
-    pub fn commit_batch(&self, batch_id: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("commit_batch", || {
-            let batch_id = parse_batch_id_input(&batch_id)
+    pub fn commit_transaction(&self, transaction_id: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("commit_transaction", || {
+            let transaction_id = parse_transaction_id_input(&transaction_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.commit_batch(batch_id).map_err(runtime_err)
+            core.commit_batch(transaction_id).map_err(runtime_err)
         })
     }
 

@@ -13,7 +13,7 @@ if (!process.env.BETTER_AUTH_SECRET) {
 
 const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 
-// TODO: Replace with a persistent adapter before shipping.
+// Development caveat: in-memory auth data resets on restart; use a persistent adapter before shipping.
 const authMemoryDb: MemoryDB = {
   account: [],
   jwks: [],

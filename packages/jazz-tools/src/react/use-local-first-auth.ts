@@ -4,13 +4,16 @@ import {
   browserAuthSecretStore,
   type BrowserAuthSecretStoreOptions,
 } from "../runtime/auth-secret-store.js";
-import type { LocalFirstAuth } from "../react-core/use-local-first-auth.js";
 
-export type UseLocalFirstAuthOptions = Pick<BrowserAuthSecretStoreOptions, "authSecretStorageKey">;
+export type UseLocalFirstAuthOptions = Pick<
+  BrowserAuthSecretStoreOptions,
+  "key" | "authSecretStorageKey" | "appId" | "userId" | "sessionId"
+>;
 
-export function useLocalFirstAuth(options?: UseLocalFirstAuthOptions): LocalFirstAuth {
-  const store = options?.authSecretStorageKey
-    ? BrowserAuthSecretStore.getDefault({ authSecretStorageKey: options.authSecretStorageKey })
+export function useLocalFirstAuth(options: UseLocalFirstAuthOptions = {}) {
+  const hasCustomOptions = Object.values(options).some((value) => value !== undefined);
+  const store = hasCustomOptions
+    ? BrowserAuthSecretStore.getDefault(options)
     : browserAuthSecretStore;
   return useLocalFirstAuthWithStore(store);
 }

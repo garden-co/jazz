@@ -10,12 +10,12 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::AppContext;
+use crate::AppId;
 use crate::middleware::AuthConfig;
-use crate::query_manager::types::Schema;
-use crate::schema_manager::AppId;
+use crate::public_schema::Schema;
+use jazz::node::EdgeCacheBudget;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
-use crate::sync_manager::ClientId;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -31,14 +31,13 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    sqlite_storage: bool,
     rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     upstream_url: Option<String>,
+    edge_cache_budget: Option<EdgeCacheBudget>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
-    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -47,7 +46,6 @@ impl std::fmt::Debug for JazzServerBuilder {
             .field("port", &self.port)
             .field("app_id", &self.app_id)
             .field("persistent_storage", &self.persistent_storage)
-            .field("has_tracer", &self.sync_tracer.is_some())
             .finish()
     }
 }
@@ -83,15 +81,6 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Use SQLite as the server storage backend, regardless of which other
-    /// storage features are compiled in.  Implies persistent storage.
-    #[cfg(feature = "sqlite")]
-    pub fn with_sqlite_storage(mut self) -> Self {
-        self.sqlite_storage = true;
-        self.persistent_storage = true;
-        self
-    }
-
     /// Use RocksDB as the server storage backend, regardless of which other
     /// storage features are compiled in.  Implies persistent storage.
     #[cfg(feature = "rocksdb")]
@@ -116,6 +105,11 @@ impl JazzServerBuilder {
         self
     }
 
+    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
+        self.edge_cache_budget = Some(budget);
+        self
+    }
+
     pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
         self.jwks_url = Some(jwks_url.into());
         self
@@ -123,11 +117,6 @@ impl JazzServerBuilder {
 
     pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
-        self
-    }
-
-    pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
-        self.sync_tracer = Some(tracer);
         self
     }
 
@@ -270,17 +259,16 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            sqlite_storage,
             rocksdb_storage,
             admin_secret,
             backend_secret,
             upstream_url,
+            edge_cache_budget,
             jwks_url,
             auth_clock,
-            sync_tracer,
         } = builder;
 
-        let app_id = app_id.unwrap_or_else(Self::default_app_id);
+        let app_id = app_id.unwrap_or_else(AppId::random);
         let data_dir = if persistent_storage {
             ServerDataDir::persistent(data_dir)
         } else {
@@ -313,19 +301,18 @@ impl JazzServer {
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }
+        if let Some(edge_cache_budget) = edge_cache_budget {
+            server_builder = server_builder.with_edge_cache_budget(edge_cache_budget);
+        }
         let mut server_builder = apply_storage_mode(
             server_builder,
             storage_data_dir,
             persistent_storage,
-            sqlite_storage,
             rocksdb_storage,
         );
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
-        }
-        if let Some(tracer) = sync_tracer {
-            server_builder = server_builder.with_sync_tracer(tracer);
         }
         let built = server_builder.build().await.expect("build test server");
 
@@ -413,29 +400,9 @@ impl JazzServer {
     }
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
-    /// that need to call internal server methods (e.g. `process_ws_client_frame`).
+    /// that need to inspect or drive internal server state.
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
-    }
-
-    /// Temporarily buffer server-to-client sync messages for the given client.
-    pub fn block_messages_to(&self, client_id: ClientId) -> super::BlockedMessagesToClient {
-        self.state.connection_event_hub.block_messages_to(client_id)
-    }
-
-    /// Set the client state TTL. Disconnected clients are reaped after this duration.
-    pub async fn set_client_ttl(&self, ttl: Duration) {
-        self.state.set_client_ttl(ttl).await;
-    }
-
-    /// Run one sweep iteration to reap expired disconnect candidates.
-    pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        self.state.run_sweep_once().await
-    }
-
-    /// Number of clients currently in the disconnect candidates list.
-    pub async fn disconnect_candidate_count(&self) -> usize {
-        self.state.disconnect_candidates.read().await.len()
     }
 
     fn require_built_in_jwt_helpers(&self) {
@@ -477,7 +444,6 @@ impl JazzServer {
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
-            sync_tracer: None,
         }
     }
 
@@ -617,13 +583,8 @@ fn apply_storage_mode(
     builder: ServerBuilder,
     data_dir: PathBuf,
     persistent: bool,
-    #[allow(unused_variables)] sqlite: bool,
     #[allow(unused_variables)] rocksdb: bool,
 ) -> ServerBuilder {
-    #[cfg(feature = "sqlite")]
-    if sqlite {
-        return builder.with_storage(StorageBackend::Sqlite { path: data_dir });
-    }
     #[cfg(feature = "rocksdb")]
     if rocksdb {
         return builder.with_storage(StorageBackend::RocksDb { path: data_dir });
@@ -655,29 +616,44 @@ mod tests {
 
     use reqwest::StatusCode;
 
+    use crate::server::ShutdownPhase;
+
     use super::*;
 
     #[tokio::test]
-    async fn explicit_shutdown_stops_jazz_server() {
+    async fn internal_shutdown_stops_jazz_server() {
         let server = JazzServer::start().await;
         let base_url = server.base_url();
+        let admin_secret = server.admin_secret().to_string();
         let client = reqwest::Client::new();
 
-        server.shutdown().await;
+        let response = client
+            .post(format!("{base_url}/internal/shutdown"))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .send()
+            .await
+            .expect("shutdown request");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
 
+        let mut saw_unavailable = false;
         for _ in 0..80 {
-            if client
-                .get(format!("{base_url}/health"))
-                .send()
-                .await
-                .is_err()
-            {
-                return;
+            match client.get(format!("{base_url}/health")).send().await {
+                Ok(response) if response.status() == StatusCode::SERVICE_UNAVAILABLE => {
+                    saw_unavailable = true;
+                }
+                Err(_) if saw_unavailable => {
+                    assert_eq!(
+                        server.server_state().shutdown.phase(),
+                        ShutdownPhase::StorageClosed
+                    );
+                    return;
+                }
+                _ => {}
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        panic!("jazz server did not stop after explicit shutdown");
+        panic!("jazz server did not stop after internal shutdown");
     }
 
     #[tokio::test]

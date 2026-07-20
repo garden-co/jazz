@@ -8,8 +8,14 @@ import { JazzServer } from "jazz-napi";
 export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
-const AUTO_PORT_MIN = 20_000;
-const AUTO_PORT_RANGE = 20_000;
+// The 20000-40000 space is partitioned by process id: vitest runs test files
+// in separate worker processes whose module-global allocation state cannot
+// coordinate, and a shared range let one worker steal a port another worker's
+// reopen test had briefly released (the napi.integration reopen flakes).
+const AUTO_PORT_SLOTS = 64;
+const AUTO_PORT_SLOT = process.pid % AUTO_PORT_SLOTS;
+const AUTO_PORT_RANGE = Math.floor(20_000 / AUTO_PORT_SLOTS);
+const AUTO_PORT_MIN = 20_000 + AUTO_PORT_SLOT * AUTO_PORT_RANGE;
 
 const autoAllocatedPorts = new Set<number>();
 
@@ -27,6 +33,7 @@ export interface StartLocalJazzServerOptions {
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
+  schema?: Uint8Array;
 }
 
 export interface LocalJazzServerHandle {
@@ -112,6 +119,7 @@ export async function startLocalJazzServer(
       upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
+      schema: options.schema ? [...options.schema] : undefined,
     });
   } catch (error) {
     if (ownsPort) {

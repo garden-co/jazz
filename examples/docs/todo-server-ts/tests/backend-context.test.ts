@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { WebSocket as UndiciWebSocket } from "undici";
 import { startLocalJazzServer } from "jazz-tools/testing";
 import { createServer, startServer, stopServer, type RunningServer } from "../src/main.ts";
+
+globalThis.WebSocket ??= UndiciWebSocket as unknown as typeof globalThis.WebSocket;
 
 describe("Todo Server backend context", () => {
   it("requires upstream sync config", async () => {

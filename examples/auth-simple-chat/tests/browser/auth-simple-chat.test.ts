@@ -35,7 +35,7 @@ async function makeClient(jwt?: string): Promise<JazzClient> {
 }
 
 async function send(client: JazzClient, chat_id: string, text: string): Promise<void> {
-  const handle = client.db.insert(app.messages, {
+  const handle = await client.db.insert(app.messages, {
     author_name: "Tester",
     chat_id,
     text,

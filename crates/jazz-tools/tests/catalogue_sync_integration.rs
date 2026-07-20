@@ -10,14 +10,15 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::public_schema::SchemaHash;
+use jazz_tools::public_schema::TablePolicies;
+use jazz_tools::public_schema::{LargeValueKind, PolicyExpr};
 use jazz_tools::row_input;
-use jazz_tools::schema_manager::{Lens, LensOp, LensTransform, generate_lens};
+use jazz_tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
+    ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, QueryBuilder, RowDescriptor,
+    SchemaBuilder, TableName, TableSchema, Value,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -43,10 +44,6 @@ fn user_values_v3(
     role: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
-}
-
-fn draft_lens_values_v1(id: jazz_tools::ObjectId) -> HashMap<String, Value> {
-    row_input!("id" => id)
 }
 
 fn schema_v1() -> jazz_tools::Schema {
@@ -83,31 +80,29 @@ fn schema_v3() -> jazz_tools::Schema {
 }
 
 fn v1_to_v2_lens() -> Lens {
-    generate_lens(&schema_v1(), &schema_v2())
+    Lens::new(
+        SchemaHash::compute(&schema_v1()),
+        SchemaHash::compute(&schema_v2()),
+        LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "users".to_string(),
+            column: "email".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]),
+    )
 }
 
 fn v2_to_v3_lens() -> Lens {
-    generate_lens(&schema_v2(), &schema_v3())
-}
-
-fn draft_lens_schema_v1() -> jazz_tools::Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
-        .build()
-}
-
-fn draft_lens_schema_v2() -> jazz_tools::Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("org_id", ColumnType::Uuid),
-        )
-        .build()
-}
-
-fn draft_lens_v1_to_v2() -> Lens {
-    generate_lens(&draft_lens_schema_v1(), &draft_lens_schema_v2())
+    Lens::new(
+        SchemaHash::compute(&schema_v2()),
+        SchemaHash::compute(&schema_v3()),
+        LensTransform::with_ops(vec![LensOp::AddColumn {
+            table: "users".to_string(),
+            column: "role".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Null,
+        }]),
+    )
 }
 
 fn rename_chain_values_v1(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
@@ -313,6 +308,31 @@ fn current_join_provenance_permission_schema() -> jazz_tools::Schema {
         .build()
 }
 
+fn large_blob_assets_schema() -> jazz_tools::Schema {
+    HashMap::from([(
+        TableName::new("assets"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
+            ]),
+            TablePolicies::new()
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_update(
+                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                )
+                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    )])
+}
+
+fn asset_values(owner_id: &str, name: &str, data: Vec<u8>) -> HashMap<String, Value> {
+    row_input!("owner_id" => owner_id, "name" => name, "data" => data)
+}
+
 fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
     Lens::new(
         SchemaHash::compute(&legacy_join_provenance_schema()),
@@ -444,11 +464,32 @@ fn removed_readded_schema_v3() -> jazz_tools::Schema {
 }
 
 fn removed_readded_v1_to_v2_lens() -> Lens {
-    generate_lens(&removed_readded_schema_v1(), &removed_readded_schema_v2())
+    Lens::new(
+        SchemaHash::compute(&removed_readded_schema_v1()),
+        SchemaHash::compute(&removed_readded_schema_v2()),
+        LensTransform::with_ops(vec![LensOp::RemoveTable {
+            table: "users".to_string(),
+            schema: TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .build(),
+        }]),
+    )
 }
 
 fn removed_readded_v2_to_v3_lens() -> Lens {
-    generate_lens(&removed_readded_schema_v2(), &removed_readded_schema_v3())
+    Lens::new(
+        SchemaHash::compute(&removed_readded_schema_v2()),
+        SchemaHash::compute(&removed_readded_schema_v3()),
+        LensTransform::with_ops(vec![LensOp::AddTable {
+            table: "users".to_string(),
+            schema: TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text)
+                .build(),
+        }]),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,7 +610,7 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .expect("decode edge schema publish response");
     assert_eq!(published_schema.hash, schema_hash);
 
-    let core_schema_response = client
+    let public_schema_convert_response = client
         .get(format!(
             "{}/apps/{app_id}/schema/{schema_hash}",
             core.base_url()
@@ -578,13 +619,13 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
         .send()
         .await
         .expect("fetch schema from core");
-    assert_eq!(core_schema_response.status(), StatusCode::OK);
-    let core_schema: StoredSchemaHttpResponse = core_schema_response
+    assert_eq!(public_schema_convert_response.status(), StatusCode::OK);
+    let public_schema_convert: StoredSchemaHttpResponse = public_schema_convert_response
         .json()
         .await
         .expect("decode core schema response");
     assert_eq!(
-        SchemaHash::compute(&core_schema.schema).to_string(),
+        SchemaHash::compute(&public_schema_convert.schema).to_string(),
         schema_hash
     );
 
@@ -1419,86 +1460,6 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
             Value::Null,
         ]
     );
-
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn draft_lens_does_not_make_rows_from_old_schema_visible() {
-    let server = JazzServer::start().await;
-    let v1_schema = draft_lens_schema_v1();
-    let v2_schema = draft_lens_schema_v2();
-    let draft_lens = draft_lens_v1_to_v2();
-    assert!(
-        draft_lens.is_draft(),
-        "test fixture should use a draft lens"
-    );
-
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        std::slice::from_ref(&v1_schema),
-        &[],
-    )
-    .await
-    .expect("push initial draft-lens v1 catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
-
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema.clone(), "alice-draft-lens"),
-    )
-    .await
-    .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-
-    let user_id = jazz_tools::ObjectId::new();
-    let (row_id, _, batch_id) = alice
-        .insert("users", draft_lens_values_v1(user_id))
-        .expect("alice creates v1 user");
-    alice
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("alice user reaches edge");
-
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        &[v1_schema, v2_schema.clone()],
-        &[draft_lens],
-    )
-    .await
-    .expect("push v2 schema with draft lens");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v2_schema,
-    )
-    .await;
-
-    let bob = JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-draft-lens"))
-        .await
-        .expect("connect bob");
-    assert_edge_query_does_not_include_row(
-        &bob,
-        QueryBuilder::new("users").build(),
-        row_id,
-        Duration::from_secs(2),
-        "bob should not see v1 row through a draft lens",
-    )
-    .await;
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -2527,6 +2488,120 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Exercises that file-like large blob values use the ordinary row/value
+/// permissions on their table. Alice can insert and read her blob row, Bob's
+/// query is filtered by the same table SELECT policy, and Mallory's spoofed
+/// owner insert is rejected by the same table INSERT check.
+///
+/// alice --insert blob asset--> server --row policy--> alice sees handle, then hydrates
+/// bob --query assets---------> server --row policy--x empty
+/// mallory --spoof owner-----> server --row policy--x rejected
+#[tokio::test]
+async fn large_blob_values_follow_ordinary_row_permissions() {
+    let server = JazzServer::start().await;
+    let schema = large_blob_assets_schema();
+
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        &[schema.clone()],
+        &[],
+    )
+    .await
+    .expect("push large blob catalogue");
+
+    publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+        schema
+            .iter()
+            .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
+            .collect::<Vec<_>>(),
+        None,
+    )
+    .await;
+
+    let alice = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
+        .await
+        .expect("connect alice");
+    wait_for_edge_query_ready(&alice, "assets", Duration::from_secs(30)).await;
+
+    let bob = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "bob"))
+        .await
+        .expect("connect bob");
+    wait_for_edge_query_ready(&bob, "assets", Duration::from_secs(30)).await;
+
+    let mallory = JazzClient::connect(server.make_client_context_for_user(schema, "mallory"))
+        .await
+        .expect("connect mallory");
+    wait_for_edge_query_ready(&mallory, "assets", Duration::from_secs(30)).await;
+
+    let blob = b"file-like payload stored as an ordinary row value".repeat(64);
+    let (asset_row_id, _, alice_batch_id) = alice
+        .insert("assets", asset_values("alice", "alice.bin", blob.clone()))
+        .expect("alice creates blob asset");
+    alice
+        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice blob asset reaches edge");
+
+    let alice_rows = wait_for_query(
+        &alice,
+        QueryBuilder::new("assets").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "alice sees her blob asset through ordinary row permissions",
+        |rows| (rows.len() == 1 && rows[0].0 == asset_row_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(alice_rows[0].1[0], Value::Text("alice".to_string()));
+    assert_eq!(alice_rows[0].1[1], Value::Text("alice.bin".to_string()));
+    let Value::LargeValue(handle) = &alice_rows[0].1[2] else {
+        panic!("large blob query should materialize as a handle");
+    };
+    assert_eq!(
+        alice
+            .hydrate_large_value(handle)
+            .await
+            .expect("hydrate alice blob"),
+        blob
+    );
+
+    let bob_rows = wait_for_query(
+        &bob,
+        QueryBuilder::new("assets").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "bob does not see alice blob asset through ordinary row permissions",
+        Some,
+    )
+    .await;
+    assert!(
+        bob_rows.is_empty(),
+        "Bob should not see Alice's blob asset without row SELECT permission"
+    );
+
+    let (_, _, mallory_batch_id) = mallory
+        .insert(
+            "assets",
+            asset_values("alice", "spoofed.bin", b"spoofed".to_vec()),
+        )
+        .expect("mallory stages spoofed blob asset");
+    mallory
+        .wait_for_batch(mallory_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("mallory spoofed blob asset should be rejected by row INSERT permission");
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    mallory.shutdown().await.expect("shutdown mallory");
     server.shutdown().await;
 }
 

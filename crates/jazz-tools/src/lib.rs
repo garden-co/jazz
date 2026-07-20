@@ -1,7 +1,7 @@
-pub mod batch_fate;
-pub mod catalogue;
-pub mod commit;
-pub mod digest;
+#[cfg(any(feature = "server", test))]
+pub(crate) mod admin_catalogue_payload_codec;
+pub(crate) mod admin_catalogue_row_format;
+pub mod app_id;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -9,36 +9,21 @@ pub mod middleware;
 pub mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
-pub mod query_manager;
-pub mod row_format;
-pub mod row_histories;
-pub mod runtime_core;
-pub mod schema_manager;
+pub(crate) mod public_api;
+pub mod public_schema;
+pub mod schema_lens;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod server;
-pub mod storage;
-pub mod sync_manager;
+pub mod sync;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
-pub mod wire_types;
+pub mod transaction;
 
-pub use query_manager::bindings as binding_support;
-#[cfg(any(feature = "cli", feature = "server"))]
-pub use server::routes;
-pub use sync_manager::sync_tracer;
-
-#[cfg(feature = "runtime-tokio")]
-pub mod runtime_tokio;
-#[cfg(feature = "runtime-tokio")]
-pub use runtime_tokio as jazz_tokio;
-
-pub mod transport_protocol;
-pub use transport_protocol as jazz_transport;
-pub mod transport_manager;
-#[cfg(feature = "transport-websocket")]
-pub mod ws_stream;
+pub mod transport_error;
+pub mod websocket_prelude_auth;
 
 #[cfg(feature = "client")]
+#[allow(clippy::await_holding_refcell_ref)]
 mod client;
 
 #[cfg(feature = "client")]
@@ -47,30 +32,25 @@ use std::path::PathBuf;
 #[cfg(feature = "client")]
 use thiserror::Error;
 
-#[cfg(feature = "client")]
-pub use client::{JazzClient, JazzTransaction};
+pub use app_id::AppId;
+pub use public_schema::{
+    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueHandle,
+    LargeValueKind, Operation, OrderedRowDelta, PolicyExpr, Query, QueryBuilder, Row, RowDelta,
+    RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
+    TableSchema, Value, WriteContext, permissions, policy_expr,
+};
+pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
 #[cfg(feature = "client")]
+pub use client::{JazzClient, JazzTransaction};
+#[cfg(feature = "client")]
+pub use jazz::db::TextEdit;
+
 pub use object::ObjectId;
 #[cfg(feature = "client")]
-pub use query_manager::query::{Query, QueryBuilder};
+pub use sync::ClientId;
 #[cfg(feature = "client")]
-pub use query_manager::session::{Session, WriteContext};
-#[cfg(feature = "client")]
-pub use query_manager::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, Row, RowDelta,
-    RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema, Value,
-};
-#[cfg(feature = "client")]
-pub use row_histories::BatchId;
-#[cfg(feature = "client")]
-pub use schema_manager::AppId;
-#[cfg(feature = "client")]
-pub use sync_manager::ClientId;
-#[cfg(feature = "client")]
-pub use sync_manager::DurabilityTier;
-#[cfg(feature = "client")]
-pub use sync_manager::ServerId;
+pub use sync::DurabilityTier;
 
 /// Configuration for connecting to Jazz.
 #[cfg(feature = "client")]
@@ -99,10 +79,6 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
-
-    /// Optional sync message tracer for test observability.
-    /// Set via `TestingClient::with_tracer()` — `None` in production.
-    pub sync_tracer: Option<(crate::sync_tracer::SyncTracer, String)>,
 }
 
 #[cfg(feature = "test-utils")]
@@ -118,7 +94,6 @@ impl AppContext {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         }
     }
 }
@@ -184,6 +159,7 @@ pub struct SubscriptionStream {
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
+    #[allow(dead_code)]
     pub(crate) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }

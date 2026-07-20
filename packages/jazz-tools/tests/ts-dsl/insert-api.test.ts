@@ -100,6 +100,24 @@ describe("TS Insert API", () => {
     });
   });
 
+  it("can use caller-supplied updatedAt on transaction-scoped insert", async () => {
+    const updatedAt = 1_704_067_200_123_000;
+    const tx = db.beginTransaction();
+    const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
+
+    await tx.commit().wait({ tier: "local" });
+
+    const projected = await db.one(
+      app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),
+    );
+
+    expect(projected).toEqual({
+      id: project.id,
+      name: "Backfilled Project",
+      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+    });
+  });
+
   it("cannot insert two rows with the same id", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
     const { value: project } = db.insert(app.projects, { name: "Test Project 1" }, { id });
@@ -136,6 +154,9 @@ describe("TS Insert API", () => {
       tags: [],
       assigneesIds: [],
     });
+
+    const queried = await db.one(app.todos.where({ id: { eq: todo.id } }));
+    expect(queried).toEqual(todo);
   });
 
   it("support schema defaults for all data types", async () => {
@@ -159,6 +180,36 @@ describe("TS Insert API", () => {
       nullableInteger: null,
       refId: "00000000-0000-0000-0000-000000000000",
     });
+
+    const queried = await db.one(app.table_with_defaults.where({ id: { eq: rowWithDefaults.id } }));
+    expect(queried).toEqual(rowWithDefaults);
+  });
+
+  it("stores explicit values for defaulted columns instead of replacing them", async () => {
+    const explicit = {
+      integer: 2,
+      float: 2.5,
+      bytes: new Uint8Array([3, 4, 5]),
+      enum: "b" as const,
+      json: { name: "explicit name", age: 7 },
+      timestampDate: new Date("2026-02-02"),
+      timestampNumber: new Date(1_704_067_200_000),
+      string: "explicit value",
+      array: ["x", "y"],
+      boolean: false,
+      nullable: "present",
+      nullableInteger: 5,
+      refId: "00000000-0000-0000-0000-000000000001",
+    };
+
+    const { value: row } = db.insert(app.table_with_defaults, explicit);
+    expect(row).toEqual({
+      id: expect.any(String),
+      ...explicit,
+    });
+
+    const queried = await db.one(app.table_with_defaults.where({ id: { eq: row.id } }));
+    expect(queried).toEqual(row);
   });
 
   it("enforces constraints on JSON schemas", async () => {
@@ -209,5 +260,8 @@ describe("TS Insert API", () => {
       nullableInteger: null,
       refId: null,
     });
+
+    const queried = await db.one(app.table_with_defaults.where({ id: { eq: rowWithDefaults.id } }));
+    expect(queried).toEqual(rowWithDefaults);
   });
 });

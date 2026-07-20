@@ -1,15 +1,10 @@
+#![allow(clippy::items_after_test_module, clippy::wrong_self_convention)]
+
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::runtime_tokio::TokioRuntime;
-use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
-use jazz_tools::server::{JazzServer, ServerState};
-use jazz_tools::storage::MemoryStorage;
-use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
-use jazz_tools::transport_protocol::encode_outbox_entry_payload;
+use jazz_tools::server::JazzServer;
+use jazz_tools::sync::ClientId;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
@@ -28,7 +23,8 @@ const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
-pub use jazz_tools::test_support::{QueryRows, wait_for_query};
+#[allow(unused_imports)]
+pub use jazz_tools::test_support::{QueryRows, push_catalogue_in_memory, wait_for_query};
 
 #[allow(unused_imports)]
 pub use permissions::{
@@ -86,7 +82,6 @@ pub struct TestingClient<'a> {
     storage: TestingClientStorage,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
-    sync_tracer: Option<(jazz_tools::sync_tracer::SyncTracer, String)>,
 }
 
 #[allow(dead_code)]
@@ -100,7 +95,6 @@ impl<'a> TestingClient<'a> {
             storage: TestingClientStorage::Memory,
             ready_table: None,
             ready_timeout: None,
-            sync_tracer: None,
         }
     }
 
@@ -150,15 +144,6 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_persistent_storage(mut self) -> Self {
         self.storage = TestingClientStorage::Persistent;
-        self
-    }
-
-    pub fn with_tracer(
-        mut self,
-        tracer: &jazz_tools::sync_tracer::SyncTracer,
-        name: impl Into<String>,
-    ) -> Self {
-        self.sync_tracer = Some((tracer.clone(), name.into()));
         self
     }
 
@@ -215,6 +200,7 @@ impl<'a> TestingClient<'a> {
                     .expect("TestingClient requires `with_schema(...)` before building"),
                 user_id,
             );
+        context.client_id = ClientId::parse(user_id);
 
         match &self.auth {
             TestingClientAuth::Admin => {
@@ -240,8 +226,6 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
-
-        context.sync_tracer = self.sync_tracer.clone();
 
         context
     }
@@ -321,142 +305,6 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
         &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
     )
     .expect("encode jwt")
-}
-
-fn build_catalogue_runtime(
-    schema_manager: SchemaManager,
-    storage: MemoryStorage,
-    state: Arc<ServerState>,
-    client_id: ClientId,
-    in_flight_pushes: Arc<AtomicUsize>,
-    push_errors: Arc<Mutex<Vec<String>>>,
-) -> TokioRuntime<MemoryStorage> {
-    TokioRuntime::new(schema_manager, storage, move |entry: OutboxEntry| {
-        let OutboxEntry {
-            destination,
-            payload,
-        } = entry;
-        if let Destination::Server(_) = destination {
-            in_flight_pushes.fetch_add(1, Ordering::AcqRel);
-            let state = state.clone();
-            let push_errors = push_errors.clone();
-            let in_flight_pushes = in_flight_pushes.clone();
-            tokio::spawn(async move {
-                let entry = jazz_tools::sync_manager::OutboxEntry {
-                    destination: Destination::Server(ServerId::default()),
-                    payload,
-                };
-                let frame = match encode_outbox_entry_payload(&entry) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        if let Ok(mut errors) = push_errors.lock() {
-                            errors.push(format!("encode sync frame: {error}"));
-                        }
-                        in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
-                        return;
-                    }
-                };
-                if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
-                    if let Ok(mut errors) = push_errors.lock() {
-                        errors.push(error);
-                    }
-                }
-                in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
-            });
-        }
-    })
-}
-
-async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
-    while in_flight_pushes.load(Ordering::Acquire) > 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-pub async fn push_catalogue_in_memory(
-    state: Arc<ServerState>,
-    app_id: AppId,
-    env: &str,
-    user_branch: &str,
-    schemas: &[Schema],
-    lenses: &[Lens],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client_id = ClientId::new();
-    state
-        .runtime
-        .ensure_client_as_admin(client_id)
-        .map_err(|e| format!("register admin client: {e:?}"))?;
-
-    let in_flight_pushes = Arc::new(AtomicUsize::new(0));
-    let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
-
-    let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
-        std::collections::HashMap::with_capacity(schemas.len());
-    for schema in schemas {
-        schema_by_hash.insert(SchemaHash::compute(schema), schema);
-        let schema_manager =
-            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, env, user_branch)
-                .map_err(|error| {
-                    format!("Failed to initialize schema manager for schema push: {error:?}")
-                })?;
-        let runtime = build_catalogue_runtime(
-            schema_manager,
-            MemoryStorage::default(),
-            state.clone(),
-            client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
-        runtime.persist_schema()?;
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
-    }
-
-    for lens in lenses {
-        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
-            format!(
-                "No schema provided for lens source hash {}",
-                lens.source_hash
-            )
-        })?;
-
-        let mut storage = MemoryStorage::default();
-        let mut schema_manager = SchemaManager::new(
-            SyncManager::new(),
-            (*source_schema).clone(),
-            app_id,
-            env,
-            user_branch,
-        )
-        .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
-        schema_manager.persist_lens(&mut storage, lens);
-        let runtime = build_catalogue_runtime(
-            schema_manager,
-            storage,
-            state.clone(),
-            client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
-    }
-
-    wait_for_in_flight_pushes(&in_flight_pushes).await;
-
-    let errors = push_errors.lock().unwrap().clone();
-    if !errors.is_empty() {
-        return Err(format!(
-            "Schema push encountered {} sync error(s): {}",
-            errors.len(),
-            errors.join("; ")
-        )
-        .into());
-    }
-
-    Ok(())
 }
 
 #[allow(dead_code)]

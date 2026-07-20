@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { schema as s } from "jazz-tools";
-import { deploy } from "../dev/catalogue.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "./schema-fetch.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
 // ---------------------------------------------------------------------------
@@ -57,6 +61,25 @@ async function createLocalFirstIdentity(
   return { token, userId };
 }
 
+async function removeTempDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        attempt === 4 ||
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOTEMPTY"
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 /**
  * Publishes the todo app schema + permissions to the server, creates a
  * persistent `JazzContext`, registers `onTestFinished` cleanup, and returns
@@ -68,12 +91,18 @@ async function createTestContext(
   backendSecret: string,
   adminSecret: string,
 ) {
-  await deploy({
+  const { hash: schemaHash } = await publishStoredSchema(server.url, {
     appId,
-    serverUrl: server.url,
     adminSecret,
-    schema: todoApp,
+    schema: todoApp.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(server.url, { appId, adminSecret });
+  await publishStoredPermissions(server.url, {
+    appId,
+    adminSecret,
+    schemaHash,
     permissions: todoAppPermissions,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
   const dataRoot = await mkdtemp(join(tmpdir(), "jazz-napi-concurrent-request-"));
@@ -95,7 +124,7 @@ async function createTestContext(
   onTestFinished(async () => {
     await context.shutdown();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await rm(dataRoot, { recursive: true, force: true });
+    await removeTempDir(dataRoot);
   });
 
   return context;
