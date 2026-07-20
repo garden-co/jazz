@@ -11,6 +11,7 @@ use jazz_tools::{
     RowDescriptor, Schema, TableName, TableSchema, Value,
 };
 use support::{TestingClient, wait_for_query};
+use uuid::Uuid;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -320,6 +321,121 @@ async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_b
         .expect("shutdown Bob after the offline follow-up");
     observer.shutdown().await.expect("shutdown observer");
     alice.shutdown().await.expect("shutdown Alice");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+/// Keeps caller-supplied IDs from turning concurrent inserts into causal updates.
+///
+/// Alice and bob intentionally create the same deterministic ID while offline;
+/// this is not a random UUID collision.
+///
+/// ```text
+/// alice ── offline insert id=shared, value=2 ──► server
+/// bob   ── offline insert id=shared, value=3 ──► server
+/// observer ◄────────── concurrent-root merge 5 ────────── server
+/// ```
+async fn parentless_client_rows_with_the_same_id_remain_concurrent() {
+    let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
+    let schema = counter_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+
+    let (mut alice_context, alice) = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-counter-shared-id")
+        .with_persistent_storage()
+        .ready_on("counters", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+    let (mut bob_context, bob) = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-counter-shared-id")
+        .with_persistent_storage()
+        .ready_on("counters", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+
+    alice
+        .shutdown()
+        .await
+        .expect("alice shuts down before the offline insert");
+    bob.shutdown()
+        .await
+        .expect("bob shuts down before the offline insert");
+    alice_context.server_url = String::new();
+    bob_context.server_url = String::new();
+
+    let shared_id =
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440010").expect("parse shared UUID");
+    let alice_offline = JazzClient::connect(alice_context.clone())
+        .await
+        .expect("alice opens her persistent storage offline");
+    let (_, _, _) = alice_offline
+        .insert_with_id("counters", shared_id, jazz_tools::row_input!("value" => 2))
+        .expect("alice inserts the shared ID offline");
+    alice_offline
+        .shutdown()
+        .await
+        .expect("alice shuts down after the offline insert");
+
+    let bob_offline = JazzClient::connect(bob_context.clone())
+        .await
+        .expect("bob opens his persistent storage offline");
+    let (counter_id, _, _) = bob_offline
+        .insert_with_id("counters", shared_id, jazz_tools::row_input!("value" => 3))
+        .expect("bob inserts the shared ID offline");
+    bob_offline
+        .shutdown()
+        .await
+        .expect("bob shuts down after the offline insert");
+
+    alice_context.server_url = server.base_url();
+    let alice_restarted = JazzClient::connect(alice_context)
+        .await
+        .expect("alice reconnects with her offline insert");
+    wait_for_query(
+        &alice_restarted,
+        QueryBuilder::new("counters").build(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice's root reaches the server first",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(2))
+                .then_some(())
+        },
+    )
+    .await;
+
+    bob_context.server_url = server.base_url();
+    let bob_restarted = JazzClient::connect(bob_context)
+        .await
+        .expect("bob reconnects with his concurrent root");
+
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("charlie-counter-shared-id")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+    wait_for_query(
+        &observer,
+        QueryBuilder::new("counters").build(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "observer sees both parentless inserts merged as concurrent roots",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(5))
+                .then_some(())
+        },
+    )
+    .await;
+
+    observer.shutdown().await.expect("shutdown observer");
+    bob_restarted.shutdown().await.expect("shutdown bob");
+    alice_restarted.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
 
