@@ -150,16 +150,15 @@ function QuotedPost({ post }: { post: DisplayPost }) {
 }
 
 export function AppHeader({
-  online,
   profile,
   handle,
   onSignOut,
 }: {
-  online: boolean;
   profile?: DisplayPost["authorProfile"];
   handle: string;
   onSignOut: () => void;
 }) {
+  const identity = profileNameParts(profile, handle);
   return (
     <header className="app-header">
       <div className="brand-lockup">
@@ -178,19 +177,8 @@ export function AppHeader({
             radius="medium"
           />
           <div className="account-identity">
-            <span className="account-handle">
-              <ProfileName profile={profile} fallback={handle} />
-            </span>
-            <Badge
-              color={online ? "jade" : "gray"}
-              variant="soft"
-              size="1"
-              role="status"
-              aria-live="polite"
-            >
-              <StatusIcon />
-              {online ? "Online" : "Offline"}
-            </Badge>
+            <strong>{identity.name}</strong>
+            {identity.handle && <span className="account-handle">{identity.handle}</span>}
           </div>
           <Button size="1" variant="soft" color="gray" onClick={onSignOut}>Sign out</Button>
         </div>
@@ -596,7 +584,18 @@ export function TimelineFeed({
       <div className="section-heading">
         <div>
           <p className="eyebrow">Timeline</p>
-          <h2 id="timeline-title">Latest posts</h2>
+          <div className="timeline-title-row">
+            <h2 id="timeline-title">Latest posts</h2>
+            <Badge
+              color={online ? "jade" : "gray"}
+              variant="soft"
+              role="status"
+              aria-live="polite"
+            >
+              <StatusIcon />
+              {online ? "Online" : "Offline"}
+            </Badge>
+          </div>
         </div>
         <p>Cached locally by Jazz for offline availability</p>
       </div>

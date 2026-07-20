@@ -10,16 +10,18 @@ h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 4px; font-size: clamp(2.1rem, 5vw, 3rem); line-height: 1; letter-spacing: -.055em; }
 h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
 .app-header h1 { font-size: clamp(1.85rem, 4vw, 2.25rem); }
-.account-card { gap: 8px; }
-.account-identity { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.account-card { flex: none; gap: 12px; }
+.account-identity { display: grid; justify-items: start; gap: 2px; min-width: 0; overflow: hidden; }
+.account-identity strong { overflow: hidden; max-width: 145px; text-overflow: ellipsis; white-space: nowrap; }
+.account-card > .rt-Button { margin-left: 4px; }
 .account-handle { max-width: 145px; }
 .account-handle, .profile-name strong, .profile-handle { overflow: hidden; text-overflow: ellipsis; }
-.account-handle, .profile-name { white-space: nowrap; }
+.account-handle, .profile-name { display: block; max-width: 100%; white-space: nowrap; }
 .profile-name { display: inline-flex; align-items: baseline; min-width: 0; gap: 4px; }
 .profile-name-separator, .profile-handle, time { color: var(--gray-11); font-weight: 500; }
 .intro { margin-bottom: 18px; }
 .composer { display: grid; gap: 13px; margin-bottom: 38px; }
-.composer-heading, .composer-actions, .sync-banner, .section-heading, .repost-reason, .post-header, .quoted-post-header, .post-actions, .reply-composer > div, .pagination-status, .app-footer { display: flex; align-items: center; }
+.composer-heading, .composer-actions, .sync-banner, .section-heading, .timeline-title-row, .repost-reason, .post-header, .quoted-post-header, .post-actions, .reply-composer > div, .pagination-status, .app-footer { display: flex; align-items: center; }
 .composer-heading, .sync-banner, .section-heading, .app-footer { justify-content: space-between; }
 .composer-heading { gap: 16px; color: var(--gray-11); font-size: .78rem; }
 .composer-heading label, .reply-composer label { color: var(--gray-12); font-weight: 800; }
@@ -27,6 +29,8 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
 .sync-banner { gap: 20px; margin: -18px 0 36px; background: var(--accent-a3); }
 .sync-banner div { display: grid; gap: 3px; }
 .section-heading { align-items: flex-end; gap: 20px; margin-bottom: 17px; }
+.timeline-title-row { gap: 10px; }
+.timeline-title-row h2 { margin-bottom: 0; }
 .feed, .thread-node, .timeline-thread { display: grid; gap: 11px; min-width: 0; }
 .repost-reason { gap: 7px; min-width: 0; padding: 0 15px; }
 .repost-reason strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -81,10 +85,11 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
 }
 @media (max-width: 580px) {
   .app-shell { width: min(100% - 28px, 760px); padding: 24px 0 44px; }
-  .app-header { margin-bottom: 32px; }
+  .app-header { gap: 12px; margin-bottom: 32px; }
   .brand-mark { width: 38px; height: 38px; }
   .app-header h1 { font-size: 1.55rem; white-space: nowrap; }
-  .account-handle, .account-card > .rt-Button { display: none; }
+  .account-identity { max-width: 76px; }
+  .account-card > .rt-Button { display: none; }
   .composer { margin-bottom: 32px; }
   .post-card > p, .post-images, .quoted-post, .post-actions { margin-left: 0; }
   .thread-replies { margin-left: 12px; padding-left: 12px; }

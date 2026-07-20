@@ -297,7 +297,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
 
   const waitingForTimeline = visibleTimelineRows.length === 0 && (timelineRows === undefined || initialLoading);
   return <main className="app-shell">
-    <AppHeader online={online} profile={ownProfile} handle={ownHandle} onSignOut={onSignOut} />
+    <AppHeader profile={ownProfile} handle={ownHandle} onSignOut={onSignOut} />
     <Intro />
     <Composer text={text} onChange={setText} onPublish={publish} />
     <SyncBanner count={visiblePendingOperations.length} online={online} onSync={flushOperations} />
