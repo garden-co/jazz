@@ -12,6 +12,7 @@ import {
   DisclosureIcon,
   LikeIcon,
   RepostIcon,
+  SignOutIcon,
   StatusIcon,
   SuccessIcon,
   ThreadLinkIcon,
@@ -180,7 +181,10 @@ export function AppHeader({
             <strong>{identity.name}</strong>
             {identity.handle && <span className="account-handle">{identity.handle}</span>}
           </div>
-          <Button size="1" variant="soft" color="gray" onClick={onSignOut}>Sign out</Button>
+          <Button size="1" variant="ghost" color="gray" onClick={onSignOut}>
+            <SignOutIcon />
+            Sign out
+          </Button>
         </div>
       </Card>
     </header>

@@ -4,6 +4,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   DotFilledIcon,
+  ExitIcon,
   ExternalLinkIcon,
   HeartFilledIcon,
   HeartIcon,
@@ -34,6 +35,10 @@ export function RepostIcon() {
 
 export function StatusIcon() {
   return <DotFilledIcon aria-hidden="true" />;
+}
+
+export function SignOutIcon() {
+  return <ExitIcon aria-hidden="true" />;
 }
 
 export function SuccessIcon() {
