@@ -3,7 +3,14 @@ import type { ReactNode } from "react";
 
 export function AppTheme({ children }: { children: ReactNode }) {
   return (
-    <Theme appearance="light" accentColor="iris" grayColor="slate" radius="large" scaling="95%">
+    <Theme
+      appearance="light"
+      accentColor="plum"
+      grayColor="mauve"
+      panelBackground="translucent"
+      radius="medium"
+      scaling="100%"
+    >
       {children}
     </Theme>
   );

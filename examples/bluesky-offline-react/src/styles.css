@@ -1,9 +1,10 @@
-body { min-width: 320px; min-height: 100vh; margin: 0; background: radial-gradient(circle at 12% 0%, rgba(93, 103, 242, .09), transparent 26rem), #f4f6fb; }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+.radix-themes { min-height: 100vh; background: radial-gradient(circle at 12% 0%, var(--accent-a3), transparent 28rem), radial-gradient(circle at 92% 18%, var(--amber-a2), transparent 24rem), var(--color-background); }
 .app-shell { width: min(100% - 40px, 760px); margin: auto; padding: 44px 0 64px; }
 .app-header, .brand-lockup, .account-actions, .account-identity { display: flex; align-items: center; }
 .app-header { justify-content: space-between; gap: 24px; margin-bottom: 46px; }
 .brand-lockup { align-items: flex-start; gap: 14px; }
-.brand-mark { display: grid; place-items: center; flex: none; width: 42px; height: 42px; border-radius: 13px; color: white; background: linear-gradient(145deg, #6971f3, #444bd3); box-shadow: 0 9px 24px rgba(81, 89, 232, .22); font-weight: 850; }
+.brand-mark { display: grid; place-items: center; flex: none; width: 42px; height: 42px; border-radius: var(--radius-4); color: var(--accent-contrast); background: linear-gradient(145deg, var(--accent-9), var(--accent-11)); box-shadow: var(--shadow-4); font-weight: 850; }
 .eyebrow { margin: 0 0 7px; color: var(--accent-9); font-size: .72rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 4px; font-size: clamp(2.1rem, 5vw, 3rem); line-height: 1; letter-spacing: -.055em; }
