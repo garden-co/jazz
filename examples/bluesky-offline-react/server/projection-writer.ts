@@ -11,7 +11,7 @@ import {
   type PostView,
   type ProfileView,
 } from "./projection-model.js";
-import { db } from "./jazz.js";
+import type { db } from "./jazz.js";
 
 type ProjectionDatabase = typeof db;
 type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
@@ -85,7 +85,7 @@ function reactionKey(kind: ReactionOperation["kind"], postId: string) {
   return `${kind}:${postId}`;
 }
 
-export function createProjectionWriter(database: ProjectionDatabase = db) {
+export function createProjectionWriter(database: ProjectionDatabase) {
   async function writeProfile(profile: ProfileProjection) {
     const existing = await database.one(app.profiles.where({ id: { eq: profile.id } }));
     await projectRow(database, app.profiles, profile.id, mergeProfileProjection(existing, profile));

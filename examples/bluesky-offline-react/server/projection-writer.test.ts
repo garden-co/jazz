@@ -2,13 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../operations.js";
 import { app } from "../schema.js";
 import { stableObjectId } from "./projection-model.js";
+import { createProjectionWriter, mergeProfileProjection } from "./projection-writer.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.doUnmock("./jazz.js");
-  vi.resetModules();
 });
 
 describe("profile projection", () => {
@@ -24,9 +23,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-    const writer = createProjectionWriter();
+    const writer = createProjectionWriter(database);
     const profile = {
       did: "did:plc:viewer",
       handle: "viewer.test",
@@ -52,10 +49,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-
-    await expect(createProjectionWriter().projectProfile({
+    await expect(createProjectionWriter(database).projectProfile({
       did: "did:plc:viewer",
       handle: "viewer.test",
       indexedAt: "2026-07-17T08:00:00.000Z",
@@ -63,8 +57,6 @@ describe("profile projection", () => {
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
-    vi.doMock("./jazz.js", () => ({ db: {} }));
-    const { mergeProfileProjection } = await import("./projection-writer.js");
     expect(mergeProfileProjection({
       did: "did:plc:author",
       handle: "author.test",
@@ -110,9 +102,7 @@ describe("durable reaction projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-    const writer = createProjectionWriter();
+    const writer = createProjectionWriter(database);
     const intents = await writer.loadReactionIntents(operation.ownerDid);
     const post = {
       id: stableObjectId("bluesky-post", operation.payload.subjectUri),
@@ -138,7 +128,7 @@ describe("durable reaction projection", () => {
     expect(database.delete.mock.calls.filter(([table]) => table === app.pendingOperations)).toHaveLength(0);
     expect(database.upsert.mock.calls.filter(([table]) => table === app.likes)).toHaveLength(0);
 
-    const restartedWriter = createProjectionWriter();
+    const restartedWriter = createProjectionWriter(database);
     const restoredIntents = await restartedWriter.loadReactionIntents(operation.ownerDid);
     await restartedWriter.projectTimelinePage(operation.ownerDid, [{ post: {
       uri: post.uri,
@@ -187,10 +177,7 @@ describe("durable reaction projection", () => {
       indexedAt: operation.createdAt,
       viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-
-    await createProjectionWriter().projectTimelinePage(
+    await createProjectionWriter(database).projectTimelinePage(
       operation.ownerDid,
       [{ post }, { post }],
       "next",
@@ -202,11 +189,15 @@ describe("durable reaction projection", () => {
 });
 
 describe("projection writer API", () => {
-  it("exposes only operations used by the projector and reconciler", async () => {
-    vi.doMock("./jazz.js", () => ({ db: {} }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-
-    expect(Object.keys(createProjectionWriter()).sort()).toEqual([
+  it("exposes only operations used by the bridge", async () => {
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => null),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    expect(Object.keys(createProjectionWriter(database)).sort()).toEqual([
       "completeOperation",
       "deactivateRepostTimelineEntries",
       "loadReactionIntents",
@@ -229,9 +220,7 @@ describe("operation completion", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-    const writer = createProjectionWriter();
+    const writer = createProjectionWriter(database);
     const post: Operation = {
       id: "00000000-0000-0000-0000-000000000001",
       ownerDid: "did:plc:viewer",
@@ -281,9 +270,7 @@ describe("thread projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-    const writer = createProjectionWriter();
+    const writer = createProjectionWriter(database);
     const thread = {
       rootPostId: "root-id",
       entries: [{
@@ -325,9 +312,7 @@ describe("progressive timeline projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     });
 
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-    const projection = createProjectionWriter().projectTimelinePage(
+    const projection = createProjectionWriter(database).projectTimelinePage(
       "did:plc:viewer",
       [
         { post: post("did:plc:author1", "3m12345678921") },
