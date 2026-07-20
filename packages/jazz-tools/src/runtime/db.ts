@@ -1206,6 +1206,17 @@ export class Db {
   }
 
   /**
+   * The engine-normalized runtime schema of this Db's live client, or null
+   * before any client exists. First-client-wins when a Db holds several
+   * clients — a dev-introspection accessor (inspector host handle, devtools
+   * bridge), not a general schema API.
+   */
+  getRuntimeSchema(): WasmSchema | null {
+    const client = this.clients.values().next().value;
+    return client ? client.getSchema() : null;
+  }
+
+  /**
    * Insert a new row into a table without waiting for durability.
    *
    * Use {@link WriteResult.wait} to wait for durable confirmation.

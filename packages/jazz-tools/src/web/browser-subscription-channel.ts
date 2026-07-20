@@ -46,6 +46,16 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     this.owner = acquireSharedBrowserWorkerOwner(config);
   }
 
+  /**
+   * @internal The in-page Db this channel drives (the shared owner's client).
+   * Used by the inspector host handle, which needs the real Db for dev-mode
+   * introspection (schema, active subscriptions) that the channel surface
+   * doesn't carry.
+   */
+  ownerDb(): Promise<Db> {
+    return this.owner.db();
+  }
+
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): Promise<T[]> {
     const db = await this.owner.db();
     return db.__withRuntimeOperationContext({ session }, () => db.all(query, options));

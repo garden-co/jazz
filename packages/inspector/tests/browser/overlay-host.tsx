@@ -59,6 +59,11 @@ function HostApp() {
     userBranch: TEST_BRANCH,
     serverUrl: SERVER_URL,
     secret,
+    // devMode must be on at subscribe time for subscription traces to register.
+    // Under the jazz dev plugin the provider defaults it on automatically, but
+    // this fixture runs under the inspector's own vite server (no plugin flag),
+    // so set it explicitly like the provider would.
+    devMode: true,
   };
 
   return (

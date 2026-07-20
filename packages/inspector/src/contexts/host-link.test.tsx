@@ -17,6 +17,7 @@ function installHost(subs: unknown[] = []) {
       adminSecret: "sek",
     }),
     getWasmSchema: () => ({ todos: { columns: [] } }),
+    getSubscriptionChannel: () => ({ subscribeAll: () => () => {} }),
     getActiveSubscriptions: () => subs,
   };
 }

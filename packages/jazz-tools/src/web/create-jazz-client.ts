@@ -71,6 +71,8 @@ export interface AsyncChannelDb {
     audience?: string;
   }): string | null | Promise<string | null>;
   getConfig(): DbConfig;
+  /** @internal The channel backing this facade (see AsyncChannelDbFacade). */
+  getSubscriptionChannel(): SubscriptionChannel;
   insert<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
@@ -179,6 +181,15 @@ class AsyncChannelDbFacade implements AsyncChannelDb {
 
   getConfig(): DbConfig {
     return this.config;
+  }
+
+  /**
+   * @internal The channel backing this facade. The inspector host handle uses
+   * it to reach the shared owner's real Db and to hand the overlay a live
+   * channel into the host's store.
+   */
+  getSubscriptionChannel(): SubscriptionChannel {
+    return this.channel;
   }
 
   insert<T, Init>(
