@@ -168,8 +168,9 @@ Two deliverables, buildable together and testable end to end:
   exactly as JSON columns do; no new value variant, no row-format change,
   no storage-format version bump, no WASM/NAPI/RN value plumbing.
 - **Validation lives in the existing column-kind validation layer** (the
-  same place JSON columns parse and JSON-Schema-check): parse the cell as
-  canonical JSON, require `v:1` and exactly the four fields with correct
+  same place JSON columns parse and JSON-Schema-check): parse the cell and
+  require it to be RFC 8785 (JCS) canonical, require `v:1` and exactly the
+  four fields with correct
   types, **and require the `id` field to match the file-id grammar**
   (`[t{class}/]{identity-uuid}/{random-uuidv4}`, class `^[a-z0-9]{1,15}$`)
   — reject otherwise. The grammar check is load-bearing: it guarantees the
@@ -317,9 +318,12 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   tickets named in the header; the files PRD and the human-first
   explainer describe the same design at feature level. If this spec and
   the PRD ever disagree, the PRD wins and this spec should be corrected.
-- The descriptor's canonical bytes matter (equality/digests): compact,
-  sorted keys, no extra whitespace — treat canonicalization as part of
-  the write-path validation, not a client courtesy.
+- The descriptor's canonical bytes matter (equality/digests):
+  canonicalize with **RFC 8785 (JCS)** — sorted keys, compact, canonical
+  number and string escaping — run in both the Rust write-path validator
+  and the TS builder (the engine has no existing canonicalization to
+  reuse; JSON columns store text verbatim). Treat it as part of write-path
+  validation, not a client courtesy.
 - The identity segment is `UUIDv5(JAZZ_FILES_NAMESPACE, user_id)` — one
   uniform, URL-safe derivation covering both self-signed identities
   (already UUIDs) and external-JWT `sub` strings (arbitrary,

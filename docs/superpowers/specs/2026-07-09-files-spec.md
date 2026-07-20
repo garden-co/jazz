@@ -609,7 +609,8 @@ nosniff` is a deployment requirement on the public object host in
   new value variant, no row-format change, no WASM/NAPI/RN binding change;
   the storage format version is untouched. The write path gets one
   validation branch beside the existing JSON one: strict _shape_ validation
-  — canonical form (compact, sorted keys), required `v: 1`, exactly the
+  — canonical form (RFC 8785 / JCS: sorted keys, compact, canonical
+  number and string escaping), required `v: 1`, exactly the
   fields `id`, `name`, `mime_type`, `size`, id well-formed (grammar
   match only; the class segment is validated against the deployment's
   set and the destination column's declaration at grant time, not
@@ -718,7 +719,7 @@ nosniff` is a deployment requirement on the public object host in
   computation, initiates the multipart upload where needed, and returns the
   pending object key, lease expiry, the `UploadId` (which the client
   holds in memory — no server remembers it), and conditional
-  presigned URLs (single PUT below a tens-of-MB implementation constant,
+  presigned URLs (single PUT below the 16 MB threshold,
   multipart above); (4) the client PUTs directly to the pending key,
   tracking completed part ETags in memory; it may request fresh part URLs
   from any edge within the lease by presenting the `UploadId` (presign
@@ -1109,20 +1110,54 @@ column)`, validates class and mime type against the schema
   warning surface, and the opt-in offline package is the durability
   upgrade); a manually deleted object serving 404/410 (operator
   error, not a protocol state).
-- The single-PUT vs multipart size threshold, the presign window for part
-  URLs, and the inline-safe type allowlist are implementation constants,
-  not configuration. The TTL class set is deployment configuration; the
-  schema names a class per column (`FILE('7d')` on the schema wire) and
-  the server validates each granted id's class segment against the set
-  and against the destination column's declaration. Class names match
-  `^[a-z0-9]{1,15}$`. The files base URL (`filesUrl`, default
-  `{serverUrl}/files`) is client deployment configuration alongside the
-  existing `serverUrl` and its env-var family. The TS builder validates
+- **Pinned implementation constants** (not configuration): the
+  single-PUT → multipart threshold is **16 MB**; the presign window for
+  part URLs is on the order of hours; the inline-safe disposition
+  allowlist (matched on the parsed MIME essence, case-insensitive) is
+  exactly `image/jpeg`, `image/png`, `image/gif`, `image/webp`,
+  `image/avif`, `video/mp4`, `video/webm`, `audio/mpeg`, `audio/mp4`,
+  `audio/ogg`, `audio/wav`, `application/pdf` — everything else, and
+  explicitly `text/html`, `image/svg+xml`, `application/xhtml+xml`, and
+  all `text/*`, serve as `attachment`.
+- **Descriptor canonicalization is RFC 8785 (JCS)** — the engine has no
+  existing canonicalization to reuse (JSON columns store text verbatim),
+  and JCS pins number and string-escaping byte-stability that "sorted
+  keys, compact" alone does not; the same algorithm runs in the Rust
+  write-path validator and the TS builder.
+- **`fromBlob` takes a `Blob`** on every platform (web `Blob`, Node ≥18
+  global `Blob`, RN `Blob`); thin platform helpers wrap a Node
+  `Buffer`/`Uint8Array` or an RN file URI into a `Blob` carrying an
+  explicit `type`. `size` and `mime_type` always come from the Blob (see
+  the empty-`type` throw in the upload flow).
+- **Configuration surfaces:** the TTL class set is deployment
+  configuration; the schema names a class per column (`FILE('7d')` on the
+  schema wire) and the server validates each granted id's class segment
+  against the set and against the destination column's declaration. Class
+  names match `^[a-z0-9]{1,15}$`; a `type/*` pattern in a column's
+  declared set matches any MIME whose primary type equals `type` with a
+  non-empty subtype, an exact `type/subtype` matches that essence
+  (parameters ignored, case-insensitive), and `*/*` is disallowed (omit
+  `types` for "any"). The client-facing files base URL (`filesUrl`,
+  default `{serverUrl}/files`) is client config alongside `serverUrl` and
+  its env-var family; the serving endpoint's **302 redirect target** is a
+  separate server config `filesObjectBase` naming the public bucket/CDN
+  object host (irrelevant in CDN-straight-at-bucket mode, where there is
+  no endpoint). The TS builder validates
   a declared `ttl` for grammar only; set membership is checked at grant.
-- The lease window default is on the order of days, realized as the
-  `pending/` prefix lifecycle expiry (day granularity), and is
-  operator-facing alongside the incomplete-multipart abort rule and one
+- The lease window default is **2 days**, realized as the
+  `pending/` prefix lifecycle expiry (day granularity) — long enough to
+  cover the longest in-session upload (core has no cross-restart resume),
+  short enough to bound storage abuse; operator-tunable alongside the
+  incomplete-multipart cleanup and one
   lifecycle rule per declared TTL class.
+- **Class-set evolution is a footgun, stated:** removing or renaming a
+  TTL class from the deployment set orphans existing `t{old}/` bodies —
+  their lifecycle rule vanishes and they become de-facto permanent — so a
+  class prefix's lifecycle rule must never be dropped while bodies live
+  under it. Relatedly, a file created via `fromBlob` for a **non-TTL**
+  column is permanent even if its descriptor is later written into a
+  TTL-declared column: the class is fixed at creation, never at
+  placement.
 - The design doc's "Rejected alternatives" section is required reading
   before proposing any deviation from the shapes above — with the caveats
   listed in this spec's header.
