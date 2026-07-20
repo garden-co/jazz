@@ -201,9 +201,11 @@ Two deliverables, buildable together and testable end to end:
   the `canonical` option was
   retired with the invisible-core amendment).
 - **File-plane protocol messages** on the authenticated sync connection:
-  grant `(file id, size, mime_type, name, destination column)` → object
+  grant `(file id, size, mime_type, name, column)` → object
   key, lease expiry, presigned URL(s),
-  `UploadId` where multipart; part-URL refresh `(file id, UploadId,
+  `UploadId` where multipart (`column` is the handle's `for`, referenced
+  by its stable schema-level column id, not its display name); part-URL
+  refresh `(file id, UploadId,
 part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   optional fields absent on the single-PUT path; delete
   `(file id)`. Every one authorizes by comparing the id's identity
@@ -211,10 +213,14 @@ part numbers)`; release `(file id, UploadId?, part ETags?)` — both
   (`Session.user_id` as the existing sync auth establishes it; the
   backend-secret surface bypasses); grant
   additionally checks the class segment against the deployment class set
-  and the named column's `ttl` declaration, and the `mime_type` against
-  that column's declared type set (no declared set = any type).
+  and the named column's `ttl` declaration, and the `mime_type` (a
+  well-formed RFC 9110 media type) against
+  that column's declared type set (no declared set = any type). A column
+  re-declared between the id's mint and the grant is validated against
+  the current schema and may refuse (→ handle `failed`; no schema version
+  is pinned into the grant).
   Nothing is persisted server-side; nothing is read from the bucket at
-  issuance.
+  issuance (bar the multipart path's single `CreateMultipartUpload`).
 - **Bucket layout and rules:** uploads land at
   `pending/{app}[/t{class}]/{identity}/{random}` under conditional
   writes; release copies to the final key (starting the TTL clock,

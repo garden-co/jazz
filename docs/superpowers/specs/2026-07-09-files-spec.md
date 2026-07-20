@@ -173,9 +173,9 @@ offline package. A handle released but never written into a surviving,
 accepted cell leaves a live orphan body — an accepted, stated leak. Where
 the write is rejected by policy, the handle's `rejected` state is the
 app's cue and `delete()` the remedy; where the descriptor is simply never
-written, the app must track its own unreferenced handles (dropping a
-handle before release cancels its in-flight upload, so an abandoned handle
-usually never releases). A TTL'd column self-heals either way.
+written, the app calls `handle.cancel()` to abort a still-in-flight
+upload (releasing the hold, moving the handle to `cancelled`) or tracks
+its own unreferenced handles. A TTL'd column self-heals either way.
 
 Reading a file _is the web_: one stable, unauthenticated, public URL —
 `GET /files/{app}/{identity}/{random}` — redirecting to the public object
@@ -279,7 +279,8 @@ never deletes objects.
     within a session, still complete with no edge affinity.
 16. As an end user, I want to see upload progress and state
     (`local → uploading(progress) → released → accepted | rejected`, or
-    `uploading → failed` on a terminal upload failure) on the
+    `uploading → failed | cancelled` when the upload fails or I cancel
+    it) on the
     file handle, so that the app can show me what's pending and warn me
     before I abandon a session holding unreleased files.
 17. As an app developer, I want `fromBlob(blob, { for })` to finalize the
@@ -669,11 +670,19 @@ nosniff` is a deployment requirement on the public object host in
   while a backend impersonating a user acts inside that user's namespace
   like any session. Only the original owner can
   ever re-claim one of their own ids — after a delete or a TTL expiry —
-  and the SDK never does (fresh randoms every time); self-resurrection is
-  the owner's own footgun and is stated as such.
+  and the SDK never reuses a _released or deleted_ id (fresh randoms per
+  new file); self-resurrection of a served id is the owner's own footgun
+  and is stated as such. The one deliberate reuse is the in-session
+  same-id restart of a **never-released** upload after lease expiry (see
+  the upload cleanup below) — safe because nothing was ever served at
+  that URL.
 - **Upload flow:** (1) create offline-capable —
-  `fromBlob(blob, { for, name })` keeps the Blob
-  in memory, measures `size`, and synchronously finalizes the
+  `fromBlob(blob, { for, name, type? })` keeps the Blob
+  in memory, measures `size`, takes `mime_type` from `type ?? blob.type`
+  (empty on both — common for Node Buffers and some RN pickers — makes
+  `fromBlob` throw, since an untyped body can neither be validated
+  against a declared set nor pinned as `Content-Type`), and synchronously
+  finalizes the
   identity-bound
   id (class segment from the `for` column's declaration + identity +
   fresh random), returning a handle whose `url()` is immediately valid;
@@ -691,8 +700,16 @@ nosniff` is a deployment requirement on the public object host in
   descriptors have bytes when they sync — while later independent commit
   units bypass it (causally dependent writes — those the outbox's existing
   relation already orders behind the held one — queue behind it); (3) grant
-  request `(file id, size, mime_type, name, destination column)` over
-  sync — the class travels inside the id;
+  request `(file id, size, mime_type, name, column)` over
+  sync — the class travels inside the id; `column` is the handle's `for`,
+  identified by its **stable schema-level column id** (not its display
+  name, so a rename never strands an in-flight grant), and is always the
+  `for` the id was minted against, never a free choice; if that column's
+  `ttl` or type set was re-declared between mint and grant, the server
+  validates against the current schema and may refuse — surfacing as the
+  handle's `failed` state, from which the app re-creates against the new
+  schema (a rare, deployment-level race, so no schema version is pinned
+  into the grant);
   any identity-bearing session may request grants for its own namespace;
   abuse is bounded by the `pending/` lifecycle expiry, with per-identity
   rate limits as future work; the server verifies the identity segment,
@@ -775,9 +792,15 @@ nosniff` is a deployment requirement on the public object host in
   on Tigris an external scheduled sweep (`ListMultipartUploads` +
   `AbortMultipartUpload`, operator infrastructure, not Jazz code) or
   knowingly accepted part accrual. If a lease expires mid-session, the
-  SDK restarts the upload with a fresh id from the still-in-memory Blob
-  and rewrites the descriptor in an ordinary transaction — in-session
-  only; after a restart nothing resumes. No sweep code exists in Jazz
+  SDK re-uploads from the still-in-memory Blob **under the same file id**
+  — never a fresh one: the id is the file's own and its `url()` may
+  already be captured or written into other cells, so re-minting would
+  silently invalidate them. Re-claiming your own never-released id is
+  safe (nothing ever served at that URL), so the restart requests a fresh
+  grant for the same key, deletes-then-rewrites or tolerates a 412 on the
+  stale pending object, and no descriptor is rewritten — the already-held
+  transactions keep their id. This is in-session only; a process restart
+  resumes nothing. No sweep code exists in Jazz
   anywhere.
 - **File TTL is a fixed set of classes, declared on the schema and
   realized as key prefixes.** A deployment declares its class set
@@ -872,13 +895,20 @@ nosniff` is a deployment requirement on the public object host in
   id; no `canonical` option —
   it is retired until an opt-in package rewrites URLs),
   `jazz.files.delete(fileId)` (returns a Promise — resolves on origin
-  confirmation, rejects on failure; retries are the caller's), and an
+  confirmation, rejects on failure; retries are the caller's),
+  `handle.cancel()` (aborts a still-in-flight upload before release,
+  releases the outbox hold, and moves the handle to `cancelled`), and an
   observable upload state on the
   handle: `local → uploading(progress) → released → accepted | rejected`,
-  plus a terminal `failed` reached from `uploading` when the upload
-  itself fails (grant refused, unrecoverable transport error, lease
-  expiry) — `failed` releases the outbox hold and lets the descriptor
-  sync bodyless, so it never hangs (accepted/rejected are the ordinary
+  plus terminal `failed` (upload itself failed — grant refused or lease
+  exhausted) and `cancelled` (via `cancel()`), both reached from
+  `uploading` and both releasing the outbox hold so the descriptor syncs
+  bodyless and never hangs. When one handle's descriptor is written into
+  several cells, the handle is `accepted` if **any** write settles
+  accepted and `rejected` only if **all** do — so `delete()` on a
+  `rejected` handle can never strand bytes a surviving accepted cell
+  references; per-write settlement stays observable for apps that want
+  the detail. (accepted/rejected are the ordinary
   transaction fates — nothing
   file-specific). Nothing else: reads, previews, and blob derivation are
   userland.
@@ -944,8 +974,9 @@ column)`, validates class and mime type against the schema
     manually-triggerable lifecycle expiry), with an in-process fake under
     the file plane in tests and minio as an optional real target.
 - **Explicit scenarios to cover:** part-URL refresh past a presign window
-  within a live session; in-session restart after lease expiry (fresh id,
-  minted from the still-in-memory Blob); an upload interrupted by a client
+  within a live session; in-session restart after lease expiry (**same
+  id**, re-granted and re-uploaded from the still-in-memory Blob — the
+  handle's id and `url()` are unchanged); an upload interrupted by a client
   restart — the descriptor syncs bodyless and its URL 404s, with no resume
   machinery anywhere (the documented core outcome); URL 404 before release and live after the
   release copy; a file written into a TTL-declared column landing under
@@ -1042,9 +1073,9 @@ column)`, validates class and mime type against the schema
   a surviving accepted cell remaining a live orphan (an accepted leak):
   on the rejected-write path the handle's `rejected` state is the app's
   cue and `delete()` the remedy; on the never-written path there is no
-  per-handle terminal cue — the app tracks its own unreferenced handles,
-  and dropping a handle before release cancels its in-flight upload (so an
-  abandoned handle usually never releases at all); either way a TTL'd
+  per-handle terminal cue — the app calls `handle.cancel()` to abort an
+  in-flight upload (→ `cancelled`, hold released) or tracks its own
+  unreferenced handles; either way a TTL'd
   column self-heals, and the SDK never auto-deletes a released body
   because the same descriptor may live in other accepted cells it cannot
   see; `url()` being valid the moment `fromBlob` returns, with no pre-id
@@ -1052,9 +1083,12 @@ column)`, validates class and mime type against the schema
   bucket
   writes (PUT + copy + delete); only the original owner can ever re-claim
   one of their own ids after a delete or expiry — third-party takeover is
-  impossible by construction, and the SDK never reuses ids, so an owner
-  resurrecting their own URL (with stale CDN copies still floating) is
-  their own footgun; the URL 404ing until release (apps preview from the
+  impossible by construction, and the SDK never reuses a released or
+  deleted id, so an owner
+  resurrecting a served URL (with stale CDN copies still floating) is
+  their own footgun (the in-session same-id restart of a never-released
+  upload is the one deliberate, safe reuse); the URL 404ing until release (apps preview from the
+  Blob they hold — in core the only pre-release render path); the URL 404ing until release (apps preview from the
   Blob they hold — in core the only pre-release render path); sibling
   columns written in the same transaction as a
   fromBlob descriptor becoming visible only when the in-memory hold
