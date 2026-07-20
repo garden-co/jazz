@@ -1341,11 +1341,22 @@ export function defineSliceableApp(
   } as SliceableApp<Schema<SchemaDefinition>>;
 }
 
+// The statically-registered app schema: the inspector host handle falls back to
+// it before any client exists (e.g. a write-only page with no query yet). Set
+// at defineApp time, so it does not depend on a connection being established.
+let registeredWasmSchema: WasmSchema | undefined;
+
+/** The most recently defined app's WasmSchema, if any (used by the inspector). */
+export function getRegisteredWasmSchema(): WasmSchema | undefined {
+  return registeredWasmSchema;
+}
+
 function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
   definition?: SchemaDefinition,
 ): App<Schema<SchemaDefinition>> {
+  registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of tableNames) {

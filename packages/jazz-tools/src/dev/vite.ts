@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
+import { wireInspectorOverlay } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -36,6 +37,11 @@ export interface JazzPluginOptions {
   schemaDir?: string;
   appId?: string;
   telemetry?: TelemetryOptions;
+  /**
+   * The in-app inspector overlay (a floating toggle that opens the embedded
+   * inspector) is served during dev by default. Set to `false` to disable it.
+   */
+  inspector?: boolean;
 }
 
 const LOG_PREFIX = "[jazz]";
@@ -55,6 +61,19 @@ export interface ViteDevServer {
     };
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
+  middlewares?: {
+    use(
+      fn: (
+        req: { url?: string },
+        res: {
+          setHeader(name: string, value: string): void;
+          statusCode: number;
+          end(body?: string | Buffer): void;
+        },
+        next: () => void,
+      ) => void,
+    ): void;
+  };
   ws: {
     send(payload: { type: string; err?: { message: string; stack?: string } }): void;
   };
@@ -145,6 +164,8 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
           managed.adminSecret,
         )}`,
       );
+
+      if (options.inspector !== false) wireInspectorOverlay(viteServer);
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

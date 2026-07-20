@@ -68,21 +68,27 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The host publishes a resolved broker-worker URL, so the overlay's
-    // persistent driver joins the host's SharedWorker/OPFS store (same url+name)
-    // instead of spinning up an empty one. Without this it would default to its
-    // own broker and never see the host's local data offline.
-    const brokerWorkerUrl = await page.evaluate(
-      () =>
-        (
-          window as unknown as {
-            __jazzInspectorHost?: {
-              getConnectionConfig(): { runtimeSources?: { brokerWorkerUrl?: string } };
-            };
-          }
-        ).__jazzInspectorHost?.getConnectionConfig().runtimeSources?.brokerWorkerUrl,
-    );
-    expect(brokerWorkerUrl).toBeTruthy();
+    // The host publishes a live subscription channel into its own store; the
+    // overlay's client connects through it (same-origin realm call) instead of
+    // opening a competing worker/OPFS connection. Without this it would never
+    // see the host's local data offline.
+    const hasHostChannel = await page.evaluate(() => {
+      const host = (
+        window as unknown as {
+          __jazzInspectorHost?: {
+            getSubscriptionChannel(): { subscribeAll?: unknown; shutdown?: unknown };
+          };
+        }
+      ).__jazzInspectorHost;
+      if (!host) return { present: false };
+      const channel = host.getSubscriptionChannel();
+      return {
+        present: typeof channel?.subscribeAll === "function",
+        // shutdown must be masked so the overlay can't shut the host down.
+        shutdownMasked: channel?.shutdown === undefined,
+      };
+    });
+    expect(hasHostChannel).toEqual({ present: true, shutdownMasked: true });
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.
