@@ -103,9 +103,11 @@ canonical-JSON value naming one body: required `v: 1` plus **file id**,
 string embedding the column's TTL class (when one is declared), a stable
 UUIDv5 derivation of the uploader's identity id, and a cryptographically
 random part. The SDK
-finalizes the id **synchronously inside `fromBlob`** — the destination
-column is passed to `fromBlob` and names the class (and its declared mime
-types) — entirely locally and fully offline, from day
+finalizes the id **synchronously inside `fromBlob`**, which is called on
+the destination file-column accessor
+(`db.<table>.<column>.fromBlob(blob)`) — the column is the receiver, so
+it supplies the class and its declared mime
+types — entirely locally and fully offline, from day
 zero, because a client always knows its own identity id and its schema.
 The id belongs to the file, not to any row: it exists the moment
 `fromBlob` returns, before the descriptor is written into any cell, and
@@ -152,9 +154,11 @@ bucket lifecycle rule expiring the `pending/` prefix (plus the native
 incomplete-multipart abort rule) — the lease window _is_ the lifecycle
 expiry, and no server sweep exists.
 
-Creation is offline-capable within a session: `fromBlob(blob, { for })`
-keeps the Blob in memory, measures `size`, and — taking the destination
-column as `for` — finalizes the id and yields a handle whose descriptor is
+Creation is offline-capable within a session:
+`db.<table>.<column>.fromBlob(blob)`
+keeps the Blob in memory, measures `size`, and — the receiver column
+supplying the class and declared types — finalizes the id and yields a
+handle whose descriptor is
 ready to write into a cell; the
 upload may begin as soon as the handle exists — grant → PUT → release —
 straight from that Blob, no longer waiting on a cell write.
@@ -283,7 +287,8 @@ never deletes objects.
     it) on the
     file handle, so that the app can show me what's pending and warn me
     before I abandon a session holding unreleased files.
-17. As an app developer, I want `fromBlob(blob, { for })` to finalize the
+17. As an app developer, I want `db.<table>.<column>.fromBlob(blob)` to
+    finalize the
     id and return a usable handle immediately — `url()` valid at once —
     while upload continues in the background, so that I
     can write it into a cell in the same breath and my UI code stays simple.
@@ -587,16 +592,19 @@ nosniff` is a deployment requirement on the public object host in
   which is per-app, so a grant implicitly authorizes only the connected
   app's namespace; `url()` takes it from the client's own config. The id
   is
-  **finalized synchronously inside `fromBlob`** — the caller passes the
-  destination column as `fromBlob(blob, { for })`, and the SDK mints the
-  full id (that column's class + identity segment + fresh random) before
+  **finalized synchronously inside `fromBlob`** — called on the
+  destination file-column accessor (`db.<table>.<column>.fromBlob(blob)`),
+  which supplies the class and declared types from its own declaration and
+  the identity from the session-bound `db`, so the SDK mints the
+  full id (column class + identity segment + fresh random) before
   `fromBlob` returns, keeping the Blob in memory. The id is the file's
   own, minted independently of any row: `url()` is valid the instant the
   handle exists, before the descriptor is written into any cell (it 404s
   until release; apps preview from the Blob they hold). Minting is
   entirely on-device and local — a client always knows its own identity id
   and its schema — so ids and `url()` work offline from the moment an
-  identity exists. Writing the handle into its `for` column (or any
+  identity exists. Writing the handle into the column it was created from
+  (or any
   other) is an ordinary write of the already-finalized descriptor; writing
   it into a differently-declared column is the ordinary copy semantic —
   the baked-in class travels, columns never re-class. The
@@ -678,105 +686,106 @@ nosniff` is a deployment requirement on the public object host in
   the upload cleanup below) — safe because nothing was ever served at
   that URL.
 - **Upload flow:** (1) create offline-capable —
-  `fromBlob(blob, { for, name, type? })` keeps the Blob
+  `db.<table>.<column>.fromBlob(blob, { name?, type? })` keeps the Blob
   in memory, measures `size`, takes `mime_type` from `type ?? blob.type`
   (empty on both — common for Node Buffers and some RN pickers — makes
   `fromBlob` throw, since an untyped body can neither be validated
   against a declared set nor pinned as `Content-Type`), and synchronously
   finalizes the
   identity-bound
-  id (class segment from the `for` column's declaration + identity +
-  fresh random), returning a handle whose `url()` is immediately valid;
-  the upload begins on the microtask after `fromBlob` returns — it does
-  not wait on a cell write; `fromBlob` requires an identity-bearing
-  session (anonymous local-first identities are keypair-backed and qualify;
-  a session with no identity cannot mint or upload); writing the
-  descriptor into a cell is an ordinary local transaction and
-  need not precede the upload; (2) the SDK holds every transaction that
-  writes this descriptor
-  at the outbox — the hold is keyed by the file id, so all such writes
-  release together on the single upload's terminal outcome — an in-memory
-  client-side courtesy so
-  upload-path
-  descriptors have bytes when they sync — while later independent commit
-  units bypass it (causally dependent writes — those the outbox's existing
-  relation already orders behind the held one — queue behind it); (3) grant
-  request `(file id, size, mime_type, name, column)` over
-  sync — the class travels inside the id; `column` is the handle's `for`,
-  identified by its **stable schema-level column id** (not its display
-  name, so a rename never strands an in-flight grant), and is always the
-  `for` the id was minted against, never a free choice; if that column's
-  `ttl` or type set was re-declared between mint and grant, the server
-  validates against the current schema and may refuse — surfacing as the
-  handle's `failed` state, from which the app re-creates against the new
-  schema (a rare, deployment-level race, so no schema version is pinned
-  into the grant);
-  any identity-bearing session may request grants for its own namespace;
-  abuse is bounded by the `pending/` lifecycle expiry, with per-identity
-  rate limits as future work; the server verifies the identity segment,
-  the class segment (deployment set + column declaration), and the
-  `mime_type` (column's declared type set) by pure
-  computation, initiates the multipart upload where needed, and returns the
-  pending object key, lease expiry, the `UploadId` (which the client
-  holds in memory — no server remembers it), and conditional
-  presigned URLs (single PUT below the 16 MB threshold,
-  multipart above); (4) the client PUTs directly to the pending key,
-  tracking completed part ETags in memory; it may request fresh part URLs
-  from any edge within the lease by presenting the `UploadId` (presign
-  windows are hours, leases are days); (5) **release** over sync carries
-  `(file id, UploadId?, part ETags?)` — both optional fields absent on
-  the single-PUT path, where release is just HEAD + copy + delete; any
-  edge HEADs the final key (already
-  present → success), completes the multipart (conditionally where the
-  backend supports it),
-  server-side-copies the pending object to its final key, pinning the
-  serving headers on the copy — **below the ~5 GB single-copy cap** a
-  single `CopyObject` re-sending them with the `REPLACE` metadata
-  directive, guarded on the destination where the backend supports it
-  (`If-None-Match: *` on S3, `cf-copy-destination-if-none-match: *` on
-  R2), else unconditional; **above the cap** an `UploadPartCopy`-based
-  multipart copy whose pinned headers travel on the destination
-  `CreateMultipartUpload` (there is no metadata directive on a multipart
-  copy) and whose guard, where offered at all, sits on the copy's
-  `CompleteMultipartUpload` (uploads run to 5 TB, past the single-copy
-  limit; the threshold is an implementation constant alongside the upload
-  single/multipart threshold). A crashed above-cap copy leaves an
-  incomplete multipart upload under the **final** prefix, so the
-  incomplete-MPU cleanup requirement (below) is bucket-wide, not scoped
-  to `pending/`. For TTL'd files
-  that key sits under the class prefix, and the copy is what starts the
-  expiry clock — and deletes the pending object (best-effort; the
-  `pending/` lifecycle rule is the backstop) — idempotent end to end by
-  construction; the held transactions then enter the ordinary lane. There
-  is no step six: no size check, no file-specific acceptance. A client that
-  never releases leaves only a pending object the bucket will expire; a
-  client that lies harms only its own URL. The release response
-  distinguishes its outcome — **final present / copy performed** vs
-  **nothing found** (no final object and no pending source, and, on the
-  multipart path, `CompleteMultipartUpload` returning no-such-upload) —
-  at zero extra cost, since the server already knows which branch it
-  took. "Nothing found" is not a silent success: the SDK maps it to
-  `failed` (or an in-session restart), so an honest client whose pending
-  object was reaped by the `pending/` lifecycle at a day boundary, or
-  whose completed upload vanished before the copy, learns its URL is
-  bodyless rather than being told it released. The small-file cost is stated
-  plainly: PUT + copy + delete is three bucket writes per file — the
-  price of `pending/` being the lease and GC mechanism.
-  **On terminal upload failure** — the grant refused (mime type or class
-  outside the column's declaration), or lease expiry with no in-session
-  retry left — the handle enters the
-  `failed` state and the outbox hold releases exactly as on success: the
-  held descriptor-writing transactions enter the ordinary lane bodyless,
-  their URLs 404, identical to the interrupted-upload outcome. The hold
-  never outlives its upload; a held transaction cannot hang the session.
-  Transient transport errors and going offline mid-session are **not**
-  terminal — the in-session driver waits and retries within the lease
-  (US 11's offline-attach relies on this); only grant refusal, lease
-  exhaustion, and explicit cancellation move a handle to `failed`. (One
-  honest edge: a session that dies mid-release-retry can land in `failed`
-  even though the release actually completed — the URL then serves, not
-  404s; the app re-derives state from the descriptor, not the stale
-  handle.)
+  id (class segment from the **receiver column's** declaration + identity
+  - fresh random), returning a handle whose `url()` is immediately valid;
+    the upload begins on the microtask after `fromBlob` returns — it does
+    not wait on a cell write; `fromBlob` requires an identity-bearing
+    session (anonymous local-first identities are keypair-backed and qualify;
+    a session with no identity cannot mint or upload); writing the
+    descriptor into a cell is an ordinary local transaction and
+    need not precede the upload; (2) the SDK holds every transaction that
+    writes this descriptor
+    at the outbox — the hold is keyed by the file id, so all such writes
+    release together on the single upload's terminal outcome — an in-memory
+    client-side courtesy so
+    upload-path
+    descriptors have bytes when they sync — while later independent commit
+    units bypass it (causally dependent writes — those the outbox's existing
+    relation already orders behind the held one — queue behind it); (3) grant
+    request `(file id, size, mime_type, name, column)` over
+    sync — the class travels inside the id; `column` is the file-column
+    accessor the handle was created from,
+    identified by its **stable schema-level column id** (not its display
+    name, so a rename never strands an in-flight grant), and is always the
+    column the id was minted against, never a free choice; if that column's
+    `ttl` or type set was re-declared between mint and grant, the server
+    validates against the current schema and may refuse — surfacing as the
+    handle's `failed` state, from which the app re-creates against the new
+    schema (a rare, deployment-level race, so no schema version is pinned
+    into the grant);
+    any identity-bearing session may request grants for its own namespace;
+    abuse is bounded by the `pending/` lifecycle expiry, with per-identity
+    rate limits as future work; the server verifies the identity segment,
+    the class segment (deployment set + column declaration), and the
+    `mime_type` (column's declared type set) by pure
+    computation, initiates the multipart upload where needed, and returns the
+    pending object key, lease expiry, the `UploadId` (which the client
+    holds in memory — no server remembers it), and conditional
+    presigned URLs (single PUT below the 16 MB threshold,
+    multipart above); (4) the client PUTs directly to the pending key,
+    tracking completed part ETags in memory; it may request fresh part URLs
+    from any edge within the lease by presenting the `UploadId` (presign
+    windows are hours, leases are days); (5) **release** over sync carries
+    `(file id, UploadId?, part ETags?)` — both optional fields absent on
+    the single-PUT path, where release is just HEAD + copy + delete; any
+    edge HEADs the final key (already
+    present → success), completes the multipart (conditionally where the
+    backend supports it),
+    server-side-copies the pending object to its final key, pinning the
+    serving headers on the copy — **below the ~5 GB single-copy cap** a
+    single `CopyObject` re-sending them with the `REPLACE` metadata
+    directive, guarded on the destination where the backend supports it
+    (`If-None-Match: *` on S3, `cf-copy-destination-if-none-match: *` on
+    R2), else unconditional; **above the cap** an `UploadPartCopy`-based
+    multipart copy whose pinned headers travel on the destination
+    `CreateMultipartUpload` (there is no metadata directive on a multipart
+    copy) and whose guard, where offered at all, sits on the copy's
+    `CompleteMultipartUpload` (uploads run to 5 TB, past the single-copy
+    limit; the threshold is an implementation constant alongside the upload
+    single/multipart threshold). A crashed above-cap copy leaves an
+    incomplete multipart upload under the **final** prefix, so the
+    incomplete-MPU cleanup requirement (below) is bucket-wide, not scoped
+    to `pending/`. For TTL'd files
+    that key sits under the class prefix, and the copy is what starts the
+    expiry clock — and deletes the pending object (best-effort; the
+    `pending/` lifecycle rule is the backstop) — idempotent end to end by
+    construction; the held transactions then enter the ordinary lane. There
+    is no step six: no size check, no file-specific acceptance. A client that
+    never releases leaves only a pending object the bucket will expire; a
+    client that lies harms only its own URL. The release response
+    distinguishes its outcome — **final present / copy performed** vs
+    **nothing found** (no final object and no pending source, and, on the
+    multipart path, `CompleteMultipartUpload` returning no-such-upload) —
+    at zero extra cost, since the server already knows which branch it
+    took. "Nothing found" is not a silent success: the SDK maps it to
+    `failed` (or an in-session restart), so an honest client whose pending
+    object was reaped by the `pending/` lifecycle at a day boundary, or
+    whose completed upload vanished before the copy, learns its URL is
+    bodyless rather than being told it released. The small-file cost is stated
+    plainly: PUT + copy + delete is three bucket writes per file — the
+    price of `pending/` being the lease and GC mechanism.
+    **On terminal upload failure** — the grant refused (mime type or class
+    outside the column's declaration), or lease expiry with no in-session
+    retry left — the handle enters the
+    `failed` state and the outbox hold releases exactly as on success: the
+    held descriptor-writing transactions enter the ordinary lane bodyless,
+    their URLs 404, identical to the interrupted-upload outcome. The hold
+    never outlives its upload; a held transaction cannot hang the session.
+    Transient transport errors and going offline mid-session are **not**
+    terminal — the in-session driver waits and retries within the lease
+    (US 11's offline-attach relies on this); only grant refusal, lease
+    exhaustion, and explicit cancellation move a handle to `failed`. (One
+    honest edge: a session that dies mid-release-retry can land in `failed`
+    even though the release actually completed — the URL then serves, not
+    404s; the app re-derives state from the descriptor, not the stale
+    handle.)
 - **Unreleased-upload cleanup is bucket TTL, not a server sweep.** A
   lifecycle rule expires the `pending/` prefix after the lease window
   (day-granularity, matching the "order of days" lease) — prefix-scoped
@@ -883,14 +892,20 @@ nosniff` is a deployment requirement on the public object host in
   hold the object-store credentials (presign, complete, copy, delete);
   clients never see them. Dev and tests run minio or an in-process fake
   that also fakes lifecycle expiry (manually triggerable in tests).
-- **TS API:** `fromBlob(blob, { for, name })` (create; the destination
-  column is passed as `for`, so the id — including its TTL class — is
+- **TS API:** `db.<table>.<column>.fromBlob(blob, { name?, type? })`
+  (create — the **file column accessor is the receiver**, so it supplies
+  the TTL class and declared `types` from its own declaration and the
+  identity from the session-bound `db`; the id — including its TTL class —
+  is
   finalized synchronously and `url()` is valid the moment the handle
   returns; the handle is then written into cells; background upload; no
   per-call `ttl` — TTL is
-  the schema's, carried by `for`; creation input is a Blob so `size` is
-  always known — there
-  is no `fromStream`), `file.url()` (the stable public URL on every
+  the schema's, carried by the column; creation input is a Blob so `size`
+  is always known — there
+  is no `fromStream`. `.fromBlob` exists only on file columns and can be
+  typed to the column's declared `types`; reaching a column accessor
+  requires a live session, which is what makes an identity-bearing session
+  a structural precondition), `file.url()` (the stable public URL on every
   platform; computed synchronously and locally from the id plus static
   client config — `filesUrl`, default `{serverUrl}/files`, and the app
   id; no `canonical` option —

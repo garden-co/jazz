@@ -7,9 +7,9 @@ are served straight from a CDN; only the metadata travels through Jazz sync.
 
 ```ts
 // declare → create → write → render, end to end
-const avatar = await jazz.files.fromBlob(blob, { for: schema.profiles.avatar });
-await db.profiles.update(me.id, { avatar });     // an ordinary column write
-<img src={me.avatar.url()} />                     // a plain, permanent URL
+const avatar = await db.profiles.avatar.fromBlob(blob); // created on the column
+await db.profiles.update(me.id, { avatar });            // an ordinary column write
+<img src={me.avatar.url()} />                            // a plain, permanent URL
 ```
 
 This guide is the **user-facing API surface** and the **flows** behind it.
@@ -86,24 +86,25 @@ app-trusted; anything you query or sort by belongs in a sibling column.
 
 ## API 2 — Create a file
 
-`fromBlob` takes the `Blob` and the **destination column**. It mints the
+`fromBlob` is a method **on the file column** — the column is the
+receiver, so it supplies the TTL class, the allowed `types`, and (via the
+session-bound `db`) your identity. It mints the
 file id synchronously and returns a handle immediately — `url()` works at
 once — then uploads in the background.
 
 ```ts
-const attachment = await jazz.files.fromBlob(blob, {
-  for: schema.messages.attachment, // destination column: supplies TTL class + allowed types
-  name: "photo.jpg", // download filename
+const attachment = await db.messages.attachment.fromBlob(blob, {
+  name: "photo.jpg", // download filename (optional)
   // mime_type defaults to blob.type; pass `type` when the Blob has none
 });
 ```
 
-| Argument | Meaning                                                                                                                                                         |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `blob`   | The bytes. `size` is measured from it; there is no `fromStream` (the grant needs `size` up front).                                                              |
-| `for`    | The column the file is destined for. It supplies the TTL class baked into the id and the allowed-types set checked at upload.                                   |
-| `name`   | Filename, used for the download `Content-Disposition`.                                                                                                          |
-| `type`   | Optional MIME override. Defaults to `blob.type`; if both are empty (common for Node `Buffer`s), `fromBlob` **throws** — an untyped body can't be served safely. |
+| Part                     | Meaning                                                                                                                                                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `db.messages.attachment` | The file-column accessor. Being the receiver, it supplies the TTL class baked into the id and the allowed-types set checked at upload. `.fromBlob` exists only on file columns, and needs a live (identity-bearing) session to reach. |
+| `blob`                   | The bytes. `size` is measured from it; there is no `fromStream` (the grant needs `size` up front).                                                                                                                                    |
+| `name`                   | Optional filename for the download `Content-Disposition`.                                                                                                                                                                             |
+| `type`                   | Optional MIME override. Defaults to `blob.type`; if both are empty (common for Node `Buffer`s), `fromBlob` **throws** — an untyped body can't be served safely.                                                                       |
 
 Then write the handle into a cell — an ordinary column write:
 
@@ -113,10 +114,13 @@ const msg = await db.messages.insert({ text: "look at this", attachment });
 
 The id is **the file's own**, not the row's: it exists the moment
 `fromBlob` returns, before any cell write, and the same handle can be
-written into several cells (an ordinary descriptor copy). Creating and
+written into several cells (an ordinary descriptor copy — the class stays
+the one it was created with, even if the other column declares a different
+one). Creating and
 minting work fully offline — a client always knows its own identity and
-schema. (`fromBlob` needs an identity-bearing session; anonymous
-local-first identities qualify.)
+schema. Because `.fromBlob` lives on a column reached through the live
+`db`, an identity-bearing session is structural, not a checked
+precondition (anonymous local-first identities qualify).
 
 ---
 
@@ -330,7 +334,7 @@ confidentiality are different axes — never mistake one for the other.
 | You want to…         | Use                                                               |
 | -------------------- | ----------------------------------------------------------------- |
 | Declare a file field | `s.file()` / `s.file({ ttl, types })`                             |
-| Create a file        | `jazz.files.fromBlob(blob, { for, name, type? })`                 |
+| Create a file        | `db.<table>.<column>.fromBlob(blob, { name?, type? })`            |
 | Put it on a row      | an ordinary column write                                          |
 | Render it            | `file.url()` in an `<img>`/`<video>`/link                         |
 | Read its bytes       | `fetch(file.url())`                                               |

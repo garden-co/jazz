@@ -87,7 +87,8 @@ Two deliverables, buildable together and testable end to end:
 ### Ids, minting & URLs
 
 10. As an app developer, I want the SDK to mint the file id synchronously
-    when I call `fromBlob` with the destination column — TTL class from
+    when I call `db.<table>.<column>.fromBlob(blob)` on the file-column
+    accessor — TTL class and declared types from
     that column's declaration,
     the identity segment derived (UUIDv5) from the session identity,
     random from a CSPRNG — so that ids are
@@ -194,8 +195,10 @@ Two deliverables, buildable together and testable end to end:
   and serving path are `{app}[/t{class}]/{identity}/{random}`, with
   `{app}` supplied by the per-app sync connection, never by the id. The
   SDK
-  finalizes the id synchronously inside `fromBlob`, from the destination
-  column passed to it (`fromBlob(blob, { for })`) — the id is the file's
+  finalizes the id synchronously inside `fromBlob`, called on the
+  destination file-column accessor
+  (`db.<table>.<column>.fromBlob(blob)`, which supplies the class and
+  declared types) — the id is the file's
   own, not a row's, and exists before any cell write; `url()` derives
   from the id plus static client config — `filesUrl` and the app id —
   and is valid the instant the handle returns (always the public URL —
