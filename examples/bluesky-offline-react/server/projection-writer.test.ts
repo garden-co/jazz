@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../operations.js";
 import { app } from "../schema.js";
-import { stableObjectId } from "./timeline.js";
+import { stableObjectId } from "./projection-model.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 
@@ -286,9 +286,7 @@ describe("thread projection", () => {
     const writer = createProjectionWriter();
     const thread = {
       rootPostId: "root-id",
-      selectedPostId: "missing-id",
       entries: [{
-        node: { uri: "at://did:plc:author/app.bsky.feed.post/missing" },
         postId: "missing-id",
         sortOrder: 0,
         state: "not-found" as const,

@@ -8,7 +8,7 @@ import {
   type SessionFetcher,
 } from "./bluesky.js";
 import { createProjectionWriter, type ProjectionWriter } from "./projection-writer.js";
-import { normalizePost, stableObjectId } from "./timeline.js";
+import { normalizePost, stableObjectId } from "./projection-model.js";
 
 type ReconcilerDependencies = {
   deleteRecord: typeof deleteRecord;

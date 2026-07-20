@@ -10,21 +10,17 @@ import {
 } from "@atproto/api";
 import { parseAtUri } from "../at-uri.js";
 import type { OAuthSession } from "./auth.js";
-import type { FeedViewPost, PostRecord, PostView, ProfileView } from "./timeline.js";
+import type {
+  FeedViewPost,
+  PostRecord,
+  PostView,
+  ProfileView,
+  ThreadViewNode,
+} from "./projection-model.js";
 
 export type SessionFetcher = Pick<OAuthSession, "fetchHandler">;
 
 const timelinePageSize = 20;
-
-export type ThreadViewNode = {
-  $type?: string;
-  uri?: string;
-  blocked?: boolean;
-  notFound?: boolean;
-  post?: PostView;
-  parent?: ThreadViewNode;
-  replies?: ThreadViewNode[];
-};
 
 export class OperationError extends Error {
   constructor(message: string, readonly status: 400 | 502) {

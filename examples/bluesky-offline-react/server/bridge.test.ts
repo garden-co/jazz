@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJazzContext } from "jazz-tools/backend";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
-import { stableObjectId } from "./timeline.js";
+import { stableObjectId } from "./projection-model.js";
 
 describe("Bluesky/Jazz bridge", () => {
   afterEach(() => {

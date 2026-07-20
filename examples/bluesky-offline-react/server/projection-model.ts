@@ -72,6 +72,16 @@ export type FeedViewPost = {
   reason?: RepostReason;
 };
 
+export type ThreadViewNode = {
+  $type?: string;
+  uri?: string;
+  blocked?: boolean;
+  notFound?: boolean;
+  post?: PostView;
+  parent?: ThreadViewNode;
+  replies?: ThreadViewNode[];
+};
+
 export function stableObjectId(
   namespace: string,
   value: string,
@@ -193,18 +203,9 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
   const normalizedPost = normalizePost(item.post);
   if (!normalizedPost) return null;
   const { post } = normalizedPost;
-  const profiles = normalizedPost.profile ? [normalizedPost.profile] : [];
-  const likes = item.post?.viewer?.like
-    ? [{
-        id: stableObjectId("bluesky-like", `${ownerDid}:${post.uri}`),
-        uri: item.post.viewer.like,
-        actorDid: ownerDid,
-        subjectPostId: post.id,
-        createdAt: post.indexedAt,
-        active: true,
-      }]
-    : [];
-  const reposts = new Map<string, {
+  const reason = item.reason?.$type === "app.bsky.feed.defs#reasonRepost" ? item.reason : undefined;
+  const reposterProfile = reason?.indexedAt ? profileRow(reason.by, reason.indexedAt) : undefined;
+  const repost: {
     id: string;
     uri?: string;
     cid?: string;
@@ -213,15 +214,9 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
     subjectPostId: string;
     createdAt: string;
     active: boolean;
-  }>();
-  const reason = item.reason?.$type === "app.bsky.feed.defs#reasonRepost" ? item.reason : undefined;
-  let reasonRepostId: string | undefined;
-  if (reason?.by?.did && reason.indexedAt) {
-    const reposterProfile = profileRow(reason.by, reason.indexedAt);
-    if (reposterProfile) profiles.push(reposterProfile);
-    reasonRepostId = stableObjectId("bluesky-repost", `${reason.by.did}:${post.uri}`);
-    reposts.set(reasonRepostId, {
-      id: reasonRepostId,
+  } | undefined = reason?.by?.did && reason.indexedAt
+    ? {
+      id: stableObjectId("bluesky-repost", `${reason.by.did}:${post.uri}`),
       uri: reason.uri,
       cid: reason.cid,
       actorDid: reason.by.did,
@@ -229,20 +224,8 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
       subjectPostId: post.id,
       createdAt: reason.indexedAt,
       active: true,
-    });
-  }
-  if (item.post?.viewer?.repost) {
-    const id = stableObjectId("bluesky-repost", `${ownerDid}:${post.uri}`);
-    reposts.set(id, {
-      id,
-      uri: item.post.viewer.repost,
-      actorDid: ownerDid,
-      actorProfileId: stableObjectId("bluesky-profile", ownerDid),
-      subjectPostId: post.id,
-      createdAt: reposts.get(id)?.createdAt ?? post.indexedAt,
-      active: true,
-    });
-  }
+    }
+    : undefined;
   const eventKey = reason?.uri
     ?? (reason?.by?.did && reason.indexedAt
       ? `repost:${reason.by.did}:${post.uri}:${reason.indexedAt}`
@@ -257,19 +240,84 @@ export function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
     ownerDid,
     postId: post.id,
     threadRootId,
-    repostId: reasonRepostId,
+    repostId: repost?.id,
     sortAt: reason?.indexedAt ?? threadRoot?.post.indexedAt ?? post.indexedAt,
     active: true,
   };
 
   return {
-    profiles,
-    post,
-    images: normalizedPost.images,
-    likes,
-    reposts: [...reposts.values()],
+    postBundle: normalizedPost,
+    reposterProfile,
+    repost,
     timelineEntry,
     context,
-    quote: normalizedPost.quote,
   };
+}
+
+export type FlatThreadEntry = {
+  post?: PostView;
+  postId: string;
+  parentPostId?: string;
+  sortOrder: number;
+  state: "post" | "blocked" | "not-found";
+};
+
+export type FlatThread = {
+  rootPostId: string;
+  entries: FlatThreadEntry[];
+};
+
+export function flattenThread(
+  requestedUri: string,
+  thread: ThreadViewNode,
+  toPostId: (uri: string) => string = (uri) => uri,
+): FlatThread {
+  const ancestors: ThreadViewNode[] = [];
+  for (let node: ThreadViewNode | undefined = thread; node; node = node.parent) {
+    ancestors.unshift(node);
+  }
+
+  const selectedUri = thread.post?.uri ?? thread.uri ?? requestedUri;
+  const rootUri = thread.post?.record?.reply?.root?.uri
+    ?? ancestors[0]?.post?.uri
+    ?? ancestors[0]?.uri
+    ?? requestedUri;
+  const entries: FlatThreadEntry[] = [];
+  const seen = new Set<string>();
+
+  const addNode = (node: ThreadViewNode, fallbackParentId?: string) => {
+    const uri = node.post?.uri ?? node.uri;
+    if (!uri) return undefined;
+    const postId = toPostId(uri);
+    if (seen.has(postId)) return postId;
+    seen.add(postId);
+    const parentUri = node.post?.record?.reply?.parent?.uri;
+    entries.push({
+      post: node.post,
+      postId,
+      parentPostId: parentUri ? toPostId(parentUri) : fallbackParentId,
+      sortOrder: entries.length,
+      state: node.post
+        ? "post"
+        : node.blocked || node.$type?.endsWith("#blockedPost")
+          ? "blocked"
+          : "not-found",
+    });
+    return postId;
+  };
+
+  let parentId: string | undefined;
+  for (const ancestor of ancestors) {
+    parentId = addNode(ancestor, parentId) ?? parentId;
+  }
+
+  const addReplies = (nodes: ThreadViewNode[] | undefined, replyParentId: string) => {
+    for (const node of nodes ?? []) {
+      const postId = addNode(node, replyParentId);
+      if (postId) addReplies(node.replies, postId);
+    }
+  };
+  addReplies(thread.replies, toPostId(selectedUri));
+
+  return { rootPostId: toPostId(rootUri), entries };
 }

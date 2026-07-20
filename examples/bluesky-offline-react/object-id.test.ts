@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { appId } from "./app-id.js";
 import { formatObjectId, objectIdKey } from "./object-id.js";
-import { stableObjectId as serverObjectId } from "./server/timeline.js";
+import { stableObjectId as serverObjectId } from "./server/projection-model.js";
 import { stableObjectId as browserObjectId } from "./src/object-id.js";
 
 describe("deterministic Jazz object IDs", () => {

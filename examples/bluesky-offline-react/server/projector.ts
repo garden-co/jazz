@@ -3,11 +3,15 @@ import {
   fetchProfile,
   fetchTimelineFeed,
   type SessionFetcher,
-  type ThreadViewNode,
 } from "./bluesky.js";
 import { createProjectionWriter, type ProjectionWriter } from "./projection-writer.js";
-import { stableObjectId, type FeedViewPost, type ProfileView } from "./timeline.js";
-import { flattenThread } from "./thread-normalizer.js";
+import {
+  flattenThread,
+  stableObjectId,
+  type FeedViewPost,
+  type ProfileView,
+  type ThreadViewNode,
+} from "./projection-model.js";
 
 type TimelineResponse = { feed?: FeedViewPost[]; cursor?: string };
 type TimelineResult = { cursor?: string; hasMore: boolean; count: number };

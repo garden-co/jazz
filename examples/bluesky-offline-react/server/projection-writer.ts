@@ -2,17 +2,16 @@ import type { Operation, ReactionOperation } from "../operations.js";
 import { decodeOperation, encodeOperationPayload } from "../operations.js";
 import { app } from "../schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
-import type { ThreadViewNode } from "./bluesky.js";
 import {
+  type FlatThread,
   normalizePost,
   normalizeTimelineItem,
   stableObjectId,
   type FeedViewPost,
   type PostView,
   type ProfileView,
-} from "./timeline.js";
+} from "./projection-model.js";
 import { db } from "./jazz.js";
-import type { FlatThread } from "./thread-normalizer.js";
 
 type ProjectionDatabase = typeof db;
 type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
@@ -224,14 +223,12 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     const normalized = normalizeTimelineItem(ownerDid, item);
     if (!normalized) throw new Error(`Invalid timeline item: ${item.post?.uri ?? "missing post"}`);
     const bundles = new Map(normalized.context.map((bundle) => [bundle.post.id, bundle]));
-    bundles.set(normalized.post.id, {
-      profile: normalized.profiles.find((profile) => profile.did === normalized.post.authorDid),
-      post: normalized.post,
-      images: normalized.images,
-      quote: normalized.quote,
-    });
+    bundles.set(normalized.postBundle.post.id, normalized.postBundle);
 
-    const profiles = new Map(normalized.profiles.map((profile) => [profile.id, profile]));
+    const profiles = new Map<string, ProfileProjection>();
+    if (normalized.reposterProfile) {
+      profiles.set(normalized.reposterProfile.id, normalized.reposterProfile);
+    }
     for (const bundle of bundles.values()) {
       if (bundle.profile) profiles.set(bundle.profile.id, bundle.profile);
     }
@@ -239,11 +236,8 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     await Promise.all([...profiles.values()].map(writeProfile));
     await Promise.all([...bundles.values()].map((bundle) =>
       writePostBundle({ ...bundle, profile: undefined })));
-    await Promise.all([
-      ...normalized.likes.map(writeLike),
-      ...normalized.reposts.map(writeRepost),
-    ]);
-    await projectViewerState(ownerDid, normalized.post, item.post?.viewer, intents);
+    if (normalized.repost) await writeRepost(normalized.repost);
+    await projectViewerState(ownerDid, normalized.postBundle.post, item.post?.viewer, intents);
     const { id, ...entry } = normalized.timelineEntry;
     await projectRow(database, app.timelineEntries, id, entry);
 
@@ -299,10 +293,10 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
   async function projectThread(ownerDid: string, thread: FlatThread, intents: ReactionIntents) {
     let count = 0;
     await Promise.all(thread.entries.map(async (entry) => {
-      const bundle = normalizePost(entry.node.post);
+      const bundle = normalizePost(entry.post);
       if (bundle) {
         await writePostBundle(bundle);
-        await projectViewerState(ownerDid, bundle.post, entry.node.post?.viewer, intents);
+        await projectViewerState(ownerDid, bundle.post, entry.post?.viewer, intents);
         count += 1;
       }
       await projectRow(database, app.threadEntries, stableObjectId(
