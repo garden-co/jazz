@@ -342,5 +342,5 @@ confidentiality are different axes — never mistake one for the other.
 | Abort an upload      | `handle.cancel()`                                                 |
 | Remove the bytes     | `jazz.files.delete(id)` — or a TTL class removes them on schedule |
 
-Exact builder spellings (`s.file`, the `for` reference form) may shift
-during implementation; the shapes above are the contract.
+Exact builder spellings (`s.file`, the `db.<table>.<column>` accessor
+path) may shift during implementation; the shapes above are the contract.
