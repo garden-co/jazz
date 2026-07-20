@@ -918,26 +918,50 @@
           : `legacy · ${entry.summary.loaded.rubric.total} points`;
       const routingExact = (score) => score.exact ?? score.passed;
 
-      const renderComparison = (entries) => {
-        if (entries.length === 0) return;
-        const baselinePercent = median(
-          entries.map((entry) => exactPercentage(entry.summary.baseline.rubric)),
-        );
-        const loadedPercent = median(
-          entries.map((entry) => exactPercentage(entry.summary.loaded.rubric)),
-        );
-        const uplift = median(
+      const renderMetricCards = (metrics) => {
+        document.querySelector("#summary").innerHTML = metrics
+          .map(
+            ([label, value, detail, className]) =>
+              `<article class="card metric"><div><div class="metric-label">${label}</div><div class="metric-value ${className}">${value}</div></div><div class="metric-detail">${detail}</div></article>`,
+          )
+          .join("");
+      };
+
+      const aggregateQuality = (entries) => ({
+        routing: median(entries.map((entry) => exactPercentage(entry.summary.routing))),
+        baseline: median(entries.map((entry) => exactPercentage(entry.summary.baseline.rubric))),
+        loaded: median(entries.map((entry) => exactPercentage(entry.summary.loaded.rubric))),
+        uplift: median(
           entries.map(
             (entry) =>
               exactPercentage(entry.summary.loaded.rubric) -
               exactPercentage(entry.summary.baseline.rubric),
           ),
-        );
+        ),
+      });
+
+      const renderAggregateSummary = (entries) => {
+        if (entries.length === 0) return;
+        const quality = aggregateQuality(entries);
+        const count = entries.length;
+        const scope = `latest run per configuration · ${count} configuration${count === 1 ? "" : "s"}`;
+        document.querySelector("#meta").textContent =
+          `${historyCorpusLabel(entries[0])} · ${scope}`;
+        renderMetricCards([
+          ["Median routing", `${percentage(quality.routing)}%`, scope, ""],
+          ["Median baseline", `${percentage(quality.baseline)}%`, "rubric criteria passed", ""],
+          ["Median loaded", `${percentage(quality.loaded)}%`, "rubric criteria passed", "accent"],
+        ]);
+      };
+
+      const renderComparison = (entries) => {
+        if (entries.length === 0) return;
+        const quality = aggregateQuality(entries);
         const count = entries.length;
         document.querySelector("#comparison-meta").textContent =
           `latest run per configuration · ${count} configuration${count === 1 ? "" : "s"}`;
         document.querySelector("#comparison").innerHTML =
-          `<div class="uplift"><span class="metric-label">Median uplift</span><strong>${uplift >= 0 ? "+" : ""}${percentage(uplift)}</strong><span class="meta">percentage points after loading skills</span></div><div><div class="bar-row"><span>Median baseline</span><div class="bar"><span style="width:${baselinePercent}%"></span></div><b>${percentage(baselinePercent)}%</b></div><div class="bar-row"><span>Median loaded</span><div class="bar loaded"><span style="width:${loadedPercent}%"></span></div><b>${percentage(loadedPercent)}%</b></div></div>`;
+          `<div class="uplift"><span class="metric-label">Median uplift</span><strong>${quality.uplift >= 0 ? "+" : ""}${percentage(quality.uplift)}</strong><span class="meta">percentage points after loading skills</span></div><div><div class="bar-row"><span>Median baseline</span><div class="bar"><span style="width:${quality.baseline}%"></span></div><b>${percentage(quality.baseline)}%</b></div><div class="bar-row"><span>Median loaded</span><div class="bar loaded"><span style="width:${quality.loaded}%"></span></div><b>${percentage(quality.loaded)}%</b></div></div>`;
       };
 
       function renderHistory(history, initialReport) {
@@ -1010,7 +1034,7 @@
         const selectRun = (entry, { collapse = false, label = null } = {}) => {
           const selected = rescoreReportRouting(entry);
           activeFilename = entry.filename ?? null;
-          render(selected);
+          render(selected, { showRunSummary: true });
           updateResultsContext(
             selected,
             label ?? (entry === latestRun ? "Most recent run" : "Selected historical run"),
@@ -1061,7 +1085,11 @@
             `${filtered.length} run${filtered.length === 1 ? "" : "s"} · ${series.length} configuration${series.length === 1 ? "" : "s"}`;
           document.querySelector("#run-history-meta").textContent =
             `${tableRuns.length} of ${filtered.length} archived run${filtered.length === 1 ? "" : "s"} shown · select one to inspect`;
-          renderComparison(series.length > 0 ? series.map(([, entry]) => entry) : [initialReport]);
+          const summaryEntries =
+            series.length > 0 ? series.map(([, entry]) => entry) : [initialReport];
+          activeFilename = null;
+          renderAggregateSummary(summaryEntries);
+          renderComparison(summaryEntries);
 
           if (filtered.length === 0) {
             document.querySelector("#history-chart").innerHTML =
@@ -1134,52 +1162,55 @@
               entry.generatedAt === initialReport.generatedAt &&
               historyConfigurationKey(entry) === historyConfigurationKey(initialReport),
           ) ?? latestRun;
-        if (initialRun) selectRun(initialRun);
-        else selectRun(initialReport, { label: "Current report" });
+        const initialDetails = rescoreReportRouting(initialRun ?? initialReport);
+        render(initialDetails, { showRunSummary: false });
+        updateResultsContext(
+          initialDetails,
+          initialRun ? "Most recent run" : "Current report",
+          initialRun?.filename,
+        );
+        syncActiveRows();
 
         return {
           showPreview(report, filename) {
             activeFilename = null;
             const preview = rescoreReportRouting(report);
-            render(preview);
+            render(preview, { showRunSummary: true });
             updateResultsContext(preview, "Previewed report", filename);
             syncActiveRows();
           },
         };
       }
 
-      function render(report) {
+      function render(report, { showRunSummary = true } = {}) {
         const generated = report.generatedAt
           ? new Date(report.generatedAt).toLocaleString()
           : "template preview";
-        document.querySelector("#meta").textContent =
-          `${generated} · ${report.runner ?? "unknown runner"}`;
         const summary = report.summary;
-        document.querySelector("#summary").innerHTML = [
-          [
-            "Routing coverage",
-            scoreText(summary.routing),
-            `${ratio(summary.routing)}% includes every expected skill · ${routingExact(summary.routing)} exact`,
-            "",
-          ],
-          [
-            "Baseline quality",
-            scoreText(summary.baseline.rubric),
-            `${ratio(summary.baseline.rubric)}% of rubric criteria`,
-            "",
-          ],
-          [
-            "Loaded quality",
-            scoreText(summary.loaded.rubric),
-            `${ratio(summary.loaded.rubric)}% of rubric criteria`,
-            "accent",
-          ],
-        ]
-          .map(
-            ([label, value, detail, className]) =>
-              `<article class="card metric"><div><div class="metric-label">${label}</div><div class="metric-value ${className}">${value}</div></div><div class="metric-detail">${detail}</div></article>`,
-          )
-          .join("");
+        if (showRunSummary) {
+          document.querySelector("#meta").textContent =
+            `Selected run · ${generated} · ${report.runner ?? "unknown runner"}`;
+          renderMetricCards([
+            [
+              "Selected run routing",
+              scoreText(summary.routing),
+              `${ratio(summary.routing)}% includes every expected skill · ${routingExact(summary.routing)} exact`,
+              "",
+            ],
+            [
+              "Selected run baseline",
+              scoreText(summary.baseline.rubric),
+              `${ratio(summary.baseline.rubric)}% of rubric criteria`,
+              "",
+            ],
+            [
+              "Selected run loaded",
+              scoreText(summary.loaded.rubric),
+              `${ratio(summary.loaded.rubric)}% of rubric criteria`,
+              "accent",
+            ],
+          ]);
+        }
 
         document.querySelector("#routing-meta").textContent =
           `${scoreText(summary.routing)} acceptable matches · ${routingExact(summary.routing)} exact`;
