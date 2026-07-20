@@ -207,9 +207,9 @@ describe("projection writer API", () => {
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     expect(Object.keys(createProjectionWriter()).sort()).toEqual([
+      "completeOperation",
       "deactivateRepostTimelineEntries",
       "loadReactionIntents",
-      "markOperationSent",
       "projectProfile",
       "projectThread",
       "projectTimelinePage",
@@ -217,6 +217,54 @@ describe("projection writer API", () => {
       "writePostBundle",
       "writeRepost",
     ]);
+  });
+});
+
+describe("operation completion", () => {
+  it("removes a completed post but retains a reaction until AppView confirms it", async () => {
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => null),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    vi.doMock("./jazz.js", () => ({ db: database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+    const writer = createProjectionWriter();
+    const post: Operation = {
+      id: "00000000-0000-0000-0000-000000000001",
+      ownerDid: "did:plc:viewer",
+      kind: "post",
+      rkey: "3mpost",
+      state: "queued",
+      createdAt: "2026-07-16T10:00:00.000Z",
+      payload: { text: "Post", createdAt: "2026-07-16T10:00:00.000Z" },
+    };
+    const like: Operation = {
+      id: "00000000-0000-0000-0000-000000000002",
+      ownerDid: "did:plc:viewer",
+      kind: "like",
+      rkey: "3mlike",
+      state: "queued",
+      createdAt: post.createdAt,
+      payload: {
+        subjectUri: "at://did:plc:author/app.bsky.feed.post/3msubject",
+        subjectCid: "bafysubject",
+        active: true,
+        createdAt: post.createdAt,
+      },
+    };
+
+    await writer.completeOperation(post);
+    await writer.completeOperation(like);
+
+    expect(database.delete).toHaveBeenCalledWith(expect.anything(), post.id);
+    expect(database.upsert).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "sent" }),
+      { id: like.id },
+    );
   });
 });
 
