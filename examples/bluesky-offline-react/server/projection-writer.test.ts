@@ -194,3 +194,55 @@ describe("durable reaction projection", () => {
     );
   });
 });
+
+describe("progressive timeline projection", () => {
+  it("does not let one slow feed item block the rest of the page", async () => {
+    let releaseFirstLookup!: () => void;
+    const firstLookup = new Promise<null>((resolve) => {
+      releaseFirstLookup = () => resolve(null);
+    });
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn()
+        .mockImplementationOnce(() => firstLookup)
+        .mockResolvedValue(null),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    const post = (did: string, rkey: string) => ({
+      uri: `at://${did}/app.bsky.feed.post/${rkey}`,
+      cid: `bafy-${rkey}`,
+      author: { did, handle: `${did.slice(-1)}.test` },
+      record: { text: `Post ${rkey}`, createdAt: "2026-07-16T10:00:00.000Z" },
+      indexedAt: "2026-07-16T10:00:01.000Z",
+    });
+
+    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+    const projection = createProjectionWriter().projectTimelinePage(
+      "did:plc:viewer",
+      [
+        { post: post("did:plc:author1", "3m12345678921") },
+        { post: post("did:plc:author2", "3m12345678922") },
+      ],
+      undefined,
+      new Map(),
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(database.upsert).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            uri: "at://did:plc:author2/app.bsky.feed.post/3m12345678922",
+          }),
+          expect.anything(),
+        );
+      });
+    } finally {
+      releaseFirstLookup();
+      await projection;
+    }
+  });
+});

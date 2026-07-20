@@ -14,11 +14,11 @@ import {
   restoreBffSession,
 } from "./auth.js";
 import {
-  OperationError,
   projectThread,
   projectTimelinePage,
   reconcileOperations,
 } from "./bridge.js";
+import { OperationError } from "./bluesky.js";
 
 const configuredWebOrigin = process.env.WEB_ORIGIN ?? "http://127.0.0.1:5173";
 

@@ -20,12 +20,6 @@ vi.mock("./auth.js", () => ({
 }));
 
 vi.mock("./bridge.js", () => ({
-  OperationError: class OperationError extends Error {
-    constructor(message: string, readonly status: 400 | 502) {
-      super(message);
-    }
-  },
-  getTimelineProjectionStatus: vi.fn(),
   projectThread: mocks.projectThread,
   projectTimelinePage: mocks.projectTimelinePage,
   reconcileOperations: mocks.reconcileOperations,
