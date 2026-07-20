@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
+import { parseAtUri } from "../at-uri.js";
 import { InvalidOperationError, parseOperationBatch } from "../operations.js";
 import {
   bffSessionCookie,
@@ -14,7 +15,6 @@ import {
 } from "./auth.js";
 import {
   OperationError,
-  getTimelineProjectionStatus,
   projectThread,
   projectTimelinePage,
   reconcileOperations,
@@ -46,32 +46,32 @@ export function createServer(webOrigin = configuredWebOrigin) {
   });
 
   server.onError((error, c) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const status = error instanceof OperationError || error instanceof InvalidOperationError
-      ? error.status
-      : 502;
-    return c.json({ error: message }, status);
+    if (error instanceof OperationError || error instanceof InvalidOperationError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    console.error(error);
+    return c.json({ error: "Unexpected server error" }, 502);
   });
 
-  server.get("/health", (c) => c.json({ status: "ok" }));
   server.get("/api/health", (c) => c.json({ status: "ok" }));
   server.get("/.well-known/jazz-jwks.json", (c) => c.json(jazzJwks));
 
   server.use("/api/session", requireSession);
   server.use("/api/timeline", requireSession);
-  server.use("/api/timeline/status", requireSession);
   server.use("/api/thread", requireSession);
   server.use("/api/operations", requireSession);
 
+  // ATProto establishes identity; Jazz trusts the same DID through this short-lived JWT.
   server.get("/api/session", async (c) => {
     const { did } = c.var.authentication;
     return c.json({ did, token: await jazzToken(did) });
   });
 
   server.post("/api/auth/login", async (c) => {
-    const { handle } = await c.req.json<{ handle?: string }>();
-    if (!handle?.trim()) return c.json({ error: "handle is required" }, 400);
-    const url = await oauth.authorize(handle.trim(), { scope: oauthScope });
+    const body = await c.req.json<{ handle?: string }>().catch(() => undefined);
+    const handle = body?.handle?.trim();
+    if (!handle) return c.json({ error: "handle is required" }, 400);
+    const url = await oauth.authorize(handle, { scope: oauthScope });
     return c.json({ url: url.toString() });
   });
 
@@ -85,31 +85,33 @@ export function createServer(webOrigin = configuredWebOrigin) {
   server.post("/api/auth/logout", async (c) => {
     const sessionId = getCookie(c, bffSessionCookie);
     const did = sessionId ? await invalidateBffSession(sessionId) : undefined;
+    // Local logout must still succeed when remote token revocation is unavailable.
     if (did) await oauth.revoke(did).catch(() => undefined);
     deleteCookie(c, bffSessionCookie, { path: "/", secure: secureCookies });
     return c.json({ ok: true });
   });
 
+  // HTTP triggers source reads and writes; projected data reaches React through Jazz.
   server.get("/api/timeline", async (c) => {
     const { did, session } = c.var.authentication;
-    return c.json(await projectTimelinePage(did, session, c.req.query("cursor")));
-  });
-
-  server.get("/api/timeline/status", (c) => {
-    const status = getTimelineProjectionStatus(c.var.authentication.did);
-    return status ? c.json(status) : c.json({ state: "idle" as const });
+    const { cursor, hasMore, count } = await projectTimelinePage(did, session, c.req.query("cursor"));
+    return c.json({ cursor, hasMore, count });
   });
 
   server.get("/api/thread", async (c) => {
     const uri = c.req.query("uri");
-    if (!uri?.startsWith("at://")) return c.json({ error: "invalid post URI" }, 400);
+    const parsedUri = parseAtUri(uri);
+    if (!uri || !parsedUri || parsedUri.collection !== "app.bsky.feed.post") {
+      return c.json({ error: "invalid post URI" }, 400);
+    }
     const { did, session } = c.var.authentication;
     return c.json(await projectThread(did, session, uri));
   });
 
   server.post("/api/operations", async (c) => {
     const { did, session } = c.var.authentication;
-    const operations = parseOperationBatch(await c.req.json<unknown>(), did);
+    const body = await c.req.json<unknown>().catch(() => undefined);
+    const operations = parseOperationBatch(body, did);
     await reconcileOperations(did, session, operations);
     return c.json({ ok: true });
   });

@@ -158,6 +158,7 @@ describe("BFF routes", () => {
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: "Unexpected server error" });
+    expect(consoleError).toHaveBeenCalledWith(expect.any(Error));
     consoleError.mockRestore();
   });
 

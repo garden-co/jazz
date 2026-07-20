@@ -19,7 +19,7 @@ WRITE
 Bluesky PDS <──── Bluesky adapter <──── Jazz bridge <──── pending Jazz intentions <──── React
 ```
 
-`/api/timeline` is only a trigger. It waits for one bounded AppView fetch, starts projection, then returns cursor, count, and projection-acceptance metadata. It does not deliver any fetched ATProto data to React. Rows are projected progressively, so the reactive Jazz query updates as each item becomes available rather than waiting for the whole page. `/api/timeline/status` exposes whether the most recent projection is fetching, projecting, completed, or failed.
+`/api/timeline` is only a trigger. It waits for one bounded AppView fetch, starts projection, then returns pagination metadata. It does not deliver any fetched ATProto data to React. Rows are projected progressively, so the reactive Jazz query updates as each item becomes available rather than waiting for the whole page.
 
 > [!NOTE]
 > Client polling could be replaced with a push mechanism. For example, a firehose consumer could project rows into Jazz, which would then sync through the reactive Jazz subscription without a separate client messaging channel. Continuously consuming the firehose is substantially more resource-intensive, so it is deliberately outside this POC's bounded scope.
@@ -30,7 +30,7 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 
 | Component | Responsibility | Knows about Jazz? | Knows about Bluesky? |
 | --- | --- | --- | --- |
-| `server/app.ts` | Session guard, HTTP validation, and error mapping | No | Only session-shaped route inputs |
+| `server/app.ts` | Session guard, HTTP validation, and error mapping | Authentication only | Only application-level route inputs |
 | `server/auth.ts` | OAuth, opaque BFF sessions, and Jazz JWTs | Stores encrypted authentication material in a backend-only table | Yes |
 | `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
 | `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
@@ -48,12 +48,11 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `src/TimelineView.tsx` | Presentational React components | No | No |
 | `pwa.ts` | Generate the install manifest and service worker | No | Keeps API traffic network-only |
 
-The bridge exposes three application-level operations and one status query:
+The BFF exposes three application-level operations:
 
 - `projectTimelinePage`: read a bounded authoritative page and progressively project it into Jazz.
 - `projectThread`: lazily read one thread and add it to the same projection.
 - `reconcileOperations`: apply queued local intentions to the authoritative system, then update Jazz with the result.
-- `getTimelineProjectionStatus`: inspect asynchronous projection completion or failure.
 
 For illustration purposes, Bluesky-specific OAuth, XRPC endpoints, AT URIs, records, and TIDs stay on one side. Jazz tables, permissions, reactive transport, and pending-operation rows stay on the other.
 
