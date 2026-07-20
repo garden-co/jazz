@@ -31,6 +31,8 @@ pub enum MetadataKey {
     TargetHash,
     /// Flag to suppress sync for an object.
     NoSync,
+    /// Visible row projection observed by the first write in a transaction.
+    TransactionBasis,
 }
 
 impl MetadataKey {
@@ -47,6 +49,7 @@ impl MetadataKey {
             Self::SourceHash => "source_hash",
             Self::TargetHash => "target_hash",
             Self::NoSync => "nosync",
+            Self::TransactionBasis => "transaction_basis_v1",
         }
     }
 }

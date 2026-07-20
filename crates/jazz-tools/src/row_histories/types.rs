@@ -243,6 +243,22 @@ impl RowMetadata {
             .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
     }
 
+    pub(crate) fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        if let Some((_, existing_value)) = self
+            .0
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+            return;
+        }
+        self.0.push((key, value));
+        self.0
+            .sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -374,6 +390,53 @@ impl StoredRowBatch {
     pub fn is_hard_deleted(&self) -> bool {
         self.delete_kind == Some(DeleteKind::Hard) || (self.is_deleted && self.data.is_empty())
     }
+}
+
+fn transaction_projection_basis_for_fields(
+    row_id: ObjectId,
+    batch_id: BatchId,
+    updated_at: u64,
+    data: &[u8],
+    is_soft_deleted: bool,
+    is_hard_deleted: bool,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"jazz-transaction-projection-basis-v1");
+    hasher.update(row_id.uuid().as_bytes());
+    hasher.update(batch_id.as_bytes());
+    hasher.update(&updated_at.to_le_bytes());
+    hasher.update(&(data.len() as u64).to_le_bytes());
+    hasher.update(data);
+    hasher.update(&[if is_hard_deleted {
+        2
+    } else if is_soft_deleted {
+        1
+    } else {
+        0
+    }]);
+    hasher.finalize().to_hex().to_string()
+}
+
+pub(crate) fn transaction_projection_basis(row: &StoredRowBatch) -> String {
+    transaction_projection_basis_for_fields(
+        row.row_id,
+        row.batch_id,
+        row.updated_at,
+        &row.data,
+        row.is_soft_deleted(),
+        row.is_hard_deleted(),
+    )
+}
+
+pub(crate) fn transaction_query_projection_basis(row_id: ObjectId, row: &QueryRowBatch) -> String {
+    transaction_projection_basis_for_fields(
+        row_id,
+        row.batch_id,
+        row.updated_at,
+        &row.data,
+        row.is_soft_deleted(),
+        row.is_hard_deleted(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

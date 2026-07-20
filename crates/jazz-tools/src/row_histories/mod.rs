@@ -30,11 +30,14 @@ pub use codecs::{
 };
 pub(crate) use mutations::{ApplyRowBatchWithContext, apply_row_batch_with_context};
 pub use mutations::{apply_row_batch, patch_row_batch_state};
-pub(crate) use resolution::visible_row_preview_from_history_rows;
+pub(crate) use resolution::{
+    has_counter_merge_strategy, rebase_counter_data, visible_row_preview_from_history_rows,
+};
 pub use types::{
     ApplyRowBatchResult, BatchId, HistoryScan, QueryRowBatch, RowHistoryError, RowMetadata,
     RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry,
 };
+pub(crate) use types::{transaction_projection_basis, transaction_query_projection_basis};
 
 #[cfg(test)]
 mod tests {

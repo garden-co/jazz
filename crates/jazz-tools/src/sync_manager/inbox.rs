@@ -5,12 +5,13 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
     ApplyRowBatchWithContext, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch,
-    apply_row_batch_with_context, patch_row_batch_state,
+    apply_row_batch_with_context, patch_row_batch_state, transaction_projection_basis,
+    visible_row_preview_from_history_rows,
 };
 use crate::storage::{
     PreparedRowWriteContext, RowLocator, Storage, metadata_from_row_locator,
     prepared_row_table_context_for_schema_hash, prepared_row_write_context_from_table_context,
-    row_locator_from_metadata,
+    resolve_history_row_write_context, row_locator_from_metadata,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -155,6 +156,45 @@ impl SyncManager {
         declared_rows: &[(String, StoredRowBatch)],
     ) -> Result<(), BatchFate> {
         for (table, row) in declared_rows {
+            if let Some(expected_basis) = row.metadata.get(MetadataKey::TransactionBasis.as_str()) {
+                let history_rows = storage
+                    .scan_history_row_batches(table, row.row_id)
+                    .map_err(|error| BatchFate::Rejected {
+                        batch_id: submission.batch_id,
+                        code: "invalid_batch_submission".to_string(),
+                        reason: format!("failed to load row history transaction basis: {error}"),
+                    })?;
+                let branch_history = history_rows
+                    .into_iter()
+                    .filter(|history_row| {
+                        history_row.branch.as_str() == submission.target_branch_name.as_str()
+                    })
+                    .collect::<Vec<_>>();
+                let context =
+                    resolve_history_row_write_context(storage, table, row).map_err(|error| {
+                        BatchFate::Rejected {
+                            batch_id: submission.batch_id,
+                            code: "invalid_batch_submission".to_string(),
+                            reason: format!("failed to resolve row transaction basis: {error}"),
+                        }
+                    })?;
+                let current_basis = visible_row_preview_from_history_rows(
+                    context.user_descriptor().as_ref(),
+                    &branch_history,
+                    None,
+                )
+                .map_err(|error| BatchFate::Rejected {
+                    batch_id: submission.batch_id,
+                    code: "invalid_batch_submission".to_string(),
+                    reason: format!("failed to rebuild row transaction basis: {error}"),
+                })?
+                .map(|visible_row| transaction_projection_basis(&visible_row));
+                if current_basis.as_ref() != Some(expected_basis) {
+                    return Err(self.parent_frontier_conflict_fate(submission.batch_id));
+                }
+                continue;
+            }
+
             let expected_frontier = Self::normalize_frontier(row.parents.iter().copied().collect());
             let current_frontier = storage
                 .load_visible_region_frontier(

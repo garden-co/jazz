@@ -2,13 +2,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::batch_fate::{BatchFate, BatchMode};
-use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
+use crate::metadata::{
+    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
+};
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
     ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
     RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, apply_row_batch,
-    apply_row_batch_with_context,
+    apply_row_batch_with_context, has_counter_merge_strategy, rebase_counter_data,
+    transaction_projection_basis, transaction_query_projection_basis,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -26,8 +29,8 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id}
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnMergeStrategy, ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor,
-    Schema, SchemaHash, TableName, Value,
+    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
+    TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -643,21 +646,48 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> (Vec<BatchId>, Option<VisibleRowEntry>) {
+    ) -> (Vec<BatchId>, Option<VisibleRowEntry>, Option<String>) {
         if let Some(existing_batch_row) =
             self.batch_history_row_for_write(storage, row_id, branch_name, write_context)
         {
-            return (existing_batch_row.parents.iter().copied().collect(), None);
+            let transaction_basis = existing_batch_row
+                .metadata
+                .get(MetadataKey::TransactionBasis.as_str())
+                .cloned();
+            return (
+                existing_batch_row.parents.iter().copied().collect(),
+                None,
+                transaction_basis,
+            );
         }
-        if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch_name, row_id) {
-            return (entry.branch_frontier.clone(), Some(entry));
+        let visible_entry = storage.load_visible_region_entry(table, branch_name, row_id);
+        if let Ok(Some(entry)) = visible_entry {
+            let transaction_basis = matches!(
+                write_context.map(WriteContext::batch_mode),
+                Some(BatchMode::Transactional)
+            )
+            .then(|| transaction_projection_basis(&entry.current_row));
+            return (
+                entry.branch_frontier.clone(),
+                Some(entry),
+                transaction_basis,
+            );
         }
+
+        let transaction_basis = matches!(
+            write_context.map(WriteContext::batch_mode),
+            Some(BatchMode::Transactional)
+        )
+        .then(|| self.load_visible_row_on_branch(storage, row_id, branch_name))
+        .flatten()
+        .map(|(_, row)| transaction_query_projection_basis(row_id, &row));
 
         (
             storage
                 .scan_row_branch_tip_ids(table, branch_name, row_id)
                 .unwrap_or_default(),
             None,
+            transaction_basis,
         )
     }
 
@@ -699,11 +729,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         requested_data: &[u8],
     ) -> Result<Option<Vec<u8>>, QueryError> {
-        if !descriptor
-            .columns
-            .iter()
-            .any(|column| matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)))
-        {
+        if !has_counter_merge_strategy(descriptor) {
             return Ok(None);
         }
         let [parent] = parents else {
@@ -720,66 +746,13 @@ impl QueryManager {
         else {
             return Ok(None);
         };
-        if raw_parent.data == visible_entry.current_row.data {
-            return Ok(None);
-        }
-
-        let projected_values = decode_row(descriptor, &visible_entry.current_row.data)
-            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
-        let requested_values = decode_row(descriptor, requested_data)
-            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
-        let raw_values = decode_row(descriptor, &raw_parent.data)
-            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
-        let mut authored_values = requested_values.clone();
-
-        for (index, column) in descriptor.columns.iter().enumerate() {
-            if !matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)) {
-                continue;
-            }
-            let counter_value = |value: &Value| match value {
-                Value::Integer(value) => Some(*value),
-                Value::Null => Some(0),
-                _ => None,
-            };
-            let projected = counter_value(&projected_values[index]).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "counter projection for '{}' is not an integer",
-                    column.name_str()
-                ))
-            })?;
-            let requested = counter_value(&requested_values[index]).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "requested counter value for '{}' is not an integer",
-                    column.name_str()
-                ))
-            })?;
-            let raw = counter_value(&raw_values[index]).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "raw counter frontier for '{}' is not an integer",
-                    column.name_str()
-                ))
-            })?;
-            let delta = requested.checked_sub(projected).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "counter projection delta overflow for '{}'",
-                    column.name_str()
-                ))
-            })?;
-            let authored = raw.checked_add(delta).ok_or_else(|| {
-                QueryError::EncodingError(format!(
-                    "counter projection update overflow for '{}'",
-                    column.name_str()
-                ))
-            })?;
-            authored_values[index] = Value::Integer(authored);
-        }
-
-        if authored_values == requested_values {
-            return Ok(None);
-        }
-        encode_row(descriptor, &authored_values)
-            .map(Some)
-            .map_err(|error| QueryError::EncodingError(error.to_string()))
+        rebase_counter_data(
+            descriptor,
+            &visible_entry.current_row.data,
+            requested_data,
+            &raw_parent.data,
+        )
+        .map_err(|error| QueryError::EncodingError(error.to_string()))
     }
 
     fn prepare_update_write_for_schema<H: Storage>(
@@ -969,7 +942,7 @@ impl QueryManager {
             id,
             index_mutations,
         } = commit;
-        let (parents, visible_entry) =
+        let (parents, visible_entry, transaction_basis) =
             self.parent_ids_for_write(storage, table, id, branch, write_context);
 
         let authored_data = if Self::write_context_is_open_batch(write_context) {
@@ -991,13 +964,17 @@ impl QueryManager {
             (authored_data != prepared.new_data).then(|| prepared.new_data.clone());
 
         let is_known_new_object = parents.is_empty();
-        let row = self.authored_row_batch(
+        let mut row = self.authored_row_batch(
             id,
             branch,
             parents,
             authored_data,
             self.row_batch_authoring(provenance, None, write_context),
         );
+        if let Some(transaction_basis) = transaction_basis {
+            row.metadata
+                .insert(MetadataKey::TransactionBasis.as_str(), transaction_basis);
+        }
         let branch_name = BranchName::new(branch);
         let (batch_id, visibility_change) = self
             .apply_local_row_history_write_with_prepared_context(
@@ -2247,19 +2224,25 @@ impl QueryManager {
             }
         }
 
-        let (parents, _) = self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let (parents, _, transaction_basis) =
+            self.parent_ids_for_write(storage, table, id, branch, write_context);
         let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
         let is_known_new_object = parents.is_empty();
-        let delete_row = self.authored_row_batch(
+        let mut delete_row = self.authored_row_batch(
             id,
             branch,
             parents,
             old_data_for_policy.to_vec(),
             self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
+        if let Some(transaction_basis) = transaction_basis {
+            delete_row
+                .metadata
+                .insert(MetadataKey::TransactionBasis.as_str(), transaction_basis);
+        }
         let index_mutations = if Self::write_context_is_open_batch(write_context) {
             Vec::new()
         } else {
