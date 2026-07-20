@@ -13,7 +13,7 @@ export {
   useJazzClient,
   useSession,
 } from "./provider.js";
-export { useAll, useAllSuspense } from "./use-all.js";
+export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 export {
   useLocalFirstAuth,
   type LocalFirstAuth,

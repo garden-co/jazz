@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import type { Db } from "jazz-tools";
 import { useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
 
@@ -222,7 +223,10 @@ function randomTodoTitle(): string {
 type Status = "idle" | "generating" | "done" | "error";
 
 export function GenerateData() {
-  const db = useDb();
+  // App.tsx opts into the sync in-process client (asyncSubscriptionsOnly:
+  // false), so the db here is the full Db with transaction support, not the
+  // async channel facade useDb is typed as.
+  const db = useDb() as unknown as Db;
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
 

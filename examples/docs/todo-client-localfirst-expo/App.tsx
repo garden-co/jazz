@@ -1,6 +1,6 @@
 import * as React from "react";
-import { type DbConfig } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
+import { ExpoAuthSecretStore } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -11,7 +11,6 @@ import {
   View,
 } from "react-native";
 import { TodoList } from "./src/TodoList";
-import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
 
 const defaultServerUrl = Platform.select({
   // Android emulator cannot reach host via localhost.
