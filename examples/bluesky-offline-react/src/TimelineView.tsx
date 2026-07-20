@@ -1,4 +1,5 @@
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { ProfileName, profileNameParts } from "./ProfileName.js";
 import { segmentRichText } from "./rich-text.js";
 import type {
   DisplayPost,
@@ -109,7 +110,7 @@ function PostImages({ post, compact = false }: { post: DisplayPost; compact?: bo
 
 function QuotedPost({ post }: { post: DisplayPost }) {
   const profile = post.authorProfile;
-  const author = profile?.handle ?? profile?.displayName ?? post.authorDid;
+  const author = profileNameParts(profile, post.authorDid).name;
   return (
     <aside className="quoted-post" aria-label={`Quoted post by ${author}`}>
       <header className="quoted-post-header">
@@ -120,7 +121,7 @@ function QuotedPost({ post }: { post: DisplayPost }) {
             {author.charAt(0).toUpperCase()}
           </span>
         )}
-        <strong>{author}</strong>
+        <ProfileName profile={profile} fallback={post.authorDid} />
         <time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time>
       </header>
       <p><PostText text={post.text} facetsJson={post.facetsJson} /></p>
@@ -166,7 +167,9 @@ export function AppHeader({
               {handle.charAt(0).toUpperCase()}
             </span>
           )}
-          <span className="account-handle">{handle}</span>
+          <span className="account-handle">
+            <ProfileName profile={profile} fallback={handle} />
+          </span>
         </span>
         <button className="link" onClick={onSignOut}>Sign out</button>
       </div>
@@ -263,7 +266,8 @@ function PostCard({
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
   const profile = post.authorProfile;
-  const author = profile?.handle ?? profile?.displayName ?? post.authorDid;
+  const author = profileNameParts(profile, post.authorDid).name;
+  const replyTarget = profile?.handle ? `@${profile.handle.replace(/^@/, "")}` : author;
   const canReply = Boolean(post.cid && threadRoot.cid);
   async function submitReply(event: FormEvent) {
     event.preventDefault();
@@ -287,7 +291,7 @@ function PostCard({
           </span>
         )}
         <div>
-          <strong>{author}</strong>
+          <ProfileName profile={profile} fallback={post.authorDid} />
           <time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time>
         </div>
         {pendingPost && <span className="pending-label">Pending</span>}
@@ -343,7 +347,7 @@ function PostCard({
             id={`reply-${post.id}`}
             value={replyText}
             onChange={(event) => setReplyText(event.target.value)}
-            placeholder={`Reply to @${author}`}
+            placeholder={`Reply to ${replyTarget}`}
             maxLength={300}
             autoFocus
           />
@@ -459,7 +463,7 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
     node.post.id === focusedId ? node : node.replies.map(findNode).find(Boolean);
   const focusedNode = findNode(item.node) ?? item.node;
   const reposter = item.repost?.actorProfile;
-  const reposterName = reposter?.handle ?? reposter?.displayName ?? item.repost?.actorDid;
+  const reposterFallback = item.repost?.actorDid ?? "Unknown account";
   return (
     <div className="timeline-thread">
       {item.repost && (
@@ -473,7 +477,7 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
               loading="lazy"
             />
           )}
-          <strong>{reposterName}</strong>
+          <ProfileName profile={reposter} fallback={reposterFallback} />
           <span>reposted</span>
         </div>
       )}

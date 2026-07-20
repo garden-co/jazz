@@ -37,6 +37,9 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); line-height: 
 .account-actions { display: flex; align-items: center; gap: 8px; }
 .account-identity { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--muted); font-size: .78rem; font-weight: 700; }
 .account-handle { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-name { display: inline-flex; align-items: baseline; min-width: 0; gap: 4px; white-space: nowrap; }
+.profile-name strong, .profile-handle { overflow: hidden; text-overflow: ellipsis; }
+.profile-name-separator, .profile-handle { color: var(--muted); font-weight: 500; }
 .status { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px; border: 1px solid #d9dee8; border-radius: 999px; color: #5d6678; background: rgba(255, 255, 255, .72); font-size: .78rem; font-weight: 700; }
 .status > span { width: 7px; height: 7px; border-radius: 50%; background: #98a2b3; }
 .status.online { border-color: #c8eddd; color: var(--success); background: var(--success-soft); }
@@ -86,6 +89,7 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
 .avatar { display: grid; place-items: center; flex: 0 0 auto; width: 36px; height: 36px; border: 1px solid #dce0ff; border-radius: 11px; color: var(--accent-dark); background: var(--accent-soft); object-fit: cover; font-size: .82rem; font-weight: 850; text-transform: uppercase; }
 .account-avatar { width: 28px; height: 28px; border-radius: 9px; }
 .post-header > div { display: grid; min-width: 0; gap: 2px; }
+.post-header .profile-name { max-width: 100%; }
 .post-header strong { overflow: hidden; font-size: .9rem; text-overflow: ellipsis; white-space: nowrap; }
 .post-header time { color: var(--muted); font-size: .72rem; }
 .pending-label { margin-left: auto; padding: 5px 8px; border-radius: 999px; color: var(--accent-dark); background: var(--accent-soft); font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
@@ -98,6 +102,7 @@ textarea { min-height: 116px; padding: 15px 16px; resize: vertical; line-height:
 .post-images[data-count="1"] img { height: auto; max-height: 520px; object-fit: contain; margin: auto; }
 .quoted-post { margin: 14px 0 0 47px; padding: 10px; border: 1px solid var(--line); border-radius: 13px; background: #fafbfe; }
 .quoted-post-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.quoted-post-header .profile-name { overflow: hidden; }
 .quoted-post-header strong { overflow: hidden; font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
 .quoted-post-header time { margin-left: auto; color: var(--muted); font-size: .68rem; white-space: nowrap; }
 .quoted-avatar { width: 28px; height: 28px; border-radius: 8px; }
