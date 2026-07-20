@@ -45,7 +45,7 @@ describe("typed column modifiers", () => {
       defaultedCount?: number;
       optionalDefaulted?: number | null;
       transformedOptional?: number | null;
-      defaultedMerge: number;
+      defaultedMerge?: number;
     }>();
   });
 
