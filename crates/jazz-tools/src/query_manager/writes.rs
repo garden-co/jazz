@@ -25,8 +25,8 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id}
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
-    TableName, Value,
+    ColumnMergeStrategy, ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor,
+    Schema, SchemaHash, TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -69,6 +69,7 @@ struct PreparedLocalRowHistoryWrite<'a> {
     row_locator: &'a RowLocator,
     descriptor: Arc<RowDescriptor>,
     is_known_new_object: bool,
+    visible_data_override: Option<Vec<u8>>,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -480,6 +481,7 @@ impl QueryManager {
             row_locator,
             descriptor,
             is_known_new_object,
+            visible_data_override,
         } = write;
         self.persist_row_locator(storage, row_id, row_locator);
         self.ensure_known_schemas_catalogued(storage)
@@ -509,6 +511,7 @@ impl QueryManager {
                 context,
                 is_known_new_object,
                 is_scoped_delivery: false,
+                visible_data_override,
             },
         )
         .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
@@ -674,6 +677,98 @@ impl QueryManager {
         storage
             .scan_row_branch_tip_ids(table, branch, row_id)
             .unwrap_or_default()
+    }
+
+    fn authored_counter_data_for_projection_overlay<H: Storage>(
+        storage: &H,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        parents: &[BatchId],
+        descriptor: &RowDescriptor,
+        requested_data: &[u8],
+    ) -> Result<Option<Vec<u8>>, QueryError> {
+        let [parent] = parents else {
+            return Ok(None);
+        };
+        let Some(visible_entry) = storage
+            .load_visible_region_entry(table, branch, row_id)
+            .map_err(|error| {
+                QueryError::EncodingError(format!(
+                    "load visible projection for counter update: {error}"
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+        let Some(raw_parent) = storage
+            .load_history_row_batch(table, branch, row_id, *parent)
+            .map_err(|error| {
+                QueryError::EncodingError(format!("load raw counter frontier for update: {error}"))
+            })?
+        else {
+            return Ok(None);
+        };
+        if raw_parent.data == visible_entry.current_row.data {
+            return Ok(None);
+        }
+
+        let projected_values = decode_row(descriptor, &visible_entry.current_row.data)
+            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
+        let requested_values = decode_row(descriptor, requested_data)
+            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
+        let raw_values = decode_row(descriptor, &raw_parent.data)
+            .map_err(|error| QueryError::EncodingError(error.to_string()))?;
+        let mut authored_values = requested_values.clone();
+
+        for (index, column) in descriptor.columns.iter().enumerate() {
+            if !matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)) {
+                continue;
+            }
+            let counter_value = |value: &Value| match value {
+                Value::Integer(value) => Some(*value),
+                Value::Null => Some(0),
+                _ => None,
+            };
+            let projected = counter_value(&projected_values[index]).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "counter projection for '{}' is not an integer",
+                    column.name_str()
+                ))
+            })?;
+            let requested = counter_value(&requested_values[index]).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "requested counter value for '{}' is not an integer",
+                    column.name_str()
+                ))
+            })?;
+            let raw = counter_value(&raw_values[index]).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "raw counter frontier for '{}' is not an integer",
+                    column.name_str()
+                ))
+            })?;
+            let delta = requested.checked_sub(projected).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "counter projection delta overflow for '{}'",
+                    column.name_str()
+                ))
+            })?;
+            let authored = raw.checked_add(delta).ok_or_else(|| {
+                QueryError::EncodingError(format!(
+                    "counter projection update overflow for '{}'",
+                    column.name_str()
+                ))
+            })?;
+            authored_values[index] = Value::Integer(authored);
+        }
+
+        if authored_values == requested_values {
+            return Ok(None);
+        }
+        encode_row(descriptor, &authored_values)
+            .map(Some)
+            .map_err(|error| QueryError::EncodingError(error.to_string()))
     }
 
     fn prepare_update_write_for_schema<H: Storage>(
@@ -865,12 +960,29 @@ impl QueryManager {
         } = commit;
         let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
+        let authored_data = if Self::write_context_is_open_batch(write_context) {
+            prepared.new_data.clone()
+        } else {
+            Self::authored_counter_data_for_projection_overlay(
+                storage,
+                table,
+                branch,
+                id,
+                &parents,
+                prepared.descriptor.as_ref(),
+                &prepared.new_data,
+            )?
+            .unwrap_or_else(|| prepared.new_data.clone())
+        };
+        let visible_data_override =
+            (authored_data != prepared.new_data).then(|| prepared.new_data.clone());
+
         let is_known_new_object = parents.is_empty();
         let row = self.authored_row_batch(
             id,
             branch,
             parents,
-            prepared.new_data.clone(),
+            authored_data,
             self.row_batch_authoring(provenance, None, write_context),
         );
         let branch_name = BranchName::new(branch);
@@ -886,6 +998,7 @@ impl QueryManager {
                     row_locator: &prepared.row_locator,
                     descriptor: prepared.descriptor.clone(),
                     is_known_new_object,
+                    visible_data_override,
                 },
             )?;
         self.maybe_track_local_pending_batch_overlay(
@@ -1197,6 +1310,7 @@ impl QueryManager {
                     row_locator: &table_write.row_locator,
                     descriptor: table_write.descriptor.clone(),
                     is_known_new_object: true,
+                    visible_data_override: None,
                 },
             )?;
         self.maybe_track_local_pending_batch_overlay(
@@ -2158,6 +2272,7 @@ impl QueryManager {
                     row_locator: &table_write.row_locator,
                     descriptor: table_write.descriptor.clone(),
                     is_known_new_object,
+                    visible_data_override: None,
                 },
             )?;
         self.maybe_track_local_pending_batch_overlay(

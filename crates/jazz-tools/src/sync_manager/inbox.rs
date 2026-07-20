@@ -414,6 +414,7 @@ impl SyncManager {
                             context,
                             is_known_new_object: is_newly_located_object && row.parents.is_empty(),
                             is_scoped_delivery,
+                            visible_data_override: None,
                         },
                     ) {
                         Ok(applied) => applied.visibility_change,
@@ -708,6 +709,7 @@ impl SyncManager {
                 context,
                 is_known_new_object: false,
                 is_scoped_delivery: !self.has_durability_identity(),
+                visible_data_override: None,
             },
         )
         .ok()
