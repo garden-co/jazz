@@ -218,7 +218,9 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
         .as_ref()
         .map(|entry| entry.current_row.clone());
 
-    let existing_history_row = if !is_known_new_object {
+    let is_scoped_visible_delivery =
+        row.state.is_visible() && row.parents.is_empty() && !is_known_new_object;
+    let existing_history_row = if is_scoped_visible_delivery {
         io.load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
             .map_err(RowHistoryError::StorageError)?
     } else {
@@ -229,19 +231,31 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
     // to the local frontier so a causal update does not become a new root.
     // If the raw batch already exists, update only the visible projection:
     // the merged snapshot must not replace the writer's raw history.
-    if row.state.is_visible() && row.parents.is_empty() && !is_known_new_object {
-        if let Some(existing_row) = existing_history_row.as_ref()
-            && !existing_row.parents.is_empty()
+    if is_scoped_visible_delivery {
+        if let Some(previous_entry) = previous_entry.as_ref()
+            && (row.updated_at, row.batch_id())
+                < (
+                    previous_entry.current_row.updated_at,
+                    previous_entry.current_row.batch_id(),
+                )
         {
-            if existing_row == &row {
-                return Ok(ApplyRowBatchResult {
-                    batch_id,
-                    row_locator,
-                    visibility_change: None,
-                });
-            }
+            return Ok(ApplyRowBatchResult {
+                batch_id,
+                row_locator,
+                visibility_change: None,
+            });
+        }
 
-            let current_entry = VisibleRowEntry::new(row.clone());
+        if existing_history_row.is_some() {
+            // The raw row is authoritative for future merges. A scoped
+            // snapshot may contain contributions from history this client
+            // cannot see, so update only the materialised projection while
+            // preserving the frontier and tier sidecars used by later local
+            // writes and tiered reads.
+            let mut current_entry = previous_entry
+                .clone()
+                .unwrap_or_else(|| VisibleRowEntry::new(row.clone()));
+            current_entry.current_row = row.clone();
             let current_visible = Some(row.clone());
             let visible_changed = previous_visible != current_visible;
             let encoded_visible =
@@ -272,6 +286,9 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
             });
         }
 
+        // A pruned ancestor may not appear in the local frontier. The
+        // monotonic check above rejects that stale delivery before it can be
+        // attached below one of its descendants.
         if let Some(previous_entry) = previous_entry.as_ref()
             && !previous_entry.branch_frontier.is_empty()
             && !previous_entry.branch_frontier.contains(&batch_id)
@@ -305,6 +322,12 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
     } else {
         let mut patched_history = load_branch_history(io, &table, object_id, &branch)?;
 
+        let existing_history_row = if let Some(existing_row) = existing_history_row {
+            Some(existing_row)
+        } else {
+            io.load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
+                .map_err(RowHistoryError::StorageError)?
+        };
         if let Some(existing_row) = existing_history_row
             && existing_row == row
         {
