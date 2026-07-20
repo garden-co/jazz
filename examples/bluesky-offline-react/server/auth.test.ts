@@ -42,7 +42,12 @@ vi.mock("./oauth-session-store.js", () => ({
 }));
 
 vi.mock("./signing-keys.js", () => ({
-  loadOrCreateJwtKeys: vi.fn().mockResolvedValue({
+  jazzJwt: {
+    algorithm: "ES256",
+    issuer: "bluesky-offline-react",
+    keyId: "local-dev",
+  },
+  loadOrCreateJazzSigningKeys: vi.fn().mockResolvedValue({
     privateJwk: {},
     publicJwk: {},
   }),

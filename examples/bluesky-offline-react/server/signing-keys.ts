@@ -1,22 +1,38 @@
 import { exportJWK, generateKeyPair, type JWK } from "jose";
-import type { EncryptedValueStore } from "./oauth-session-store.js";
+import type { Db } from "jazz-tools";
+import { createEncryptedValueStore } from "./oauth-session-store.js";
 
-export type StoredJwtKeys = {
+export const jazzJwt = {
+  algorithm: "ES256",
+  issuer: "bluesky-offline-react",
+  keyId: "local-dev",
+} as const;
+
+export type JazzSigningKeyPair = {
   privateJwk: JWK;
   publicJwk: JWK;
 };
 
-export async function loadOrCreateJwtKeys(
-  store: EncryptedValueStore<StoredJwtKeys>,
-) {
-  const stored = await store.get("es256");
+const signingKeyNamespace = "jazz-signing-key:";
+const signingKeyName = "es256";
+
+export async function loadOrCreateJazzSigningKeys(database: Db) {
+  const store = createEncryptedValueStore<JazzSigningKeyPair>(
+    database,
+    signingKeyNamespace,
+  );
+  const stored = await store.get(signingKeyName);
   if (stored) return stored;
 
-  const generated = await generateKeyPair("ES256", { extractable: true });
+  const generated = await generateKeyPair(jazzJwt.algorithm, {
+    extractable: true,
+  });
   const keys = {
     privateJwk: await exportJWK(generated.privateKey),
     publicJwk: await exportJWK(generated.publicKey),
   };
-  await store.set("es256", keys);
+
+  // Persisting the pair keeps issued Jazz tokens verifiable across BFF restarts.
+  await store.set(signingKeyName, keys);
   return keys;
 }
