@@ -7,7 +7,8 @@ use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
     ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
-    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
+    RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, apply_row_batch,
+    apply_row_batch_with_context,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -642,25 +643,22 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> Vec<BatchId> {
+    ) -> (Vec<BatchId>, Option<VisibleRowEntry>) {
         if let Some(existing_batch_row) =
             self.batch_history_row_for_write(storage, row_id, branch_name, write_context)
         {
-            return existing_batch_row.parents.iter().copied().collect();
+            return (existing_batch_row.parents.iter().copied().collect(), None);
         }
-        self.load_branch_tip_ids(storage, table, row_id, branch_name)
-    }
+        if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch_name, row_id) {
+            return (entry.branch_frontier.clone(), Some(entry));
+        }
 
-    fn staged_row_for_write(
-        &self,
-        storage: &dyn Storage,
-        row_id: ObjectId,
-        branch_name: &str,
-        write_context: Option<&WriteContext>,
-    ) -> Option<QueryRowBatch> {
-        let batch_id = write_context.and_then(WriteContext::batch_id)?;
-        self.load_latest_transactional_staged_row_on_branch(storage, row_id, branch_name, batch_id)
-            .map(|(_, row)| row)
+        (
+            storage
+                .scan_row_branch_tip_ids(table, branch_name, row_id)
+                .unwrap_or_default(),
+            None,
+        )
     }
 
     fn load_branch_tip_ids(
@@ -679,26 +677,39 @@ impl QueryManager {
             .unwrap_or_default()
     }
 
+    fn staged_row_for_write(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Option<QueryRowBatch> {
+        let batch_id = write_context.and_then(WriteContext::batch_id)?;
+        self.load_latest_transactional_staged_row_on_branch(storage, row_id, branch_name, batch_id)
+            .map(|(_, row)| row)
+    }
+
     fn authored_counter_data_for_projection_overlay<H: Storage>(
         storage: &H,
         table: &str,
         branch: &str,
         row_id: ObjectId,
         parents: &[BatchId],
+        visible_entry: Option<&VisibleRowEntry>,
         descriptor: &RowDescriptor,
         requested_data: &[u8],
     ) -> Result<Option<Vec<u8>>, QueryError> {
+        if !descriptor
+            .columns
+            .iter()
+            .any(|column| matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)))
+        {
+            return Ok(None);
+        }
         let [parent] = parents else {
             return Ok(None);
         };
-        let Some(visible_entry) = storage
-            .load_visible_region_entry(table, branch, row_id)
-            .map_err(|error| {
-                QueryError::EncodingError(format!(
-                    "load visible projection for counter update: {error}"
-                ))
-            })?
-        else {
+        let Some(visible_entry) = visible_entry else {
             return Ok(None);
         };
         let Some(raw_parent) = storage
@@ -958,7 +969,8 @@ impl QueryManager {
             id,
             index_mutations,
         } = commit;
-        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let (parents, visible_entry) =
+            self.parent_ids_for_write(storage, table, id, branch, write_context);
 
         let authored_data = if Self::write_context_is_open_batch(write_context) {
             prepared.new_data.clone()
@@ -969,6 +981,7 @@ impl QueryManager {
                 branch,
                 id,
                 &parents,
+                visible_entry.as_ref(),
                 prepared.descriptor.as_ref(),
                 &prepared.new_data,
             )?
@@ -2234,7 +2247,7 @@ impl QueryManager {
             }
         }
 
-        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let (parents, _) = self.parent_ids_for_write(storage, table, id, branch, write_context);
         let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
