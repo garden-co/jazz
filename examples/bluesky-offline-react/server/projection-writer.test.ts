@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../operations.js";
+import { app } from "../schema.js";
 import { stableObjectId } from "./timeline.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.doUnmock("./jazz.js");
   vi.resetModules();
 });
@@ -58,54 +60,6 @@ describe("profile projection", () => {
       handle: "viewer.test",
       indexedAt: "2026-07-17T08:00:00.000Z",
     })).rejects.toThrow("Insert denied on table profiles");
-  });
-
-  it("updates a deterministic Jazz object that already exists remotely", async () => {
-    const database = {
-      all: vi.fn(async () => []),
-      one: vi.fn(async () => null),
-      upsert: vi.fn(() => {
-        throw new Error("Upsert failed: object already exists: profile-id");
-      }),
-      update: vi.fn(settledWrite),
-      delete: vi.fn(settledWrite),
-    };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-
-    await createProjectionWriter().projectProfile({
-      did: "did:plc:viewer",
-      handle: "viewer.test",
-      indexedAt: "2026-07-17T08:00:00.000Z",
-    });
-
-    expect(database.update).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.any(String),
-      expect.objectContaining({ handle: "viewer.test" }),
-    );
-  });
-
-  it("reports when a remote deterministic object has not reached the local cache", async () => {
-    const database = {
-      all: vi.fn(async () => []),
-      one: vi.fn(async () => null),
-      upsert: vi.fn(() => {
-        throw new Error("Upsert failed: object already exists: profile-id");
-      }),
-      update: vi.fn(() => {
-        throw new Error("Update failed: object not found: profile-id");
-      }),
-      delete: vi.fn(),
-    };
-    vi.doMock("./jazz.js", () => ({ db: database }));
-    const { createProjectionWriter } = await import("./projection-writer.js");
-
-    await expect(createProjectionWriter().projectProfile({
-      did: "did:plc:viewer",
-      handle: "viewer.test",
-      indexedAt: "2026-07-17T08:00:00.000Z",
-    })).rejects.toThrow("Update failed: object not found: profile-id");
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
@@ -174,24 +128,131 @@ describe("durable reaction projection", () => {
       state: "synced" as const,
     };
 
-    await writer.projectViewerState(operation.ownerDid, post, {}, intents);
-    expect(database.delete).not.toHaveBeenCalled();
-    expect(database.upsert).not.toHaveBeenCalled();
+    await writer.projectTimelinePage(operation.ownerDid, [{ post: {
+      uri: post.uri,
+      cid: "bafypost",
+      author: { did: post.authorDid, handle: "author.test" },
+      record: { text: post.text, createdAt: post.createdAt },
+      indexedAt: post.indexedAt,
+    } }], "next", intents);
+    expect(database.delete.mock.calls.filter(([table]) => table === app.pendingOperations)).toHaveLength(0);
+    expect(database.upsert.mock.calls.filter(([table]) => table === app.likes)).toHaveLength(0);
 
     const restartedWriter = createProjectionWriter();
     const restoredIntents = await restartedWriter.loadReactionIntents(operation.ownerDid);
-    await restartedWriter.projectViewerState(
-      operation.ownerDid,
-      post,
-      { like: "at://viewer/app.bsky.feed.like/3mlike" },
-      restoredIntents,
-    );
-    expect(database.delete).toHaveBeenCalledWith(expect.anything(), operation.id);
-    expect(database.upsert).toHaveBeenCalledWith(
-      expect.anything(),
+    await restartedWriter.projectTimelinePage(operation.ownerDid, [{ post: {
+      uri: post.uri,
+      cid: "bafypost",
+      author: { did: post.authorDid, handle: "author.test" },
+      record: { text: post.text, createdAt: post.createdAt },
+      indexedAt: post.indexedAt,
+      viewer: { like: "at://viewer/app.bsky.feed.like/3mlike" },
+    } }], "next", restoredIntents);
+    expect(database.delete).toHaveBeenCalledWith(app.pendingOperations, operation.id);
+    expect(database.upsert.mock.calls).toContainEqual([
+      app.likes,
       expect.objectContaining({ active: true }),
       expect.anything(),
+    ]);
+  });
+
+  it("confirms one pending reaction once when a post appears twice", async () => {
+    const subjectUri = "at://did:plc:author/app.bsky.feed.post/3m12345678921";
+    const operation: Operation = {
+      id: "00000000-0000-0000-0000-000000000001",
+      ownerDid: "did:plc:viewer",
+      kind: "like",
+      rkey: "3mlike",
+      state: "sent",
+      createdAt: "2026-07-16T10:00:00.000Z",
+      payload: {
+        subjectUri,
+        subjectCid: "bafypost",
+        active: true,
+        createdAt: "2026-07-16T10:00:00.000Z",
+      },
+    };
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => null),
+      upsert: vi.fn(settledWrite),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    const post = {
+      uri: subjectUri,
+      cid: "bafypost",
+      author: { did: "did:plc:author", handle: "author.test" },
+      record: { text: "Post", createdAt: operation.createdAt },
+      indexedAt: operation.createdAt,
+      viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
+    };
+    vi.doMock("./jazz.js", () => ({ db: database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+
+    await createProjectionWriter().projectTimelinePage(
+      operation.ownerDid,
+      [{ post }, { post }],
+      "next",
+      new Map([[`like:${stableObjectId("bluesky-post", subjectUri)}`, operation]]),
     );
+
+    expect(database.delete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("projection writer API", () => {
+  it("exposes only operations used by the projector and reconciler", async () => {
+    vi.doMock("./jazz.js", () => ({ db: {} }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+
+    expect(Object.keys(createProjectionWriter()).sort()).toEqual([
+      "deactivateRepostTimelineEntries",
+      "loadReactionIntents",
+      "markOperationSent",
+      "projectProfile",
+      "projectThread",
+      "projectTimelinePage",
+      "writeLike",
+      "writePostBundle",
+      "writeRepost",
+    ]);
+  });
+});
+
+describe("thread projection", () => {
+  it("does not rewrite an unchanged unavailable thread entry", async () => {
+    let storedEntry: Record<string, unknown> | null = null;
+    const database = {
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => storedEntry),
+      upsert: vi.fn((_table, data: Record<string, unknown>, options: { id: string }) => {
+        storedEntry = { id: options.id, ...data };
+        return settledWrite();
+      }),
+      update: vi.fn(settledWrite),
+      delete: vi.fn(settledWrite),
+    };
+    vi.doMock("./jazz.js", () => ({ db: database }));
+    const { createProjectionWriter } = await import("./projection-writer.js");
+    const writer = createProjectionWriter();
+    const thread = {
+      rootPostId: "root-id",
+      selectedPostId: "missing-id",
+      entries: [{
+        node: { uri: "at://did:plc:author/app.bsky.feed.post/missing" },
+        postId: "missing-id",
+        sortOrder: 0,
+        state: "not-found" as const,
+      }],
+    };
+
+    vi.setSystemTime("2026-07-16T10:00:00.000Z");
+    await writer.projectThread("did:plc:viewer", thread, new Map());
+    vi.setSystemTime("2026-07-16T11:00:00.000Z");
+    await writer.projectThread("did:plc:viewer", thread, new Map());
+
+    expect(database.update).not.toHaveBeenCalled();
   });
 });
 

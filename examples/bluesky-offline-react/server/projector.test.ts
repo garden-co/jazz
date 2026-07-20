@@ -4,62 +4,37 @@ vi.mock("./jazz.js", () => ({ db: {} }));
 
 import { createProjector } from "./projector.js";
 
+function projectorDependencies(overrides: Partial<Parameters<typeof createProjector>[0]> = {}) {
+  return {
+    fetchTimelineFeed: vi.fn(async () => ({ feed: [], cursor: "next" })),
+    fetchPostThread: vi.fn(),
+    fetchProfile: vi.fn(),
+    writer: {
+      loadReactionIntents: vi.fn(async () => new Map()),
+      projectProfile: vi.fn(async () => undefined),
+      projectTimelinePage: vi.fn(async () => undefined),
+      projectThread: vi.fn(),
+    },
+    ...overrides,
+  };
+}
+
 describe("timeline projector", () => {
   it("projects the signed-in profile without waiting for the timeline fetch", async () => {
-    const profile = {
-      did: "did:plc:viewer",
-      handle: "viewer.test",
-    };
+    const profile = { did: "did:plc:viewer", handle: "viewer.test" };
     const projectProfile = vi.fn(async () => undefined);
-    const projector = createProjector({
+    const dependencies = projectorDependencies({
       fetchTimelineFeed: vi.fn(() => new Promise(() => undefined)),
-      fetchPostThread: vi.fn(),
       fetchProfile: vi.fn(async () => profile),
-      writer: {
-        loadReactionIntents: vi.fn(async () => new Map()),
-        projectProfile,
-        projectTimelinePage: vi.fn(async () => undefined),
-        projectThread: vi.fn(),
-      },
     });
+    dependencies.writer.projectProfile = projectProfile;
+    const projector = createProjector(dependencies);
 
     projector.projectTimelinePage("did:plc:viewer", { fetchHandler: vi.fn() });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(projectProfile).toHaveBeenCalledWith(profile);
+    await vi.waitFor(() => expect(projectProfile).toHaveBeenCalledWith(profile));
   });
 
-  it("does not let pagination swallow a fresh head projection", async () => {
-    const releases = new Map<string, (value: { feed: never[]; cursor?: string }) => void>();
-    const fetchTimelineFeed = vi.fn((_session: unknown, cursor?: string) =>
-      new Promise<{ feed: never[]; cursor?: string }>((resolve) => {
-        releases.set(cursor ?? "head", resolve);
-      }));
-    const projector = createProjector({
-      fetchTimelineFeed,
-      fetchPostThread: vi.fn(),
-      fetchProfile: vi.fn(),
-      writer: {
-        loadReactionIntents: vi.fn(async () => new Map()),
-        projectProfile: vi.fn(async () => undefined),
-        projectTimelinePage: vi.fn(async () => undefined),
-        projectThread: vi.fn(),
-      },
-    });
-    const session = { fetchHandler: vi.fn() };
-
-    const pagination = projector.projectTimelinePage("did:plc:viewer", session, "older");
-    const refresh = projector.projectTimelinePage("did:plc:viewer", session);
-
-    expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
-    releases.get("older")?.({ feed: [], cursor: "oldest" });
-    releases.get("head")?.({ feed: [], cursor: "newer" });
-    await expect(pagination).resolves.toMatchObject({ cursor: "oldest" });
-    await expect(refresh).resolves.toMatchObject({ cursor: "newer" });
-  });
-
-  it("shares one in-flight fetch and exposes projection completion", async () => {
+  it("shares one in-flight projection and returns only pagination metadata", async () => {
     let releaseFetch!: (value: { feed: never[]; cursor: string }) => void;
     const fetchTimelineFeed = vi.fn(() => new Promise<{ feed: never[]; cursor: string }>((resolve) => {
       releaseFetch = resolve;
@@ -68,17 +43,9 @@ describe("timeline projector", () => {
     const projectTimelinePage = vi.fn(() => new Promise<void>((resolve) => {
       releaseProjection = resolve;
     }));
-    const projector = createProjector({
-      fetchTimelineFeed,
-      fetchPostThread: vi.fn(),
-      fetchProfile: vi.fn(),
-      writer: {
-        loadReactionIntents: vi.fn(async () => new Map()),
-        projectProfile: vi.fn(async () => undefined),
-        projectTimelinePage,
-        projectThread: vi.fn(),
-      },
-    });
+    const dependencies = projectorDependencies({ fetchTimelineFeed });
+    dependencies.writer.projectTimelinePage = projectTimelinePage;
+    const projector = createProjector(dependencies);
     const session = { fetchHandler: vi.fn() };
 
     const first = projector.projectTimelinePage("did:plc:viewer", session);
@@ -86,63 +53,45 @@ describe("timeline projector", () => {
     expect(fetchTimelineFeed).toHaveBeenCalledTimes(1);
 
     releaseFetch({ feed: [], cursor: "next" });
-    const [firstResult, secondResult] = await Promise.all([first, second]);
-    expect(firstResult.projection.state).toBe("accepted");
-    expect(secondResult.projection.state).toBe("running");
-    expect(secondResult.projection.id).toBe(firstResult.projection.id);
-    expect(projector.getTimelineProjectionStatus("did:plc:viewer")).toMatchObject({ state: "projecting" });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { cursor: "next", hasMore: true, count: 0 },
+      { cursor: "next", hasMore: true, count: 0 },
+    ]);
 
     releaseProjection();
-    await projector.waitForTimelineProjection("did:plc:viewer");
-    expect(projector.getTimelineProjectionStatus("did:plc:viewer")).toMatchObject({ state: "completed" });
+    await vi.waitFor(() => expect(projectTimelinePage).toHaveBeenCalledTimes(1));
+    await projector.projectTimelinePage("did:plc:viewer", session);
+    expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
   });
 
-  it("retains projection failures for inspection", async () => {
-    const projector = createProjector({
-      fetchTimelineFeed: vi.fn(async () => ({ feed: [], cursor: undefined })),
-      fetchPostThread: vi.fn(),
-      fetchProfile: vi.fn(),
-      writer: {
-        loadReactionIntents: vi.fn(async () => new Map()),
-        projectProfile: vi.fn(async () => undefined),
-        projectTimelinePage: vi.fn(async () => { throw new Error("projection exploded"); }),
-        projectThread: vi.fn(),
-      },
-    });
+  it("does not let pagination swallow a fresh head projection", async () => {
+    const releases = new Map<string, (value: { feed: never[]; cursor?: string }) => void>();
+    const fetchTimelineFeed = vi.fn((_session: unknown, cursor?: string) =>
+      new Promise<{ feed: never[]; cursor?: string }>((resolve) => {
+        releases.set(cursor ?? "head", resolve);
+      }));
+    const projector = createProjector(projectorDependencies({ fetchTimelineFeed }));
+    const session = { fetchHandler: vi.fn() };
+
+    const pagination = projector.projectTimelinePage("did:plc:viewer", session, "older");
+    const refresh = projector.projectTimelinePage("did:plc:viewer", session);
+
+    expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
+    releases.get("older")?.({ feed: [], cursor: "oldest" });
+    releases.get("head")?.({ feed: [], cursor: "newer" });
+    await expect(pagination).resolves.toEqual({ cursor: "oldest", hasMore: true, count: 0 });
+    await expect(refresh).resolves.toEqual({ cursor: "newer", hasMore: true, count: 0 });
+  });
+
+  it("reports a background projection failure", async () => {
+    const error = new Error("projection exploded");
+    const dependencies = projectorDependencies();
+    dependencies.writer.projectTimelinePage = vi.fn(async () => { throw error; });
+    const reportError = vi.fn();
+    const projector = createProjector(dependencies, reportError);
 
     await projector.projectTimelinePage("did:plc:viewer", { fetchHandler: vi.fn() });
-    await projector.waitForTimelineProjection("did:plc:viewer");
 
-    expect(projector.getTimelineProjectionStatus("did:plc:viewer")).toMatchObject({
-      state: "failed",
-      error: "projection exploded",
-    });
-  });
-
-  it("does not overwrite an early profile failure when the timeline fetch finishes later", async () => {
-    let releaseTimeline!: (value: { feed: never[] }) => void;
-    const projector = createProjector({
-      fetchTimelineFeed: vi.fn(() => new Promise<{ feed: never[] }>((resolve) => {
-        releaseTimeline = resolve;
-      })),
-      fetchPostThread: vi.fn(),
-      fetchProfile: vi.fn(async () => ({ did: "did:plc:viewer", handle: "viewer.test" })),
-      writer: {
-        loadReactionIntents: vi.fn(async () => new Map()),
-        projectProfile: vi.fn(async () => { throw new Error("profile projection failed"); }),
-        projectTimelinePage: vi.fn(async () => undefined),
-        projectThread: vi.fn(),
-      },
-    });
-
-    const request = projector.projectTimelinePage("did:plc:viewer", { fetchHandler: vi.fn() });
-    await projector.waitForTimelineProjection("did:plc:viewer");
-    releaseTimeline({ feed: [] });
-    await request;
-
-    expect(projector.getTimelineProjectionStatus("did:plc:viewer")).toMatchObject({
-      state: "failed",
-      error: "profile projection failed",
-    });
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith("Timeline projection failed", error));
   });
 });
