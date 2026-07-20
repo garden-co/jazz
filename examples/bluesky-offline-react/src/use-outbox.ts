@@ -1,7 +1,6 @@
 import { useDb } from "jazz-tools/react";
 import { useEffect, useRef } from "react";
 import { app } from "../schema.js";
-import { stableObjectId } from "./object-id.js";
 import { singleFlight } from "./single-flight.js";
 
 const retryInterval = 15_000;
@@ -35,14 +34,6 @@ export function useOutbox(
         return;
       }
       reportApiReachable(true);
-      for (const operation of operations) {
-        db.update(app.pendingOperations, operation.id, { state: "sent", error: "" });
-        if (operation.kind === "post") {
-          const postId = await stableObjectId("bluesky-post", `at://${ownerDid}/app.bsky.feed.post/${operation.rkey}`);
-          const post = await db.one(app.posts.where({ id: { eq: postId } }));
-          if (post) db.update(app.posts, post.id, { state: "synced" });
-        }
-      }
     } catch {
       for (const operation of operations) db.update(app.pendingOperations, operation.id, { error: "Sync failed" });
       reportApiReachable(false);

@@ -320,7 +320,11 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     return { rootPostId: thread.rootPostId, count };
   }
 
-  async function markOperationSent(operation: Operation) {
+  async function completeOperation(operation: Operation) {
+    if (operation.kind === "post") {
+      await database.delete(app.pendingOperations, operation.id).wait({ tier: "edge" });
+      return;
+    }
     await projectRow(database, app.pendingOperations, operation.id, {
       ownerDid: operation.ownerDid,
       kind: operation.kind,
@@ -343,9 +347,9 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
   }
 
   return {
+    completeOperation,
     deactivateRepostTimelineEntries,
     loadReactionIntents,
-    markOperationSent,
     projectProfile,
     projectThread,
     projectTimelinePage,

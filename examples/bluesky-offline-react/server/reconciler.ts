@@ -16,7 +16,7 @@ type ReconcilerDependencies = {
   putRecord: typeof putRecord;
   recordKey: typeof recordKey;
   writer: Pick<ProjectionWriter,
-    "deactivateRepostTimelineEntries" | "markOperationSent" | "writeLike" | "writePostBundle" | "writeRepost">;
+    "completeOperation" | "deactivateRepostTimelineEntries" | "writeLike" | "writePostBundle" | "writeRepost">;
 };
 
 export function createReconciler(dependencies: ReconcilerDependencies = {
@@ -57,6 +57,7 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
   ) {
     const kind = operation.kind;
     const collection = `app.bsky.feed.${kind}`;
+    // Resolve the current subject again because its CID may have changed while this intention was offline.
     const [post] = await dependencies.fetchViewerPosts(session, [operation.payload.subjectUri]);
     if (!post?.uri || !post.cid) throw new OperationError("subject post is unavailable", 502);
 
@@ -82,7 +83,11 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
     } else if (!operation.payload.active && wasActive) {
       const rkey = dependencies.recordKey(viewerUri, did, collection);
       if (!rkey) throw new OperationError(`AppView returned an invalid ${kind} URI`, 502);
-      await dependencies.deleteRecord(session, { repo: did, collection, rkey });
+      try {
+        await dependencies.deleteRecord(session, { repo: did, collection, rkey });
+      } catch (error) {
+        if (!(error instanceof OperationError) || !error.message.includes("RecordNotFound")) throw error;
+      }
       uri = undefined;
     }
 
@@ -127,10 +132,12 @@ export function createReconciler(dependencies: ReconcilerDependencies = {
 
   async function reconcileOperations(did: string, session: SessionFetcher, operations: Operation[]) {
     // ATProto repository writes are ordered intentions; do not parallelise them.
-    for (const operation of operations) {
+    const ordered = [...operations].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    for (const operation of ordered) {
       if (operation.kind === "post") await reconcilePost(did, session, operation);
       else await reconcileReaction(did, session, operation);
-      await dependencies.writer.markOperationSent(operation);
+      await dependencies.writer.completeOperation(operation);
     }
   }
 
