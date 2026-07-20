@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { appId } from "../app-id.js";
 import { formatObjectId, objectIdKey } from "../object-id.js";
 
 export type ProfileView = {
@@ -74,9 +75,9 @@ export type FeedViewPost = {
 export function stableObjectId(
   namespace: string,
   value: string,
-  appId = process.env.JAZZ_APP_ID ?? "bluesky-offline-react-v2",
+  applicationId = appId,
 ) {
-  return formatObjectId(createHash("sha256").update(objectIdKey(appId, namespace, value)).digest());
+  return formatObjectId(createHash("sha256").update(objectIdKey(applicationId, namespace, value)).digest());
 }
 
 function profileRow(profile: ProfileView | undefined, indexedAt: string) {

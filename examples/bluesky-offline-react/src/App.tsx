@@ -2,6 +2,7 @@ import { Button, Card, Spinner, TextField } from "@radix-ui/themes";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { appId } from "../app-id.js";
 import { SuccessIcon } from "./Icons.js";
 import { Timeline } from "./Timeline.js";
 import { LoadingScreen } from "./TimelineView.js";
@@ -12,7 +13,6 @@ import {
   type Session,
 } from "./auth-state.js";
 
-const appId = import.meta.env.VITE_JAZZ_APP_ID ?? "bluesky-offline-react-v2";
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 const sessionCacheKey = `${appId}:session`;
 

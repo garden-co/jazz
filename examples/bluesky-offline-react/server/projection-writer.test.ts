@@ -22,7 +22,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
     const writer = createProjectionWriter();
     const profile = {
@@ -50,7 +50,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await expect(createProjectionWriter().projectProfile({
@@ -70,7 +70,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await createProjectionWriter().projectProfile({
@@ -98,7 +98,7 @@ describe("profile projection", () => {
       }),
       delete: vi.fn(),
     };
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
 
     await expect(createProjectionWriter().projectProfile({
@@ -109,7 +109,7 @@ describe("profile projection", () => {
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => ({}) }));
+    vi.doMock("./jazz.js", () => ({ db: {} }));
     const { mergeProfileProjection } = await import("./projection-writer.js");
     expect(mergeProfileProjection({
       did: "did:plc:author",
@@ -156,7 +156,7 @@ describe("durable reaction projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
     const writer = createProjectionWriter();
     const intents = await writer.loadReactionIntents(operation.ownerDid);
@@ -218,7 +218,7 @@ describe("progressive timeline projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     });
 
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     const { createProjectionWriter } = await import("./projection-writer.js");
     const projection = createProjectionWriter().projectTimelinePage(
       "did:plc:viewer",

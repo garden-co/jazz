@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./jazz.js", () => ({ db: {} }));
+
 import { createProjector } from "./projector.js";
 
 describe("timeline projector", () => {

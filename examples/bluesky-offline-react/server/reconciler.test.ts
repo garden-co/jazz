@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./jazz.js", () => ({ db: {} }));
+
 import { createReconciler } from "./reconciler.js";
 
 function writer() {

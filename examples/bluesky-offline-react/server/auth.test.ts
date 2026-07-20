@@ -27,7 +27,7 @@ vi.mock("jose", () => ({
 }));
 
 vi.mock("./jazz.js", () => ({
-  getBackendDb: () => ({}),
+  db: {},
 }));
 
 vi.mock("./oauth-session-store.js", () => ({

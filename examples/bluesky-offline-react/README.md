@@ -125,7 +125,7 @@ pnpm dev
 
 Open `http://127.0.0.1:5173`. OAuth uses ATProto's loopback client metadata and redirects through `http://127.0.0.1:3001`; use the same loopback address for the app so its session cookie is sent correctly.
 
-Note that `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` must match. OAuth session material is encrypted with AES-256-GCM before it is stored in Jazz's backend-only `oauthSessions` table. `OAUTH_SESSION_ENCRYPTION_KEY` must contain a 64-character hexadecimal key; changing it invalidates existing sessions. The table has no client permissions and does not sync to browsers.
+The browser, BFF and local Jazz server share the application ID exported from `app-id.ts`. OAuth session material is encrypted with AES-256-GCM before it is stored in Jazz's backend-only `oauthSessions` table. `OAUTH_SESSION_ENCRYPTION_KEY` must contain a 64-character hexadecimal key; changing it invalidates existing sessions. The table has no client permissions and does not sync to browsers.
 
 ## Changing the schema
 
@@ -143,4 +143,4 @@ pnpm test
 pnpm build
 ```
 
-Do not change the app ID or database path merely to bypass an incompatible schema. A new app ID creates a separate Jazz application and is useful only when isolation is the intended result. For normal development, keep `JAZZ_APP_ID` and `VITE_JAZZ_APP_ID` aligned and add a migration so existing local and server data can evolve.
+Do not change the app ID or database path merely to bypass an incompatible schema. A new app ID creates a separate Jazz application and is useful only when isolation is the intended result. For normal development, keep the shared `app-id.ts` value and add a migration so existing local and server data can evolve.

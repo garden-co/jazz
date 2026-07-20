@@ -11,10 +11,10 @@ import {
   type PostView,
   type ProfileView,
 } from "./timeline.js";
-import { getBackendDb } from "./jazz.js";
+import { db } from "./jazz.js";
 import type { FlatThread } from "./thread-normalizer.js";
 
-type ProjectionDatabase = ReturnType<typeof getBackendDb>;
+type ProjectionDatabase = typeof db;
 type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
 type NormalizedPost = PostBundle["post"];
 export type ReactionIntents = Map<string, ReactionOperation>;
@@ -90,7 +90,7 @@ function reactionKey(kind: ReactionOperation["kind"], postId: string) {
   return `${kind}:${postId}`;
 }
 
-export function createProjectionWriter(database: ProjectionDatabase = getBackendDb()) {
+export function createProjectionWriter(database: ProjectionDatabase = db) {
   async function writeProfile(profile: ProfileProjection) {
     const existing = await database.one(app.profiles.where({ id: { eq: profile.id } }));
     await projectRow(database, app.profiles, profile.id, mergeProfileProjection(existing, profile));

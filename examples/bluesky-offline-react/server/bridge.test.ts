@@ -38,7 +38,7 @@ describe("Bluesky/Jazz bridge", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     };
 
-    vi.doMock("./jazz.js", () => ({ getBackendDb: () => database }));
+    vi.doMock("./jazz.js", () => ({ db: database }));
     vi.doMock("./bluesky.js", () => ({
       deleteRecord: vi.fn(),
       fetchPostThread: vi.fn(),
@@ -73,6 +73,7 @@ describe("Bluesky/Jazz bridge", () => {
   });
 
   it("exposes only the application operations", async () => {
+    vi.doMock("./jazz.js", () => ({ db: {} }));
     vi.doMock("./projector.js", () => ({
       createProjector: () => ({
         projectThread: vi.fn(),

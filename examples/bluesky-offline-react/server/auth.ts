@@ -7,7 +7,7 @@ import {
   importJWK,
   SignJWT,
 } from "jose";
-import { getBackendDb } from "./jazz.js";
+import { db } from "./jazz.js";
 import {
   createBffSessionStore,
   createEncryptedValueStore,
@@ -21,8 +21,6 @@ const clientMetadata = buildAtprotoLoopbackClientMetadata({
   redirect_uris: ["http://127.0.0.1:3001/api/auth/callback"],
   scope: oauthScope,
 });
-const db = getBackendDb();
-
 export const oauth = new NodeOAuthClient({
   clientMetadata,
   stateStore: createOAuthStateStore(db),

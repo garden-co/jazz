@@ -1,9 +1,9 @@
 import { formatObjectId, objectIdKey } from "../object-id.js";
+import { appId } from "../app-id.js";
 
 const objectIds = new Map<string, Promise<string>>();
 
 export function stableObjectId(namespace: string, value: string) {
-  const appId = import.meta.env.VITE_JAZZ_APP_ID ?? "bluesky-offline-react-v2";
   const key = objectIdKey(appId, namespace, value);
   const cached = objectIds.get(key);
   if (cached) return cached;
