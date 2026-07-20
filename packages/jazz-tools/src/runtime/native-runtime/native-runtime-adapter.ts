@@ -1227,6 +1227,13 @@ export class NativeRuntimeAdapter implements Runtime {
     return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
   }
 
+  private warnedOnce = new Set<string>();
+  private warnOnce(key: string, message: string): void {
+    if (this.warnedOnce.has(key)) return;
+    this.warnedOnce.add(key);
+    console.warn(`[jazz native-runtime] ${message}`);
+  }
+
   private async refreshRowsFromEdge(
     session: RuntimeSession | null,
     rows: RowState[],
@@ -1703,12 +1710,26 @@ export class NativeRuntimeAdapter implements Runtime {
         const previousRows = subscription.rows;
         // Guarded so the argument never evaluates without a server transport:
         // memory-backed chunks carry a different updated-payload shape and the
-        // callers swallow rejections, which silently killed delivery.
-        if (this.serverTransport) {
-          await this.refreshRowsFromEdge(
-            subscription.session,
-            rowsFromBatches(chunk.delta.updated, this.schema),
-          );
+        // callers swallow rejections, which silently killed delivery. The
+        // refresh is an optimization: any failure (including payload-shape
+        // decode errors on individual subscriptions) must degrade to a plain
+        // snapshot refresh, never kill delivery for that subscription.
+        // Scope: post-open update convergence only. During initial ingest
+        // (reset chunks / not-yet-opened subscriptions) the refresh would fire
+        // per-row edge queries across the whole snapshot — a multi-second cold
+        // open tax with no correctness benefit.
+        if (this.serverTransport && subscription.opened && !chunk.reset) {
+          try {
+            await this.refreshRowsFromEdge(
+              subscription.session,
+              rowsFromBatches(chunk.delta.updated, this.schema),
+            );
+          } catch (error) {
+            this.warnOnce(
+              "edge-refresh-decode",
+              `edge refresh skipped for a subscription chunk: ${String(error)}`,
+            );
+          }
         }
         subscription.rows = this.refreshPlainSubscriptionRows(subscription);
         subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
