@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drift detector for the nine Jazz starters.
+// Drift detector for the Jazz starters.
 //
 // Verifies that files meant to be identical actually are, and that every
 // README follows the same section order. Runs in CI / lefthook and also
@@ -25,6 +25,7 @@ const STARTERS = {
   ],
   react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
   ts: ["starters/ts-betterauth", "starters/ts-localfirst", "starters/ts-hybrid"],
+  nuxt: ["starters/nuxt-betterauth", "starters/nuxt-localfirst", "starters/nuxt-hybrid"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -35,6 +36,7 @@ const HORIZONTAL_FILES = {
   sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
   react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
   ts: ["schema.ts", "permissions.ts", "src/todo-widget.ts"],
+  nuxt: ["schema.ts", "permissions.ts", "components/TodoWidget.client.vue"],
 };
 
 // Files that must be byte-identical across all starters regardless of
@@ -51,6 +53,7 @@ const CROSS_FRAMEWORK_FILES = [
     sveltekit: "src/lib/schema.ts",
     react: "schema.ts",
     ts: "schema.ts",
+    nuxt: "schema.ts",
   },
   {
     logical: "permissions",
@@ -58,6 +61,7 @@ const CROSS_FRAMEWORK_FILES = [
     sveltekit: "src/lib/permissions.ts",
     react: "permissions.ts",
     ts: "permissions.ts",
+    nuxt: "permissions.ts",
   },
 ];
 

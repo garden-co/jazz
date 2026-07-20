@@ -1,0 +1,21 @@
+{
+  "name": "nuxt-localfirst",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "nuxt": "^3.16.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "typescript": "catalog:default"
+  }
+}

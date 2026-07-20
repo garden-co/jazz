@@ -25,6 +25,9 @@ export const KNOWN_STARTERS = [
   "ts-betterauth",
   "ts-localfirst",
   "ts-hybrid",
+  "nuxt-betterauth",
+  "nuxt-localfirst",
+  "nuxt-hybrid",
 ] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 

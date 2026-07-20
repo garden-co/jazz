@@ -1,0 +1,23 @@
+{
+  "name": "nuxt-betterauth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/init-env.mjs",
+    "dev": "nuxt dev",
+    "build": "nuxt build --dotenv .env.local",
+    "preview": "nuxt preview",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "better-auth": "^1.5.5",
+    "jazz-tools": "workspace:*",
+    "nuxt": "^3.16.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "typescript": "catalog:default"
+  }
+}
