@@ -9,9 +9,9 @@ use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
     ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
-    RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, apply_row_batch,
-    apply_row_batch_with_context, has_counter_merge_strategy, rebase_counter_data,
-    transaction_projection_basis, transaction_query_projection_basis,
+    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
+    has_counter_merge_strategy, rebase_counter_data, transaction_projection_basis,
+    transaction_query_projection_basis,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -55,6 +55,12 @@ struct PreparedUpdateCommit<'a> {
     branch: &'a str,
     id: ObjectId,
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
+}
+
+struct WriteAncestry {
+    parents: Vec<BatchId>,
+    visible_projection: Option<QueryRowBatch>,
+    transaction_basis: Option<String>,
 }
 
 struct RowBatchAuthoring<'a> {
@@ -639,14 +645,15 @@ impl QueryManager {
             .map(|(_, row)| row)
     }
 
-    fn parent_ids_for_write(
+    fn write_ancestry(
         &self,
         storage: &dyn Storage,
         table: &str,
         row_id: ObjectId,
         branch_name: &str,
         write_context: Option<&WriteContext>,
-    ) -> (Vec<BatchId>, Option<VisibleRowEntry>, Option<String>) {
+        load_visible_projection: bool,
+    ) -> WriteAncestry {
         if let Some(existing_batch_row) =
             self.batch_history_row_for_write(storage, row_id, branch_name, write_context)
         {
@@ -654,11 +661,15 @@ impl QueryManager {
                 .metadata
                 .get(MetadataKey::TransactionBasis.as_str())
                 .cloned();
-            return (
-                existing_batch_row.parents.iter().copied().collect(),
-                None,
+            let visible_projection = load_visible_projection
+                .then(|| self.load_visible_row_on_branch(storage, row_id, branch_name))
+                .flatten()
+                .map(|(_, row)| row);
+            return WriteAncestry {
+                parents: existing_batch_row.parents.iter().copied().collect(),
+                visible_projection,
                 transaction_basis,
-            );
+            };
         }
         let visible_entry = storage.load_visible_region_entry(table, branch_name, row_id);
         if let Ok(Some(entry)) = visible_entry {
@@ -667,28 +678,40 @@ impl QueryManager {
                 Some(BatchMode::Transactional)
             )
             .then(|| transaction_projection_basis(&entry.current_row));
-            return (
-                entry.branch_frontier.clone(),
-                Some(entry),
+            let visible_projection =
+                load_visible_projection.then(|| QueryRowBatch::from(&entry.current_row));
+            return WriteAncestry {
+                parents: entry.branch_frontier,
+                visible_projection,
                 transaction_basis,
-            );
+            };
         }
 
-        let transaction_basis = matches!(
+        let is_transactional = matches!(
             write_context.map(WriteContext::batch_mode),
             Some(BatchMode::Transactional)
-        )
-        .then(|| self.load_visible_row_on_branch(storage, row_id, branch_name))
-        .flatten()
-        .map(|(_, row)| transaction_query_projection_basis(row_id, &row));
+        );
+        let visible_projection = (is_transactional || load_visible_projection)
+            .then(|| self.load_visible_row_on_branch(storage, row_id, branch_name))
+            .flatten()
+            .map(|(_, row)| row);
+        let transaction_basis = is_transactional
+            .then(|| {
+                visible_projection
+                    .as_ref()
+                    .map(|row| transaction_query_projection_basis(row_id, row))
+            })
+            .flatten();
 
-        (
-            storage
+        WriteAncestry {
+            parents: storage
                 .scan_row_branch_tip_ids(table, branch_name, row_id)
                 .unwrap_or_default(),
-            None,
+            visible_projection: load_visible_projection
+                .then_some(visible_projection)
+                .flatten(),
             transaction_basis,
-        )
+        }
     }
 
     fn load_branch_tip_ids(
@@ -724,18 +747,17 @@ impl QueryManager {
         table: &str,
         branch: &str,
         row_id: ObjectId,
-        parents: &[BatchId],
-        visible_entry: Option<&VisibleRowEntry>,
+        ancestry: &WriteAncestry,
         descriptor: &RowDescriptor,
         requested_data: &[u8],
     ) -> Result<Option<Vec<u8>>, QueryError> {
         if !has_counter_merge_strategy(descriptor) {
             return Ok(None);
         }
-        let [parent] = parents else {
+        let [parent] = ancestry.parents.as_slice() else {
             return Ok(None);
         };
-        let Some(visible_entry) = visible_entry else {
+        let Some(visible_projection) = ancestry.visible_projection.as_ref() else {
             return Ok(None);
         };
         let Some(raw_parent) = storage
@@ -746,9 +768,10 @@ impl QueryManager {
         else {
             return Ok(None);
         };
+
         rebase_counter_data(
             descriptor,
-            &visible_entry.current_row.data,
+            &visible_projection.data,
             requested_data,
             &raw_parent.data,
         )
@@ -942,36 +965,37 @@ impl QueryManager {
             id,
             index_mutations,
         } = commit;
-        let (parents, visible_entry, transaction_basis) =
-            self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let ancestry = self.write_ancestry(
+            storage,
+            table,
+            id,
+            branch,
+            write_context,
+            has_counter_merge_strategy(prepared.descriptor.as_ref()),
+        );
 
-        let authored_data = if Self::write_context_is_open_batch(write_context) {
-            prepared.new_data.clone()
-        } else {
-            Self::authored_counter_data_for_projection_overlay(
-                storage,
-                table,
-                branch,
-                id,
-                &parents,
-                visible_entry.as_ref(),
-                prepared.descriptor.as_ref(),
-                &prepared.new_data,
-            )?
-            .unwrap_or_else(|| prepared.new_data.clone())
-        };
+        let authored_data = Self::authored_counter_data_for_projection_overlay(
+            storage,
+            table,
+            branch,
+            id,
+            &ancestry,
+            prepared.descriptor.as_ref(),
+            &prepared.new_data,
+        )?
+        .unwrap_or_else(|| prepared.new_data.clone());
         let visible_data_override =
             (authored_data != prepared.new_data).then(|| prepared.new_data.clone());
 
-        let is_known_new_object = parents.is_empty();
+        let is_known_new_object = ancestry.parents.is_empty();
         let mut row = self.authored_row_batch(
             id,
             branch,
-            parents,
+            ancestry.parents,
             authored_data,
             self.row_batch_authoring(provenance, None, write_context),
         );
-        if let Some(transaction_basis) = transaction_basis {
+        if let Some(transaction_basis) = ancestry.transaction_basis {
             row.metadata
                 .insert(MetadataKey::TransactionBasis.as_str(), transaction_basis);
         }
@@ -2224,21 +2248,20 @@ impl QueryManager {
             }
         }
 
-        let (parents, _, transaction_basis) =
-            self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let ancestry = self.write_ancestry(storage, table, id, branch, write_context, false);
         let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
-        let is_known_new_object = parents.is_empty();
+        let is_known_new_object = ancestry.parents.is_empty();
         let mut delete_row = self.authored_row_batch(
             id,
             branch,
-            parents,
+            ancestry.parents,
             old_data_for_policy.to_vec(),
             self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
         );
-        if let Some(transaction_basis) = transaction_basis {
+        if let Some(transaction_basis) = ancestry.transaction_basis {
             delete_row
                 .metadata
                 .insert(MetadataKey::TransactionBasis.as_str(), transaction_basis);
