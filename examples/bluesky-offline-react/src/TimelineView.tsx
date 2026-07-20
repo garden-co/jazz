@@ -7,6 +7,15 @@ import {
   TextArea,
 } from "@radix-ui/themes";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import {
+  BackIcon,
+  DisclosureIcon,
+  LikeIcon,
+  RepostIcon,
+  StatusIcon,
+  SuccessIcon,
+  ThreadLinkIcon,
+} from "./Icons.js";
 import { ProfileName, profileNameParts } from "./ProfileName.js";
 import { ReplyIcon } from "./ReplyIcon.js";
 import { segmentRichText } from "./rich-text.js";
@@ -169,7 +178,7 @@ export function AppHeader({
           role="status"
           aria-live="polite"
         >
-          <span aria-hidden="true" />
+          <StatusIcon />
           {online ? "Online" : "Offline"}
         </Badge>
         <span className="account-identity">
@@ -344,7 +353,7 @@ function PostCard({
           disabled={!post.cid}
           onClick={() => onToggleReaction("like", post)}
         >
-          <span aria-hidden="true">{post.like?.active ? "♥" : "♡"}</span>
+          <LikeIcon active={post.like?.active ?? false} />
           <span>{post.likeCount || ""}</span>
         </Button>
         <Button
@@ -359,7 +368,7 @@ function PostCard({
           disabled={!post.cid}
           onClick={() => onToggleReaction("repost", post)}
         >
-          <span aria-hidden="true">↻</span>
+          <RepostIcon />
           <span>{post.repostCount || ""}</span>
         </Button>
         {(pendingLike || pendingRepost) && (
@@ -462,6 +471,7 @@ function TimelinePostTree({ node, threadRoot, onReroot, postState, actions, dept
           className="thread-disclosure"
           onClick={() => onReroot(node.post.id)}
         >
+          <DisclosureIcon />
           Show {node.replies.length === 1 ? "reply" : `${node.replies.length} replies`}
         </button>
       ))}
@@ -477,7 +487,7 @@ function TimelinePostTree({ node, threadRoot, onReroot, postState, actions, dept
               Loading replies…
             </>
           ) : postState.online ? (
-            `Load ${node.post.replyCount === 1 ? "reply" : `${node.post.replyCount} replies`}`
+            <><DisclosureIcon />Load {node.post.replyCount === 1 ? "reply" : `${node.post.replyCount} replies`}</>
           ) : "Replies not cached"}
         </button>
       )}
@@ -496,7 +506,7 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
     <div className="timeline-thread">
       {item.repost && (
         <div className="repost-reason">
-          <span aria-hidden="true">↻</span>
+          <RepostIcon />
           {reposter?.avatar && (
             <img
               className="repost-avatar"
@@ -514,6 +524,7 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
           className="thread-reset"
           onClick={() => setFocusedId(item.node.post.id)}
         >
+          <BackIcon />
           Back to top level
         </button>
       )}
@@ -531,6 +542,7 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
           target="_blank"
           rel="noopener noreferrer"
         >
+          <ThreadLinkIcon />
           View thread
         </a>
       )}
@@ -612,7 +624,7 @@ export function TimelineFeed({
       )}
       {!hasMore && items.length > 0 && (
         <p className="pagination-status">
-          <span aria-hidden="true">✓</span>
+          <span><SuccessIcon /></span>
           You’re all caught up
         </p>
       )}

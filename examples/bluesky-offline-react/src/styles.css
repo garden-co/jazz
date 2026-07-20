@@ -41,9 +41,8 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); line-height: 
 .profile-name strong, .profile-handle { overflow: hidden; text-overflow: ellipsis; }
 .profile-name-separator, .profile-handle { color: var(--muted); font-weight: 500; }
 .status { display: inline-flex; align-items: center; gap: 7px; font-size: .78rem; font-weight: 700; }
-.status > span { width: 7px; height: 7px; border-radius: 50%; background: #98a2b3; }
+.status > svg { width: 11px; height: 11px; }
 .status.online { color: var(--success); }
-.status.online > span { background: #0da36f; box-shadow: 0 0 0 3px rgba(13, 163, 111, .12); }
 .intro { position: relative; overflow: hidden; margin-bottom: 18px; padding: 27px 30px; border: 1px solid #dfe2ff; border-radius: 20px; background: linear-gradient(135deg, rgba(248, 249, 255, .97), rgba(239, 241, 255, .95)); box-shadow: 0 15px 40px rgba(56, 63, 143, .06); }
 .intro::after { position: absolute; right: -36px; bottom: -58px; width: 155px; height: 155px; border: 28px solid rgba(81, 89, 232, .08); border-radius: 50%; content: ""; }
 .intro h2, .intro p { position: relative; z-index: 1; }
@@ -104,7 +103,6 @@ input:not(.rt-TextFieldInput):focus { border-color: var(--accent); box-shadow: 0
 .reaction-button { font-size: .78rem; font-weight: 750; font-variant-numeric: tabular-nums; }
 .like-button:hover:not(:disabled) { color: #c1154a; background: #fff0f4; }
 .like-button.active { color: #c1154a; background: #fff0f4; }
-.reaction-button > span:first-child { font-size: 1rem; line-height: 1; }
 .reply-button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .repost-button:hover:not(:disabled), .repost-button.active { color: var(--success); background: var(--success-soft); }
 .reaction-pending { font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
@@ -118,13 +116,9 @@ input:not(.rt-TextFieldInput):focus { border-color: var(--accent); box-shadow: 0
 .timeline-thread { display: grid; gap: 11px; min-width: 0; }
 .thread-replies { position: relative; display: grid; gap: 11px; margin-left: 30px; padding-left: 18px; }
 .thread-replies::before { content: ""; position: absolute; top: -11px; left: 0; width: 18px; height: 30px; border-left: 2px solid #dfe2ff; border-bottom: 2px solid #dfe2ff; border-bottom-left-radius: 10px; pointer-events: none; }
-.thread-disclosure, .thread-reset, .thread-link { width: max-content; padding: 7px 10px; border-radius: 8px; color: var(--accent); background: transparent; font-size: .77rem; font-weight: 800; }
-.thread-disclosure.load-thread { display: inline-flex; align-items: center; gap: 7px; }
+.thread-disclosure, .thread-reset, .thread-link { display: inline-flex; align-items: center; gap: 7px; width: max-content; padding: 7px 10px; border-radius: 8px; color: var(--accent); background: transparent; font-size: .77rem; font-weight: 800; }
 .thread-disclosure.load-thread .rt-Spinner { width: 12px; height: 12px; }
-.thread-disclosure::before { display: inline-block; margin-right: 7px; content: "›"; }
-.thread-reset::before { margin-right: 7px; content: "←"; }
 .thread-link { text-decoration: none; }
-.thread-link::before { margin-right: 7px; content: "↗"; }
 .thread-disclosure:hover, .thread-reset:hover, .thread-link:hover { background: var(--accent-soft); }
 .empty-state { display: grid; justify-items: center; padding: 54px 24px; border: 1px dashed #ccd2df; border-radius: 18px; text-align: center; background: rgba(255, 255, 255, .55); }
 .empty-state .brand-mark { width: 38px; height: 38px; margin-bottom: 17px; }

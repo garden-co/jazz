@@ -2,6 +2,7 @@ import { Button, Card, Spinner, TextField } from "@radix-ui/themes";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { SuccessIcon } from "./Icons.js";
 import { Timeline } from "./Timeline.js";
 import { LoadingScreen } from "./TimelineView.js";
 import {
@@ -166,21 +167,21 @@ export function App() {
         </p>
         <ul>
           <li>
-            <span aria-hidden="true">✓</span>
+            <span><SuccessIcon /></span>
             <div>
               <strong>Read anywhere</strong>
               <p>Your recent timeline is cached on this device.</p>
             </div>
           </li>
           <li>
-            <span aria-hidden="true">✓</span>
+            <span><SuccessIcon /></span>
             <div>
               <strong>Write offline</strong>
               <p>Posts and reactions queue locally and publish when you reconnect.</p>
             </div>
           </li>
           <li>
-            <span aria-hidden="true">✓</span>
+            <span><SuccessIcon /></span>
             <div>
               <strong>Stay in control</strong>
               <p>Your PDS remains the source of truth.</p>
