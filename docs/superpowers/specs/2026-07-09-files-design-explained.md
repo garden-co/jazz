@@ -249,17 +249,17 @@ sequenceDiagram
     participant E as Edge (stateless)
     participant S3 as Public bucket
 
-    Note over C: fromBlob → id + url() ready; Blob held in memory;<br/>the descriptor-writing transaction is HELD at the outbox
+    Note over C: fromBlob gives id + url() at once, Blob held in memory,<br/>descriptor-writing transaction HELD at the outbox
     C->>E: grant (file id, size, mime_type, name, column)
-    Note over E: pure check — no bucket reads, no records:<br/>identity segment == UUIDv5(session identity)?<br/>class + mime_type match the column's declaration?
-    E->>S3: (multipart only) CreateMultipartUpload → UploadId
-    E-->>C: pending key, lease, UploadId,<br/>presigned PUT(s) with pinned Content-Type / Disposition / Cache-Control + If-None-Match:*
-    C->>S3: PUT bytes to pending/  (single PUT, or parts)
+    Note over E: pure check, no bucket reads, no records —<br/>identity segment equals UUIDv5(session identity)?<br/>class + mime_type match the column's declaration?
+    E->>S3: (multipart only) CreateMultipartUpload for an UploadId
+    E-->>C: pending key, lease, UploadId,<br/>presigned PUT(s) with pinned headers + If-None-Match star
+    C->>S3: PUT bytes to pending/ (single PUT, or parts)
     Note over C: part URLs refreshable within the lease, from any edge
     C->>E: release (file id, UploadId?, part ETags?)
-    E->>S3: HEAD final (present → done)<br/>· complete multipart (conditional where supported)<br/>· copy pending → final (REPLACE headers; UploadPartCopy if >5GB)<br/>· delete pending
-    Note over C: hold releases → descriptor enters the ordinary lane;<br/>url() now live
-    Note over S3: lifecycle expires pending/ after the lease;<br/>per-backend job reaps abandoned multiparts;<br/>each TTL class prefix has its own expiry rule
+    E->>S3: HEAD final (present means done),<br/>complete multipart (conditional where supported),<br/>copy pending to final (REPLACE headers, UploadPartCopy over 5 GB),<br/>delete pending
+    Note over C: hold releases, descriptor enters the ordinary lane,<br/>url() now live
+    Note over S3: lifecycle expires pending/ after the lease,<br/>per-backend job reaps abandoned multiparts,<br/>each TTL class prefix has its own expiry rule
 ```
 
 What the diagram encodes:
