@@ -12,6 +12,7 @@ describe("Bluesky/Jazz bridge", () => {
   afterEach(() => {
     vi.doUnmock("./bluesky.js");
     vi.doUnmock("./jazz.js");
+    vi.doUnmock("./projection-writer.js");
     vi.doUnmock("./projector.js");
     vi.doUnmock("./reconciler.js");
     vi.resetModules();
@@ -70,6 +71,25 @@ describe("Bluesky/Jazz bridge", () => {
       await context.shutdown();
       rmSync(dataDirectory, { recursive: true, force: true });
     }
+  });
+
+  it("uses one Jazz projection writer for reads and writes", async () => {
+    const createProjectionWriter = vi.fn(() => ({
+      completeOperation: vi.fn(),
+      deactivateRepostTimelineEntries: vi.fn(),
+      loadReactionIntents: vi.fn(),
+      projectProfile: vi.fn(),
+      projectThread: vi.fn(),
+      projectTimelinePage: vi.fn(),
+      writeLike: vi.fn(),
+      writePostBundle: vi.fn(),
+      writeRepost: vi.fn(),
+    }));
+    vi.doMock("./projection-writer.js", () => ({ createProjectionWriter }));
+
+    await import("./bridge.js");
+
+    expect(createProjectionWriter).toHaveBeenCalledOnce();
   });
 
   it("exposes only the application operations", async () => {
