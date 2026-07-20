@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Spinner,
+  Text,
   TextArea,
 } from "@radix-ui/themes";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
@@ -601,7 +602,9 @@ export function TimelineFeed({
             </Badge>
           </div>
         </div>
-        <p>Cached locally by Jazz for offline availability</p>
+        <Text as="p" size="1" color="gray">
+          Cached locally by Jazz for offline availability
+        </Text>
       </div>
       <div className="feed">
         {items.map((item) => (
