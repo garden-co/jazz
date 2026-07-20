@@ -169,29 +169,32 @@ export function AppHeader({
           <h1>Jazz ❤️ Bluesky</h1>
         </div>
       </div>
-      <div className="account-actions">
-        <Badge
-          color={online ? "jade" : "gray"}
-          variant="soft"
-          role="status"
-          aria-live="polite"
-        >
-          <StatusIcon />
-          {online ? "Online" : "Offline"}
-        </Badge>
-        <span className="account-identity">
+      <Card asChild size="1">
+        <div className="account-card">
           <Avatar
             src={profile?.avatar ?? undefined}
             fallback={handle.charAt(0).toUpperCase()}
-            size="1"
+            size="2"
             radius="medium"
           />
-          <span className="account-handle">
-            <ProfileName profile={profile} fallback={handle} />
-          </span>
-        </span>
-        <Button variant="ghost" color="gray" onClick={onSignOut}>Sign out</Button>
-      </div>
+          <div className="account-identity">
+            <span className="account-handle">
+              <ProfileName profile={profile} fallback={handle} />
+            </span>
+            <Badge
+              color={online ? "jade" : "gray"}
+              variant="soft"
+              size="1"
+              role="status"
+              aria-live="polite"
+            >
+              <StatusIcon />
+              {online ? "Online" : "Offline"}
+            </Badge>
+          </div>
+          <Button size="1" variant="soft" color="gray" onClick={onSignOut}>Sign out</Button>
+        </div>
+      </Card>
     </header>
   );
 }

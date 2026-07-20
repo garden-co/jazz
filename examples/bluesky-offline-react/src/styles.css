@@ -1,16 +1,17 @@
 body { min-width: 320px; min-height: 100vh; margin: 0; }
 .radix-themes { min-height: 100vh; background: radial-gradient(circle at 12% 0%, var(--accent-a3), transparent 28rem), radial-gradient(circle at 92% 18%, var(--amber-a2), transparent 24rem), var(--color-background); }
 .app-shell { width: min(100% - 40px, 760px); margin: auto; padding: 44px 0 64px; }
-.app-header, .brand-lockup, .account-actions, .account-identity { display: flex; align-items: center; }
+.app-header, .brand-lockup, .account-card { display: flex; align-items: center; }
 .app-header { justify-content: space-between; gap: 24px; margin-bottom: 46px; }
-.brand-lockup { align-items: flex-start; gap: 14px; }
+.brand-lockup { gap: 12px; }
 .brand-mark { display: grid; place-items: center; flex: none; width: 42px; height: 42px; border-radius: var(--radius-4); color: var(--accent-contrast); background: linear-gradient(145deg, var(--accent-9), var(--accent-11)); box-shadow: var(--shadow-4); font-weight: 850; }
 .eyebrow { margin: 0 0 7px; color: var(--accent-9); font-size: .72rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 4px; font-size: clamp(2.1rem, 5vw, 3rem); line-height: 1; letter-spacing: -.055em; }
 h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
-.account-actions { gap: 8px; }
-.account-identity { gap: 7px; min-width: 0; }
+.app-header h1 { font-size: clamp(1.85rem, 4vw, 2.25rem); }
+.account-card { gap: 8px; }
+.account-identity { display: grid; justify-items: start; gap: 3px; min-width: 0; }
 .account-handle { max-width: 145px; }
 .account-handle, .profile-name strong, .profile-handle { overflow: hidden; text-overflow: ellipsis; }
 .account-handle, .profile-name { white-space: nowrap; }
@@ -82,8 +83,8 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
   .app-shell { width: min(100% - 28px, 760px); padding: 24px 0 44px; }
   .app-header { margin-bottom: 32px; }
   .brand-mark { width: 38px; height: 38px; }
-  .app-header h1 { font-size: 1.85rem; }
-  .account-identity .account-handle, .account-actions > .rt-Button { display: none; }
+  .app-header h1 { font-size: 1.55rem; white-space: nowrap; }
+  .account-handle, .account-card > .rt-Button { display: none; }
   .composer { margin-bottom: 32px; }
   .post-card > p, .post-images, .quoted-post, .post-actions { margin-left: 0; }
   .thread-replies { margin-left: 12px; padding-left: 12px; }
