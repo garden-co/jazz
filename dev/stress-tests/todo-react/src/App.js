@@ -1,10 +1,9 @@
+import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState, useEffect, use, Suspense } from "react";
 import { JazzProvider } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
 import { BrowserAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
-
 function useHash() {
   const [hash, setHash] = useState(location.hash);
   useEffect(() => {
@@ -14,39 +13,31 @@ function useHash() {
   }, []);
   return hash;
 }
-
 function Router() {
   const hash = useHash();
-
   if (hash === "#list") {
-    return (
-      <>
-        <h1>Todos</h1>
-        <p>
-          <a href="#">Back to Generate</a>
-        </p>
-        <TodoList />
-      </>
-    );
+    return _jsxs(_Fragment, {
+      children: [
+        _jsx("h1", { children: "Todos" }),
+        _jsx("p", { children: _jsx("a", { href: "#", children: "Back to Generate" }) }),
+        _jsx(TodoList, {}),
+      ],
+    });
   }
-
-  return <GenerateData />;
+  return _jsx(GenerateData, {});
 }
-
 const appId = requireEnv(import.meta.env.VITE_JAZZ_APP_ID, "JAZZ_APP_ID");
 const serverUrl = requireEnv(import.meta.env.VITE_JAZZ_SERVER_URL, "JAZZ_SERVER_URL");
 const telemetryCollectorUrl = import.meta.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
-
-function requireEnv(value: string | undefined, name: string): string {
+function requireEnv(value, name) {
   if (!value) {
     throw new Error(`${name} is required`);
   }
   return value;
 }
-
 function AppInner() {
   const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
-  const config: DbConfig & { asyncSubscriptionsOnly: boolean } = {
+  const config = {
     appId,
     env: import.meta.env.DEV ? "dev" : "prod",
     userBranch: "main",
@@ -60,20 +51,16 @@ function AppInner() {
     // transaction support).
     asyncSubscriptionsOnly: false,
   };
-
-  return (
-    <JazzProvider config={config} fallback={<p>Loading...</p>}>
-      <Router />
-    </JazzProvider>
-  );
+  return _jsx(JazzProvider, {
+    config: config,
+    fallback: _jsx("p", { children: "Loading..." }),
+    children: _jsx(Router, {}),
+  });
 }
-
 // #region context-setup-react
 export function App() {
-  return (
-    <Suspense fallback={<p>Loading...</p>}>
-      <AppInner />
-    </Suspense>
-  );
+  return _jsx(Suspense, {
+    fallback: _jsx("p", { children: "Loading..." }),
+    children: _jsx(AppInner, {}),
+  });
 }
-// #endregion context-setup-react

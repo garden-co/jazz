@@ -1,13 +1,11 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useCallback } from "react";
-import type { Db } from "jazz-tools";
 import { useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
-
-const TOTAL_PROJECTS = 10_000;
-const TOTAL_TODOS = 50_000;
+const TOTAL_PROJECTS = 10000;
+const TOTAL_TODOS = 50000;
 const BATCH_SIZE = 500;
 const YIELD_EVERY_BATCHES = 10;
-
 const ADJECTIVES = [
   "quick",
   "lazy",
@@ -58,7 +56,6 @@ const ADJECTIVES = [
   "xenial",
   "young",
 ];
-
 const NOUNS = [
   "fox",
   "dog",
@@ -111,7 +108,6 @@ const NOUNS = [
   "urchin",
   "viper",
 ];
-
 const VERBS = [
   "build",
   "craft",
@@ -164,7 +160,6 @@ const VERBS = [
   "xor",
   "yank",
 ];
-
 const TOPICS = [
   "dashboard",
   "migration",
@@ -207,44 +202,35 @@ const TOPICS = [
   "factory",
   "builder",
 ];
-
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)]!;
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
-
-function randomProjectName(): string {
+function randomProjectName() {
   return `${pick(ADJECTIVES)}-${pick(NOUNS)}-${pick(TOPICS)}`;
 }
-
-function randomTodoTitle(): string {
+function randomTodoTitle() {
   return `${pick(VERBS)} the ${pick(ADJECTIVES)} ${pick(NOUNS)} ${pick(TOPICS)}`;
 }
-
-type Status = "idle" | "generating" | "done" | "error";
-
 export function GenerateData() {
   // App.tsx opts into the sync in-process client (asyncSubscriptionsOnly:
   // false), so the db here is the full Db with transaction support, not the
   // async channel facade useDb is typed as.
-  const db = useDb() as unknown as Db;
+  const db = useDb();
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
-
-  const [status, setStatus] = useState<Status>("idle");
+  const [status, setStatus] = useState("idle");
   const [projectsCreated, setProjectsCreated] = useState(0);
   const [todosCreated, setTodosCreated] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-
+  const [error, setError] = useState(null);
   const generate = useCallback(async () => {
     if (!sessionUserId) return;
     setStatus("generating");
     setProjectsCreated(0);
     setTodosCreated(0);
     setError(null);
-
     try {
       // Generate projects in mergeable transactions
-      const projectIds: string[] = [];
+      const projectIds = [];
       let batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_PROJECTS; i += BATCH_SIZE) {
         const batchEnd = Math.min(i + BATCH_SIZE, TOTAL_PROJECTS);
@@ -261,7 +247,6 @@ export function GenerateData() {
           await new Promise((r) => setTimeout(r, 0));
         }
       }
-
       // Generate todos in mergeable transactions, round-robin across projects
       batchesSinceYield = 0;
       for (let i = 0; i < TOTAL_TODOS; i += BATCH_SIZE) {
@@ -283,46 +268,61 @@ export function GenerateData() {
           await new Promise((r) => setTimeout(r, 0));
         }
       }
-
       setStatus("done");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
   }, [db, sessionUserId]);
-
-  return (
-    <>
-      <h1>Generate Stress Test Data</h1>
-      <p>
-        This will create <strong>{TOTAL_PROJECTS.toLocaleString()}</strong> projects and{" "}
-        <strong>{TOTAL_TODOS.toLocaleString()}</strong> todos linked to them.
-      </p>
-
-      <button onClick={generate} disabled={status === "generating" || !sessionUserId}>
-        {status === "generating" ? "Generating..." : "Generate"}
-      </button>
-
-      {status !== "idle" && (
-        <div style={{ marginTop: "1rem" }}>
-          <p>
-            Projects: {projectsCreated.toLocaleString()} / {TOTAL_PROJECTS.toLocaleString()}
-          </p>
-          <progress value={projectsCreated} max={TOTAL_PROJECTS} style={{ width: "100%" }} />
-
-          <p>
-            Todos: {todosCreated.toLocaleString()} / {TOTAL_TODOS.toLocaleString()}
-          </p>
-          <progress value={todosCreated} max={TOTAL_TODOS} style={{ width: "100%" }} />
-        </div>
-      )}
-
-      {status === "done" && <p style={{ color: "green" }}>Done!</p>}
-      {status === "error" && <p style={{ color: "red" }}>Error: {error}</p>}
-
-      <p>
-        <a href="#list">View Todos</a>
-      </p>
-    </>
-  );
+  return _jsxs(_Fragment, {
+    children: [
+      _jsx("h1", { children: "Generate Stress Test Data" }),
+      _jsxs("p", {
+        children: [
+          "This will create ",
+          _jsx("strong", { children: TOTAL_PROJECTS.toLocaleString() }),
+          " projects and",
+          " ",
+          _jsx("strong", { children: TOTAL_TODOS.toLocaleString() }),
+          " todos linked to them.",
+        ],
+      }),
+      _jsx("button", {
+        onClick: generate,
+        disabled: status === "generating" || !sessionUserId,
+        children: status === "generating" ? "Generating..." : "Generate",
+      }),
+      status !== "idle" &&
+        _jsxs("div", {
+          style: { marginTop: "1rem" },
+          children: [
+            _jsxs("p", {
+              children: [
+                "Projects: ",
+                projectsCreated.toLocaleString(),
+                " / ",
+                TOTAL_PROJECTS.toLocaleString(),
+              ],
+            }),
+            _jsx("progress", {
+              value: projectsCreated,
+              max: TOTAL_PROJECTS,
+              style: { width: "100%" },
+            }),
+            _jsxs("p", {
+              children: [
+                "Todos: ",
+                todosCreated.toLocaleString(),
+                " / ",
+                TOTAL_TODOS.toLocaleString(),
+              ],
+            }),
+            _jsx("progress", { value: todosCreated, max: TOTAL_TODOS, style: { width: "100%" } }),
+          ],
+        }),
+      status === "done" && _jsx("p", { style: { color: "green" }, children: "Done!" }),
+      status === "error" && _jsxs("p", { style: { color: "red" }, children: ["Error: ", error] }),
+      _jsx("p", { children: _jsx("a", { href: "#list", children: "View Todos" }) }),
+    ],
+  });
 }
