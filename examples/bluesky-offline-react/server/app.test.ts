@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   currentSession: vi.fn(),
   jazzToken: vi.fn(),
+  projectThread: vi.fn(),
   projectTimelinePage: vi.fn(),
   reconcileOperations: vi.fn(),
 }));
@@ -25,7 +26,7 @@ vi.mock("./bridge.js", () => ({
     }
   },
   getTimelineProjectionStatus: vi.fn(),
-  projectThread: vi.fn(),
+  projectThread: mocks.projectThread,
   projectTimelinePage: mocks.projectTimelinePage,
   reconcileOperations: mocks.reconcileOperations,
 }));
@@ -78,7 +79,11 @@ describe("BFF routes", () => {
       headers: { cookie: "bff-session=opaque-session-id" },
     });
 
-    expect(await response.json()).toEqual(metadata);
+    expect(await response.json()).toEqual({
+      cursor: "next-page",
+      hasMore: true,
+      count: 20,
+    });
     expect(mocks.projectTimelinePage).toHaveBeenCalledWith(
       "did:plc:alice",
       authenticatedSession.session,
@@ -113,5 +118,54 @@ describe("BFF routes", () => {
 
     expect(response.status).toBe(403);
     expect(mocks.reconcileOperations).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/api/auth/login", undefined],
+    ["/api/operations", "bff-session=opaque-session-id"],
+  ])("rejects malformed JSON sent to %s", async (path, cookie) => {
+    const response = await createServer().request(path, {
+      method: "POST",
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        "content-type": "application/json",
+      },
+      body: "{",
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it.each([
+    "at://incomplete",
+    "at://did:plc:alice/app.bsky.feed.like/3mlike",
+  ])("rejects invalid post URI %s", async (uri) => {
+    const response = await createServer().request(`/api/thread?uri=${encodeURIComponent(uri)}`, {
+      headers: { cookie: "bff-session=opaque-session-id" },
+    });
+
+    expect(response.status).toBe(400);
+    expect(mocks.projectThread).not.toHaveBeenCalled();
+  });
+
+  it("does not expose unexpected server errors", async () => {
+    mocks.projectTimelinePage.mockRejectedValue(new Error("database password leaked"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await createServer().request("/api/timeline", {
+      headers: { cookie: "bff-session=opaque-session-id" },
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "Unexpected server error" });
+    consoleError.mockRestore();
+  });
+
+  it("keeps projection jobs out of the client API", async () => {
+    const response = await createServer().request("/api/timeline/status", {
+      headers: { cookie: "bff-session=opaque-session-id" },
+    });
+
+    expect(response.status).toBe(404);
   });
 });
