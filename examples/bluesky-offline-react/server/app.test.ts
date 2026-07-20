@@ -1,22 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  currentSession: vi.fn(),
-  jazzToken: vi.fn(),
+  createJazzToken: vi.fn(),
   projectThread: vi.fn(),
   projectTimelinePage: vi.fn(),
   reconcileOperations: vi.fn(),
+  restoreBffSession: vi.fn(),
 }));
 
 vi.mock("./auth.js", () => ({
   bffSessionCookie: "bff-session",
   createBffSession: vi.fn(),
-  currentSession: mocks.currentSession,
+  createJazzToken: mocks.createJazzToken,
   invalidateBffSession: vi.fn(),
   jazzJwks: { keys: [] },
-  jazzToken: mocks.jazzToken,
   oauth: { authorize: vi.fn(), callback: vi.fn(), revoke: vi.fn() },
   oauthScope: "atproto transition:generic",
+  restoreBffSession: mocks.restoreBffSession,
 }));
 
 vi.mock("./bridge.js", () => ({
@@ -51,8 +51,8 @@ const queuedPost = {
 describe("BFF routes", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mocks.currentSession.mockResolvedValue(authenticatedSession);
-    mocks.jazzToken.mockResolvedValue("jazz-jwt");
+    mocks.restoreBffSession.mockResolvedValue(authenticatedSession);
+    mocks.createJazzToken.mockResolvedValue("jazz-jwt");
   });
 
   it("exchanges the BFF session for the matching Jazz identity", async () => {
@@ -62,8 +62,8 @@ describe("BFF routes", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ did: "did:plc:alice", token: "jazz-jwt" });
-    expect(mocks.currentSession).toHaveBeenCalledWith("opaque-session-id");
-    expect(mocks.jazzToken).toHaveBeenCalledWith("did:plc:alice");
+    expect(mocks.restoreBffSession).toHaveBeenCalledWith("opaque-session-id");
+    expect(mocks.createJazzToken).toHaveBeenCalledWith("did:plc:alice");
   });
 
   it("triggers projection into Jazz without returning timeline rows", async () => {

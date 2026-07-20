@@ -1,5 +1,6 @@
 import {
   buildAtprotoLoopbackClientMetadata,
+  isExpectedSessionError,
   NodeOAuthClient,
 } from "@atproto/oauth-client-node";
 import {
@@ -27,6 +28,7 @@ export const oauth = new NodeOAuthClient({
   clientMetadata,
   stateStore: createOAuthStateStore(db),
   sessionStore: createOAuthSessionStore(db),
+  // This example uses an HTTP loopback client during local development.
   allowHttp: true,
 });
 
@@ -52,8 +54,8 @@ export const jazzJwks = {
   keys: [{ ...jwtKeys.publicJwk, kid: jwtKid, alg: "ES256", use: "sig" }],
 };
 
-export function jazzToken(did: string) {
-  return new SignJWT({ sub: did, claims: { did } })
+export function createJazzToken(did: string) {
+  return new SignJWT({ sub: did })
     .setProtectedHeader({ alg: "ES256", kid: jwtKid })
     .setIssuer("bluesky-offline-react")
     .setIssuedAt()
@@ -61,14 +63,16 @@ export function jazzToken(did: string) {
     .sign(jwtPrivateKey);
 }
 
-export async function currentSession(sessionId: string | undefined) {
+export async function restoreBffSession(sessionId: string | undefined) {
   if (!sessionId) return null;
   const did = await bffSessions.resolve(sessionId);
   if (!did) return null;
   try {
     return { did, session: await oauth.restore(did) };
-  } catch {
-    await bffSessions.invalidate(sessionId);
+  } catch (error) {
+    if (isExpectedSessionError(error)) {
+      await bffSessions.invalidate(sessionId);
+    }
     return null;
   }
 }

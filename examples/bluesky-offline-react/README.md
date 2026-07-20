@@ -31,7 +31,9 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | Component | Responsibility | Knows about Jazz? | Knows about Bluesky? |
 | --- | --- | --- | --- |
 | `server/app.ts` | Session guard, HTTP validation, and error mapping | Authentication only | Only application-level route inputs |
-| `server/auth.ts` | OAuth, opaque BFF sessions, and Jazz JWTs | Stores encrypted authentication material in a backend-only table | Yes |
+| `server/auth.ts` | Compose ATProto OAuth, opaque BFF sessions, and Jazz JWTs | Yes | Yes |
+| `server/oauth-session-store.ts` | Encrypt and persist authentication material in a backend-only Jazz table | Yes | No |
+| `server/signing-keys.ts` | Persist the stable ES256 key used to sign Jazz JWTs | Through its encrypted store | No |
 | `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
 | `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
 | `server/timeline.ts` | Pure Bluesky-to-projection normalisation | Only the projection shape | Yes |

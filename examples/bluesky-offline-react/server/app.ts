@@ -6,12 +6,12 @@ import { InvalidOperationError, parseOperationBatch } from "../operations.js";
 import {
   bffSessionCookie,
   createBffSession,
-  currentSession,
+  createJazzToken,
   invalidateBffSession,
   jazzJwks,
-  jazzToken,
   oauth,
   oauthScope,
+  restoreBffSession,
 } from "./auth.js";
 import {
   OperationError,
@@ -22,7 +22,7 @@ import {
 
 const configuredWebOrigin = process.env.WEB_ORIGIN ?? "http://127.0.0.1:5173";
 
-type AuthenticatedSession = NonNullable<Awaited<ReturnType<typeof currentSession>>>;
+type AuthenticatedSession = NonNullable<Awaited<ReturnType<typeof restoreBffSession>>>;
 type ServerEnvironment = {
   Variables: {
     authentication: AuthenticatedSession;
@@ -39,7 +39,7 @@ export function createServer(webOrigin = configuredWebOrigin) {
     path: "/",
   };
   const requireSession = createMiddleware<ServerEnvironment>(async (c, next) => {
-    const authentication = await currentSession(getCookie(c, bffSessionCookie));
+    const authentication = await restoreBffSession(getCookie(c, bffSessionCookie));
     if (!authentication) return c.json({ error: "not signed in" }, 401);
     c.set("authentication", authentication);
     await next();
@@ -64,7 +64,7 @@ export function createServer(webOrigin = configuredWebOrigin) {
   // ATProto establishes identity; Jazz trusts the same DID through this short-lived JWT.
   server.get("/api/session", async (c) => {
     const { did } = c.var.authentication;
-    return c.json({ did, token: await jazzToken(did) });
+    return c.json({ did, token: await createJazzToken(did) });
   });
 
   server.post("/api/auth/login", async (c) => {

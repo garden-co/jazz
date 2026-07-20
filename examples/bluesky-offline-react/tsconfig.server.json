@@ -11,5 +11,5 @@
     "types": ["node"]
   },
   "include": ["server/**/*.ts", "schema.ts", "permissions.ts", "operations.ts", "object-id.ts", "at-uri.ts"],
-  "exclude": ["server/**/*.test.ts"]
+  "exclude": ["server/**/*.test.ts", "server/test-support/**/*.ts"]
 }
