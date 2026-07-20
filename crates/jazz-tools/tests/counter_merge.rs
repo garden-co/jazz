@@ -33,6 +33,12 @@ fn counter_value(row: &(jazz_tools::ObjectId, Vec<Value>)) -> Option<i32> {
 }
 
 #[tokio::test]
+/// Keeps concurrent counter deltas exact across persistent restart and replay.
+///
+/// ```text
+/// bob ── offline +3 ──► server ◄── +5 ── alice
+/// charlie ◄──────────── merged 8 ─────────── server
+/// ```
 async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
     let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
     let schema = counter_schema();
@@ -156,6 +162,14 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
 }
 
 #[tokio::test]
+/// Keeps causal counter snapshots from being counted as independent roots.
+///
+/// ```text
+/// alice ── 0 ──► bob
+/// alice ── 2 ──► server ──► bob
+/// alice ── 3 (parent 2) ──► server ──► bob
+/// charlie ───────────── fresh observer ───────────► 3
+/// ```
 async fn counter_merge_does_not_recount_causal_updates_for_live_clients() {
     let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
     let schema = counter_schema();

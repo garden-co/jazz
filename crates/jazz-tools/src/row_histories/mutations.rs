@@ -305,14 +305,14 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
     } else {
         let mut patched_history = load_branch_history(io, &table, object_id, &branch)?;
 
-        if let Some(existing_row) = existing_history_row {
-            if existing_row == row {
-                return Ok(ApplyRowBatchResult {
-                    batch_id,
-                    row_locator,
-                    visibility_change: None,
-                });
-            }
+        if let Some(existing_row) = existing_history_row
+            && existing_row == row
+        {
+            return Ok(ApplyRowBatchResult {
+                batch_id,
+                row_locator,
+                visibility_change: None,
+            });
         }
         if let Some(existing) = patched_history
             .iter_mut()
