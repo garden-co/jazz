@@ -134,7 +134,6 @@ function QuotedPost({ post }: { post: DisplayPost }) {
       <aside className="quoted-post" aria-label={`Quoted post by ${author}`}>
       <header className="quoted-post-header">
         <Avatar
-          className="quoted-avatar"
           src={profile?.avatar ?? undefined}
           fallback={author.charAt(0).toUpperCase()}
           size="1"
@@ -172,7 +171,6 @@ export function AppHeader({
       </div>
       <div className="account-actions">
         <Badge
-          className={online ? "status online" : "status"}
           color={online ? "jade" : "gray"}
           variant="soft"
           role="status"
@@ -183,7 +181,6 @@ export function AppHeader({
         </Badge>
         <span className="account-identity">
           <Avatar
-            className="account-avatar"
             src={profile?.avatar ?? undefined}
             fallback={handle.charAt(0).toUpperCase()}
             size="1"
@@ -228,6 +225,7 @@ export function Composer({ text, onChange, onPublish }: {
       </div>
       <TextArea
         id="post-text"
+        rows={4}
         value={text}
         onChange={(event) => onChange(event.target.value)}
         placeholder="What’s happening?"
@@ -327,7 +325,6 @@ function PostCard({
       {post.quote && <QuotedPost post={post.quote} />}
       <footer className="post-actions">
         <Button
-          className="reaction-button reply-button"
           variant="ghost"
           color="gray"
           size="1"
@@ -342,8 +339,7 @@ function PostCard({
           <span>{post.replyCount || ""}</span>
         </Button>
         <Button
-          className={`reaction-button like-button${post.like?.active ? " active" : ""}`}
-          variant="ghost"
+          variant={post.like?.active ? "soft" : "ghost"}
           color={post.like?.active ? "crimson" : "gray"}
           size="1"
           type="button"
@@ -357,8 +353,7 @@ function PostCard({
           <span>{post.likeCount || ""}</span>
         </Button>
         <Button
-          className={`reaction-button repost-button${post.repost?.active ? " active" : ""}`}
-          variant="ghost"
+          variant={post.repost?.active ? "soft" : "ghost"}
           color={post.repost?.active ? "jade" : "gray"}
           size="1"
           type="button"
@@ -372,7 +367,7 @@ function PostCard({
           <span>{post.repostCount || ""}</span>
         </Button>
         {(pendingLike || pendingRepost) && (
-          <Badge className="reaction-pending" variant="soft">Pending</Badge>
+          <Badge variant="soft">Pending</Badge>
         )}
       </footer>
       {replying && (
@@ -380,6 +375,7 @@ function PostCard({
           <label htmlFor={`reply-${post.id}`}>Reply to {author}</label>
           <TextArea
             id={`reply-${post.id}`}
+            rows={3}
             value={replyText}
             onChange={(event) => setReplyText(event.target.value)}
             placeholder={`Reply to ${replyTarget}`}
@@ -467,17 +463,21 @@ function TimelinePostTree({ node, threadRoot, onReroot, postState, actions, dept
           ))}
         </div>
       ) : (
-        <button
-          className="thread-disclosure"
+        <Button
+          className="thread-control"
+          variant="ghost"
+          size="1"
           onClick={() => onReroot(node.post.id)}
         >
           <DisclosureIcon />
           Show {node.replies.length === 1 ? "reply" : `${node.replies.length} replies`}
-        </button>
+        </Button>
       ))}
       {hasUncachedReplies && (
-        <button
-          className="thread-disclosure load-thread"
+        <Button
+          className="thread-control"
+          variant="ghost"
+          size="1"
           disabled={!postState.online || loadingReplies}
           onClick={() => actions.onLoadThread(node.post)}
         >
@@ -489,7 +489,7 @@ function TimelinePostTree({ node, threadRoot, onReroot, postState, actions, dept
           ) : postState.online ? (
             <><DisclosureIcon />Load {node.post.replyCount === 1 ? "reply" : `${node.post.replyCount} replies`}</>
           ) : "Replies not cached"}
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -502,17 +502,18 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
   const focusedNode = findNode(item.node) ?? item.node;
   const reposter = item.repost?.actorProfile;
   const reposterFallback = item.repost?.actorDid ?? "Unknown account";
+  const reposterName = profileNameParts(reposter, reposterFallback).name;
   return (
     <div className="timeline-thread">
       {item.repost && (
         <div className="repost-reason">
           <RepostIcon />
           {reposter?.avatar && (
-            <img
-              className="repost-avatar"
+            <Avatar
               src={reposter.avatar}
-              alt=""
-              loading="lazy"
+              fallback={reposterName.charAt(0).toUpperCase()}
+              size="1"
+              radius="medium"
             />
           )}
           <ProfileName profile={reposter} fallback={reposterFallback} />
@@ -520,13 +521,15 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
         </div>
       )}
       {focusedId !== item.node.post.id && (
-        <button
-          className="thread-reset"
+        <Button
+          className="thread-control"
+          variant="ghost"
+          size="1"
           onClick={() => setFocusedId(item.node.post.id)}
         >
           <BackIcon />
           Back to top level
-        </button>
+        </Button>
       )}
       <TimelinePostTree
         node={focusedNode}
@@ -536,15 +539,16 @@ function TimelineThread({ item, postState, actions }: TimelineThreadProps & { it
         actions={actions}
       />
       {item.threadUrl && (
-        <a
-          className="thread-link"
-          href={item.threadUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <ThreadLinkIcon />
-          View thread
-        </a>
+        <Button asChild className="thread-control" variant="ghost" size="1">
+          <a
+            href={item.threadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ThreadLinkIcon />
+            View thread
+          </a>
+        </Button>
       )}
     </div>
   );

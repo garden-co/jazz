@@ -198,6 +198,7 @@ export function App() {
             <label htmlFor="handle">Bluesky handle</label>
             <TextField.Root
               id="handle"
+              size="3"
               value={handle}
               onChange={(event) => setHandle(event.target.value)}
               placeholder="you.bsky.social"
