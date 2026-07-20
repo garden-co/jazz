@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   fetchPostThread,
   fetchProfile,
@@ -11,6 +10,7 @@ import { stableObjectId, type FeedViewPost, type ProfileView } from "./timeline.
 import { flattenThread } from "./thread-normalizer.js";
 
 type TimelineResponse = { feed?: FeedViewPost[]; cursor?: string };
+type TimelineResult = { cursor?: string; hasMore: boolean; count: number };
 
 type ProjectorDependencies = {
   fetchTimelineFeed: (session: SessionFetcher, cursor?: string) => Promise<TimelineResponse>;
@@ -20,21 +20,8 @@ type ProjectorDependencies = {
     "loadReactionIntents" | "projectProfile" | "projectThread" | "projectTimelinePage">;
 };
 
-export type TimelineProjectionStatus = {
-  id: string;
-  ownerDid: string;
-  cursor?: string;
-  count?: number;
-  state: "fetching" | "projecting" | "completed" | "failed";
-  acceptedAt: string;
-  completedAt?: string;
-  error?: string;
-};
-
 type TimelineJob = {
-  ready: Promise<{ cursor?: string; hasMore: boolean; count: number }>;
-  completion: Promise<void>;
-  status: TimelineProjectionStatus;
+  ready: Promise<TimelineResult>;
 };
 
 export function createProjector(dependencies: ProjectorDependencies = {
@@ -42,60 +29,35 @@ export function createProjector(dependencies: ProjectorDependencies = {
   fetchPostThread,
   fetchProfile,
   writer: createProjectionWriter(),
-}) {
+}, reportError: (message: string, error: unknown) => void = console.error) {
   const jobs = new Map<string, TimelineJob>();
-  const statuses = new Map<string, TimelineProjectionStatus>();
-  const completions = new Map<string, Promise<void>>();
 
   function timelineJobKey(ownerDid: string, cursor?: string) {
     return `${ownerDid}\n${cursor ?? "head"}`;
   }
 
   function startTimelineJob(ownerDid: string, session: SessionFetcher, cursor?: string) {
-    const status: TimelineProjectionStatus = {
-      id: randomUUID(),
-      ownerDid,
-      cursor,
-      state: "fetching",
-      acceptedAt: new Date().toISOString(),
-    };
-    statuses.set(ownerDid, status);
-
-    let timeline: TimelineResponse;
-    const ready = dependencies.fetchTimelineFeed(session, cursor).then((response) => {
-      timeline = response;
-      status.cursor = response.cursor;
-      status.count = response.feed?.length ?? 0;
-      if (!status.completedAt) status.state = "projecting";
-      return {
-        cursor: response.cursor,
-        hasMore: Boolean(response.cursor),
-        count: response.feed?.length ?? 0,
-      };
-    });
+    const timeline = dependencies.fetchTimelineFeed(session, cursor);
+    const ready = timeline.then((response) => ({
+      cursor: response.cursor,
+      hasMore: Boolean(response.cursor),
+      count: response.feed?.length ?? 0,
+    }));
 
     const profileProjection = cursor
       ? Promise.resolve()
-      : Promise.resolve(dependencies.fetchProfile(ownerDid, session))
-          .then((profile) => dependencies.writer.projectProfile(profile));
-    const timelineProjection = ready.then(async () => {
+      : dependencies.fetchProfile(ownerDid, session)
+          .then((profile) => dependencies.writer.projectProfile(profile))
+          .catch((error: unknown) => reportError("Profile projection failed", error));
+    const timelineProjection = timeline.then(async (response) => {
       const intents = await dependencies.writer.loadReactionIntents(ownerDid);
-      await dependencies.writer.projectTimelinePage(ownerDid, timeline.feed ?? [], cursor, intents);
-    });
-    const completion = Promise.all([timelineProjection, profileProjection]).then(() => {
-      status.state = "completed";
-      status.completedAt = new Date().toISOString();
-    }).catch((error: unknown) => {
-      status.state = "failed";
-      status.error = error instanceof Error ? error.message : String(error);
-      status.completedAt = new Date().toISOString();
-    });
+      await dependencies.writer.projectTimelinePage(ownerDid, response.feed ?? [], cursor, intents);
+    }).catch((error: unknown) => reportError("Timeline projection failed", error));
 
-    const job = { ready, completion, status };
+    const job = { ready };
     const jobKey = timelineJobKey(ownerDid, cursor);
     jobs.set(jobKey, job);
-    completions.set(ownerDid, completion);
-    completion.finally(() => {
+    Promise.all([timelineProjection, profileProjection]).then(() => {
       if (jobs.get(jobKey) === job) jobs.delete(jobKey);
     });
     return job;
@@ -104,14 +66,7 @@ export function createProjector(dependencies: ProjectorDependencies = {
   async function projectTimelinePage(ownerDid: string, session: SessionFetcher, cursor?: string) {
     const current = jobs.get(timelineJobKey(ownerDid, cursor));
     const job = current ?? startTimelineJob(ownerDid, session, cursor);
-    const result = await job.ready;
-    return {
-      ...result,
-      projection: {
-        id: job.status.id,
-        state: current ? "running" as const : "accepted" as const,
-      },
-    };
+    return job.ready;
   }
 
   async function projectThread(ownerDid: string, session: SessionFetcher, uri: string) {
@@ -126,20 +81,9 @@ export function createProjector(dependencies: ProjectorDependencies = {
     return { ok: true, ...await dependencies.writer.projectThread(ownerDid, flattened, intents) };
   }
 
-  function getTimelineProjectionStatus(ownerDid: string) {
-    const status = statuses.get(ownerDid);
-    return status ? { ...status } : undefined;
-  }
-
-  async function waitForTimelineProjection(ownerDid: string) {
-    await completions.get(ownerDid);
-  }
-
   return {
-    getTimelineProjectionStatus,
     projectThread,
     projectTimelinePage,
-    waitForTimelineProjection,
   };
 }
 

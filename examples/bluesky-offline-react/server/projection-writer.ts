@@ -18,6 +18,7 @@ type ProjectionDatabase = typeof db;
 type PostBundle = NonNullable<ReturnType<typeof normalizePost>>;
 type NormalizedPost = PostBundle["post"];
 export type ReactionIntents = Map<string, ReactionOperation>;
+const unknownIndexedAt = new Date(0).toISOString();
 
 type ProjectionTable<TRow, TInit> = TableProxy<TRow, TInit> & {
   where(filter: { id: { eq: string } }): QueryBuilder<TRow>;
@@ -44,12 +45,7 @@ async function projectRow<TRow extends object, TInit extends object>(
     return;
   }
 
-  try {
-    await database.upsert(table, data, { id }).wait({ tier: "edge" });
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("object already exists")) throw error;
-    await database.update(table, id, data).wait({ tier: "edge" });
-  }
+  await database.upsert(table, data, { id }).wait({ tier: "edge" });
 }
 
 type ProfileProjection = {
@@ -166,6 +162,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
       const viewerActive = Boolean(viewerUri);
 
       if (intent && viewerActive !== intent.payload.active) continue;
+      if (intent) intents.delete(reactionKey(kind, post.id));
 
       const id = stableObjectId(`bluesky-${kind}`, `${ownerDid}:${post.uri}`);
       if (kind === "like") {
@@ -207,7 +204,6 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
 
       if (intent) {
         await database.delete(app.pendingOperations, intent.id).wait({ tier: "edge" });
-        intents.delete(reactionKey(kind, post.id));
       }
     }
   }
@@ -318,7 +314,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
         parentPostId: bundle?.post.replyParentId ?? entry.parentPostId,
         sortOrder: entry.sortOrder,
         state: bundle ? "post" : entry.state,
-        indexedAt: bundle?.post.indexedAt ?? new Date().toISOString(),
+        indexedAt: bundle?.post.indexedAt ?? unknownIndexedAt,
       });
     }));
     return { rootPostId: thread.rootPostId, count };
@@ -352,9 +348,7 @@ export function createProjectionWriter(database: ProjectionDatabase = db) {
     markOperationSent,
     projectProfile,
     projectThread,
-    projectTimelineItem,
     projectTimelinePage,
-    projectViewerState,
     writeLike,
     writePostBundle,
     writeRepost,

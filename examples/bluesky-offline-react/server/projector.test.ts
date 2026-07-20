@@ -8,7 +8,7 @@ function projectorDependencies(overrides: Partial<Parameters<typeof createProjec
   return {
     fetchTimelineFeed: vi.fn(async () => ({ feed: [], cursor: "next" })),
     fetchPostThread: vi.fn(),
-    fetchProfile: vi.fn(),
+    fetchProfile: vi.fn(async () => undefined),
     writer: {
       loadReactionIntents: vi.fn(async () => new Map()),
       projectProfile: vi.fn(async () => undefined),
@@ -59,9 +59,11 @@ describe("timeline projector", () => {
     ]);
 
     releaseProjection();
-    await vi.waitFor(() => expect(projectTimelinePage).toHaveBeenCalledTimes(1));
-    await projector.projectTimelinePage("did:plc:viewer", session);
+    await new Promise((resolve) => setImmediate(resolve));
+    const third = projector.projectTimelinePage("did:plc:viewer", session);
     expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
+    releaseFetch({ feed: [], cursor: "later" });
+    await expect(third).resolves.toMatchObject({ cursor: "later" });
   });
 
   it("does not let pagination swallow a fresh head projection", async () => {
