@@ -185,6 +185,145 @@ async fn counter_merge_does_not_recount_a_writer_after_restart_and_reconnect() {
 }
 
 #[tokio::test]
+/// Preserves a merged counter projection when the receiving writer contributed to it.
+///
+/// ```text
+/// bob ── base ── offline +3 ────────────────► server
+/// alice ── +5 ──► server ── merged 8 ───────► bob
+/// bob ── offline follow-up 9 ───────────────► local view
+/// ```
+async fn counter_merge_preserves_projection_when_scoped_snapshot_replays_local_batch() {
+    let _suite_guard = COUNTER_SUITE_LOCK.lock().await;
+    let schema = counter_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-counter-projection")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+    let (mut bob_context, bob) = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-counter-projection")
+        .with_persistent_storage()
+        .ready_on("counters", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+
+    let (counter_id, _, _) = alice
+        .insert("counters", jazz_tools::row_input!("value" => 0))
+        .expect("alice creates counter");
+    let query = QueryBuilder::new("counters").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees the counter base",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(0))
+                .then_some(())
+        },
+    )
+    .await;
+
+    bob.shutdown()
+        .await
+        .expect("bob shuts down before offline write");
+    bob_context.server_url = String::new();
+    let bob_offline = JazzClient::connect(bob_context.clone())
+        .await
+        .expect("bob opens his persistent storage offline");
+    bob_offline
+        .update(counter_id, vec![("value".to_string(), Value::Integer(3))])
+        .expect("bob writes +3 offline");
+    bob_offline
+        .shutdown()
+        .await
+        .expect("bob shuts down after offline write");
+
+    let alice_batch = alice
+        .update(counter_id, vec![("value".to_string(), Value::Integer(5))])
+        .expect("alice writes +5 first");
+    alice
+        .wait_for_batch(alice_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's write settles at the server");
+
+    bob_context.server_url = server.base_url();
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("charlie-counter-projection")
+        .ready_on("counters", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob_restarted = JazzClient::connect(bob_context.clone())
+        .await
+        .expect("bob reconnects with persistent storage");
+
+    wait_for_query(
+        &bob_restarted,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees the merged counter",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(8))
+                .then_some(())
+        },
+    )
+    .await;
+    wait_for_query(
+        &observer,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "fresh observer sees the merged counter",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == counter_id && counter_value(&rows[0]) == Some(8))
+                .then_some(())
+        },
+    )
+    .await;
+
+    bob_restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted Bob");
+    bob_context.server_url = String::new();
+    let bob_follow_up = JazzClient::connect(bob_context)
+        .await
+        .expect("bob reopens his merged state offline");
+    bob_follow_up
+        .update(counter_id, vec![("value".to_string(), Value::Integer(9))])
+        .expect("bob writes the next counter value offline");
+    let local_rows = bob_follow_up
+        .query(QueryBuilder::new("counters").build(), None)
+        .await
+        .expect("query Bob's offline counter");
+    assert_eq!(
+        local_rows
+            .iter()
+            .find(|row| row.0 == counter_id)
+            .and_then(counter_value),
+        Some(9),
+        "a local write after a scoped merge must build on the merged visible value"
+    );
+
+    bob_follow_up
+        .shutdown()
+        .await
+        .expect("shutdown Bob after the offline follow-up");
+    observer.shutdown().await.expect("shutdown observer");
+    alice.shutdown().await.expect("shutdown Alice");
+    server.shutdown().await;
+}
+
+#[tokio::test]
 /// Keeps causal counter snapshots from being counted as independent roots.
 ///
 /// ```text
