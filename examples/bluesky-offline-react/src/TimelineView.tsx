@@ -198,16 +198,18 @@ export function AppHeader({
 
 export function Intro() {
   return (
-    <section className="intro" aria-labelledby="intro-title">
-      <p className="eyebrow">Why Jazz?</p>
-      <h2 id="intro-title">Your Bluesky timeline, available offline.</h2>
-      <p>
-        Jazz updates your feed live with posts and reposts from people you follow
-        while you’re online, then keeps them available without a connection. You
-        can even write offline. Your changes stay safely queued until you’re back
-        online.
-      </p>
-    </section>
+    <Card asChild size="3">
+      <section className="intro" aria-labelledby="intro-title">
+        <p className="eyebrow">Why Jazz?</p>
+        <h2 id="intro-title">Your Bluesky timeline, available offline.</h2>
+        <p>
+          Jazz updates your feed live with posts and reposts from people you follow
+          while you’re online, then keeps them available without a connection. You
+          can even write offline. Your changes stay safely queued until you’re back
+          online.
+        </p>
+      </section>
+    </Card>
   );
 }
 
