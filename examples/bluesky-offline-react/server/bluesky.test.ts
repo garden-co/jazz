@@ -91,14 +91,15 @@ describe("PDS writes", () => {
     agent.deleteRecord.mockResolvedValue({ data: {} });
 
     await expect(putRecord(session, input)).resolves.toEqual({ uri: "at://post", cid: "bafy-post" });
-    await expect(deleteRecord(session, input)).resolves.toBeUndefined();
-
-    expect(agent.putRecord).toHaveBeenCalledWith(input);
-    expect(agent.deleteRecord).toHaveBeenCalledWith({
+    const deleteInput = {
       repo: input.repo,
       collection: input.collection,
       rkey: input.rkey,
-    });
+    };
+    await expect(deleteRecord(session, deleteInput)).resolves.toBeUndefined();
+
+    expect(agent.putRecord).toHaveBeenCalledWith(input);
+    expect(agent.deleteRecord).toHaveBeenCalledWith(deleteInput);
   });
 
   it.each([
