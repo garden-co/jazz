@@ -3829,7 +3829,7 @@ fn normalize_inherited_parent_policy(
         RowSetExpr::Join {
             left: child_current,
             right: parent_current,
-            mode: NormalizedJoinMode::Inner,
+            mode: NormalizedJoinMode::Semi,
             on: NormalizedPredicateExpr::Compare {
                 left: NormalizedValueRef::SourceField {
                     source: child_source.clone(),

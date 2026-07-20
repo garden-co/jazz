@@ -2552,6 +2552,22 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     (adds, removes)
 }
 
+fn canonical_view_update_rows_for_table(
+    update: &SyncMessage,
+    table: &str,
+) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
+    let (adds, removes) = canonical_view_update_rows(update);
+    (
+        adds.into_iter()
+            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
+            .collect(),
+        removes
+            .into_iter()
+            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
+            .collect(),
+    )
+}
+
 #[test]
 fn required_include_unreadable_target_drops_parent() {
     let schema = required_include_rls_schema();
@@ -3488,6 +3504,170 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         hidden_again_tx,
     );
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
+}
+
+#[test]
+fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations() {
+    let reader = user(0xa1);
+    let other = user(0xb2);
+    let container = row(0xc1);
+    let entry = row(0xe1);
+    let first_edge = row(0xa1);
+    let second_edge = row(0xa2);
+    let third_edge = row(0xa3);
+    let container_policy = Policy::shape(Query::from("containers").join_via(
+        "containerAccess",
+        "container",
+        [eq(col("reader"), claim("sub"))],
+    ));
+    let schema = JazzSchema::new([
+        TableSchema::new("containers", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(container_policy),
+        TableSchema::new(
+            "entries",
+            [
+                ColumnSchema::new("container", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_reference("container", "containers")
+        .with_read_policy(Policy::shape(Query::from("entries").inherits("container"))),
+        TableSchema::new(
+            "containerAccess",
+            [
+                ColumnSchema::new("container", ColumnType::Uuid),
+                ColumnSchema::new("reader", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("container", "containers"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    let _container_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containers", container, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("container"))])),
+    );
+    let entry_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("entries", entry, 11).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("title".to_owned(), v("entry")),
+        ])),
+    );
+    let first_edge_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", first_edge, 12).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let second_edge_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", second_edge, 13).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", row(0xaf), 14).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+
+    let shape = Query::from("entries")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let one_shot_rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+        .unwrap();
+    assert_eq!(
+        one_shot_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+
+    let mut peer = PeerState::for_author(reader);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&initial, "entries"),
+        (
+            vec![("entries".to_owned().into(), entry, entry_tx)],
+            Vec::new()
+        )
+    );
+    let _stable = peer.query_update(&mut core, &shape, &binding).unwrap();
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", first_edge, 15)
+            .parents(vec![first_edge_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (_, first_revoke_entry_removes) =
+        canonical_view_update_rows_for_table(&first_revoke, "entries");
+    assert!(first_revoke_entry_removes.is_empty());
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", second_edge, 16)
+            .parents(vec![second_edge_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (_, last_revoke_entry_removes) =
+        canonical_view_update_rows_for_table(&last_revoke, "entries");
+    assert_eq!(
+        last_revoke_entry_removes
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    assert!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .is_empty()
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", third_edge, 17).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let regrant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (regrant_entry_adds, _) = canonical_view_update_rows_for_table(&regrant, "entries");
+    assert_eq!(
+        regrant_entry_adds
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
 }
 
 #[test]

@@ -580,6 +580,9 @@ pub(crate) struct ClaimPath(pub(crate) Vec<String>);
 pub(crate) enum JoinMode {
     /// Required match; drop parent/source rows with no target.
     Inner,
+    /// Existence semi-join; left rows pass when at least one right match exists;
+    /// left multiplicity preserved; right multiplicity collapsed.
+    Semi,
     /// Keep parent/source rows and emit a hole/null edge.
     NullExtend,
 }
