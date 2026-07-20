@@ -97,9 +97,13 @@ canonical-JSON value naming one body: required `v: 1` plus **file id**,
 string embedding the column's TTL class (when one is declared), a stable
 UUIDv5 derivation of the uploader's identity id, and a cryptographically
 random part. The SDK
-finalizes the id at the **first cell write** — the destination column's
-schema names the class — entirely locally and fully offline, from day
-zero, because a client always knows its own identity id. At the type layer
+finalizes the id **synchronously inside `fromBlob`** — the destination
+column is passed to `fromBlob` and names the class (and its declared mime
+types) — entirely locally and fully offline, from day
+zero, because a client always knows its own identity id and its schema.
+The id belongs to the file, not to any row: it exists the moment
+`fromBlob` returns, before the descriptor is written into any cell, and
+`url()` is valid immediately (404ing until release). At the type layer
 this is a schema-level `ColumnType::File` that lowers onto the existing
 text value type — the same facade pattern JSON columns already use — so no
 value-enum, row-format, or binding changes exist anywhere. The write path
@@ -140,17 +144,28 @@ bucket lifecycle rule expiring the `pending/` prefix (plus the native
 incomplete-multipart abort rule) — the lease window _is_ the lifecycle
 expiry, and no server sweep exists.
 
-Creation is offline-capable within a session: `fromBlob` keeps the Blob in
-memory, measures `size`, and yields a descriptor to write into a cell; the
-upload runs in-session — grant → PUT → release — straight from that Blob.
-The SDK holds the writing transaction at the outbox until release — an
+Creation is offline-capable within a session: `fromBlob(blob, { for })`
+keeps the Blob in memory, measures `size`, and — taking the destination
+column as `for` — finalizes the id and yields a handle whose descriptor is
+ready to write into a cell; the
+upload may begin as soon as the handle exists — grant → PUT → release —
+straight from that Blob, no longer waiting on a cell write.
+The SDK holds the transaction that writes the descriptor at the outbox
+until release — an
 **in-memory** client-side courtesy so that descriptors written through the
 upload path have bytes present when they sync, not a server-enforced gate
-— and later, independent writes bypass the held unit. A restart mid-upload
+— and independent later writes bypass the held unit while causally
+dependent ones queue behind it (causal dependency is the outbox's existing
+relation — a transaction that reads or writes what the held one wrote —
+not a new file-specific rule). A restart mid-upload
 loses the body: the committed descriptor syncs and its URL 404s — the
 ordinary bodyless state, documented as the interrupted-upload outcome.
 Nothing re-uploads; durable staging and resume belong to the opt-in
-offline package.
+offline package. A handle released but never written into a surviving,
+accepted cell (the write is rejected by policy, or never happens) leaves a
+live orphan body: an accepted, stated leak — the handle's `rejected` state
+is the app's cue, `delete()` the remedy, and a TTL'd column self-heals on
+schedule.
 
 Reading a file _is the web_: one stable, unauthenticated, public URL —
 `GET /files/{app}/{identity}/{random}` — redirecting to the public object
@@ -223,9 +238,11 @@ never deletes objects.
 9. As an app developer, I want file ids minted entirely on-device — the
    destination column's TTL class, the UUIDv5 derivation of my identity
    id, and a CSPRNG random
-   part, finalized at the first cell write — so that offline creation works
-   from the very first moment an identity exists, with no server handshake
-   before `url()` is usable.
+   part, finalized synchronously when I call `fromBlob` with the
+   destination column — so that offline creation works
+   from the very first moment an identity exists, the id is the file's own
+   (not a row's), and `url()` is usable the instant `fromBlob` returns,
+   with no server handshake and no cell write required first.
 10. As an app developer, I want file cells to be opaque to the query layer
     in v1 (text-column semantics: whole-value equality, null checks), so
     that the query path carries no descriptor-specific code; field access
@@ -254,8 +271,9 @@ never deletes objects.
     (`local → uploading(progress) → released → accepted | rejected`) on the
     file handle, so that the app can show me what's pending and warn me
     before I abandon a device holding unreleased files.
-17. As an app developer, I want `fromBlob` to return a usable descriptor
-    handle immediately while upload continues in the background, so that I
+17. As an app developer, I want `fromBlob(blob, { for })` to finalize the
+    id and return a usable handle immediately — `url()` valid at once —
+    while upload continues in the background, so that I
     can write it into a cell in the same breath and my UI code stays simple.
 18. As an app developer, I want TTL declared on the schema —
     `s.file({ ttl: "7d" })`, with no per-call option — so that a column's
@@ -536,15 +554,19 @@ nosniff` is a deployment requirement on the public object host in
   which is per-app, so a grant implicitly authorizes only the connected
   app's namespace; `url()` takes it from the client's own config. The id
   is
-  **finalized at the first cell write** — `fromBlob` keeps the Blob in
-  memory and
-  returns a handle; when the descriptor first lands in a file column, the
-  SDK mints the full id using that column's declared class. Minting is
+  **finalized synchronously inside `fromBlob`** — the caller passes the
+  destination column as `fromBlob(blob, { for })`, and the SDK mints the
+  full id (that column's class + identity segment + fresh random) before
+  `fromBlob` returns, keeping the Blob in memory. The id is the file's
+  own, minted independently of any row: `url()` is valid the instant the
+  handle exists, before the descriptor is written into any cell (it 404s
+  until release; apps preview from the Blob they hold). Minting is
   entirely on-device and local — a client always knows its own identity id
   and its schema — so ids and `url()` work offline from the moment an
-  identity exists (before the first write there is no id or URL; apps
-  preview from the Blob they hold). Writing the same handle to a second
-  column is an ordinary copy of the already-finalized descriptor. The
+  identity exists. Writing the handle into its `for` column (or any
+  other) is an ordinary write of the already-finalized descriptor; writing
+  it into a differently-declared column is the ordinary copy semantic —
+  the baked-in class travels, columns never re-class. The
   stated privacy trade: every URL publicly carries a stable pseudonymous
   UUIDv5 derivation of the uploader's identity id — never the raw id —
   linkable across that uploader's files.
@@ -614,15 +636,20 @@ nosniff` is a deployment requirement on the public object host in
   ever re-claim one of their own ids — after a delete or a TTL expiry —
   and the SDK never does (fresh randoms every time); self-resurrection is
   the owner's own footgun and is stated as such.
-- **Upload flow:** (1) create offline-capable — `fromBlob` keeps the Blob
-  in memory, measures `size`, and returns a
-  handle; at the **first cell write** the SDK finalizes the identity-bound
-  id (class segment from the destination column's declaration + identity +
-  fresh random) and the write is an ordinary local transaction; (2) the SDK holds that transaction
+- **Upload flow:** (1) create offline-capable —
+  `fromBlob(blob, { for, name })` keeps the Blob
+  in memory, measures `size`, and synchronously finalizes the
+  identity-bound
+  id (class segment from the `for` column's declaration + identity +
+  fresh random), returning a handle whose `url()` is immediately valid;
+  writing the descriptor into a cell is an ordinary local transaction and
+  need not precede the upload; (2) the SDK holds the descriptor-writing
+  transaction
   at the outbox until release — an in-memory client-side courtesy so
   upload-path
   descriptors have bytes when they sync — while later independent commit
-  units bypass it (causally dependent writes queue behind it); (3) grant
+  units bypass it (causally dependent writes — those the outbox's existing
+  relation already orders behind the held one — queue behind it); (3) grant
   request `(file id, size, mime_type, name, destination column)` over
   sync — the class travels inside the id;
   any identity-bearing session may request grants for its own namespace;
@@ -674,8 +701,9 @@ nosniff` is a deployment requirement on the public object host in
   realized as key prefixes.** A deployment declares its class set
   (recommended defaults 1d/7d/30d); permanent is the default. The schema
   names a column's class — `s.file({ ttl: "7d" })` — and there is no
-  per-call TTL anywhere. The class is baked into the file id at the first
-  cell write and routes the file to `{app}/t7d/{identity}/{random}`,
+  per-call TTL anywhere. The class is baked into the file id when
+  `fromBlob` is called with the destination column, and routes the file
+  to `{app}/t7d/{identity}/{random}`,
   covered by that class's one lifecycle expiration rule; the descriptor
   carries no `ttl` field — the id alone determines key, URL, and expiry.
   The expiry clock starts at the release copy (CopyObject creates the
@@ -745,10 +773,13 @@ nosniff` is a deployment requirement on the public object host in
   hold the object-store credentials (presign, complete, copy, delete);
   clients never see them. Dev and tests run minio or an in-process fake
   that also fakes lifecycle expiry (manually triggerable in tests).
-- **TS API:** `fromBlob(blob, opts)` (create; returns a handle to write
-  into cells — the id is finalized at the first cell write from the
-  column's declared class; background upload; no per-call `ttl` — TTL is
-  the schema's; creation input is a Blob so `size` is always known — there
+- **TS API:** `fromBlob(blob, { for, name })` (create; the destination
+  column is passed as `for`, so the id — including its TTL class — is
+  finalized synchronously and `url()` is valid the moment the handle
+  returns; the handle is then written into cells; background upload; no
+  per-call `ttl` — TTL is
+  the schema's, carried by `for`; creation input is a Blob so `size` is
+  always known — there
   is no `fromStream`), `file.url()` (the stable public URL on every
   platform; computed synchronously and locally from the id plus static
   client config — `filesUrl`, default `{serverUrl}/files`, and the app
@@ -916,7 +947,16 @@ column)`, validates class and mime type against the schema
   ordinary state whose URL 404s; declared mime types and TTL classes
   enforced at grant time only — copies and hand-rolled descriptors
   escape them, and serving is protected by the disposition policy, not
-  the declaration; the small-file write path costing three bucket
+  the declaration; a released body whose descriptor is never written into
+  a surviving accepted cell — the write rejected by policy, or never made
+  — remaining a live orphan (an accepted leak: the handle's `rejected`
+  state is the app's cue, `delete()` the remedy, a TTL'd column
+  self-healing; the SDK never auto-deletes, because the same descriptor
+  may live in other accepted cells it cannot see); `url()` on a handle
+  being valid the moment `fromBlob` returns and only throwing if called on
+  a handle whose `fromBlob` has not returned (there is no pre-id limbo —
+  the id is minted synchronously); the small-file write path costing three
+  bucket
   writes (PUT + copy + delete); only the original owner can ever re-claim
   one of their own ids after a delete or expiry — third-party takeover is
   impossible by construction, and the SDK never reuses ids, so an owner

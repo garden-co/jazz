@@ -2,7 +2,7 @@
 
 Type: `wayfinder:grilling`
 Status: open
-Assignee: (unclaimed)
+Assignee: guido
 Blocked by: (none)
 
 ## Question

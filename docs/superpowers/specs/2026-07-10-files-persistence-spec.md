@@ -86,11 +86,13 @@ Two deliverables, buildable together and testable end to end:
 
 ### Ids, minting & URLs
 
-10. As an app developer, I want the SDK to mint the file id at the first
-    cell write — TTL class from the destination column's declaration,
+10. As an app developer, I want the SDK to mint the file id synchronously
+    when I call `fromBlob` with the destination column — TTL class from
+    that column's declaration,
     the identity segment derived (UUIDv5) from the session identity,
     random from a CSPRNG — so that ids are
-    correct by construction and I never assemble one by hand.
+    correct by construction, belong to the file rather than a row, and I
+    never assemble one by hand.
 11. As an end user, I want id minting to work fully offline from the
     first moment (my identity id is always known locally), so that
     offline creation has no first-contact caveat.
@@ -187,9 +189,12 @@ Two deliverables, buildable together and testable end to end:
   and serving path are `{app}[/t{class}]/{identity}/{random}`, with
   `{app}` supplied by the per-app sync connection, never by the id. The
   SDK
-  finalizes the id at the descriptor's first cell write; `url()` derives
-  from the id plus static client config — `filesUrl` and the app id
-  (always the public URL — the `canonical` option was
+  finalizes the id synchronously inside `fromBlob`, from the destination
+  column passed to it (`fromBlob(blob, { for })`) — the id is the file's
+  own, not a row's, and exists before any cell write; `url()` derives
+  from the id plus static client config — `filesUrl` and the app id —
+  and is valid the instant the handle returns (always the public URL —
+  the `canonical` option was
   retired with the invisible-core amendment).
 - **File-plane protocol messages** on the authenticated sync connection:
   grant `(file id, size, mime_type, name, destination column)` → object
