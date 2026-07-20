@@ -8,12 +8,12 @@ export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
 /** Read-once handle the host publishes on `window` for the same-origin overlay. */
 export interface JazzInspectorHost {
   /**
-   * A ready-to-use config for the overlay client: the host's identity and app
-   * coordinates. Built entirely on the host side — the overlay passes it to its
-   * provider verbatim, together with {@link getSubscriptionChannel}'s channel,
-   * so it never opens its own storage or worker. No schemaHash: the host
-   * injects its runtime schema directly (plain data), so the overlay skips the
-   * server schema fetch.
+   * A ready-to-use config for the overlay client: the app id plus the live
+   * subscription channel from {@link getSubscriptionChannel}. Built entirely on
+   * the host side — the overlay passes it to its provider verbatim, so it never
+   * opens its own storage, worker, or server connection, and no credential is
+   * exposed on the handle. No schemaHash: the host injects its runtime schema
+   * directly (plain data), so the overlay skips the server schema fetch.
    */
   getConnectionConfig(): DbConfig;
   /**

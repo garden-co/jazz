@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
-import { wireInspectorOverlay } from "./inspector-overlay/serve.js";
+import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
@@ -61,19 +61,7 @@ export interface ViteDevServer {
     };
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
-  middlewares?: {
-    use(
-      fn: (
-        req: { url?: string },
-        res: {
-          setHeader(name: string, value: string): void;
-          statusCode: number;
-          end(body?: string | Buffer): void;
-        },
-        next: () => void,
-      ) => void,
-    ): void;
-  };
+  middlewares?: OverlayDevServer["middlewares"];
   ws: {
     send(payload: { type: string; err?: { message: string; stack?: string } }): void;
   };

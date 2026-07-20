@@ -25,14 +25,11 @@ function readHost(): JazzInspectorHost | null {
 
 export function readInspectorHostConfig(): DbConfig | null {
   const host = readHost();
-  if (!host) return null;
-  // The overlay client connects through the host's own subscription channel
-  // (same-origin realm call), so it never opens storage, a worker, or a server
-  // connection of its own — and sees exactly the host's local store.
-  return {
-    ...host.getConnectionConfig(),
-    subscriptionChannel: host.getSubscriptionChannel(),
-  };
+  // The config carries the host's live subscription channel (same-origin realm
+  // call), so the overlay client passes it to its provider verbatim and never
+  // opens storage, a worker, or a server connection of its own — it sees
+  // exactly the host's local store.
+  return host ? host.getConnectionConfig() : null;
 }
 
 export function readInspectorHostSchema(): WasmSchema | null {

@@ -1344,6 +1344,8 @@ export function defineSliceableApp(
 // The statically-registered app schema: the inspector host handle falls back to
 // it before any client exists (e.g. a write-only page with no query yet). Set
 // at defineApp time, so it does not depend on a connection being established.
+// Last-defineApp-wins by design: a dev-only fallback, not a multi-app registry —
+// pages defining several apps get the most recent one until a client exists.
 let registeredWasmSchema: WasmSchema | undefined;
 
 /** The most recently defined app's WasmSchema, if any (used by the inspector). */

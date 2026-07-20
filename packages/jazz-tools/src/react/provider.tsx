@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
-import { startInspectorOnce } from "../dev-tools/auto-attach.js";
+import { jazzDevPluginActive, startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -57,10 +57,19 @@ export function JazzProvider({
   const createClient: CreateJazzClient = (nextConfig) =>
     createJazzClient(nextConfig) as Promise<CreatedJazzClient>;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  // Subscription traces only register while devMode is on at subscribe time,
+  // so it must be on from Db construction for the overlay's Subscriptions tab
+  // to see the app's startup queries — the host bridge's later setDevMode(true)
+  // only covers subscriptions opened after the overlay attached. Default it on
+  // exactly when the overlay will mount; an explicit config value always wins.
+  const effectiveConfig =
+    shouldAutoAttach && config.devMode === undefined && jazzDevPluginActive()
+      ? { ...config, devMode: true }
+      : config;
 
   return (
     <CoreJazzProvider
-      config={config}
+      config={effectiveConfig}
       fallback={fallback}
       createJazzClient={createClient}
       onJWTExpired={onJWTExpired}

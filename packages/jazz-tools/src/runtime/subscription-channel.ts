@@ -1,5 +1,5 @@
 import type { Session } from "./context.js";
-import type { DbConfig, QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type { Db, DbConfig, QueryBuilder, QueryOptions, TableProxy } from "./db.js";
 import type {
   BinaryLargeValueFileApp,
   BinaryLargeValueFileRow,
@@ -36,6 +36,12 @@ export interface SubscriptionRowCodec<T extends { id: string }> {
 }
 
 export interface SubscriptionChannel {
+  /**
+   * @internal Dev-introspection: the in-realm Db this channel ultimately
+   * drives, when one exists (used by the inspector host handle). Wrapper
+   * channels should forward it so introspection survives composition.
+   */
+  ownerDb?(): Promise<Db>;
   all?<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): MaybePromise<T[]>;
   one?<T>(
     query: QueryBuilder<T>,
@@ -117,6 +123,13 @@ export type SubscriptionChannelTarget = SubscriptionChannel;
 
 export class InProcessSubscriptionChannel implements SubscriptionChannel {
   constructor(private readonly target: SubscriptionChannelTarget) {}
+
+  ownerDb(): Promise<Db> {
+    if (!this.target.ownerDb) {
+      return Promise.reject(new Error("Subscription channel target has no owner Db."));
+    }
+    return this.target.ownerDb();
+  }
 
   all<T>(query: QueryBuilder<T>, options?: QueryOptions, session?: Session): MaybePromise<T[]> {
     if (!this.target.all) {

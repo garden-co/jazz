@@ -16,7 +16,7 @@
 // a literal: Next only static-inlines that exact member access, not an alias.
 import type { InspectorHostDb } from "../dev/inspector-overlay/host-bridge.js";
 
-function jazzDevPluginActive(): boolean {
+export function jazzDevPluginActive(): boolean {
   const viteEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
   const nextFlag =
     typeof process !== "undefined" ? process.env.NEXT_PUBLIC_JAZZ_INSPECTOR : undefined;

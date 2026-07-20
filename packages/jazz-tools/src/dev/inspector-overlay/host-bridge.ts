@@ -1,9 +1,5 @@
 import type { Db, DbConfig } from "../../runtime/db.js";
-import {
-  createInProcessSubscriptionChannel,
-  type SubscriptionChannel,
-  type SubscriptionChannelTarget,
-} from "../../runtime/subscription-channel.js";
+import type { SubscriptionChannel } from "../../runtime/subscription-channel.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -26,42 +22,10 @@ export type InspectorHostDb =
       getSubscriptionChannel(): SubscriptionChannel;
     };
 
-type OwnerDbCapableChannel = SubscriptionChannel & { ownerDb?(): Promise<Db> };
-
-function isSyncDb(db: InspectorHostDb): db is Db {
-  return "setDevMode" in db;
-}
-
-/**
- * Build the config the overlay client uses. Identity and app coordinates only:
- * the overlay connects through the host's own subscription channel (see
- * {@link JazzInspectorHost.getSubscriptionChannel}), so it opens no storage, no
- * worker, and no server connection of its own — which is also why no driver or
- * runtime sources are forwarded.
- */
-function buildOverlayDbConfig(c: DbConfig): DbConfig {
-  // Pass exactly one identity credential — secret/jwtToken/cookieSession are
-  // mutually exclusive, and a local-first host carries both a secret and a
-  // derived jwtToken. Use the host's *identity* (live session → seed) so the
-  // overlay is the same user as the host. adminSecret is independent of
-  // identity (not mutually exclusive with it), so forward it whenever the host
-  // has one.
-  const identityCredential = c.jwtToken
-    ? { jwtToken: c.jwtToken }
-    : c.secret
-      ? { secret: c.secret }
-      : c.cookieSession
-        ? { cookieSession: c.cookieSession }
-        : {};
-  return {
-    appId: c.appId,
-    /* Display/telemetry only — the overlay never dials the server itself. */
-    serverUrl: c.serverUrl,
-    env: c.env,
-    userBranch: c.userBranch,
-    ...identityCredential,
-    ...(c.adminSecret ? { adminSecret: c.adminSecret } : {}),
-  };
+function isChannelFacade(db: InspectorHostDb): db is Exclude<InspectorHostDb, Db> {
+  // The facade's channel accessor is the union's actual discriminant — the
+  // real Db drives its store directly and has no channel to hand out.
+  return "getSubscriptionChannel" in db;
 }
 
 /**
@@ -81,12 +45,14 @@ function withoutShutdown(channel: SubscriptionChannel): SubscriptionChannel {
 
 /**
  * Publish the host handle + push the active-subscription list to the overlay
- * iframe. The overlay is same-origin, so it reads the config and the live
- * subscription channel off `window.__jazzInspectorHost` and connects through
- * the host's own store, while we push only a stack-less subscription list
- * (one-way, plain JSON). The host realm owns the listener, so there's no
- * dead-iframe-listener hazard and no cross-realm value issue. Returns a
- * disposer.
+ * iframe. The overlay is same-origin, so it reads the config — which carries a
+ * live, shutdown-masked subscription channel into the host's own store — off
+ * `window.__jazzInspectorHost` and connects through it verbatim: it opens no
+ * storage, no worker, and no server connection of its own, and its identity is
+ * the host's (auth state comes from the shared channel). We push only a
+ * stack-less subscription list (one-way, plain JSON). The host realm owns the
+ * listener, so there's no dead-iframe-listener hazard and no cross-realm value
+ * issue. Returns a disposer.
  */
 export function installInspectorHost(
   db: InspectorHostDb,
@@ -116,18 +82,24 @@ export function installInspectorHost(
     stopSubscriptionPush = resolved.onActiveQuerySubscriptionsChange(push);
   };
 
-  const channel: SubscriptionChannel = isSyncDb(db)
-    ? createInProcessSubscriptionChannel(db as unknown as SubscriptionChannelTarget)
-    : db.getSubscriptionChannel();
-
-  const config = db.getConfig();
+  // Masked once: the handle is polled by the overlay, and the client registry
+  // dedupes on channel identity, so every read must yield the same object. A
+  // sync Db is itself a valid channel target (the in-process channel is pure
+  // delegation over the same surface), so one masking layer covers both arms.
+  const maskedChannel = withoutShutdown(
+    isChannelFacade(db) ? db.getSubscriptionChannel() : (db as unknown as SubscriptionChannel),
+  );
 
   const handle: JazzInspectorHost = {
     getConnectionConfig() {
-      return buildOverlayDbConfig(ownerDb ? ownerDb.getConfig() : config);
+      // appId plus the channel is the whole contract: the overlay client reads
+      // auth state, data, and writes through the channel, so no credential,
+      // server URL, or storage coordinates are forwarded (and no secret is
+      // parked on a window global).
+      return { appId: (ownerDb ?? db).getConfig().appId, subscriptionChannel: maskedChannel };
     },
     getSubscriptionChannel() {
-      return withoutShutdown(channel);
+      return maskedChannel;
     },
     getWasmSchema() {
       // The live client's schema is authoritative when a client exists (it's
@@ -146,16 +118,17 @@ export function installInspectorHost(
   };
   (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL] = handle;
 
-  if (isSyncDb(db)) {
-    bindOwnerDb(db);
-  } else {
+  if (isChannelFacade(db)) {
     // Owner resolution is async (the shared owner opens lazily); until it
     // lands, the handle serves the statically-registered schema and an empty
     // subscription list, and the overlay's poll/push paths pick up the rest.
-    void (channel as OwnerDbCapableChannel)
+    void db
+      .getSubscriptionChannel()
       .ownerDb?.()
       .then(bindOwnerDb)
       .catch(() => {});
+  } else {
+    bindOwnerDb(db);
   }
 
   return () => {

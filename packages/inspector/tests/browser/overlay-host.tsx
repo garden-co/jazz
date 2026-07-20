@@ -59,10 +59,10 @@ function HostApp() {
     userBranch: TEST_BRANCH,
     serverUrl: SERVER_URL,
     secret,
-    // Real dev apps run with devMode on (the vite plugin environment); it must
-    // be set at subscribe time for subscription traces to register — the
-    // host-bridge's later setDevMode(true) only affects subscriptions opened
-    // after the overlay attached.
+    // devMode must be on at subscribe time for subscription traces to register.
+    // Under the jazz dev plugin the provider defaults it on automatically, but
+    // this fixture runs under the inspector's own vite server (no plugin flag),
+    // so set it explicitly like the provider would.
     devMode: true,
   };
 

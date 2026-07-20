@@ -1,8 +1,4 @@
-import {
-  encodeSchema,
-  mergePermissionsIntoWasmSchema,
-  startLocalJazzServer,
-} from "jazz-tools/testing";
+import { mergePermissionsIntoWasmSchema, startLocalJazzServer } from "jazz-tools/testing";
 import {
   ADMIN_SECRET,
   APP_ID,
@@ -21,14 +17,13 @@ export default async function runServer() {
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
     backendSecret: "test",
-    // Publish the schema (with permissions merged) at server start — the
-    // code-first counterpart of the directory-based catalogue deploy, which
-    // needs a schema project on disk and can't take the in-code app object.
-    schema: encodeSchema(mergePermissionsIntoWasmSchema(app.wasmSchema, permissions)),
   });
 
-  // Register the schema in the server's stored-schema registry too, so
-  // hash-keyed consumers (the standalone inspector) can look it up.
+  // Publish the schema (with permissions merged) through the admin endpoint —
+  // the code-first counterpart of the directory-based catalogue deploy, which
+  // needs a schema project on disk and can't take the in-code app object. This
+  // both wires the runtime catalogue (clients can connect) and registers the
+  // hash for hash-keyed consumers (the standalone inspector).
   await publishStoredSchema(serverHandle.url, {
     appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,

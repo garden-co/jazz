@@ -126,11 +126,7 @@ function getFirstDbClient(db: Db): JazzClient | null {
 }
 
 function tryGetSchemaFromDb(db: Db): WasmSchema | null {
-  const firstClient = getFirstDbClient(db);
-  if (!firstClient) {
-    return null;
-  }
-  return firstClient.getSchema();
+  return db.getRuntimeSchema();
 }
 
 function tryCreateClientForSchema(db: Db, schema: WasmSchema): JazzClient | null {
