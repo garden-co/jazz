@@ -1,61 +1,56 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { deliverOperations } from "../../src/use-outbox.js";
 
-const mocks = vi.hoisted(() => ({
-  all: vi.fn(),
-  update: vi.fn(),
-  useEffect: vi.fn(),
-}));
-
-vi.mock("jazz-tools/react", () => ({
-  useDb: () => ({ all: mocks.all, update: mocks.update }),
-}));
-vi.mock("react", () => ({
-  useEffect: mocks.useEffect,
-  useRef: <T>(value: T) => ({ current: value }),
-}));
-
-import { useOutbox } from "../../src/use-outbox.js";
-
-beforeEach(() => {
-  vi.restoreAllMocks();
-  mocks.all.mockReset();
-  mocks.update.mockReset();
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { onLine: true } });
-});
+const earlier = {
+  id: "00000000-0000-0000-0000-000000000001",
+  ownerDid: "did:plc:viewer",
+  kind: "post",
+  rkey: "earlier",
+  payload: "{}",
+  state: "queued",
+  createdAt: "2026-07-16T10:00:00.000Z",
+};
+const later = {
+  ...earlier,
+  id: "00000000-0000-0000-0000-000000000002",
+  rkey: "later",
+  createdAt: "2026-07-16T10:00:01.000Z",
+};
 
 describe("outbox delivery", () => {
-  it("sends intentions chronologically and marks only the failed operation", async () => {
-    const earlier = {
-      id: "00000000-0000-0000-0000-000000000001",
-      ownerDid: "did:plc:viewer",
-      kind: "post",
-      rkey: "earlier",
-      payload: "{}",
-      state: "queued",
-      createdAt: "2026-07-16T10:00:00.000Z",
-    };
-    const later = {
-      ...earlier,
-      id: "00000000-0000-0000-0000-000000000002",
-      rkey: "later",
-      createdAt: "2026-07-16T10:00:01.000Z",
-    };
-    mocks.all.mockResolvedValue([later, earlier]);
-    const fetch = vi.spyOn(globalThis, "fetch")
+  it("sends intentions chronologically and stops at the failed operation", async () => {
+    const request = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Invalid post" }), { status: 400 }));
+    const markFailed = vi.fn();
     const reportApiReachable = vi.fn();
 
-    await useOutbox(earlier.ownerDid, true, reportApiReachable)();
+    await deliverOperations([later, earlier], { request, markFailed, reportApiReachable });
 
-    expect(fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+    expect(request.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
       [earlier],
       [later],
     ]);
-    expect(mocks.update).toHaveBeenCalledTimes(1);
-    expect(mocks.update).toHaveBeenCalledWith(expect.anything(), later.id, {
+    expect(markFailed).toHaveBeenCalledOnce();
+    expect(markFailed).toHaveBeenCalledWith(later.id, {
       state: "failed",
       error: "Invalid post",
+    });
+    expect(reportApiReachable).toHaveBeenLastCalledWith(true);
+  });
+
+  it("keeps an intention queued when authentication can be refreshed", async () => {
+    const request = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: "Session expired" }), { status: 401 }),
+    );
+    const markFailed = vi.fn();
+    const reportApiReachable = vi.fn();
+
+    await deliverOperations([earlier], { request, markFailed, reportApiReachable });
+
+    expect(markFailed).toHaveBeenCalledWith(earlier.id, {
+      state: "queued",
+      error: "Session expired",
     });
     expect(reportApiReachable).toHaveBeenLastCalledWith(true);
   });
