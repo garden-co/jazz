@@ -4231,15 +4231,25 @@ function plainResetChunkCanStayPacked(
   },
   schema: WasmSchema,
 ): boolean {
-  return (
-    chunk.reset === true &&
-    chunk.delta.updated.length === 0 &&
-    chunk.delta.removed.length === 0 &&
-    !chunk.relationDelta &&
-    !chunk.relationSnapshot &&
-    subscription.relationMaterialization.arraySubqueries.length === 0 &&
-    subscriptionOutputColumnsAreIdentityProjection(subscription.outputColumns, schema)
+  const reset = chunk.reset === true;
+  const noUpdated = chunk.delta.updated.length === 0;
+  const noRemoved = chunk.delta.removed.length === 0;
+  const noArraySubqueries = subscription.relationMaterialization.arraySubqueries.length === 0;
+  const noRelevantRelationDelta = !chunk.relationDelta || noArraySubqueries;
+  const noRelationSnapshot = !chunk.relationSnapshot;
+  const identityProjection = subscriptionOutputColumnsAreIdentityProjection(
+    subscription.outputColumns,
+    schema,
   );
+  const canStayPacked =
+    reset &&
+    noUpdated &&
+    noRemoved &&
+    noRelevantRelationDelta &&
+    noRelationSnapshot &&
+    noArraySubqueries &&
+    identityProjection;
+  return canStayPacked;
 }
 
 function subscriptionOutputColumnsAreIdentityProjection(
@@ -4280,11 +4290,22 @@ function createRawNativeFrameRowEncoder(
   return (raw) => {
     const values = columns.map((column) => {
       const sourceIndex = sourceIndexesByPublicName.get(column.name);
-      if (sourceIndex === undefined) return encodeNullValue(columnValueType(column));
-      return decodeRecord(raw, sourceIndex) ?? encodeNullValue(columnValueType(column));
+      const outputValueType = columnValueType(column);
+      if (sourceIndex === undefined) return encodeNullValue(outputValueType);
+      const decoded = decodeRecord(raw, sourceIndex);
+      if (decoded == null) return encodeNullValue(outputValueType);
+      return encodeFrameColumnValue(decoded, outputValueType);
     });
     return createRecord(outputDescriptor, values);
   };
+}
+
+function encodeFrameColumnValue(decoded: Uint8Array, outputValueType: ValueType): Uint8Array {
+  if (outputValueType.tag !== 12) return decoded;
+  const output = new Uint8Array(decoded.length + 1);
+  output[0] = 1;
+  output.set(decoded, 1);
+  return output;
 }
 
 function nativeDescriptorMatchesColumns(
