@@ -599,11 +599,9 @@ impl QueryManager {
     ) -> Option<(String, StoredRowBatch)> {
         let table = self.load_row_table_name(storage, row_id)?;
         let row = storage
-            .scan_history_row_batches(&table, row_id)
-            .ok()?
-            .into_iter()
-            .filter(|row| row.batch_id == batch_id && row.branch.as_str() == branch_name)
-            .max_by_key(|row| (row.updated_at, row.batch_id()))?;
+            .load_history_row_batch(&table, branch_name, row_id, batch_id)
+            .ok()
+            .flatten()?;
         Some((table, row))
     }
 

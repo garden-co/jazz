@@ -57,6 +57,7 @@ impl SyncManager {
 
     /// Queue all existing objects to sync to a new server using storage as the
     /// source of truth for row history and current state.
+    #[allow(dead_code)]
     pub(super) fn queue_full_sync_to_server_from_storage<H: Storage>(
         &mut self,
         server_id: ServerId,

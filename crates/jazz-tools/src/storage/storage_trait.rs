@@ -1363,6 +1363,7 @@ pub trait Storage {
             .map(QueryRowBatch::from))
     }
 
+    #[cfg(test)]
     fn load_history_row_batch_any_branch(
         &self,
         table: &str,
@@ -1385,6 +1386,7 @@ pub trait Storage {
         Ok(Some(first_match))
     }
 
+    #[cfg(test)]
     fn load_history_query_row_batch_any_branch(
         &self,
         table: &str,
@@ -2189,6 +2191,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         )
     }
 
+    #[cfg(test)]
     fn load_history_row_batch_any_branch(
         &self,
         table: &str,
@@ -2198,6 +2201,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_history_row_batch_any_branch(table, row_id, batch_id)
     }
 
+    #[cfg(test)]
     fn load_history_query_row_batch_any_branch(
         &self,
         table: &str,

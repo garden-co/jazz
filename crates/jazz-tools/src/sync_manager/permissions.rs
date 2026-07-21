@@ -7,7 +7,7 @@ use crate::row_histories::{
     BatchId, RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, patch_row_batch_state,
 };
 use crate::storage::Storage;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl SyncManager {
     /// Take all pending permission checks for policy evaluation.
@@ -160,63 +160,26 @@ impl SyncManager {
         batch_id: BatchId,
         fallback_row: StoredRowBatch,
     ) -> Vec<StoredRowBatch> {
-        let mut row_ids = HashSet::new();
-        for key in self.row_batch_interest.keys() {
-            if key.batch_id == batch_id {
-                row_ids.insert(key.row_id);
-            }
-        }
-        for pending in &self.pending_permission_checks {
-            if let SyncPayload::RowBatchCreated { row, .. }
-            | SyncPayload::RowBatchNeeded { row, .. } = &pending.payload
-                && row.batch_id == batch_id
-            {
-                row_ids.insert(row.row_id);
-            }
-        }
-
-        let mut rows = row_ids
+        let mut rows = storage
+            .load_local_batch_row_index(batch_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
             .into_iter()
-            .filter_map(|row_id| {
-                let table = storage.load_row_locator(row_id).ok().flatten()?.table;
-                storage
-                    .scan_history_row_batches(table.as_str(), row_id)
-                    .ok()?
-                    .into_iter()
-                    .find(|row| row.batch_id == batch_id)
+            .filter_map(|member| {
+                let row = storage
+                    .load_history_row_batch_for_schema_hash(
+                        member.table_name.as_str(),
+                        member.schema_hash,
+                        member.branch_name.as_str(),
+                        member.object_id,
+                        batch_id,
+                    )
+                    .ok()
+                    .flatten()?;
+                (row.content_digest() == member.row_digest).then_some(row)
             })
             .collect::<Vec<_>>();
-
-        rows.extend(
-            storage
-                .load_sealed_batch_submission(batch_id)
-                .ok()
-                .flatten()
-                .map(|submission| {
-                    submission
-                        .members
-                        .into_iter()
-                        .filter_map(|member| {
-                            let table = storage
-                                .load_row_locator(member.object_id)
-                                .ok()
-                                .flatten()?
-                                .table;
-                            storage
-                                .scan_history_row_batches(table.as_str(), member.object_id)
-                                .ok()?
-                                .into_iter()
-                                .find(|row| {
-                                    row.batch_id == batch_id
-                                        && row.branch.as_str()
-                                            == submission.target_branch_name.as_str()
-                                        && row.content_digest() == member.row_digest
-                                })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        );
 
         if !rows.iter().any(|row| {
             row.row_id == fallback_row.row_id

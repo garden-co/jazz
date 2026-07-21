@@ -477,7 +477,9 @@ impl SyncManager {
     ) {
         self.pending_servers.remove(&server_id);
         self.servers.insert(server_id, ServerState::default());
-        self.queue_full_sync_to_server_from_storage(server_id, storage);
+        // TODO: this proved to be too resource intensive, replace with a more robust
+        // full-storage reconciliation strategy
+        // self.queue_full_sync_to_server_from_storage(server_id, storage);
         if !skip_catalogue_sync {
             self.queue_catalogue_sync_to_server_from_storage(server_id, storage);
         }
