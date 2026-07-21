@@ -62,6 +62,16 @@ describe("AppView reads", () => {
     expect(agent.getTimeline).toHaveBeenCalledWith({ limit: 20, cursor: "current-page" });
   });
 
+  it("retries a timeline read once after a transient upstream failure", async () => {
+    const page = { feed: [], cursor: "next-page" };
+    agent.getTimeline
+      .mockRejectedValueOnce(new XRPCError(500, "InternalServerError", "UND_ERR_SOCKET error"))
+      .mockResolvedValueOnce({ data: page });
+
+    await expect(fetchTimelineFeed(session)).resolves.toEqual(page);
+    expect(agent.getTimeline).toHaveBeenCalledTimes(2);
+  });
+
   it("forwards the remaining projection reads to Agent", async () => {
     const uri = "at://did:plc:alice/app.bsky.feed.post/3m12345678921";
     const post = { uri, cid: "bafy-post" };
