@@ -40,7 +40,7 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `server/projection.ts`          | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                         | Yes                                 |
 | `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
 | `permissions.ts`                | Client access to projected rows and locally queued intentions                                  | Yes                         | No                                  |
-| `shared/operations.ts`          | Validate the shared queued-operation contract                                                 | Describes intention rows    | Describes source operations         |
+| `shared/pending-operations.ts`  | Serialise and validate the offline-write contract                                              | Describes intention rows    | Describes source operations         |
 | `src/Timeline.tsx`              | Compose the reactive view and local-first commands                                            | Yes                         | Only calls trigger/reconcile routes |
 | `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint                                                        | No                          | Knows only trigger metadata         |
 | `src/use-outbox.ts`             | Serialise retries of queued intentions                                                        | Yes                         | Calls the reconcile route           |

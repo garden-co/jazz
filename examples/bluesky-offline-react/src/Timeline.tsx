@@ -3,7 +3,7 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 import { useEffect, useRef, useState } from "react";
 import { app } from "../schema.js";
 import { parseAtRecordUri } from "../shared/identifiers.js";
-import { decodeOperation, encodeOperationPayload, type Operation } from "../shared/operations.js";
+import { decodeOperation, encodeOperationPayload, type Operation } from "../shared/pending-operations.js";
 import {
   initialTimelineLimit,
   nextTimelineLimit,

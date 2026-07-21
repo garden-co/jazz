@@ -8,8 +8,8 @@ import {
   AppBskyFeedPost,
   AppBskyRichtextFacet,
 } from "@atproto/api";
-import type { Operation, PostOperation, ReactionOperation } from "../shared/operations.js";
-import { decodeOperation, encodeOperationPayload } from "../shared/operations.js";
+import type { Operation, PostOperation, ReactionOperation } from "../shared/pending-operations.js";
+import { decodeOperation, encodeOperationPayload } from "../shared/pending-operations.js";
 import { app } from "../schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
 import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";

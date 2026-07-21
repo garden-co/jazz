@@ -1,4 +1,4 @@
-import type { Operation, PostOperation, ReactionOperation } from "../shared/operations.js";
+import type { Operation, PostOperation, ReactionOperation } from "../shared/pending-operations.js";
 import {
   deleteRecord,
   fetchPostThread,
