@@ -852,7 +852,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } catch (error) {
       throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
     }
-    const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
+    const snapshotRefresh = false;
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -1166,7 +1166,14 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private refreshOpenedPlainSubscriptions(): void {
     for (const subscription of this.subscriptions.values()) {
-      if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
+      if (
+        subscription.cancelled ||
+        !subscription.opened ||
+        !subscription.callback ||
+        !subscription.snapshotRefresh
+      ) {
+        continue;
+      }
 
       const previousRows = subscription.rows;
       const nextRows =
@@ -3835,26 +3842,32 @@ function applySubscriptionDeltaWithWireDelta(
   schema: WasmSchema,
   reset = false,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
-  const rowsByKey = reset
-    ? new Map<string, RowState>()
-    : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
-  const removedEntries: Array<{ id: string; index: number }> = [];
-
+  const indexedAddedRows = indexedRowsFromBatches(delta.added, schema);
+  const indexedUpdatedRows = indexedRowsFromBatches(delta.updated, schema);
+  const changedKeys = new Set<string>();
+  for (const entry of indexedAddedRows.concat(indexedUpdatedRows)) {
+    changedKeys.add(rowKey(entry.row.table, entry.row.id));
+  }
   for (const removed of delta.removed) {
-    const id = formatUuid(removed.rowId);
-    const key = rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0 });
-    rowsByKey.delete(key);
+    changedKeys.add(rowKey(removed.table, formatUuid(removed.rowId)));
   }
 
-  const addedRows = rowsFromBatches(delta.added, schema);
-  const updatedRows = rowsFromBatches(delta.updated, schema);
-  for (const row of addedRows.concat(updatedRows)) {
-    rowsByKey.set(rowKey(row.table, row.id), row);
-  }
+  const baseRows = reset
+    ? []
+    : currentRows.filter((row) => !changedKeys.has(rowKey(row.table, row.id)));
+  const placements = indexedAddedRows
+    .concat(indexedUpdatedRows)
+    .map((entry) => ({ index: entry.index, row: entry.row }));
+  const rows = mergeRowsByIndex(baseRows, placements);
 
-  const rows = Array.from(rowsByKey.values());
   const rowIndexByKey = indexRowsByKey(rows);
+  const addedRows = indexedAddedRows.map((entry) => entry.row);
+  const updatedRows = indexedUpdatedRows.map((entry) => entry.row);
+  const removedEntries = delta.removed.map((removed) => ({
+    id: formatUuid(removed.rowId),
+    index:
+      removed.index ?? currentIndexByKey.get(rowKey(removed.table, formatUuid(removed.rowId))) ?? 0,
+  }));
   return {
     rows,
     rowIndexByKey,
@@ -3863,6 +3876,58 @@ function applySubscriptionDeltaWithWireDelta(
       ...(reset ? { reset: true } : {}),
     },
   };
+}
+
+function indexedRowsFromBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+): Array<{ row: RowState; index: number }> {
+  const entries: Array<{ row: RowState; index: number }> = [];
+  for (const batch of batches) {
+    const fieldPlans = nativeRowFieldPlans(batch, schema);
+    const decodeRecord = createRecordValueDecoder(batch.descriptor);
+    for (const nativeRow of batch.rows) {
+      const values: Value[] = [];
+      const valuesByColumn = new Map<string, Value>();
+      for (const field of fieldPlans) {
+        const value = decodePlannedField(field, decodeRecord, nativeRow.raw);
+        valuesByColumn.set(field.name, value);
+        if (field.includeInValues) {
+          values.push(value);
+        }
+      }
+      entries.push({
+        row: withValuesByColumn(
+          { id: formatUuid(nativeRow.rowId), table: batch.table, values },
+          valuesByColumn,
+        ),
+        index: nativeRow.index,
+      });
+    }
+  }
+  return entries;
+}
+
+function mergeRowsByIndex(
+  baseRows: RowState[],
+  placements: Array<{ index: number; row: RowState }>,
+): RowState[] {
+  if (placements.length === 0) return baseRows;
+  const byIndex = new Map<number, RowState>();
+  let inserted = 0;
+  for (const placement of placements.sort((a, b) => a.index - b.index)) {
+    const index = Math.max(0, Math.min(placement.index, baseRows.length + inserted));
+    byIndex.set(index, placement.row);
+    inserted += 1;
+  }
+  const rows: RowState[] = [];
+  rows.length = baseRows.length + placements.length;
+  let baseIndex = 0;
+  for (let index = 0; index < rows.length; index += 1) {
+    const placed = byIndex.get(index);
+    rows[index] = placed ?? baseRows[baseIndex++]!;
+  }
+  return rows;
 }
 
 function applyRelationSubscriptionDelta(
@@ -4149,6 +4214,7 @@ function nativeDeltaFromRows(
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
+  __nativeRuntimeAdapterTestHooks.legacySemanticDeltaCalls += 1;
   const previousByKey = new Map(
     previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
   );
@@ -4205,7 +4271,7 @@ function nativeResetDeltaFromBatches(
       : (raw: Uint8Array) => raw;
     for (const row of batch.rows) {
       const raw = encodeFrameRow(row.raw);
-      chunks.push(row.rowId, u32Le(rowIndex), u32Le(raw.byteLength), raw);
+      chunks.push(row.rowId, u32Le(row.index), u32Le(raw.byteLength), raw);
       rowIndex += 1;
     }
   }
@@ -4439,6 +4505,13 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
       return "value" in right && left.value === right.value;
   }
 }
+
+export const __nativeRuntimeAdapterTestHooks = {
+  legacySemanticDeltaCalls: 0,
+  reset() {
+    this.legacySemanticDeltaCalls = 0;
+  },
+};
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false;

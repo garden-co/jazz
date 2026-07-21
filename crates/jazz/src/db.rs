@@ -6796,9 +6796,54 @@ pub enum SubscriptionEvent {
         settled: bool,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
+        /// Core-authoritative root row positions for this delta, when available.
+        positioned: Option<PositionedSubscriptionDelta>,
     },
     /// The subscription stream was closed by the producer.
     Closed,
+}
+
+/// Core-authoritative position for one row addition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionedAddedRow {
+    /// Zero-based index of the row after applying the delta.
+    pub index: usize,
+    /// Materialized row at that position.
+    pub row: CurrentRow,
+}
+
+/// Core-authoritative position for one row update or move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionedUpdatedRow {
+    /// Zero-based index of the row before applying the delta.
+    pub old_index: usize,
+    /// Zero-based index of the row after applying the delta.
+    pub new_index: usize,
+    /// Materialized row at the new position.
+    pub row: CurrentRow,
+}
+
+/// Core-authoritative position for one row removal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionedRemovedRow {
+    /// Zero-based index of the row before applying the delta.
+    pub index: usize,
+    /// Table that contained the removed row.
+    pub table: String,
+    /// Removed row identity.
+    pub row_uuid: RowUuid,
+}
+
+/// Root-scope delta positions. Relation/include payloads intentionally stay on
+/// their existing path until maintained relation deltas grow positional facts.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PositionedSubscriptionDelta {
+    /// Rows newly visible to the result, with post-delta positions.
+    pub added: Vec<PositionedAddedRow>,
+    /// Rows still visible but changed or moved, with post-delta positions.
+    pub updated: Vec<PositionedUpdatedRow>,
+    /// Rows no longer visible to the result, with pre-delta positions.
+    pub removed: Vec<PositionedRemovedRow>,
 }
 
 /// Stream of materialized subscription events.
@@ -6899,6 +6944,7 @@ fn subscription_reset_event(
         removed_edges: Vec::new(),
         settled,
         tier,
+        positioned: None,
     }
 }
 
@@ -6922,6 +6968,7 @@ fn subscription_delta_event_with_reset(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
+    let mut positioned = PositionedSubscriptionDelta::default();
     let previous_edges = previous.edges.iter().cloned().collect::<BTreeSet<_>>();
     let current_edges = current.edges.iter().cloned().collect::<BTreeSet<_>>();
     let added_edges = current_edges
@@ -6933,16 +6980,69 @@ fn subscription_delta_event_with_reset(
         .cloned()
         .collect::<Vec<_>>();
 
+    let previous_indices = previous
+        .rows
+        .iter()
+        .take(previous.root_count)
+        .enumerate()
+        .map(|(index, row)| (subscription_row_key(row), index))
+        .collect::<BTreeMap<_, _>>();
+    let current_indices = current
+        .rows
+        .iter()
+        .take(current.root_count)
+        .enumerate()
+        .map(|(index, row)| (subscription_row_key(row), index))
+        .collect::<BTreeMap<_, _>>();
+
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
-            None => added.push((*row).clone()),
-            Some(previous_row) if *previous_row != *row => updated.push((*row).clone()),
+            None => {
+                if let Some(index) = current_indices.get(key) {
+                    positioned.added.push(PositionedAddedRow {
+                        index: *index,
+                        row: (*row).clone(),
+                    });
+                }
+                added.push((*row).clone());
+            }
+            Some(previous_row) if *previous_row != *row => {
+                if let (Some(old_index), Some(new_index)) =
+                    (previous_indices.get(key), current_indices.get(key))
+                {
+                    positioned.updated.push(PositionedUpdatedRow {
+                        old_index: *old_index,
+                        new_index: *new_index,
+                        row: (*row).clone(),
+                    });
+                }
+                updated.push((*row).clone());
+            }
+            Some(_) if previous_indices.get(key) != current_indices.get(key) => {
+                if let (Some(old_index), Some(new_index)) =
+                    (previous_indices.get(key), current_indices.get(key))
+                {
+                    positioned.updated.push(PositionedUpdatedRow {
+                        old_index: *old_index,
+                        new_index: *new_index,
+                        row: (*row).clone(),
+                    });
+                    updated.push((*row).clone());
+                }
+            }
             Some(_) => {}
         }
     }
 
     for (key, _) in &previous_by_id {
         if !current_by_id.contains_key(key) {
+            if let Some(index) = previous_indices.get(key) {
+                positioned.removed.push(PositionedRemovedRow {
+                    index: *index,
+                    table: key.0.clone(),
+                    row_uuid: key.1,
+                });
+            }
             removed.push(RemovedRow {
                 table: key.0.clone(),
                 row_uuid: key.1,
@@ -6960,6 +7060,7 @@ fn subscription_delta_event_with_reset(
         removed_edges,
         settled,
         tier,
+        positioned: Some(positioned),
     }
 }
 
@@ -7000,6 +7101,7 @@ fn apply_maintained_update_to_snapshot(
                 removed_edges: Vec::new(),
                 settled,
                 tier,
+                positioned: None,
             };
         }
 
@@ -7044,6 +7146,7 @@ fn apply_maintained_update_to_snapshot(
             removed_edges: Vec::new(),
             settled,
             tier,
+            positioned: None,
         };
     }
 
@@ -7051,6 +7154,10 @@ fn apply_maintained_update_to_snapshot(
     let mut updated = Vec::new();
     let mut removed = Vec::new();
     let mut added_related = Vec::new();
+    let root_positioned_delta = snapshot.edges.is_empty()
+        && update_added_edges.is_empty()
+        && update_removed_edges.is_empty();
+    let previous = root_positioned_delta.then(|| snapshot.clone());
 
     for row in &update_added {
         let table = row.table();
@@ -7147,6 +7254,21 @@ fn apply_maintained_update_to_snapshot(
         }
     }
 
+    let positioned = previous
+        .as_ref()
+        .map(|previous| positioned_delta_from_snapshots(previous, snapshot));
+    let mut updated_keys = updated
+        .iter()
+        .map(subscription_row_key)
+        .collect::<BTreeSet<_>>();
+    if let Some(positioned) = &positioned {
+        for row in &positioned.updated {
+            if updated_keys.insert(subscription_row_key(&row.row)) {
+                updated.push(row.row.clone());
+            }
+        }
+    }
+
     SubscriptionEvent::Delta {
         reset: false,
         added,
@@ -7160,7 +7282,81 @@ fn apply_maintained_update_to_snapshot(
         removed_edges: update_removed_edges,
         settled,
         tier,
+        positioned,
     }
+}
+
+fn positioned_delta_from_snapshots(
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+) -> PositionedSubscriptionDelta {
+    let previous_by_id = previous
+        .rows
+        .iter()
+        .take(previous.root_count)
+        .map(|row| (subscription_row_key(row), row))
+        .collect::<BTreeMap<_, _>>();
+    let current_by_id = current
+        .rows
+        .iter()
+        .take(current.root_count)
+        .map(|row| (subscription_row_key(row), row))
+        .collect::<BTreeMap<_, _>>();
+    let previous_indices = previous
+        .rows
+        .iter()
+        .take(previous.root_count)
+        .enumerate()
+        .map(|(index, row)| (subscription_row_key(row), index))
+        .collect::<BTreeMap<_, _>>();
+    let current_indices = current
+        .rows
+        .iter()
+        .take(current.root_count)
+        .enumerate()
+        .map(|(index, row)| (subscription_row_key(row), index))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut delta = PositionedSubscriptionDelta::default();
+    for (key, row) in &current_by_id {
+        match previous_by_id.get(key) {
+            None => {
+                if let Some(index) = current_indices.get(key) {
+                    delta.added.push(PositionedAddedRow {
+                        index: *index,
+                        row: (*row).clone(),
+                    });
+                }
+            }
+            Some(previous_row)
+                if *previous_row != *row
+                    || previous_indices.get(key) != current_indices.get(key) =>
+            {
+                if let (Some(old_index), Some(new_index)) =
+                    (previous_indices.get(key), current_indices.get(key))
+                {
+                    delta.updated.push(PositionedUpdatedRow {
+                        old_index: *old_index,
+                        new_index: *new_index,
+                        row: (*row).clone(),
+                    });
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for key in previous_by_id.keys() {
+        if !current_by_id.contains_key(key)
+            && let Some(index) = previous_indices.get(key)
+        {
+            delta.removed.push(PositionedRemovedRow {
+                index: *index,
+                table: key.0.clone(),
+                row_uuid: key.1,
+            });
+        }
+    }
+    delta
 }
 
 fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {

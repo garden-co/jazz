@@ -178,6 +178,7 @@ struct WasmRowBatch<'a> {
 #[derive(Clone, Debug, Serialize)]
 struct WasmRow<'a> {
     row_id: RowUuid,
+    index: u64,
     deleted: bool,
     raw: &'a [u8],
 }
@@ -221,6 +222,7 @@ struct WasmRelationEdge {
 struct WasmRemovedRow {
     table: String,
     row_id: RowUuid,
+    index: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2486,15 +2488,51 @@ fn encode_subscription_delta<'a>(
     added: &'a [jazz::node::CurrentRow],
     updated: &'a [jazz::node::CurrentRow],
     removed: &[jazz::db::RemovedRow],
+    positioned: Option<&jazz::db::PositionedSubscriptionDelta>,
 ) -> Result<Vec<u8>, postcard::Error> {
+    let added_indices = positioned.map(|delta| {
+        delta
+            .added
+            .iter()
+            .map(|row| ((row.row.table().to_owned(), row.row.row_uuid()), row.index))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
+    let updated_indices = positioned.map(|delta| {
+        delta
+            .updated
+            .iter()
+            .map(|row| {
+                (
+                    (row.row.table().to_owned(), row.row.row_uuid()),
+                    row.new_index,
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
+    let removed_indices = positioned.map(|delta| {
+        delta
+            .removed
+            .iter()
+            .map(|row| ((row.table.clone(), row.row_uuid), row.index))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
     postcard::to_allocvec(&WasmSubscriptionDelta {
-        added: row_batches(added),
-        updated: row_batches(updated),
+        added: row_batches_with_indices(added, added_indices.as_ref()),
+        updated: row_batches_with_indices(updated, updated_indices.as_ref()),
         removed: removed
             .iter()
-            .map(|row| WasmRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
+            .enumerate()
+            .map(|(ordinal, row)| {
+                let key = (row.table.clone(), row.row_uuid);
+                let index = removed_indices
+                    .as_ref()
+                    .and_then(|indices| indices.get(&key).copied())
+                    .unwrap_or(ordinal);
+                WasmRemovedRow {
+                    table: row.table.clone(),
+                    row_id: row.row_uuid,
+                    index: index as u64,
+                }
             })
             .collect(),
     })
@@ -2518,9 +2556,11 @@ fn encode_relation_subscription_delta<'a>(
         updated: row_batches(updated),
         removed: removed
             .iter()
-            .map(|row| WasmRemovedRow {
+            .enumerate()
+            .map(|(index, row)| WasmRemovedRow {
                 table: row.table.clone(),
                 row_id: row.row_uuid,
+                index: index as u64,
             })
             .collect(),
         added_edges: added_edges.iter().map(wasm_relation_edge).collect(),
@@ -2529,17 +2569,28 @@ fn encode_relation_subscription_delta<'a>(
 }
 
 fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
+    row_batches_with_indices(rows, None)
+}
+
+fn row_batches_with_indices<'a>(
+    rows: &'a [jazz::node::CurrentRow],
+    indices: Option<&std::collections::BTreeMap<(String, RowUuid), usize>>,
+) -> Vec<WasmRowBatch<'a>> {
     let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
-    for row in rows {
+    for (ordinal, row) in rows.iter().enumerate() {
         let (descriptor, raw) = row.encoded_record();
+        let key = (row.table().to_owned(), row.row_uuid());
+        let index = indices
+            .and_then(|indices| indices.get(&key).copied())
+            .unwrap_or(ordinal);
         match batches.last_mut() {
             Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(wasm_row(row, raw));
+                batch.rows.push(wasm_row(row, raw, index));
             }
             _ => batches.push(WasmRowBatch {
                 table: row.table(),
                 descriptor: *descriptor,
-                rows: vec![wasm_row(row, raw)],
+                rows: vec![wasm_row(row, raw, index)],
             }),
         }
     }
@@ -2556,9 +2607,10 @@ fn wasm_relation_edge(edge: &jazz::node::RelationEdge) -> WasmRelationEdge {
     }
 }
 
-fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
+fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8], index: usize) -> WasmRow<'a> {
     WasmRow {
         row_id: row.row_uuid(),
+        index: index as u64,
         deleted: row.is_deleted(),
         raw,
     }
@@ -2577,9 +2629,10 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             removed_edges,
             settled,
             tier,
+            positioned,
         } => {
-            let delta =
-                encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
+            let delta = encode_subscription_delta(&added, &updated, &removed, positioned.as_ref())
+                .map_err(to_js_error)?;
             let relation_delta = encode_relation_subscription_delta(
                 &added,
                 &updated,

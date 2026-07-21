@@ -296,7 +296,12 @@ attach/rebuild outputs rather than the normal maintenance strategy.
 
 The TypeScript/WASM/NAPI subscription surface should be a thin event bridge over
 maintained subscription terminal deltas, not a second diff engine. The bridge
-needs stable event records for:
+consumes core-authored subscription deltas carrying row identity, membership
+kind, reset/settled/tier metadata, and positions for root rows. It may reduce
+those events into host-native callbacks and cache the materialized result, but
+it must not re-run filtering, ordering, limit/offset, row equality, or semantic
+add/update/remove classification in the host language. The bridge needs stable
+event records for:
 
 - first result / settled state;
 - result-row add/remove and replacement;
@@ -308,6 +313,13 @@ The Rust `WatchHandle` can remain conflated for simple callers, but the binding
 ABI must expose enough structured deltas for UI stores to maintain identity,
 loading state, and optimistic/settled transitions without cloning entire result
 sets on every tick.
+
+Phase 2 root-scope binding detail: maintained/plain root subscription deltas
+carry zero-based positions through Rust `SubscriptionEvent::positioned`, the
+wasm/native row batch index field, and the TypeScript `NativeRowDelta` frame.
+Relation/include payloads remain on their previous materialization path until
+maintained relation-edge terminal deltas grow positional facts; root positional
+metadata must not introduce O(result set) work for relation/include updates.
 
 ### 16.8 Open questions
 

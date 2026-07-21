@@ -16,11 +16,16 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
 } from "./websocket.js";
-import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import {
+  __nativeRuntimeAdapterTestHooks,
+  NativeRuntimeAdapter,
+  type Transport,
+} from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
-import { decodeNativeDelta } from "../subscription-manager.js";
+import { decodeNativeDelta, SubscriptionManager } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
+import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -2611,6 +2616,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             rowId: uuidBytes("00000000-0000-0000-0000-000000000003"),
             title: "third",
+            index: 1,
           },
         ],
         updated: [
@@ -2618,12 +2624,14 @@ describe("NativeRuntimeAdapter server transport", () => {
             table: "todos",
             rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
             title: "second updated",
+            index: 0,
           },
         ],
         removed: [
           {
             table: "todos",
             rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            index: 0,
           },
         ],
       }),
@@ -2697,6 +2705,190 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       ],
     ]);
+  });
+
+  it("applies core-provided native subscription positions without JS sorting", async () => {
+    __nativeRuntimeAdapterTestHooks.reset();
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const deltas: unknown[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    controller!.enqueue({
+      type: "delta",
+      reset: true,
+      delta: encodeSubscriptionDelta({
+        added: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+            title: "first",
+            index: 0,
+          },
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000003"),
+            title: "third",
+            index: 1,
+          },
+        ],
+        updated: [],
+        removed: [],
+      }),
+    });
+    await Promise.resolve();
+
+    controller!.enqueue({
+      type: "delta",
+      reset: false,
+      delta: encodeSubscriptionDelta({
+        added: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000002"),
+            title: "second",
+            index: 1,
+          },
+        ],
+        updated: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000003"),
+            title: "third updated",
+            index: 2,
+          },
+        ],
+        removed: [],
+      }),
+    });
+    await Promise.resolve();
+
+    const manager = new SubscriptionManager<{ id: string; title: string }>();
+    manager.handleDelta(
+      deltas[0] as NativeRowDelta,
+      (row) => ({
+        id: row.id,
+        title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+      }),
+      testSchema.todos.columns,
+    );
+    const reduced = manager.handleDelta(
+      deltas[1] as NativeRowDelta,
+      (row) => ({
+        id: row.id,
+        title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+      }),
+      testSchema.todos.columns,
+    );
+    expect(reduced.all?.map((row) => row.id)).toEqual([
+      "00000000-0000-0000-0000-000000000001",
+      "00000000-0000-0000-0000-000000000002",
+      "00000000-0000-0000-0000-000000000003",
+    ]);
+    expect(__nativeRuntimeAdapterTestHooks.legacySemanticDeltaCalls).toBe(0);
+  });
+
+  it("does not run db.all snapshot refresh cycles for maintained native subscriptions", async () => {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    let allCalls = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              allCalls += 1;
+              return encodeRows([]);
+            },
+            prepareQuery: () => ({}),
+            insertWithIdEncoded: () => fakeWrite(),
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }));
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+
+    controller!.enqueue({
+      type: "delta",
+      reset: true,
+      settled: true,
+      delta: encodeSubscriptionDelta({
+        added: [],
+        updated: [],
+        removed: [],
+      }),
+    });
+    await flushAdapterMicrotasks();
+    expect(updates).toHaveBeenCalledTimes(1);
+
+    for (let index = 0; index < 5; index += 1) {
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: `row-${index}` } },
+        null,
+        `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`,
+      );
+      controller!.enqueue({
+        type: "delta",
+        reset: false,
+        settled: true,
+        delta: encodeSubscriptionDelta({
+          added: [
+            {
+              table: "todos",
+              rowId: indexedUuidBytes(index + 1),
+              title: `row-${index}`,
+              index,
+            },
+          ],
+          updated: [],
+          removed: [],
+        }),
+      });
+      await flushAdapterMicrotasks();
+    }
+
+    expect(allCalls).toBe(0);
   });
 
   it("encodes public id equality relation filters into prepared native queries", async () => {
@@ -4502,6 +4694,61 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
       );
     },
   );
+
+  it.skipIf(process.env.JAZZ_TS_ADAPTER_PERF !== "1" || !hasJazzWasmBuild())(
+    "measures mergeable commit slope with and without one maintained subscription",
+    { timeout: 900_000 },
+    async () => {
+      const batchSize = 500;
+      const totalRows = 5_000;
+
+      async function run(label: string, withSubscription: boolean) {
+        const runtime = (await createWasmRuntime(testSchema, {
+          appId: `adapter-perf-${label}`,
+          userBranch: String(Date.now()),
+        })) as NativeRuntimeAdapter;
+        let callbackCount = 0;
+        if (withSubscription) {
+          const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null);
+          runtime.executeSubscription(handle, () => {
+            callbackCount += 1;
+          });
+          await flushAdapterMicrotasks();
+        }
+
+        const batches: Array<{ rows: number; commitMs: number }> = [];
+        for (let start = 0; start < totalRows; start += batchSize) {
+          const tx = runtime.beginTransaction("mergeable");
+          for (let offset = 0; offset < batchSize; offset += 1) {
+            const index = start + offset + 1;
+            runtime.insert(
+              "todos",
+              { title: { type: "Text", value: `row-${index}` } },
+              JSON.stringify({ batch_id: tx }),
+              formatUuidForTest(indexedUuidBytes(index)),
+            );
+          }
+          const beforeCommit = performance.now();
+          runtime.commitTransaction(tx);
+          await flushAdapterMicrotasks();
+          const measurement = {
+            rows: start + batchSize,
+            commitMs: performance.now() - beforeCommit,
+          };
+          batches.push(measurement);
+          console.info(JSON.stringify({ commitSlopeBatch: { label, ...measurement } }));
+        }
+        runtime.close();
+        return { label, withSubscription, callbackCount, batches };
+      }
+
+      console.info(
+        JSON.stringify({
+          commitSlope: [await run("no-subscription", false), await run("one-subscription", true)],
+        }),
+      );
+    },
+  );
 });
 
 const testSchema = {
@@ -4576,6 +4823,12 @@ function subscriptionFrameBuffersForTest(delta: NativeRowDelta): ArrayBuffer[] {
     transferableBufferForTest(delta.removed),
     transferableBufferForTest(delta.updated),
   ];
+}
+
+async function flushAdapterMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function transferableBufferForTest(bytes: Uint8Array): ArrayBuffer {
@@ -5514,6 +5767,7 @@ type EncodedTestRow = {
   table: string;
   rowId: Uint8Array;
   title: string;
+  index?: number;
   txTime?: number;
   createdAt?: number;
   updatedAt?: number;
@@ -5579,6 +5833,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
     batch.vec((row, index) => {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
+      row.u64(source.index ?? index);
       row.bool(false);
       const values: Uint8Array[] = [new TextEncoder().encode(source.title)];
       if (hasProvenance) {
@@ -5596,7 +5851,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
 function encodeSubscriptionDelta(delta: {
   added: EncodedTestRow[];
   updated: EncodedTestRow[];
-  removed: Array<{ table: string; rowId: Uint8Array }>;
+  removed: Array<{ table: string; rowId: Uint8Array; index?: number }>;
 }): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, delta.added);
@@ -5605,6 +5860,7 @@ function encodeSubscriptionDelta(delta: {
     const source = delta.removed[index]!;
     removed.string(source.table);
     removed.bytes(source.rowId);
+    removed.u64(source.index ?? index);
   }, delta.removed.length);
   return writer.finish();
 }
@@ -5614,7 +5870,7 @@ function encodeRelationSubscriptionDelta(delta: {
   cursor: number;
   added: EncodedTestRow[];
   updated: EncodedTestRow[];
-  removed: Array<{ table: string; rowId: Uint8Array }>;
+  removed: Array<{ table: string; rowId: Uint8Array; index?: number }>;
   addedEdges: NativeRelationSubscriptionEdge[];
   removedEdges: NativeRelationSubscriptionEdge[];
 }): Uint8Array {
@@ -5631,6 +5887,7 @@ function encodeRelationSubscriptionDelta(delta: {
     const source = delta.removed[index]!;
     removed.string(source.table);
     removed.bytes(source.rowId);
+    removed.u64(source.index ?? index);
   }, delta.removed.length);
   writer.vec(
     (edge, index) => writeRelationEdge(edge, delta.addedEdges[index]!),
@@ -5661,6 +5918,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     writeDescriptor(batch, descriptor);
     batch.vec((encodedRow) => {
       encodedRow.bytes(row.rowId);
+      encodedRow.u64(0);
       encodedRow.bool(false);
       encodedRow.bytes(
         createRecord(descriptor, [
@@ -5703,6 +5961,7 @@ function encodeBinaryLargeValueRows(): Uint8Array {
     writeDescriptor(batch, descriptor);
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));
+      row.u64(0);
       row.bool(false);
       row.bytes(
         createRecord(descriptor, [
