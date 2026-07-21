@@ -1,6 +1,7 @@
 export type FlowAttributeSource = {
   payload?: string;
-  payload_json?: string;
+  summary?: string;
+  encoded_len?: string;
   peer_kind?: string;
   peer_id?: string;
   tier?: string;
@@ -19,7 +20,8 @@ export type FlowAttrs = {
   peer_kind: string;
   peer_id: string;
   tier: string;
-  payload_json: string;
+  summary: string;
+  encoded_len: string;
 };
 
 export type FlowPayloadDetail = {
@@ -56,7 +58,8 @@ export function buildFlowSql(filters: FlowSqlFilters): string {
       ${attr("jazz.runtime_thread")} AS thread,
       ${attr("jazz.span.fields")} AS fields,
       ${attr("payload")} AS payload,
-      ${attr("payload_json")} AS payload_json,
+      ${attr("summary")} AS summary,
+      ${attr("encoded_len")} AS encoded_len,
       ${attr("peer_kind")} AS peer_kind,
       ${attr("peer_id")} AS peer_id,
       ${attr("tier")} AS tier
@@ -88,22 +91,24 @@ export function resolveFlowAttrs(row: FlowAttributeSource): FlowAttrs {
   let peer_kind = row.peer_kind || "";
   let peer_id = row.peer_id || "";
   let tier = row.tier || "";
-  let payload_json = row.payload_json || "";
+  let summary = row.summary || "";
+  let encoded_len = row.encoded_len || "";
 
-  if ((!payload || !peer_kind || !payload_json) && row.fields) {
+  if ((!payload || !peer_kind || !summary) && row.fields) {
     try {
       const fields = JSON.parse(row.fields) as Record<string, string>;
       payload = payload || fields.payload || "";
       peer_kind = peer_kind || fields.peer_kind || "";
       peer_id = peer_id || fields.peer_id || "";
       tier = tier || fields.tier || "";
-      payload_json = payload_json || fields.payload_json || "";
+      summary = summary || fields.summary || "";
+      encoded_len = encoded_len || fields.encoded_len || "";
     } catch {
       // Keep direct attributes when the legacy field blob is malformed.
     }
   }
 
-  return { payload, peer_kind, peer_id, tier, payload_json };
+  return { payload, peer_kind, peer_id, tier, summary, encoded_len };
 }
 
 export function flowPayloadDetails(attrs: FlowAttrs): FlowPayloadDetail[] {
@@ -111,8 +116,11 @@ export function flowPayloadDetails(attrs: FlowAttrs): FlowPayloadDetail[] {
   if (attrs.payload) {
     details.push({ label: "payload", value: attrs.payload, kind: "text" });
   }
-  if (attrs.payload_json) {
-    details.push({ label: "payload_json", value: attrs.payload_json, kind: "json" });
+  if (attrs.summary) {
+    details.push({ label: "summary", value: attrs.summary, kind: "text" });
+  }
+  if (attrs.encoded_len) {
+    details.push({ label: "encoded_len", value: attrs.encoded_len, kind: "text" });
   }
   return details;
 }

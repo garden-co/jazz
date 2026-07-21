@@ -17,6 +17,7 @@ type WriteMessage = Extract<
 
 let runtime: NativeRuntimeAdapter | null = null;
 let runtimeNamespace: string | null = null;
+let workerWasmModule: Awaited<ReturnType<typeof loadWasmModule>> | null = null;
 let disposeWorkerTelemetry: (() => void) | null = null;
 const pendingWriteTransactionIds = new Set<string>();
 
@@ -135,6 +136,19 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         postResult(message.id, undefined);
         return;
       }
+      case "installTelemetry": {
+        const [telemetry] = message.args;
+        if (workerWasmModule && !disposeWorkerTelemetry) {
+          disposeWorkerTelemetry = installWasmTelemetry({
+            wasmModule: workerWasmModule,
+            collectorUrl: telemetry.collectorUrl,
+            appId: telemetry.appId,
+            runtimeThread: "worker",
+          });
+        }
+        postResult(message.id, undefined);
+        return;
+      }
     }
   } catch (error) {
     postError(message.id, error);
@@ -176,16 +190,9 @@ function dispatchWrite(message: WriteMessage): { transactionId: string } {
 }
 
 async function openRuntime(message: OpenMessage): Promise<void> {
-  const [runtimeSources, dbName, schema, node, author, telemetry] = message.args;
+  const [runtimeSources, dbName, schema, node, author] = message.args;
   const wasmModule = await loadWasmModule(runtimeSources);
-  if (telemetry && !disposeWorkerTelemetry) {
-    disposeWorkerTelemetry = installWasmTelemetry({
-      wasmModule,
-      collectorUrl: telemetry.collectorUrl,
-      appId: telemetry.appId,
-      runtimeThread: "worker",
-    });
-  }
+  workerWasmModule = wasmModule;
   runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
@@ -213,6 +220,7 @@ async function closeRuntime(): Promise<void> {
   await settlePendingWrites();
   disposeWorkerTelemetry?.();
   disposeWorkerTelemetry = null;
+  workerWasmModule = null;
   await runtime?.close?.();
   runtime = null;
   runtimeNamespace = null;

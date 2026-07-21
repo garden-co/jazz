@@ -62,7 +62,6 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     private readonly dbName: string,
     private readonly node: Uint8Array,
     private readonly author: Uint8Array,
-    private readonly telemetry?: PersistentBrowserTelemetryOptions,
   ) {
     this.worker = new Worker(new URL("./persistent-browser-worker.js", import.meta.url), {
       type: "module",
@@ -81,7 +80,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       }
       this.rejectAll(new Error(event.message));
     };
-    this.opened = this.send("open", [runtimeSources, dbName, schema, node, author, telemetry]).then(
+    this.opened = this.send("open", [runtimeSources, dbName, schema, node, author]).then(
       () => undefined,
     );
     if (typeof window !== "undefined") {
@@ -94,6 +93,10 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         { signal: this.pagehideAbort.signal },
       );
     }
+  }
+
+  installTelemetry(telemetry: PersistentBrowserTelemetryOptions): void {
+    void this.opened.then(() => this.send("installTelemetry", [telemetry])).catch(() => undefined);
   }
 
   insert(

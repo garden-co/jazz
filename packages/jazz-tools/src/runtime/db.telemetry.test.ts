@@ -53,7 +53,7 @@ describe("Db core telemetry", () => {
     const coreSource = new TestRuntimeSource();
     const db = await createTestDb({ appId: "main-no-telemetry" }, coreSource);
 
-    (db as any).installMainThreadCoreTelemetry();
+    (db as any).installCoreTelemetry();
 
     expect(coreSource.installTelemetryMock).not.toHaveBeenCalled();
     await db.shutdown();
@@ -68,7 +68,7 @@ describe("Db core telemetry", () => {
     };
     const db = await createTestDb(config, coreSource);
 
-    (db as any).installMainThreadCoreTelemetry();
+    (db as any).installCoreTelemetry();
 
     expect(coreSource.installTelemetryMock).toHaveBeenCalledTimes(1);
     expect(coreSource.installTelemetryMock).toHaveBeenCalledWith({

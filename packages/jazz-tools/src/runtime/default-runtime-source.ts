@@ -13,7 +13,7 @@ import {
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
-import { installWasmTelemetry, resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
+import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload } from "./client-session.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -73,6 +73,7 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
+  private persistentBrowserRuntime: PersistentBrowserOpfsRuntime | null = null;
 
   private get wasmModule(): WasmModule {
     if (!this.module) {
@@ -108,8 +109,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = subject
       ? authorBytesForSubject(subject, identitySeed)
       : deterministicBytes(`${identitySeed}:author`);
-    const workerCollectorUrl =
-      resolveTelemetryCollectorUrlFromEnv() ?? config.telemetryCollectorUrl;
     const mainThreadPeerRuntime = persistentBrowserDbName
       ? new PersistentBrowserOpfsRuntime(
           config.runtimeSources,
@@ -117,11 +116,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           persistentBrowserDbName,
           node,
           author,
-          workerCollectorUrl
-            ? { collectorUrl: workerCollectorUrl, appId: config.appId }
-            : undefined,
         )
       : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true);
+    this.persistentBrowserRuntime =
+      mainThreadPeerRuntime instanceof PersistentBrowserOpfsRuntime ? mainThreadPeerRuntime : null;
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
@@ -147,6 +145,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     collectorUrl,
     runtimeThread,
   }: RuntimeTelemetryContext<DbConfig>): (() => void) | null {
+    // The persistent-browser worker owns the wasm instance that runs sync, so
+    // the same install request also fans out to it; the worker disposes its
+    // exporter when the runtime closes.
+    this.persistentBrowserRuntime?.installTelemetry({ collectorUrl, appId: config.appId });
     return installWasmTelemetry({
       wasmModule: this.wasmModule,
       collectorUrl,

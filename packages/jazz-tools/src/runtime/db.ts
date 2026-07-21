@@ -1080,7 +1080,6 @@ export class Db {
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
     if (!this.clients.has(key)) {
-      this.installMainThreadCoreTelemetry();
       const client = this.runtimeSource.createClient({
         config: { ...this.config },
         schema: runtimeSchema,
@@ -1099,6 +1098,9 @@ export class Db {
       }
       this.clients.set(key, client);
       this.clientSchemas.set(key, runtimeSchema);
+      // After createClient so the runtime source can fan the install out to
+      // runtimes it created (e.g. the persistent-browser worker).
+      this.installCoreTelemetry();
     }
 
     return this.clients.get(key)!;
@@ -1126,7 +1128,7 @@ export class Db {
     }
   }
 
-  private installMainThreadCoreTelemetry(): void {
+  private installCoreTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
     if (!collectorUrl || this.disposeCoreTelemetry) {
       return;

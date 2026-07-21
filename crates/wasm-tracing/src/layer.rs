@@ -84,6 +84,9 @@ pub fn set_trace_entry_collection_enabled(enabled: bool) {
     if !enabled {
         clear_trace_entries();
     }
+    // A layer with console reporting disabled reports interest only while
+    // collecting; cached callsite interest must be recomputed on toggle.
+    tracing::callsite::rebuild_interest_cache();
 }
 
 /// Subscribe to notifications that buffered tracing entries are ready to drain.
@@ -267,8 +270,12 @@ impl Default for WasmLayer {
 
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     fn enabled(&self, metadata: &tracing::Metadata<'_>, _: Context<'_, S>) -> bool {
+        // Gate on the collection flag as well as the level: when console
+        // reporting is disabled and nothing is collecting, spans/events would
+        // be discarded anyway, and disabling them here lets `tracing` skip
+        // field evaluation at the callsite entirely.
         let level = metadata.level();
-        level <= &self.config.max_level
+        level <= &self.config.max_level && (self.config.enabled || trace_entry_collection_enabled())
     }
 
     fn on_new_span(

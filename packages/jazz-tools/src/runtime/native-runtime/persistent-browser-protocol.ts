@@ -16,7 +16,6 @@ type OpenRequest = {
     schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
-    telemetry?: PersistentBrowserTelemetryOptions,
   ];
 };
 
@@ -124,6 +123,11 @@ export type PersistentBrowserOpfsOwnerRequest =
   | { id: number; method: "unsubscribe"; args: [handle: number] }
   | { id: number; method: "close"; args: [] }
   | { id: number; method: "closeForStorageClear"; args: [] }
+  | {
+      id: number;
+      method: "installTelemetry";
+      args: [telemetry: PersistentBrowserTelemetryOptions];
+    }
   | { id: number; method: "connect"; args: [url: string, authJson: string] }
   | { id: number; method: "disconnect"; args: [] }
   | { id: number; method: "updateAuth"; args: [authJson: string] };

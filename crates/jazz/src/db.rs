@@ -4069,14 +4069,12 @@ where
         if let Err(message) = validate_sync_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
-        let _sync_send_span = tracing::debug_span!(
-            "sync.send",
-            payload = sync_message_variant_name(&message),
-            payload_json = %sync_message_payload_json(&message, payload.len()),
-            peer_id = %wire_session_peer_label(self.session.as_ref()),
-            encoded_len = payload.len() as u64,
-        )
-        .entered();
+        let _sync_send_span = enter_sync_wire_span(
+            SyncWireDirection::Send,
+            &message,
+            payload.len(),
+            self.session.as_ref(),
+        );
         let payload = match self.outbound_stream.encode_message(&payload) {
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
@@ -4162,14 +4160,12 @@ where
                     let payload_len = payload.len();
                     match decode_sync_message_for_receive(&payload) {
                         Ok(message) => {
-                            let _sync_recv_span = tracing::debug_span!(
-                                "sync.recv",
-                                payload = sync_message_variant_name(&message),
-                                payload_json = %sync_message_payload_json(&message, payload_len),
-                                peer_id = %wire_session_peer_label(self.session.as_ref()),
-                                encoded_len = payload_len as u64,
-                            )
-                            .entered();
+                            let _sync_recv_span = enter_sync_wire_span(
+                                SyncWireDirection::Recv,
+                                &message,
+                                payload_len,
+                                self.session.as_ref(),
+                            );
                             return Some(ReceivedSyncMessage::with_encoded_len(
                                 message,
                                 payload_len,
@@ -5268,34 +5264,46 @@ fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
     )
 }
 
-fn sync_message_variant_name(message: &SyncMessage) -> &'static str {
-    match message {
-        SyncMessage::SessionClaims { .. } => "SessionClaims",
-        SyncMessage::CommitUnit { .. } => "CommitUnit",
-        SyncMessage::FateUpdate { .. } => "FateUpdate",
-        SyncMessage::RegisterShape { .. } => "RegisterShape",
-        SyncMessage::Subscribe { .. } => "Subscribe",
-        SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",
-        SyncMessage::Unsubscribe { .. } => "Unsubscribe",
-        SyncMessage::PublishSchema { .. } => "PublishSchema",
-        SyncMessage::PublishLens { .. } => "PublishLens",
-        SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
-        SyncMessage::CatalogueAck { .. } => "CatalogueAck",
-        SyncMessage::ViewUpdate { .. } => "ViewUpdate",
-        SyncMessage::ViewUpdateChunk { .. } => "ViewUpdateChunk",
-        SyncMessage::FetchContentExtent { .. } => "FetchContentExtent",
-        SyncMessage::ContentExtents { .. } => "ContentExtents",
-        SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
-        SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
-    }
+#[derive(Clone, Copy)]
+enum SyncWireDirection {
+    Send,
+    Recv,
 }
 
-fn sync_message_payload_json(message: &SyncMessage, encoded_len: usize) -> String {
-    serde_json::json!({
-        "summary": summarize_sync_message(message),
-        "encoded_len": encoded_len,
-    })
-    .to_string()
+/// Enter a `sync.send`/`sync.recv` span for one wire message, or `None` when
+/// no subscriber wants DEBUG spans — the explicit gate keeps the summary
+/// formatting entirely off the wire hot path in that case. `payload` is the
+/// message variant (the summary's leading token), kept as its own field so
+/// viewers can filter on it exactly.
+fn enter_sync_wire_span(
+    direction: SyncWireDirection,
+    message: &SyncMessage,
+    encoded_len: usize,
+    session: Option<&WireSession>,
+) -> Option<tracing::span::EnteredSpan> {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return None;
+    }
+    let summary = summarize_sync_message(message);
+    let payload = summary.split(' ').next().unwrap_or("");
+    let peer_id = wire_session_peer_label(session);
+    let span = match direction {
+        SyncWireDirection::Send => tracing::debug_span!(
+            "sync.send",
+            payload,
+            summary = %summary,
+            peer_id = %peer_id,
+            encoded_len = encoded_len as u64,
+        ),
+        SyncWireDirection::Recv => tracing::debug_span!(
+            "sync.recv",
+            payload,
+            summary = %summary,
+            peer_id = %peer_id,
+            encoded_len = encoded_len as u64,
+        ),
+    };
+    Some(span.entered())
 }
 
 fn wire_session_peer_label(session: Option<&WireSession>) -> String {
