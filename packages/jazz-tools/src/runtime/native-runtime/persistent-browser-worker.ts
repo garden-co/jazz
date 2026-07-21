@@ -56,15 +56,23 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
       }
       case "writeBatch": {
         // Apply every item first, then settle local durability once per
-        // distinct transaction — one message and one wait set instead of a
-        // postMessage round-trip and a wait per write.
+        // distinct standalone write — one message and one wait set instead of
+        // a postMessage round-trip and a wait per write. Writes that belong to
+        // an open transaction (a batch_id in their write context) must NOT
+        // gate the ack on local settlement: the transaction can only settle
+        // once its commit arrives, and the page cannot send the commit until
+        // this ack resolves the write promises — waiting here deadlocks the
+        // worker. Their settlement is observed through the commit ack and
+        // explicit waitForTransaction calls, exactly as before.
         const [items] = message.args;
         const results: PersistentBrowserWriteBatchResult[] = [];
-        const transactionIds = new Set<string>();
+        const standaloneTransactionIds = new Set<string>();
         for (const item of items) {
           try {
             const result = dispatchWrite(item);
-            transactionIds.add(result.transactionId);
+            if (!writeBatchItemBatchId(item)) {
+              standaloneTransactionIds.add(result.transactionId);
+            }
             results.push({ ok: result });
           } catch (error) {
             results.push({
@@ -75,7 +83,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
             });
           }
         }
-        for (const transactionId of transactionIds) {
+        for (const transactionId of standaloneTransactionIds) {
           await getRuntime().waitForTransaction(transactionId, "local");
         }
         postResult(message.id, results);
@@ -266,6 +274,18 @@ function getRuntime(): NativeRuntimeAdapter {
 
 function postResult(id: number, result: unknown, transfer?: Transferable[]): void {
   workerScope.postMessage({ id, ok: true, result }, transfer);
+}
+
+function writeBatchItemBatchId(item: PersistentBrowserWriteBatchItem): string | undefined {
+  const writeContextIndex = item.method === "delete" || item.method === "insert" ? 2 : 3;
+  const writeContext = item.args[writeContextIndex] as string | null | undefined;
+  if (!writeContext) return undefined;
+  try {
+    const parsed = JSON.parse(writeContext) as { batch_id?: unknown };
+    return typeof parsed.batch_id === "string" ? parsed.batch_id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function exactByteView(bytes: Uint8Array): Uint8Array<ArrayBuffer> {

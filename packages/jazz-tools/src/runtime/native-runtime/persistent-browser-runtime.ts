@@ -56,15 +56,25 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private nextCallId = 1;
   private nextSubscriptionId = 1;
   private closed = false;
-  // Synchronous write bursts coalesce here and flush as one writeBatch
-  // message; see queueWrite/flushBatchedWrites.
-  private pendingBatchedWrites: Array<{
-    method: PersistentBrowserWriteRequest["method"];
-    args: unknown[];
-    batchId: string | undefined;
-    resolve: (transactionId: string) => void;
-    reject: (error: unknown) => void;
-  }> = [];
+  // Synchronous write bursts coalesce here and flush as writeBatch messages,
+  // with transaction begins sequenced in their original positions; see
+  // queueWrite/beginTransaction/flushBatchedWrites.
+  private pendingBatchedWrites: Array<
+    | {
+        kind: "write";
+        method: PersistentBrowserWriteRequest["method"];
+        args: unknown[];
+        batchId: string | undefined;
+        resolve: (transactionId: string) => void;
+        reject: (error: unknown) => void;
+      }
+    | {
+        kind: "begin";
+        txKind: TransactionKind;
+        resolve: (workerTransactionId: string) => void;
+        reject: (error: unknown) => void;
+      }
+  > = [];
   private writeFlushScheduled = false;
   private closing = false;
   private readonly opened: Promise<void>;
@@ -196,9 +206,17 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
 
   beginTransaction(kind: TransactionKind): string {
     const transactionId = `pending-worker-tx-${this.nextCallId++}`;
-    const workerTransactionId = this.opened.then(
-      () => this.send("beginTransaction", [kind]) as Promise<string>,
-    );
+    // Sequenced through the write flush queue so the worker opens the
+    // transaction in the same position relative to buffered writes as the app
+    // issued it — a begin must not overtake earlier writes still waiting for
+    // their batch.
+    const workerTransactionId = new Promise<string>((resolve, reject) => {
+      this.pendingBatchedWrites.push({ kind: "begin", txKind: kind, resolve, reject });
+    });
+    if (!this.writeFlushScheduled) {
+      this.writeFlushScheduled = true;
+      queueMicrotask(() => void this.flushBatchedWrites());
+    }
     this.writes.set(transactionId, workerTransactionId);
     this.transactionRemoteIds.set(transactionId, workerTransactionId);
     void workerTransactionId.catch(() => undefined);
@@ -442,6 +460,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     // and microtask overhead dominated bulk-write profiles.
     const write = new Promise<string>((resolve, reject) => {
       this.pendingBatchedWrites.push({
+        kind: "write",
         method,
         args: args as unknown[],
         batchId,
@@ -473,45 +492,74 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       for (const entry of pending) entry.reject(error);
       return;
     }
-    const toSend: typeof pending = [];
-    const items: PersistentBrowserWriteBatchItem[] = [];
+    // Preserve the app's operation order exactly: writes coalesce into
+    // writeBatch messages, but a transaction begin flushes the writes queued
+    // before it and is sent in its original position — the engine must never
+    // see a transaction opened ahead of writes the app issued earlier.
+    type WriteEntry = Extract<(typeof pending)[number], { kind: "write" }>;
+    let segment: WriteEntry[] = [];
+    const sendSegment = async (): Promise<void> => {
+      const toSend: WriteEntry[] = [];
+      const items: PersistentBrowserWriteBatchItem[] = [];
+      for (const entry of segment) {
+        if (entry.batchId && this.completedTxs.get(entry.batchId) === "rolled_back") {
+          entry.resolve(entry.batchId);
+          continue;
+        }
+        const translatedArgs = await this.translateWriteArgs(
+          entry.method,
+          entry.args as PersistentBrowserRequestArgs<typeof entry.method>,
+        );
+        toSend.push(entry);
+        items.push({
+          method: entry.method,
+          args: translatedArgs,
+        } as PersistentBrowserWriteBatchItem);
+      }
+      segment = [];
+      if (items.length === 0) return;
+      let results: PersistentBrowserWriteBatchResult[];
+      try {
+        const response = await this.send("writeBatch", [items]);
+        results = response as PersistentBrowserWriteBatchResult[];
+      } catch (error) {
+        for (const entry of toSend) entry.reject(error);
+        return;
+      }
+      toSend.forEach((entry, index) => {
+        const result = results[index];
+        if (!result) {
+          entry.reject(new Error("Persistent browser worker write batch returned too few results"));
+          return;
+        }
+        if ("error" in result) {
+          entry.reject(new Error(result.error.message));
+          return;
+        }
+        if (typeof result.ok?.transactionId !== "string") {
+          entry.reject(
+            new Error("Persistent browser worker write did not return a transaction id"),
+          );
+          return;
+        }
+        entry.resolve(result.ok.transactionId);
+      });
+    };
+
     for (const entry of pending) {
-      if (entry.batchId && this.completedTxs.get(entry.batchId) === "rolled_back") {
-        entry.resolve(entry.batchId);
+      if (entry.kind === "write") {
+        segment.push(entry);
         continue;
       }
-      const translatedArgs = await this.translateWriteArgs(
-        entry.method,
-        entry.args as PersistentBrowserRequestArgs<typeof entry.method>,
-      );
-      toSend.push(entry);
-      items.push({ method: entry.method, args: translatedArgs } as PersistentBrowserWriteBatchItem);
+      await sendSegment();
+      try {
+        const workerTransactionId = (await this.send("beginTransaction", [entry.txKind])) as string;
+        entry.resolve(workerTransactionId);
+      } catch (error) {
+        entry.reject(error);
+      }
     }
-    if (items.length === 0) return;
-    let results: PersistentBrowserWriteBatchResult[];
-    try {
-      const response = await this.send("writeBatch", [items]);
-      results = response as PersistentBrowserWriteBatchResult[];
-    } catch (error) {
-      for (const entry of toSend) entry.reject(error);
-      return;
-    }
-    toSend.forEach((entry, index) => {
-      const result = results[index];
-      if (!result) {
-        entry.reject(new Error("Persistent browser worker write batch returned too few results"));
-        return;
-      }
-      if ("error" in result) {
-        entry.reject(new Error(result.error.message));
-        return;
-      }
-      if (typeof result.ok?.transactionId !== "string") {
-        entry.reject(new Error("Persistent browser worker write did not return a transaction id"));
-        return;
-      }
-      entry.resolve(result.ok.transactionId);
-    });
+    await sendSegment();
   }
 
   private batchIdFromWriteArgs<Method extends PersistentBrowserWriteRequest["method"]>(

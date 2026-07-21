@@ -709,6 +709,11 @@ export class NativeRuntimeAdapter implements Runtime {
         } finally {
           transportError?.cancel();
         }
+        // `change` can resolve as a microtask without real progress. Yield a
+        // macrotask before re-polling so timers and socket frames — the events
+        // that actually advance settlement — can run; a hot microtask loop
+        // here starves them and wedges the whole worker.
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
     }
   }
