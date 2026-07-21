@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTimeline,
-  optimisticReplyCount,
+  writableReplyCount,
   type IncludedPost,
   type TimelineEntryView,
-} from "../../src/timeline-model.js";
+} from "../../src/timeline-data.js";
 
 function post(id: string, replyParentId?: string): IncludedPost {
   return {
@@ -31,8 +31,8 @@ describe("timeline model", () => {
   it("only changes a reply count optimistically when the viewer owns the parent post", () => {
     const parent = post("parent");
 
-    expect(optimisticReplyCount(parent, "did:plc:viewer")).toBeUndefined();
-    expect(optimisticReplyCount(parent, parent.authorDid)).toBe(1);
+    expect(writableReplyCount(parent, "did:plc:viewer")).toBeUndefined();
+    expect(writableReplyCount(parent, parent.authorDid)).toBe(1);
   });
 
   it("includes the quoted post in the display model", () => {
