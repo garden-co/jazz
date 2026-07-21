@@ -36,25 +36,25 @@ describe("profile projection", () => {
     expect(database.update).not.toHaveBeenCalled();
   });
 
-  it("reports a Jazz write rejected by the sync server", async () => {
+  it("does not block local projection on edge persistence", async () => {
+    const wait = vi.fn(async ({ tier }: { tier: "local" | "edge" }) => {
+      if (tier === "edge") throw new Error("sync server unavailable");
+    });
     const database = {
       all: vi.fn(async () => []),
       one: vi.fn(async () => null),
-      upsert: vi.fn(() => ({
-        wait: vi.fn(async () => {
-          throw new Error("Insert denied on table profiles - missing explicit policy");
-        }),
-      })),
+      upsert: vi.fn(() => ({ wait })),
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    await expect(
-      createProjection(database).projectProfile({
-        did: "did:plc:viewer",
-        handle: "viewer.test",
-        indexedAt: "2026-07-17T08:00:00.000Z",
-      }),
-    ).rejects.toThrow("Insert denied on table profiles");
+
+    await createProjection(database).projectProfile({
+      did: "did:plc:viewer",
+      handle: "viewer.test",
+      indexedAt: "2026-07-17T08:00:00.000Z",
+    });
+
+    expect(wait).toHaveBeenCalledWith({ tier: "local" });
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
