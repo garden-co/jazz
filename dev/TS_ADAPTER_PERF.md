@@ -71,3 +71,41 @@ Slice canary receipt:
 | After corrected guard  |                           24.84ms |          1.78ms total |      0.013ms | Canary now asserts delivered `addedCount` equals source row count. The 24k reset path is really engaged and includes envelope parse, public-frame build, and worker-style `transferableBuffer` checks. |
 
 End-to-end real-app verification note: `/Users/anselm/jazz-private/workspaces/boredm` serves the worker from the main checkout through symlinks. The orchestrator runs that post-merge; this lane records the local adapter gates only.
+
+## Packed reset real-app guard trace
+
+Trace setup: temporarily emitted worker spans from `plainResetChunkCanStayPacked` and the packed reset frame builder, rebuilt `packages/jazz-tools` dist in this worktree, relinked the boredm app's `node_modules/jazz-tools` and `node_modules/jazz-wasm` to this worktree, and restarted `/Users/anselm/jazz-private/workspaces/boredm` with `JAZZ_CORE_ROOT=/Users/anselm/jazz_core-ts-adapter scripts/demo-stack.sh --skip-build --prod`.
+
+Important setup correction: `demo-stack.sh` defaults `ENGINE_ROOT` to `/Users/anselm/Documents/jazz_core`, and the boredm `node_modules` symlinks also pointed at that main checkout. Early trace runs were therefore measuring the main checkout bundle, not this worktree. The final verification used the worktree links above; `jazz-napi` remained linked to the built main package because this slice only changes `jazz-tools` TypeScript.
+
+Empirical guard finding for the 24,045-row `dropdown_entry` reset chunk:
+
+| Guard conjunct                 | Trace value                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------- |
+| `reset`                        | `true`                                                                                 |
+| `delta.updated.length === 0`   | `true`                                                                                 |
+| `delta.removed.length === 0`   | `true`                                                                                 |
+| `!relationSnapshot`            | `true`                                                                                 |
+| `arraySubqueries.length === 0` | `true`                                                                                 |
+| identity projection            | `true` (`outputColumnsLength = 11`, `tableColumnsLength = 11`, `firstMismatch = null`) |
+| old `!relationDelta`           | `false`                                                                                |
+
+The chunk carried a `relationDelta`, but the adapter only consumes relation deltas in `applyRelationSubscriptionDelta` when `subscription.relationMaterialization.arraySubqueries.length > 0`. For a plain table reset with no array subqueries, that relation delta is irrelevant to worker-side bookkeeping, and routing to `snapshotRefresh` forced the 24k row decode. The guard now allows `relationDelta` only in that no-array-subquery case.
+
+Second trace finding after enabling that guard: the fast path engaged, but the main thread threw `unexpected end of record` / `invalid offset`. Descriptor trace showed the engine batch descriptor uses `user_*` fields with outer optional wrappers:
+
+- output `dropdowns_id: Uuid`, source `user_dropdowns_id: Optional<Uuid>`
+- output `options: Array<Text>`, source `user_options: Optional<Array<Text>>`
+- output nullable columns such as `allow_custom: Optional<Boolean>`, source `user_allow_custom: Optional<Optional<Boolean>>`
+
+`createRecordValueDecoder` unwraps source optional layers. The packed frame builder therefore had to re-wrap decoded bytes when the output column is nullable before creating the public output record. The equality test covering this is `rewraps user field option bytes when packed reset frames filter engine records`.
+
+Real-app receipts:
+
+| Run                                    | Harness dir                                                        | Warm apply result                                                                                                                                    |
+| -------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before fix, worktree-linked with trace | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T212100Z` | `subscription_apply_chunk` max `2048.1ms`, 24,045 rows; guard declined on `relationDelta`, branch `snapshot-refresh`.                                |
+| Guard-only fix, before optional rewrap | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T212457Z` | Worker apply max `100ms`, but page failed decoding because packed frame bytes did not match output column nullability.                               |
+| Final clean fix                        | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T213401Z` | Warm `subscription_apply_chunk` total `120.6ms`, max `98.8ms`; no apply span over 1000 rows, so the 24,045-row reset stayed packed. UI guard passed. |
+
+Temporary instrumentation was removed before the final clean run.
