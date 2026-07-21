@@ -78,13 +78,7 @@ async function reconcilePost(did: string, session: SessionFetcher, operation: Po
     rkey: operation.rkey,
     record,
   });
-  await projection.projectPostOperation(operation, {
-    uri: created.uri,
-    cid: created.cid,
-    author: { did },
-    record,
-    indexedAt: operation.payload.createdAt,
-  });
+  await projection.projectPostOperation(operation, created);
 }
 
 async function reconcileReaction(

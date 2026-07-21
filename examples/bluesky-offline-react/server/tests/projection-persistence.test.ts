@@ -274,11 +274,11 @@ describe("operation completion", () => {
     const postView = {
       uri: `at://${post.ownerDid}/app.bsky.feed.post/${post.rkey}`,
       cid: "bafypost",
-      author: { did: post.ownerDid },
+      author: { did: post.ownerDid, handle: "viewer.test" },
       record: post.payload,
       indexedAt: post.createdAt,
     };
-    await writer.projectPostOperation(post, postView);
+    await writer.projectPostOperation(post, { uri: postView.uri, cid: postView.cid });
     await writer.projectReactionOperation(
       like,
       {

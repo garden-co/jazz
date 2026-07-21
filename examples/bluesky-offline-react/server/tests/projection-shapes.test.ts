@@ -1,9 +1,10 @@
+import type { AppBskyFeedDefs } from "@atproto/api";
 import { describe, expect, it, vi } from "vitest";
 import { app } from "../../schema.js";
-import type { PostView } from "../bluesky.js";
 import { createProjection, stableObjectId } from "../projection.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
+const testCid = "bafkreie7q3iidccmpvszul7kudcvvuavuo7u6gzlbobczuk5nqk3b4akba";
 
 function database() {
   return {
@@ -15,10 +16,11 @@ function database() {
   };
 }
 
-function post(uri: string, indexedAt = "2026-07-15T08:00:01.000Z"): PostView {
+function post(uri: string, indexedAt = "2026-07-15T08:00:01.000Z"): AppBskyFeedDefs.PostView {
   return {
+    $type: "app.bsky.feed.defs#postView",
     uri,
-    cid: `bafy-${uri.split("/").at(-1)}`,
+    cid: testCid,
     author: { did: "did:plc:author", handle: "author.test" },
     record: { text: "A post", createdAt: indexedAt },
     indexedAt,
@@ -37,7 +39,9 @@ describe("post projection", () => {
             ...post("at://did:plc:author/app.bsky.feed.post/3m12345678921"),
             record: { text: "Worth reading", createdAt: "2026-07-17T08:00:00.000Z" },
             embed: {
+              $type: "app.bsky.embed.record#view",
               record: {
+                $type: "app.bsky.embed.record#viewRecord",
                 uri: quotedUri,
                 cid: "bafyquoted",
                 author: { did: "did:plc:quoted", handle: "quoted.test" },
@@ -71,11 +75,15 @@ describe("post projection", () => {
           post: {
             ...post("at://did:plc:author/app.bsky.feed.post/3m12345678922"),
             embed: {
+              $type: "app.bsky.embed.recordWithMedia#view",
               media: {
+                $type: "app.bsky.embed.images#view",
                 images: [{ thumb: "https://cdn.test/thumb", fullsize: "https://cdn.test/full" }],
               },
               record: {
+                $type: "app.bsky.embed.record#view",
                 record: {
+                  $type: "app.bsky.embed.record#viewRecord",
                   uri: "at://did:plc:quoted/app.bsky.feed.post/3m12345678920",
                   cid: "bafyquoted",
                   author: { did: "did:plc:quoted" },
@@ -166,8 +174,12 @@ describe("thread projection", () => {
       root: { uri: root.uri, cid: root.cid },
       parent: { uri: root.uri, cid: root.cid },
     };
-    const repeated = { post: reply };
-    const thread = { post: root, replies: [repeated, repeated] };
+    const repeated = { $type: "app.bsky.feed.defs#threadViewPost", post: reply } as const;
+    const thread = {
+      $type: "app.bsky.feed.defs#threadViewPost",
+      post: root,
+      replies: [repeated, repeated],
+    } as const;
     const db = database();
 
     const result = await createProjection(db).projectThread("did:plc:viewer", root.uri!, thread);

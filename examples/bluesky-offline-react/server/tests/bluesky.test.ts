@@ -97,7 +97,10 @@ describe("PDS writes", () => {
     agent.putRecord.mockResolvedValue({ data: { uri: "at://post", cid: "bafy-post" } });
     agent.deleteRecord.mockResolvedValue({ data: {} });
 
-    await expect(putRecord(session, input)).resolves.toEqual({ uri: "at://post", cid: "bafy-post" });
+    await expect(putRecord(session, input)).resolves.toEqual({
+      uri: "at://post",
+      cid: "bafy-post",
+    });
     const deleteInput = {
       repo: input.repo,
       collection: input.collection,
@@ -131,9 +134,15 @@ describe("recordKey", () => {
   const collection = "app.bsky.feed.like";
 
   it("returns a key only for the expected repository and collection", () => {
-    expect(recordKey(`at://${did}/${collection}/3m12345678921`, did, collection)).toBe("3m12345678921");
-    expect(recordKey(`at://did:plc:bob/${collection}/3m12345678921`, did, collection)).toBeUndefined();
-    expect(recordKey(`at://${did}/app.bsky.feed.repost/3m12345678921`, did, collection)).toBeUndefined();
+    expect(recordKey(`at://${did}/${collection}/3m12345678921`, did, collection)).toBe(
+      "3m12345678921",
+    );
+    expect(
+      recordKey(`at://did:plc:bob/${collection}/3m12345678921`, did, collection),
+    ).toBeUndefined();
+    expect(
+      recordKey(`at://${did}/app.bsky.feed.repost/3m12345678921`, did, collection),
+    ).toBeUndefined();
     expect(recordKey("not-an-at-uri", did, collection)).toBeUndefined();
   });
 });

@@ -1,20 +1,27 @@
 import { createHash } from "node:crypto";
+import {
+  AppBskyActorDefs,
+  AppBskyEmbedImages,
+  AppBskyEmbedRecord,
+  AppBskyEmbedRecordWithMedia,
+  AppBskyFeedDefs,
+  AppBskyFeedPost,
+  AppBskyRichtextFacet,
+} from "@atproto/api";
 import type { Operation, PostOperation, ReactionOperation } from "../operations.js";
 import { decodeOperation, encodeOperationPayload } from "../operations.js";
 import { app } from "../schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
 import { appId } from "../app-id.js";
 import { formatObjectId, objectIdKey } from "../object-id.js";
-import type {
-  FeedViewPost,
-  PostEmbedView,
-  PostView,
-  ProfileView,
-  ThreadViewNode,
-} from "./bluesky.js";
 import type { db } from "./jazz.js";
 
 type ProjectionDatabase = typeof db;
+type ThreadNode =
+  | AppBskyFeedDefs.ThreadViewPost
+  | AppBskyFeedDefs.NotFoundPost
+  | AppBskyFeedDefs.BlockedPost
+  | { $type: string };
 
 export function stableObjectId(namespace: string, value: string, applicationId = appId) {
   return formatObjectId(
@@ -34,27 +41,45 @@ export function createProjection(database: ProjectionDatabase) {
     projectTimelinePage,
   };
 
-  function profileRow(profile: ProfileView | undefined, indexedAt: string) {
+  function profileRow(
+    profile: AppBskyActorDefs.ProfileViewBasic | AppBskyActorDefs.ProfileViewDetailed | undefined,
+    indexedAt: string,
+  ) {
     if (!profile?.did) return undefined;
     return {
       id: stableObjectId("bluesky-profile", profile.did),
       did: profile.did,
       handle: profile.handle,
       displayName: profile.displayName,
-      description: profile.description,
+      description: "description" in profile ? profile.description : undefined,
       avatar: profile.avatar,
       indexedAt,
     };
   }
 
-  function normalizePostBase(post: PostView | undefined) {
-    const uri = post?.uri;
-    const cid = post?.cid;
-    const authorDid = post?.author?.did;
-    const record = post?.record;
-    if (!uri || !cid || !authorDid || typeof record?.text !== "string" || !record.createdAt)
-      return null;
-    const indexedAt = post.indexedAt ?? record.createdAt;
+  function postRecord(post: AppBskyFeedDefs.PostView | undefined) {
+    if (!post) return undefined;
+    const result = AppBskyFeedPost.validateRecord({
+      ...post.record,
+      $type: "app.bsky.feed.post",
+    });
+    return result.success ? result.value : undefined;
+  }
+
+  function postImages(embed: AppBskyFeedDefs.PostView["embed"]) {
+    if (AppBskyEmbedImages.isView(embed)) return embed.images;
+    if (AppBskyEmbedRecordWithMedia.isView(embed) && AppBskyEmbedImages.isView(embed.media)) {
+      return embed.media.images;
+    }
+    return [];
+  }
+
+  function normalizePostBase(post: AppBskyFeedDefs.PostView | undefined) {
+    const record = postRecord(post);
+    if (!post || !record) return null;
+    const { uri, cid } = post;
+    const authorDid = post.author.did;
+    const indexedAt = post.indexedAt || record.createdAt;
     const id = stableObjectId("bluesky-post", uri);
     const authorProfile = profileRow(post.author, indexedAt);
     const replyParentId = record.reply?.parent?.uri
@@ -63,28 +88,25 @@ export function createProjection(database: ProjectionDatabase) {
     const replyRootId = record.reply?.root?.uri
       ? stableObjectId("bluesky-post", record.reply.root.uri)
       : undefined;
-    const images = (post.embed?.images ?? post.embed?.media?.images ?? [])
-      .filter((image) => image.thumb && image.fullsize)
+    const images = postImages(post.embed)
       .slice(0, 4)
       .map((image, position) => ({
         id: stableObjectId("bluesky-post-image", `${uri}:${position}`),
         postId: id,
         postCid: cid,
         position,
-        thumb: image.thumb!,
-        fullsize: image.fullsize!,
-        alt: image.alt ?? "",
+        thumb: image.thumb,
+        fullsize: image.fullsize,
+        alt: image.alt,
         aspectWidth: image.aspectRatio?.width,
         aspectHeight: image.aspectRatio?.height,
       }));
     const linkFacets = (record.facets ?? []).flatMap((facet) => {
-      const link = facet.features?.find(
-        (feature) => feature.$type === "app.bsky.richtext.facet#link" && feature.uri,
-      );
-      const byteStart = facet.index?.byteStart;
-      const byteEnd = facet.index?.byteEnd;
-      return link && Number.isInteger(byteStart) && Number.isInteger(byteEnd)
-        ? [{ byteStart: byteStart!, byteEnd: byteEnd!, uri: link.uri! }]
+      const link = facet.features
+        .map(AppBskyRichtextFacet.validateLink)
+        .find((result) => result.success);
+      return link
+        ? [{ byteStart: facet.index.byteStart, byteEnd: facet.index.byteEnd, uri: link.value.uri }]
         : [];
     });
 
@@ -117,10 +139,16 @@ export function createProjection(database: ProjectionDatabase) {
     quote?: BasePostBundle;
   };
 
-  function quotedPostView(embed: PostEmbedView | undefined): PostView | undefined {
-    const embedded = embed?.record?.record ?? embed?.record;
-    if (!embedded?.uri || !embedded.cid || !embedded.author?.did || !embedded.value)
-      return undefined;
+  function quotedPost(
+    embed: AppBskyFeedDefs.PostView["embed"],
+  ): AppBskyFeedDefs.PostView | undefined {
+    const recordEmbed = AppBskyEmbedRecordWithMedia.isView(embed)
+      ? embed.record
+      : AppBskyEmbedRecord.isView(embed)
+        ? embed
+        : undefined;
+    const embedded = recordEmbed?.record;
+    if (!AppBskyEmbedRecord.isViewRecord(embedded)) return undefined;
     return {
       uri: embedded.uri,
       cid: embedded.cid,
@@ -131,10 +159,10 @@ export function createProjection(database: ProjectionDatabase) {
     };
   }
 
-  function normalizePost(post: PostView | undefined): NormalizedPostBundle | null {
+  function normalizePost(post: AppBskyFeedDefs.PostView | undefined): NormalizedPostBundle | null {
     const normalized = normalizePostBase(post);
     if (!normalized) return null;
-    const quote = normalizePostBase(quotedPostView(post?.embed));
+    const quote = normalizePostBase(quotedPost(post?.embed));
     return {
       ...normalized,
       post: {
@@ -145,12 +173,11 @@ export function createProjection(database: ProjectionDatabase) {
     };
   }
 
-  function normalizeTimelineItem(ownerDid: string, item: FeedViewPost) {
+  function normalizeTimelineItem(ownerDid: string, item: AppBskyFeedDefs.FeedViewPost) {
     const normalizedPost = normalizePost(item.post);
     if (!normalizedPost) return null;
     const { post } = normalizedPost;
-    const reason =
-      item.reason?.$type === "app.bsky.feed.defs#reasonRepost" ? item.reason : undefined;
+    const reason = AppBskyFeedDefs.isReasonRepost(item.reason) ? item.reason : undefined;
     const reposterProfile = reason?.indexedAt ? profileRow(reason.by, reason.indexedAt) : undefined;
     const repost:
       | {
@@ -183,6 +210,7 @@ export function createProjection(database: ProjectionDatabase) {
         : post.uri);
     const threadRootId = post.replyRootId ?? post.id;
     const context = [item.reply?.root, item.reply?.parent]
+      .filter(AppBskyFeedDefs.isPostView)
       .map(normalizePost)
       .filter((value): value is NonNullable<ReturnType<typeof normalizePost>> => value !== null);
     const threadRoot = context.find((bundle) => bundle.post.id === threadRootId);
@@ -206,7 +234,7 @@ export function createProjection(database: ProjectionDatabase) {
   }
 
   type FlatThreadEntry = {
-    post?: PostView;
+    post?: AppBskyFeedDefs.PostView;
     postId: string;
     parentPostId?: string;
     sortOrder: number;
@@ -220,40 +248,48 @@ export function createProjection(database: ProjectionDatabase) {
 
   function flattenThread(
     requestedUri: string,
-    thread: ThreadViewNode,
+    thread: ThreadNode,
     toPostId: (uri: string) => string = (uri) => uri,
   ): FlatThread {
-    const ancestors: ThreadViewNode[] = [];
-    for (let node: ThreadViewNode | undefined = thread; node; node = node.parent) {
+    const ancestors: ThreadNode[] = [];
+    for (
+      let node: ThreadNode | undefined = thread;
+      node;
+      node = AppBskyFeedDefs.isThreadViewPost(node) ? node.parent : undefined
+    ) {
       ancestors.unshift(node);
     }
 
-    const selectedUri = thread.post?.uri ?? thread.uri ?? requestedUri;
+    const selectedPost = AppBskyFeedDefs.isThreadViewPost(thread) ? thread.post : undefined;
+    const selectedUri =
+      selectedPost?.uri ?? ("uri" in thread ? thread.uri : undefined) ?? requestedUri;
+    const rootRecord = postRecord(selectedPost);
+    const firstAncestor = ancestors[0];
+    const firstPost = AppBskyFeedDefs.isThreadViewPost(firstAncestor)
+      ? firstAncestor.post
+      : undefined;
     const rootUri =
-      thread.post?.record?.reply?.root?.uri ??
-      ancestors[0]?.post?.uri ??
-      ancestors[0]?.uri ??
+      rootRecord?.reply?.root.uri ??
+      firstPost?.uri ??
+      (firstAncestor && "uri" in firstAncestor ? firstAncestor.uri : undefined) ??
       requestedUri;
     const entries: FlatThreadEntry[] = [];
     const seen = new Set<string>();
 
-    const addNode = (node: ThreadViewNode, fallbackParentId?: string) => {
-      const uri = node.post?.uri ?? node.uri;
+    const addNode = (node: ThreadNode, fallbackParentId?: string) => {
+      const post = AppBskyFeedDefs.isThreadViewPost(node) ? node.post : undefined;
+      const uri = post?.uri ?? ("uri" in node ? node.uri : undefined);
       if (!uri) return undefined;
       const postId = toPostId(uri);
       if (seen.has(postId)) return postId;
       seen.add(postId);
-      const parentUri = node.post?.record?.reply?.parent?.uri;
+      const parentUri = postRecord(post)?.reply?.parent.uri;
       entries.push({
-        post: node.post,
+        post,
         postId,
         parentPostId: parentUri ? toPostId(parentUri) : fallbackParentId,
         sortOrder: entries.length,
-        state: node.post
-          ? "post"
-          : node.blocked || node.$type?.endsWith("#blockedPost")
-            ? "blocked"
-            : "not-found",
+        state: post ? "post" : AppBskyFeedDefs.isBlockedPost(node) ? "blocked" : "not-found",
       });
       return postId;
     };
@@ -263,13 +299,16 @@ export function createProjection(database: ProjectionDatabase) {
       parentId = addNode(ancestor, parentId) ?? parentId;
     }
 
-    const addReplies = (nodes: ThreadViewNode[] | undefined, replyParentId: string) => {
+    const addReplies = (nodes: ThreadNode[] | undefined, replyParentId: string) => {
       for (const node of nodes ?? []) {
         const postId = addNode(node, replyParentId);
-        if (postId) addReplies(node.replies, postId);
+        if (postId && AppBskyFeedDefs.isThreadViewPost(node)) addReplies(node.replies, postId);
       }
     };
-    addReplies(thread.replies, toPostId(selectedUri));
+    addReplies(
+      AppBskyFeedDefs.isThreadViewPost(thread) ? thread.replies : undefined,
+      toPostId(selectedUri),
+    );
 
     return { rootPostId: toPostId(rootUri), entries };
   }
@@ -420,7 +459,7 @@ export function createProjection(database: ProjectionDatabase) {
   async function projectViewerState(
     ownerDid: string,
     post: NormalizedPost,
-    viewer: PostView["viewer"],
+    viewer: AppBskyFeedDefs.PostView["viewer"],
     intents: ReactionIntents,
   ) {
     for (const kind of ["like", "repost"] as const) {
@@ -485,7 +524,7 @@ export function createProjection(database: ProjectionDatabase) {
 
   async function projectTimelineItem(
     ownerDid: string,
-    item: FeedViewPost,
+    item: AppBskyFeedDefs.FeedViewPost,
     intents: ReactionIntents,
   ) {
     const normalized = normalizeTimelineItem(ownerDid, item);
@@ -520,7 +559,11 @@ export function createProjection(database: ProjectionDatabase) {
     return normalized.timelineEntry;
   }
 
-  async function projectTimelinePage(ownerDid: string, items: FeedViewPost[], cursor?: string) {
+  async function projectTimelinePage(
+    ownerDid: string,
+    items: AppBskyFeedDefs.FeedViewPost[],
+    cursor?: string,
+  ) {
     const intents = await loadReactionIntents(ownerDid);
     const entries = await Promise.all(
       items.map((item) => projectTimelineItem(ownerDid, item, intents)),
@@ -558,7 +601,7 @@ export function createProjection(database: ProjectionDatabase) {
     );
   }
 
-  async function projectProfile(profile: (ProfileView & { indexedAt?: string }) | undefined) {
+  async function projectProfile(profile: AppBskyActorDefs.ProfileViewDetailed | undefined) {
     if (!profile?.did) return;
     await writeProfile({
       id: stableObjectId("bluesky-profile", profile.did),
@@ -571,7 +614,7 @@ export function createProjection(database: ProjectionDatabase) {
     });
   }
 
-  async function projectThread(ownerDid: string, requestedUri: string, source: ThreadViewNode) {
+  async function projectThread(ownerDid: string, requestedUri: string, source: ThreadNode) {
     const thread = flattenThread(requestedUri, source, (postUri) =>
       stableObjectId("bluesky-post", postUri),
     );
@@ -619,16 +662,42 @@ export function createProjection(database: ProjectionDatabase) {
     });
   }
 
-  async function projectPostOperation(operation: PostOperation, post: PostView) {
-    const bundle = normalizePost(post);
-    if (!bundle) throw new Error("PDS returned an invalid post");
+  async function projectPostOperation(
+    operation: PostOperation,
+    created: { uri: string; cid: string },
+  ) {
+    const bundle: PostBundle = {
+      profile: undefined,
+      post: {
+        id: stableObjectId("bluesky-post", created.uri),
+        uri: created.uri,
+        cid: created.cid,
+        authorDid: operation.ownerDid,
+        authorProfileId: stableObjectId("bluesky-profile", operation.ownerDid),
+        text: operation.payload.text,
+        facetsJson: undefined,
+        createdAt: operation.payload.createdAt,
+        indexedAt: operation.payload.createdAt,
+        replyParentId: operation.payload.reply?.parent.uri
+          ? stableObjectId("bluesky-post", operation.payload.reply.parent.uri)
+          : undefined,
+        replyRootId: operation.payload.reply?.root.uri
+          ? stableObjectId("bluesky-post", operation.payload.reply.root.uri)
+          : undefined,
+        replyCount: 0,
+        likeCount: 0,
+        repostCount: 0,
+        state: "synced",
+      },
+      images: [],
+    };
     await writePostBundle(bundle);
     await completeOperation(operation);
   }
 
   async function projectReactionOperation(
     operation: ReactionOperation,
-    post: PostView,
+    post: AppBskyFeedDefs.PostView,
     result: { uri?: string; cid?: string },
   ) {
     const bundle = normalizePost(post);
