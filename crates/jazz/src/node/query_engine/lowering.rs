@@ -783,6 +783,7 @@ fn analyze_query_plan(
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
+    let plan = plan_with_default_result_order(plan);
     validate_output_capabilities(request, &plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
@@ -834,6 +835,50 @@ fn validate_output_capabilities(
     gaps.push(UnsupportedReason::Operator(
         "maintained subscription view window shape is not lowered yet".to_owned(),
     ));
+}
+
+fn plan_with_default_result_order(mut plan: AnalyzedQueryPlan) -> AnalyzedQueryPlan {
+    inject_default_order_in_plan(&mut plan);
+    plan
+}
+
+fn inject_default_order_in_plan(plan: &mut AnalyzedQueryPlan) {
+    match plan {
+        AnalyzedQueryPlan::Linear(linear) => inject_default_order_in_linear(linear),
+        AnalyzedQueryPlan::Union(_)
+        | AnalyzedQueryPlan::CorrelatedPath(_)
+        | AnalyzedQueryPlan::RecursiveRelation(_) => {}
+    }
+}
+
+fn inject_default_order_in_linear(plan: &mut LinearCurrentRoot) {
+    inject_default_order_in_steps(&plan.root, &mut plan.steps);
+}
+
+fn inject_default_order_in_steps(root: &LinearRoot, steps: &mut Vec<LinearStep>) {
+    let Some(source) = root.source().cloned() else {
+        return;
+    };
+    let insert_at = steps.iter().position(|step| {
+        matches!(
+            step,
+            LinearStep::OrderBy(_) | LinearStep::Slice { .. } | LinearStep::Aggregate { .. }
+        )
+    });
+    let Some(insert_at) = insert_at else {
+        return;
+    };
+    if matches!(
+        steps.get(insert_at),
+        Some(LinearStep::OrderBy(_) | LinearStep::Aggregate { .. })
+    ) {
+        return;
+    }
+    let key = OrderKey {
+        value: NormalizedValueRef::RowId(RowIdRef::Source(source)),
+        direction: SortDirection::Asc,
+    };
+    steps.insert(insert_at, LinearStep::OrderBy(vec![key]));
 }
 
 fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {

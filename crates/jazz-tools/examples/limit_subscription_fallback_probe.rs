@@ -50,7 +50,10 @@ fn open_db(seed: u64) -> DirectDb {
 
 fn todo_cells(index: usize, done: bool) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("title".to_owned(), Value::String(format!("Todo {index:06}"))),
+        (
+            "title".to_owned(),
+            Value::String(format!("Todo {index:06}")),
+        ),
         ("done".to_owned(), Value::Bool(done)),
         ("owner_id".to_owned(), Value::Uuid(AUTHOR.0)),
     ])
@@ -108,6 +111,8 @@ fn main() {
     let reject_db = open_db(1);
     let rejected = reject_db
         .prepare_query(&Query::from("todos").limit(100))
-        .and_then(|prepared| block_on(reject_db.subscribe(&prepared, ReadOpts::default())).map(|_| ()));
+        .and_then(|prepared| {
+            block_on(reject_db.subscribe(&prepared, ReadOpts::default())).map(|_| ())
+        });
     println!("unsupported_limit100_subscribe_error={}", rejected.is_err());
 }

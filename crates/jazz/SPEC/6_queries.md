@@ -169,13 +169,21 @@ family with matching maintained semantics.
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
 re-derived by binding layers (ch. 13 §13.13).
+Implementation note, 2026-07-21: root finite `limit`/`offset` windows without
+explicit `order_by` now express this default by injecting ascending row-id order
+in lowering before the slice operator.
 
 Decision, Anselm 2026-07-18: when a relation-valued result has no explicit
 `order_by`, its default order is ascending row id (`RowUuid`). This applies at
 every relation-valued result boundary: root query rows, relation payloads from
 `array_subqueries`, and nested include/relation subtrees. A parent row's child
 relation is therefore ordered by child row id unless that child relation carries
-its own explicit `order_by`. The default is intentionally cheap: it matches
+its own explicit `order_by`. Precision note: uuidv7 row ids order by creation time at millisecond
+granularity; ids minted within the same millisecond order by their random
+bits — stable and deterministic, but not insertion order. Order-sensitive
+tests must sort expected ids rather than assume insertion sequence.
+
+The default is intentionally cheap: it matches
 primary-index scan order for row tables, is stable under updates because row ids
 are immutable, and for uuidv7-generated ids approximates creation-time order.
 
@@ -207,6 +215,11 @@ to be applied in the specified order. This composes with
 immutable id, a single-row content update that does not change membership must
 not reorder neighboring rows, and a single-row insert must publish its ordered
 position without scanning or diffing the accumulated relation state.
+
+🔶 Staged implementation remainder: unbounded root relation results and
+relation payload boundaries from `array_subqueries`/nested relation subtrees
+still need the same plan-injected default order once their maintained graph
+fragments can carry it without perturbing recursive/policy maintenance.
 
 ### 6.5 Query-driven sync
 

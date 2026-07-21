@@ -944,7 +944,13 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             limit: 3,
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
-            && order_cols.is_empty()
+            // Default ordering (SPEC 6.4.1) is injected into the plan:
+            // row_uuid is the order column (ascending), with the standard
+            // row_uuid tie-break the window machinery always carries.
+            && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
+                field: groove::ivm::FieldRef::Name(field),
+                direction: groove::ivm::TopByDirection::Asc,
+            }] if field == "row_uuid")
             && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
                 if field == "row_uuid")
     ));

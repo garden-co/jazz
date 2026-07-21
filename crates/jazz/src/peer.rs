@@ -2687,16 +2687,6 @@ mod tests {
             .map(|maintained| maintained.subscription.id())
     }
 
-    fn assert_unsupported_maintained_subscription_error(result: Result<SyncMessage, Error>) {
-        match result {
-            Err(Error::QueryCapability(detail)) => assert!(
-                detail.contains("CapabilityReport") || detail.contains("UnsupportedReason"),
-                "unexpected capability detail: {detail}"
-            ),
-            other => panic!("expected unsupported maintained subscription error, got {other:?}"),
-        }
-    }
-
     fn aggregate_payload_count(fact: &ProgramFactEntry) -> Value {
         let ProgramFactEntry::ResultPayload(payload) = fact else {
             panic!("expected result payload fact");
@@ -3853,7 +3843,7 @@ mod tests {
     }
 
     #[test]
-    fn maintained_subscription_view_unsupported_limited_variants_error_loudly() {
+    fn maintained_subscription_view_default_order_limited_variants_are_supported() {
         let (_dir, mut core) = open_node_with_uuid(node(0x90));
         let first_tx = core
             .commit_mergeable(
@@ -3873,18 +3863,26 @@ mod tests {
             .offset(1)
             .validate(&schema())
             .unwrap();
-        let shapes = [no_order_limit, offset_limit_one];
+        let shapes = [
+            (
+                no_order_limit,
+                vec![
+                    ("todos", row(0x10), first_tx),
+                    ("todos", row(0x11), second_tx),
+                ],
+            ),
+            (offset_limit_one, vec![("todos", row(0x11), second_tx)]),
+        ];
         let mut peer = PeerState::new();
 
-        for shape in shapes {
+        for (shape, expected_adds) in shapes {
             let binding = shape.bind(BTreeMap::new()).unwrap();
             let subscription = subscription_key(&shape, &binding);
 
-            assert_unsupported_maintained_subscription_error(
-                peer.rehydrate_query(&mut core, &shape, &binding),
-            );
+            let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
-            assert!(maintained_subscription_id(&peer, subscription).is_none());
+            assert!(maintained_subscription_id(&peer, subscription).is_some());
+            assert_view_update_row_order(update, expected_adds, vec![]);
         }
 
         let metrics = peer.maintained_subscription_view_metrics();

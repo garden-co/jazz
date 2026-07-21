@@ -21,6 +21,7 @@ use support::{
     wait_for_subscription_update,
 };
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn todo_schema() -> Schema {
     SchemaBuilder::new()
@@ -30,6 +31,136 @@ fn todo_schema() -> Schema {
                 .column("done", ColumnType::Boolean),
         )
         .build()
+}
+
+fn uuid_from_u128(value: u128) -> Uuid {
+    Uuid::from_u128(value)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "tracking: subscriber currently emits reset/removal churn before fine-grained default-order window positions"]
+async fn default_order_limit_subscription_emits_ordered_window_indices() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "default-order-writer"),
+            )
+            .await
+            .expect("connect writer");
+            let reader = JazzClient::connect(
+                server.make_client_context_for_user(schema, "default-order-reader"),
+            )
+            .await
+            .expect("connect reader");
+
+            wait_for_edge_query_ready(&writer, "todos", Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&reader, "todos", Duration::from_secs(30)).await;
+
+            let id10 = ObjectId::from_uuid(uuid_from_u128(10));
+            let id20 = ObjectId::from_uuid(uuid_from_u128(20));
+            let id30 = ObjectId::from_uuid(uuid_from_u128(30));
+            let id40 = ObjectId::from_uuid(uuid_from_u128(40));
+            for (id, title) in [
+                (id10, "ten"),
+                (id20, "twenty"),
+                (id30, "thirty"),
+                (id40, "forty"),
+            ] {
+                writer
+                    .insert_with_id(
+                        "todos",
+                        Some(*id.uuid()),
+                        row_input!("title" => title, "done" => false),
+                    )
+                    .expect("insert seeded todo");
+            }
+
+            let query = QueryBuilder::new("todos").limit(3).build();
+            wait_for_query(
+                &reader,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "reader sees default-ordered limited seed window",
+                |rows| {
+                    (rows.iter().map(|(id, _)| *id).collect::<Vec<_>>() == vec![id10, id20, id30])
+                        .then_some(())
+                },
+            )
+            .await;
+            let mut stream = reader
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe limit");
+            let initial = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("initial subscription delta")
+                .expect("subscription stream should stay open");
+            assert_eq!(
+                initial
+                    .added
+                    .iter()
+                    .map(|added| (added.id, added.index))
+                    .collect::<Vec<_>>(),
+                vec![(id10, 0), (id20, 1), (id30, 2)]
+            );
+
+            let id05 = ObjectId::from_uuid(uuid_from_u128(5));
+            writer
+                .insert_with_id(
+                    "todos",
+                    Some(*id05.uuid()),
+                    row_input!("title" => "five", "done" => false),
+                )
+                .expect("insert lower todo");
+
+            let mut delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("window update delta")
+                .expect("subscription stream should stay open");
+            while delta.added.iter().all(|added| added.id != id05) {
+                assert!(
+                    delta.is_empty() || delta.pending || !delta.removed.is_empty(),
+                    "unexpected non-window delta before lower-id insert delta: {delta:#?}"
+                );
+                delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                    .await
+                    .expect("window update delta")
+                    .expect("subscription stream should stay open");
+            }
+            assert_eq!(
+                delta
+                    .added
+                    .iter()
+                    .map(|added| (added.id, added.index))
+                    .collect::<Vec<_>>(),
+                vec![(id05, 0)]
+            );
+            assert_eq!(
+                delta
+                    .removed
+                    .iter()
+                    .map(|removed| (removed.id, removed.index))
+                    .collect::<Vec<_>>(),
+                vec![(id30, 2)]
+            );
+
+            wait_for_query(
+                &reader,
+                query,
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "reader sees shifted default-order window",
+                |rows| {
+                    (rows.iter().map(|(id, _)| *id).collect::<Vec<_>>() == vec![id05, id10, id20])
+                        .then_some(())
+                },
+            )
+            .await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
