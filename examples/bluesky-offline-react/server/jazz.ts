@@ -15,17 +15,13 @@ if (!serverUrl) throw new Error("JAZZ_SERVER_URL is required");
 const backendSecret = process.env.BACKEND_SECRET;
 if (!backendSecret) throw new Error("BACKEND_SECRET is required");
 
-// Credentials remain durable in their own encrypted Jazz replica. Keeping
-// them out of the projection replica means an obsolete projection outbox
-// cannot prevent the BFF from restoring OAuth sessions.
+// Credentials remain durable in a local encrypted Jazz database. They never
+// need to leave the BFF, so this context deliberately has no sync transport.
 const authenticationContext = createJazzContext({
   appId: jazzAppId,
   app,
   permissions,
   driver: { type: "persistent", dataPath: authenticationDbPath },
-  serverUrl,
-  backendSecret,
-  adminSecret: process.env.JAZZ_ADMIN_SECRET,
   env: "dev",
   userBranch: "main",
 });
@@ -44,5 +40,5 @@ const projectionContext = createJazzContext({
   userBranch: "main",
 });
 
-export const authenticationDb = authenticationContext.asBackend();
+export const authenticationDb = authenticationContext.db();
 export const projectionDb = projectionContext.asBackend();
