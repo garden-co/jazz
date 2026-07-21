@@ -679,7 +679,7 @@ fn run_concurrent_live(
         writer_nodes.push((dir, writer_node));
         writer_edge_peers.insert(
             writer_idx,
-            PeerState::for_author(participant_author(writer_idx)),
+            PeerState::client_link(participant_author(writer_idx)),
         );
     }
 
@@ -699,14 +699,14 @@ fn run_concurrent_live(
         ));
     }
 
-    let mut initial_core_peer = PeerState::for_author(participant_author(0));
+    let mut initial_core_peer = PeerState::client_link(participant_author(0));
     let invited_core_update = initial_core_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .expect("invited core rehydrate");
     edge_node
         .apply_sync_message(invited_core_update)
         .expect("edge apply invited initial");
-    let mut writer_initial_edge_peer = PeerState::for_author(participant_author(0));
+    let mut writer_initial_edge_peer = PeerState::client_link(participant_author(0));
     let writer_initial_update = writer_initial_edge_peer
         .rehydrate_query(&mut edge_node, &shape, &binding)
         .expect("writer initial edge rehydrate");
@@ -718,13 +718,13 @@ fn run_concurrent_live(
     let mut reader_core_peers = Vec::with_capacity(config.passive);
     let mut reader_edge_peer_states = Vec::with_capacity(config.passive);
     for position in &passive_reader_positions {
-        let mut core_peer = PeerState::for_author(participant_author(0));
+        let mut core_peer = PeerState::client_link(participant_author(0));
         let _ = core_peer
             .rehydrate_query(&mut core, &shape, &binding)
             .expect("core reader initial rehydrate");
         reader_core_peers.push(ReaderCorePeer { peer: core_peer });
 
-        let mut edge_peer = PeerState::for_author(participant_author(0));
+        let mut edge_peer = PeerState::client_link(participant_author(0));
         let reader_initial_update = edge_peer
             .rehydrate_query(&mut edge_node, &shape, &binding)
             .expect("edge reader initial rehydrate");
@@ -2291,12 +2291,12 @@ fn open_participant(
         name: name.to_owned(),
         node: participant_node,
         _dir: dir,
-        peer: PeerState::for_author(identity),
+        peer: PeerState::client_link(identity),
         edge: EdgeRoute {
             name: format!("{name}_edge"),
             node: edge_node,
             _dir: edge_dir,
-            core_peer: PeerState::for_author(identity),
+            core_peer: PeerState::client_link(identity),
             policy_peer: PeerState::relay(),
         },
     }

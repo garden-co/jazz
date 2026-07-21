@@ -39,7 +39,7 @@ Current focused result:
 
 ## Review Lesson
 
-The first fix was over-broad: it used `PeerRole::EdgeClient` as the authority discriminator. That is wrong because `PeerState::for_author` is the compatibility spelling for `edge_client`, so ordinary client links on core servers also have `PeerRole::EdgeClient`. `crates/jazz-server/tests/cli_dry_run.rs::server_command_loads_published_schema_and_persists_ws_data_across_restart` correctly caught this by exercising a core-role durable server: client uploads there must keep the generic core authority path and settle at `Global`.
+The first fix was over-broad: it used the peer role as the authority discriminator. That is wrong because ordinary client links on core servers and client links terminated by edge servers both carry the same link-level role; only host wiring decides whether that link has edge fate authority. `crates/jazz-server/tests/cli_dry_run.rs::server_command_loads_published_schema_and_persists_ws_data_across_restart` correctly caught this by exercising a core-role durable server: client uploads there must keep the generic core authority path and settle at `Global`.
 
 ## Wiring Diff Summary
 
@@ -80,3 +80,37 @@ The first fix was over-broad: it used `PeerRole::EdgeClient` as the authority di
 | `cargo check -p jazz-sim --benches -j 2` | passed, exit `0` |
 | `cargo fmt -p jazz -p jazz-server` | passed, exit `0` |
 | `cargo fmt --check -p jazz -p jazz-server` | passed, exit `0` |
+
+## Fold-ins
+
+### Naming Decision
+
+`PeerState::for_author` was removed instead of deprecated. Its replacement is
+`PeerState::client_link(identity)`: ch. 9 uses "client" for a client-attached
+edge/server link, and "link" keeps the name scoped to transport identity instead
+of implying fate authority. Edge-specific construction sites still call
+`PeerState::edge_client(identity)` explicitly.
+
+`PeerRole::EdgeClient` was renamed to `PeerRole::ClientLink`. Post-fix, this
+role is used for any author-terminated client link on core or edge servers; edge
+fate authority now comes only from host-shell wiring via
+`CommitUnitIngestContext::edge_authority`.
+
+### Implementation Discipline
+
+Added `crates/jazz/SPEC/A_impl_discipline.md` section A.8, establishing the
+production-shell wiring canary convention. The edge-fate case is cited as the
+motivating example because hand-wired harness tests used the intended topology
+but could not catch the production server shell routing client uploads through
+the wrong authority path.
+
+### Fold-in Gate Table
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p jazz -j 2` | passed, exit `0` |
+| `cargo test -p jazz-server -j 2` | passed, exit `0` |
+| `cargo test -p jazz --test four_tier -j 2` | passed, exit `0` |
+| `cargo test -p groove -j 2` | passed, exit `0` |
+| `cargo check -p jazz-sim --benches -j 2` | passed, exit `0` |
+| `cargo fmt --check -p jazz -p jazz-server -p groove` | passed, exit `0` |

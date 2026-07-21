@@ -48,7 +48,7 @@ Sync uses one peer protocol everywhere in the deployment. UI, worker, edge, and
 core links all exchange the same `SyncMessage` vocabulary; a tier's behavior is
 determined by its role, not by a separate wire language (ch. 1, principle 2).
 Roles include relay links (`PeerRole::Relay`), edge-client links
-(`PeerRole::EdgeClient { identity }`), fate authority, durability, and eviction.
+(`PeerRole::ClientLink { identity }`), fate authority, durability, and eviction.
 
 A relay link represents the system author (`AuthorId::SYSTEM`) and performs no
 read narrowing. It registers each shape upstream **once** and forwards the

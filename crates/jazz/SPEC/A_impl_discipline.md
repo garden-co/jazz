@@ -106,7 +106,18 @@ report deterministic counters plus timing ratios as discipline gates
 results. Metrics are _not_ one unified struct: they are split across
 `SyncMetrics`, `PeerMetrics`, and benchmark-computed values.
 
-### A.8 Canonical gates
+### A.8 Host-shell wiring canaries
+
+Harness topologies are necessary but not sufficient for role semantics. The
+edge-fate authority bug showed why: hand-wired four-tier tests exercised the
+correct edge ingest path, while the production server shell routed the same
+client upload through the core authority path. Convention: for every
+host-shell role x ingest/dispatch path combination, at least one black-box test
+must flow through the production shell and assert the semantics that role must
+produce, including a paired discriminator when another role intentionally keeps
+different behavior.
+
+### A.9 Canonical gates
 
 The canonical Rust gate set is part of implementation discipline. A branch that
 changes Rust/core behavior should be able to pass:
@@ -135,7 +146,7 @@ This discipline was added after four concrete misses:
 - Adding `SyncMessage::SubscribeRejected` broke jazz-sim bench compilation and
   was caught two steps late.
 
-### A.9 Structural discipline
+### A.10 Structural discipline
 
 Structure should make the design easy to audit. Large implementation concepts
 should be immediately findable, algorithms should read as large steps before

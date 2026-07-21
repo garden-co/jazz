@@ -132,7 +132,7 @@ history, uploads its writes to an upstream, never self-finalizes, and has no fat
 authority. The server-side tiers — **core**, **edge**, and **relay** — are not
 `Db` roles. They are operated at the `Node` level: a core is a `Node` over a
 history-complete `NodeState` that self-finalizes via `finalize_*`; an edge is a
-`PeerRole::EdgeClient` link; and a relay is a `PeerRole::Relay` link (ch. 9,
+`PeerRole::ClientLink` link; and a relay is a `PeerRole::Relay` link (ch. 9,
 appendix E). Keeping non-client topology at the `Node` layer preserves one
 vocabulary for sync roles while leaving the app facade small.
 
