@@ -10,10 +10,12 @@ import type {
   PersistentBrowserWriteRequest,
 } from "./persistent-browser-protocol.js";
 import {
+  decodeEncodedQueryResult,
   encodeCellsForPatch,
   encodeCellsForRow,
   formatUuid,
   parseUuid,
+  type EncodedQueryResult,
 } from "./native-runtime-adapter.js";
 
 type PendingCall = {
@@ -254,7 +256,13 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       await this.connectionReady;
       await this.settleServerWaitsForRead(tier);
     }
-    return this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
+    const result = await this.send("query", [queryJson, sessionJson, tier, translatedOptionsJson]);
+    // The worker ships an encoded payload (moved via transfer list) whenever it
+    // applied no post-processing; decoding here is the same pure function of
+    // (payload, schema, query) the worker would otherwise have run.
+    const encoded = (result as { encodedQueryResult?: EncodedQueryResult } | null | undefined)
+      ?.encodedQueryResult;
+    return encoded ? decodeEncodedQueryResult(encoded, this.schema, queryJson) : result;
   }
 
   createSubscription(

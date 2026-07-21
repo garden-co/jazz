@@ -299,7 +299,7 @@ type SubscriptionSourceState = {
   reading: boolean;
 };
 
-type RowState = {
+export type RowState = {
   table: string;
   id: string;
   values: Value[];
@@ -730,6 +730,40 @@ export class NativeRuntimeAdapter implements Runtime {
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
+    const outcome = await this.queryTransportOutcome(queryJson, sessionJson, tier, optionsJson, {
+      preferEncoded: false,
+    });
+    return outcome.kind === "rows"
+      ? outcome.rows
+      : decodeEncodedQueryResult(outcome, this.schema, queryJson);
+  }
+
+  /**
+   * @internal Worker-boundary variant of {@link query}: returns the engine's
+   * encoded result payload whenever no adapter-side post-processing (edge
+   * refresh, transaction read overlay) was applied, so a message transport can
+   * move one transferable buffer instead of structured-cloning a decoded row
+   * tree. Decode with {@link decodeEncodedQueryResult} — a pure function of
+   * (payload, schema, queryJson) — on the receiving side.
+   */
+  async queryForTransport(
+    queryJson: string,
+    sessionJson?: string | null,
+    tier?: string | null,
+    optionsJson?: string | null,
+  ): Promise<QueryTransportOutcome> {
+    return this.queryTransportOutcome(queryJson, sessionJson, tier, optionsJson, {
+      preferEncoded: true,
+    });
+  }
+
+  private async queryTransportOutcome(
+    queryJson: string,
+    sessionJson: string | null | undefined,
+    tier: string | null | undefined,
+    optionsJson: string | null | undefined,
+    { preferEncoded }: { preferEncoded: boolean },
+  ): Promise<QueryTransportOutcome> {
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
@@ -743,13 +777,17 @@ export class NativeRuntimeAdapter implements Runtime {
           throw new Error("Native runtime does not support session-scoped relation queries");
         }
         const payload = this.db.allRelationQueryForIdentity(coreQueryJson, session.identity, opts);
-        return rowsFromBatches(readRowBatches(payload), this.schema);
+        return preferEncoded
+          ? { kind: "encoded_row_batches", payload }
+          : { kind: "rows", rows: rowsFromBatches(readRowBatches(payload), this.schema) };
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
       const payload = this.db.allRelationQuery(coreQueryJson, opts);
-      return rowsFromBatches(readRowBatches(payload), this.schema);
+      return preferEncoded
+        ? { kind: "encoded_row_batches", payload }
+        : { kind: "rows", rows: rowsFromBatches(readRowBatches(payload), this.schema) };
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
@@ -761,21 +799,46 @@ export class NativeRuntimeAdapter implements Runtime {
             throw new Error("Native runtime does not support session-scoped relation snapshots");
           }
           const payload = this.db.allRelationSnapshotForIdentity(query, session.identity, opts);
-          return rowsFromRelationSnapshot(
-            readRelationSnapshot(payload),
-            this.schema,
-            relationMaterializationSpec(coreQueryJson, this.schema),
-          );
+          return preferEncoded
+            ? { kind: "encoded_relation_snapshot", payload }
+            : {
+                kind: "rows",
+                rows: rowsFromRelationSnapshot(
+                  readRelationSnapshot(payload),
+                  this.schema,
+                  relationMaterializationSpec(coreQueryJson, this.schema),
+                ),
+              };
         }
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
         const payload = this.db.allRelationSnapshot(query, opts);
-        return rowsFromRelationSnapshot(
-          readRelationSnapshot(payload),
-          this.schema,
-          relationMaterializationSpec(coreQueryJson, this.schema),
-        );
+        return preferEncoded
+          ? { kind: "encoded_relation_snapshot", payload }
+          : {
+              kind: "rows",
+              rows: rowsFromRelationSnapshot(
+                readRelationSnapshot(payload),
+                this.schema,
+                relationMaterializationSpec(coreQueryJson, this.schema),
+              ),
+            };
+      }
+      // The plain path can ship encoded only when the adapter adds nothing on
+      // top of the engine result: an edge/global read may refresh and re-query,
+      // and an open transaction read overlays pending writes — both require
+      // decoded rows here.
+      if (
+        preferEncoded &&
+        tier !== "edge" &&
+        tier !== "global" &&
+        txIdFromOptions(optionsJson) === undefined
+      ) {
+        const payload = session
+          ? this.db.allForIdentity(query, session.identity, opts)
+          : this.db.all(query, opts);
+        return { kind: "encoded_row_batches", payload };
       }
       let rows = session
         ? this.db.allForIdentity(query, session.identity, opts)
@@ -788,7 +851,10 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.all(query, opts);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       }
-      return this.applyTransactionReadOverlay(rowStates, coreQueryJson, optionsJson);
+      return {
+        kind: "rows",
+        rows: this.applyTransactionReadOverlay(rowStates, coreQueryJson, optionsJson),
+      };
     } finally {
       if (attachment !== undefined) this.db.detachQuery?.(attachment);
     }
@@ -3514,6 +3580,38 @@ function expectString(value: Value, type: string): string {
     return value.value;
   }
   throw new Error(`expected ${type} value`);
+}
+
+/**
+ * Encoded query result crossing a message transport (see
+ * {@link NativeRuntimeAdapter.queryForTransport}). The payload stays in the
+ * engine's postcard encoding so it can ride a transfer list.
+ */
+export type EncodedQueryResult =
+  | { kind: "encoded_row_batches"; payload: Uint8Array }
+  | { kind: "encoded_relation_snapshot"; payload: Uint8Array };
+
+export type QueryTransportOutcome = EncodedQueryResult | { kind: "rows"; rows: unknown };
+
+/**
+ * Decode a transported encoded query result. Pure function of its inputs, so
+ * both sides of a worker boundary produce identical rows from the same
+ * payload, schema, and original query JSON.
+ */
+export function decodeEncodedQueryResult(
+  result: EncodedQueryResult,
+  schema: WasmSchema,
+  queryJson: string,
+): RowState[] {
+  if (result.kind === "encoded_row_batches") {
+    return rowsFromBatches(readRowBatches(result.payload), schema);
+  }
+  const coreQueryJson = addNestedOuterColumns(queryJson);
+  return rowsFromRelationSnapshot(
+    readRelationSnapshot(result.payload),
+    schema,
+    relationMaterializationSpec(coreQueryJson, schema),
+  );
 }
 
 function readRowBatches(payload: Uint8Array): NativeRowBatch[] {

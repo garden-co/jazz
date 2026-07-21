@@ -77,8 +77,19 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         return;
       }
       case "query": {
-        const result = await getRuntime().query(...message.args);
-        postResult(message.id, result);
+        const outcome = await getRuntime().queryForTransport(...message.args);
+        if (outcome.kind === "rows") {
+          postResult(message.id, outcome.rows);
+          return;
+        }
+        // Transfer the encoded payload instead of structured-cloning a decoded
+        // row tree; the page decodes with the same pure helpers. Transfer moves
+        // the whole backing buffer, so a partial view is sliced to an exact one
+        // first (and slicing also detaches nothing the sender still needs).
+        const payload = exactByteView(outcome.payload);
+        postResult(message.id, { encodedQueryResult: { kind: outcome.kind, payload } }, [
+          payload.buffer,
+        ]);
         return;
       }
       case "createExecutedSubscription": {
@@ -222,8 +233,16 @@ function getRuntime(): NativeRuntimeAdapter {
   return runtime;
 }
 
-function postResult(id: number, result: unknown): void {
-  workerScope.postMessage({ id, ok: true, result });
+function postResult(id: number, result: unknown, transfer?: Transferable[]): void {
+  workerScope.postMessage({ id, ok: true, result }, transfer);
+}
+
+function exactByteView(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  return bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength &&
+    bytes.buffer instanceof ArrayBuffer
+    ? (bytes as Uint8Array<ArrayBuffer>)
+    : (bytes.slice() as Uint8Array<ArrayBuffer>);
 }
 
 function postError(id: number, error: unknown): void {
