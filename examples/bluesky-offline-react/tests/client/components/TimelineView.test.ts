@@ -4,13 +4,14 @@ import { describe, expect, it } from "vitest";
 import { Intro } from "../../../src/components/TimelineView.js";
 
 describe("timeline introduction", () => {
-  it("is an expanded disclosure that can be collapsed", () => {
+  it("uses a default-open accordion with a concise summary", () => {
     const html = renderToStaticMarkup(createElement(Intro));
+    const trigger = html.match(/<button[^>]*aria-expanded="true"[^>]*>(.*?)<\/button>/)?.[1];
 
-    expect(html).toContain("<details");
-    expect(html).toContain("<summary");
-    expect(html).toContain("open=\"\"");
-    expect(html).toContain("Why Jazz?");
+    expect(trigger).toBeDefined();
+    expect(trigger ?? "").toContain("Why Jazz?");
+    expect(trigger ?? "").not.toContain("Your Bluesky timeline, available offline.");
+    expect(html).toContain('data-state="open"');
     expect(html).toContain("Your Bluesky timeline, available offline.");
   });
 });
