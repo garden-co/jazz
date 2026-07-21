@@ -1,4 +1,4 @@
-/server-dist/
+/dist/
 # Credentials
 .env*
 !.env.example

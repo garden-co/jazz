@@ -72,16 +72,18 @@ The login form state, in-flight HTTP requests, and projection-status history bey
 
 ## Offline installation
 
-Production builds are installable PWAs. The generated service worker precaches the HTML, JavaScript, CSS, Jazz WASM, and Jazz worker files. It deliberately does not intercept `/api/*`, `/xrpc/*`, or Jazz sync traffic: Jazz remains responsible for local rows and queued intentions, while the network routes only hydrate or reconcile that state.
+Production builds are installable PWAs. The generated service worker precaches the HTML, JavaScript, CSS, Jazz WASM, and Jazz worker files. It deliberately does not intercept `/api/*`, `/xrpc/*`, or Jazz sync traffic: Jazz remains responsible for local rows and queued intentions, while the network routes only hydrate or reconcile that state. The build produces one deployable `dist` directory, and the BFF serves both its API and the compiled frontend from one origin.
 
 Bluesky avatars and post images are cached as they are viewed. This media cache keeps at most 100 responses and expires entries after seven days so images cannot grow without bound. Text, profiles, thread structure, reactions, and the outbox remain in Jazz rather than the service-worker cache.
 
-The service worker is registered only in production builds, avoiding stale development modules during Vite hot reloads. To inspect the installable build locally:
+The service worker is registered only in production builds, avoiding stale development modules during Vite hot reloads. To inspect the complete production application locally:
 
 ```sh
 pnpm build
-pnpm preview --port 5173
+WEB_ORIGIN=http://127.0.0.1:3001 pnpm start
 ```
+
+Open <http://127.0.0.1:3001>. Development still uses separate Vite and BFF processes so Vite can provide hot-module replacement.
 
 Loopback origins are considered secure for PWA development; a deployed copy must use HTTPS. A user must sign in and open the app online once before it can reopen their local timeline offline. OAuth and data that have never reached the device cannot work without a connection.
 

@@ -8,10 +8,10 @@
     "dev:vite": "vite",
     "dev:server": "wait-on --timeout 20000 tcp:127.0.0.1:4200 && tsx --env-file=.env server/index.ts",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.server.json --noEmit",
-    "build:server": "node --eval \"require('node:fs').rmSync('server-dist', { recursive: true, force: true })\" && tsc -p tsconfig.server.json",
+    "build:server": "node --eval \"require('node:fs').rmSync('dist/server', { recursive: true, force: true })\" && tsc -p tsconfig.server.json",
     "build": "pnpm typecheck && vite build && pnpm build:server",
     "preview": "vite preview",
-    "start": "node server-dist/server/index.js",
+    "start": "node --env-file=.env dist/server/server/index.js",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
