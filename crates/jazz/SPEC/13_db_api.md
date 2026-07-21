@@ -515,6 +515,34 @@ Rust-owned objects. WASM, NAPI, React Native, and future language bindings all
 consume the same `Db`/selected `Node` contract; packaging differences must not
 fork query, transaction, or sync semantics.
 
+### 13.13 Query semantics live in the core
+
+Decision, Anselm 2026-07-21: query semantics live in the core, in exactly one
+place. TypeScript, wasm, napi, and runtime client layers may build queries,
+serialize query IR, cache prepared handles, transport frames, and hydrate typed
+application objects — but they must not independently evaluate predicates,
+ordering, limit/offset/windowing, relation/include membership, permission
+visibility, identity/dedupe rules, or semantic delta coalescing. A client-side
+reducer over delivered deltas is legitimate only as a *specified wire-protocol
+reducer*: its behavior must be fully determined by the delivered stream, never
+by re-evaluating the query against row sets.
+
+When a client API needs an alternate read view — read-your-writes inside an
+open transaction, a branch cut, a historical snapshot — the API expresses that
+view to the core (`ReadOpts.read_view`, open-transaction overlays) and the
+normal lowered query executes there. The engine already evaluates queries
+inside open exclusive transactions (`tx_query` over
+`OverlayRef::OpenTransaction`); binding layers plumb handles to it rather than
+overlaying pending writes above the engine.
+
+Known violations at decision time (tx read overlay, TS relation/include
+materialization, TS-computed semantic deltas, pre-core predicate rewriting) are
+inventoried in the branch's semantic-duplication audit and are being removed in
+stacked cleanup work; new code must not add to that list. The default-ordering
+drift (§6.4.1 implemented in core but re-derived inconsistently above it) is
+the canonical example of why: every re-implementation is a divergence waiting
+for a workload.
+
 ## Open Questions
 
 ### Open questions

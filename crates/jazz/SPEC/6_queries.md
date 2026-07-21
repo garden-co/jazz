@@ -166,6 +166,10 @@ family with matching maintained semantics.
 
 ### 6.4.1 Default result ordering
 
+Ordering is a core-owned query semantic: it must be expressed in the lowered
+plan and carried through delivered results and delta positions, never
+re-derived by binding layers (ch. 13 §13.13).
+
 Decision, Anselm 2026-07-18: when a relation-valued result has no explicit
 `order_by`, its default order is ascending row id (`RowUuid`). This applies at
 every relation-valued result boundary: root query rows, relation payloads from
