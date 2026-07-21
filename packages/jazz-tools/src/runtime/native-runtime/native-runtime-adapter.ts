@@ -28,6 +28,7 @@ import {
   type NativeRowBatch,
   type NativeRemovedRow,
   type QueryArraySubquery,
+  type DescriptorField,
   type QueryLiteral,
   type QueryOrder,
   type QueryPredicate,
@@ -1722,8 +1723,11 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription.outputColumns,
             );
         this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
-      } else if (plainResetChunkCanStayPacked(subscription, chunk)) {
-        const packedResetRows = nativeResetDeltaFromBatches(chunk.delta.added);
+      } else if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
+        const packedResetRows = nativeResetDeltaFromBatches(
+          chunk.delta.added,
+          subscription.outputColumns,
+        );
         subscription.rows = [];
         subscription.rowIndexByKey = new Map();
         subscription.packedResetBatches = chunk.delta.added;
@@ -4225,12 +4229,21 @@ function nativeResetDeltaFromRows(
   };
 }
 
-function nativeResetDeltaFromBatches(batches: NativeRowBatch[]): NativeRowDelta {
+function nativeResetDeltaFromBatches(
+  batches: NativeRowBatch[],
+  outputColumns: SubscriptionOutputColumns | null,
+): NativeRowDelta {
   let rowIndex = 0;
   const chunks: Uint8Array[] = [];
   for (const batch of batches) {
+    const frameColumns =
+      outputColumns && batch.table === outputColumns.rootTable ? outputColumns.rootColumns : null;
+    const encodeFrameRow = frameColumns
+      ? createRawNativeFrameRowEncoder(batch.descriptor, frameColumns)
+      : (raw: Uint8Array) => raw;
     for (const row of batch.rows) {
-      chunks.push(row.rowId, u32Le(rowIndex), u32Le(row.raw.byteLength), row.raw);
+      const raw = encodeFrameRow(row.raw);
+      chunks.push(row.rowId, u32Le(rowIndex), u32Le(raw.byteLength), raw);
       rowIndex += 1;
     }
   }
@@ -4254,6 +4267,7 @@ function plainResetChunkCanStayPacked(
     relationDelta?: NativeRelationSubscriptionDelta;
     relationSnapshot?: NativeRelationSubscriptionSnapshot;
   },
+  schema: WasmSchema,
 ): boolean {
   return (
     chunk.reset === true &&
@@ -4262,8 +4276,67 @@ function plainResetChunkCanStayPacked(
     !chunk.relationDelta &&
     !chunk.relationSnapshot &&
     subscription.relationMaterialization.arraySubqueries.length === 0 &&
-    subscription.outputColumns === null
+    subscriptionOutputColumnsAreIdentityProjection(subscription.outputColumns, schema)
   );
+}
+
+function subscriptionOutputColumnsAreIdentityProjection(
+  outputColumns: SubscriptionOutputColumns | null,
+  schema: WasmSchema,
+): boolean {
+  if (!outputColumns) return true;
+  const tableColumns = publicTableColumns(schema[outputColumns.rootTable]?.columns ?? []);
+  if (outputColumns.rootColumns.length !== tableColumns.length) return false;
+  return outputColumns.rootColumns.every((column, index) => column === tableColumns[index]);
+}
+
+function publicTableColumns(columns: readonly ColumnDescriptor[]): ColumnDescriptor[] {
+  return columns.filter(
+    (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
+  );
+}
+
+function createRawNativeFrameRowEncoder(
+  sourceDescriptor: DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+): (raw: Uint8Array) => Uint8Array {
+  if (nativeDescriptorMatchesColumns(sourceDescriptor, columns)) {
+    return (raw) => raw;
+  }
+  const outputDescriptor = columns.map((column) => ({
+    name: column.name,
+    valueType: columnValueType(column),
+  }));
+  const decodeRecord = createRecordValueDecoder(sourceDescriptor);
+  const sourceIndexesByPublicName = new Map<string, number>();
+  for (let index = 0; index < sourceDescriptor.length; index += 1) {
+    const fieldName = sourceDescriptor[index]?.name;
+    if (!fieldName || isInternalField(fieldName)) continue;
+    sourceIndexesByPublicName.set(publicFieldName(fieldName), index);
+  }
+
+  return (raw) => {
+    const values = columns.map((column) => {
+      const sourceIndex = sourceIndexesByPublicName.get(column.name);
+      if (sourceIndex === undefined) return encodeNullValue(columnValueType(column));
+      return decodeRecord(raw, sourceIndex) ?? encodeNullValue(columnValueType(column));
+    });
+    return createRecord(outputDescriptor, values);
+  };
+}
+
+function nativeDescriptorMatchesColumns(
+  descriptor: readonly DescriptorField[],
+  columns: readonly ColumnDescriptor[],
+): boolean {
+  if (descriptor.length !== columns.length) return false;
+  return columns.every((column, index) => {
+    const field = descriptor[index];
+    return (
+      field?.name === column.name &&
+      valueTypeCacheKey(field.valueType) === valueTypeCacheKey(columnValueType(column))
+    );
+  });
 }
 
 function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
