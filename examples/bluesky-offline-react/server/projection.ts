@@ -13,9 +13,9 @@ import { decodeOperation, encodeOperationPayload } from "../shared/pending-opera
 import { app } from "../schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
 import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";
-import type { db } from "./jazz.js";
+import type { projectionDb } from "./jazz.js";
 
-type ProjectionDatabase = typeof db;
+type ProjectionDatabase = typeof projectionDb;
 type ThreadNode =
   | AppBskyFeedDefs.ThreadViewPost
   | AppBskyFeedDefs.NotFoundPost

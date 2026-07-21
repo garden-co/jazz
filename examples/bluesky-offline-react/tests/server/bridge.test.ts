@@ -59,7 +59,7 @@ vi.mock("../../server/projection.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../server/jazz.js", () => ({ db: {} }));
+vi.mock("../../server/jazz.js", () => ({ projectionDb: {} }));
 
 function projectionWriter(overrides: Record<string, unknown> = {}) {
   return {

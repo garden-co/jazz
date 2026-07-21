@@ -7,7 +7,7 @@ import {
   importJWK,
   SignJWT,
 } from "jose";
-import { db } from "./jazz.js";
+import { authenticationDb } from "./jazz.js";
 import {
   createBffSessionStore,
   createOAuthSessionStore,
@@ -22,8 +22,8 @@ const clientMetadata = buildAtprotoLoopbackClientMetadata({
 });
 export const oauth = new NodeOAuthClient({
   clientMetadata,
-  stateStore: createOAuthStateStore(db),
-  sessionStore: createOAuthSessionStore(db),
+  stateStore: createOAuthStateStore(authenticationDb),
+  sessionStore: createOAuthSessionStore(authenticationDb),
   // This example uses an HTTP loopback client during local development.
   allowHttp: true,
 });
@@ -31,7 +31,7 @@ export const oauth = new NodeOAuthClient({
 export type OAuthSession = NonNullable<Awaited<ReturnType<typeof oauth.restore>>>;
 export const bffSessionCookie = "bff-session";
 
-const bffSessions = createBffSessionStore(db);
+const bffSessions = createBffSessionStore(authenticationDb);
 
 export function createBffSession(did: string) {
   return bffSessions.create(did);
@@ -41,7 +41,7 @@ export function invalidateBffSession(sessionId: string) {
   return bffSessions.invalidate(sessionId);
 }
 
-const jwtKeys = await loadOrCreateJazzSigningKeys(db);
+const jwtKeys = await loadOrCreateJazzSigningKeys(authenticationDb);
 const jwtPrivateKey = await importJWK(jwtKeys.privateJwk, jazzJwt.algorithm);
 
 export const jazzJwks = {

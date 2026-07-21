@@ -10,7 +10,7 @@ import {
   recordKey,
   type SessionFetcher,
 } from "./bluesky.js";
-import { db } from "./jazz.js";
+import { projectionDb } from "./jazz.js";
 import { createProjection } from "./projection.js";
 
 type TimelineResult = { cursor?: string; hasMore: boolean; count: number };
@@ -21,7 +21,7 @@ type ProjectionLane = {
   running: Promise<void>;
 };
 
-const projection = createProjection(db);
+const projection = createProjection(projectionDb);
 const timelineJobs = new Map<string, TimelineJob>();
 const projectionLanes = new Map<string, ProjectionLane>();
 

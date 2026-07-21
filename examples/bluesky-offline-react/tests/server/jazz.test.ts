@@ -31,7 +31,7 @@ describe("server Jazz contexts", () => {
     await expect(import("../../server/jazz.js")).rejects.toThrow("BACKEND_SECRET is required");
   });
 
-  it("keeps credentials local while projecting through a separate synced replica", async () => {
+  it("keeps credentials and projections in separate synced replicas", async () => {
     vi.stubEnv("JAZZ_SERVER_URL", "http://127.0.0.1:4200");
     vi.stubEnv("BACKEND_SECRET", "backend-secret");
     vi.stubEnv("JAZZ_ADMIN_SECRET", "admin-secret");
@@ -39,10 +39,13 @@ describe("server Jazz contexts", () => {
     const jazz = await import("../../server/jazz.js");
 
     expect(contexts.createJazzContext).toHaveBeenCalledTimes(2);
+    const authenticationConfig = contexts.createJazzContext.mock.calls[0]?.[0];
     expect(contexts.createJazzContext).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      driver: { type: "persistent", dataPath: "./data/jazz.db" },
-      serverUrl: undefined,
+      backendSecret: "backend-secret",
+      driver: { type: "persistent", dataPath: "./data/auth.db" },
+      serverUrl: "http://127.0.0.1:4200",
     }));
+    expect(authenticationConfig).toHaveProperty("adminSecret", "admin-secret");
     expect(contexts.createJazzContext).toHaveBeenNthCalledWith(2, expect.objectContaining({
       driver: { type: "persistent", dataPath: "./data/projection.db" },
       serverUrl: "http://127.0.0.1:4200",
