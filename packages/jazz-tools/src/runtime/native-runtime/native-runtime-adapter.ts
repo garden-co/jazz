@@ -265,7 +265,10 @@ type SubscriptionState = {
   identity?: Uint8Array;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
+  packedResetBatches: NativeRowBatch[] | null;
+  packedResetRows: NativeRowDelta | null;
   visibleRows: RowState[];
+  visiblePackedResetRows: NativeRowDelta | null;
   relationRows: RowState[];
   relationRootCount: number;
   relationEdges: NativeRelationSubscriptionEdge[];
@@ -315,6 +318,7 @@ type NativeRowFieldPlan = {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
   Runtime: NativeDbConstructor,
@@ -827,6 +831,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, false, optionsJson);
     const identity = session?.identity;
     let nativeSubscription: ReadableStream<unknown> | Subscription;
+    let preparedQuery: PreparedQuery | null = null;
     try {
       if (usesNativeRelationApi) {
         nativeSubscription = identity
@@ -834,6 +839,7 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.subscribeRelationQuery!(queryJson, opts);
       } else {
         const query = this.prepareQuery(queryJson);
+        preparedQuery = query;
         nativeSubscription = identity
           ? this.db.subscribeForIdentity!(query, identity, opts)
           : this.db.subscribe!(query, opts);
@@ -845,11 +851,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
-      query: usesNativeRelationApi ? null : this.prepareQuery(queryJson),
+      query: preparedQuery,
       identity,
       rows: [],
       rowIndexByKey: new Map(),
+      packedResetBatches: null,
+      packedResetRows: null,
       visibleRows: [],
+      visiblePackedResetRows: null,
       relationRows: [],
       relationRootCount: 0,
       relationEdges: [],
@@ -877,7 +886,12 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.callback = onUpdate;
     if (subscription.visibleOpened) {
       subscription.callback(
-        nativeResetDeltaFromRows(subscription.visibleRows, this.schema, subscription.outputColumns),
+        subscription.visiblePackedResetRows ??
+          nativeResetDeltaFromRows(
+            subscription.visibleRows,
+            this.schema,
+            subscription.outputColumns,
+          ),
       );
     }
     this.startSubscriptionReader(handle, subscription);
@@ -1679,6 +1693,8 @@ export class NativeRuntimeAdapter implements Runtime {
       if (chunk.reset) {
         subscription.rows = [];
         subscription.rowIndexByKey = new Map();
+        subscription.packedResetBatches = null;
+        subscription.packedResetRows = null;
       }
       if (chunk.relationDelta && subscription.relationMaterialization.arraySubqueries.length > 0) {
         const previousRows = subscription.rows;
@@ -1706,7 +1722,16 @@ export class NativeRuntimeAdapter implements Runtime {
               subscription.outputColumns,
             );
         this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
+      } else if (plainResetChunkCanStayPacked(subscription, chunk)) {
+        const packedResetRows = nativeResetDeltaFromBatches(chunk.delta.added);
+        subscription.rows = [];
+        subscription.rowIndexByKey = new Map();
+        subscription.packedResetBatches = chunk.delta.added;
+        subscription.packedResetRows = packedResetRows;
+        subscription.opened = true;
+        this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else if (subscription.snapshotRefresh) {
+        materializePackedResetRows(subscription, this.schema);
         const previousRows = subscription.rows;
         // Guarded so the argument never evaluates without a server transport:
         // memory-backed chunks carry a different updated-payload shape and the
@@ -1744,6 +1769,7 @@ export class NativeRuntimeAdapter implements Runtime {
             );
         this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else {
+        materializePackedResetRows(subscription, this.schema);
         const applied = applySubscriptionDeltaWithWireDelta(
           subscription.rows,
           subscription.rowIndexByKey,
@@ -1782,19 +1808,33 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.deferredVisibleReset ||
       !subscription.visibleOpened
     ) {
-      visibleDelta =
-        subscription.deferredVisibleReset || !subscription.visibleOpened
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              subscription.visibleRows,
-              this.schema,
-              subscription.outputColumns,
-            );
+      const publishReset = subscription.deferredVisibleReset || !subscription.visibleOpened;
+      if (publishReset && subscription.packedResetRows) {
+        visibleDelta = subscription.packedResetRows;
+      } else if (publishReset) {
+        visibleDelta = nativeResetDeltaFromRows(
+          subscription.rows,
+          this.schema,
+          subscription.outputColumns,
+        );
+      } else {
+        visibleDelta = nativeDeltaFromRows(
+          subscription.rows,
+          subscription.visibleRows,
+          this.schema,
+          subscription.outputColumns,
+        );
+      }
     }
 
     subscription.callback?.(visibleDelta);
-    subscription.visibleRows = [...subscription.rows];
+    if (visibleDelta === subscription.packedResetRows) {
+      subscription.visibleRows = [];
+      subscription.visiblePackedResetRows = subscription.packedResetRows;
+    } else {
+      subscription.visibleRows = [...subscription.rows];
+      subscription.visiblePackedResetRows = null;
+    }
     subscription.visibleOpened = true;
     subscription.deferredVisiblePublication = false;
     subscription.deferredVisibleReset = false;
@@ -3557,6 +3597,15 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
 }
 
 function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeRowFieldPlan[] {
+  let cache = nativeRowFieldPlanCache.get(schema);
+  if (!cache) {
+    cache = new Map();
+    nativeRowFieldPlanCache.set(schema, cache);
+  }
+  const cacheKey = nativeRowFieldPlanCacheKey(batch);
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const columns = schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const plans: NativeRowFieldPlan[] = [];
@@ -3578,7 +3627,20 @@ function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeR
     });
   }
 
+  cache.set(cacheKey, plans);
   return plans;
+}
+
+function nativeRowFieldPlanCacheKey(batch: NativeRowBatch): string {
+  let key = batch.table;
+  for (const field of batch.descriptor) {
+    key += `\0${field.name ?? ""}:${valueTypeCacheKey(field.valueType)}`;
+  }
+  return key;
+}
+
+function valueTypeCacheKey(type: ValueType): string {
+  return type.inner ? `${type.tag}<${valueTypeCacheKey(type.inner)}>` : String(type.tag);
 }
 
 function rowsFromRelationSnapshot(
@@ -4161,6 +4223,55 @@ function nativeResetDeltaFromRows(
     ...nativeDeltaFromChanges(rows, [], [], indexRowsByKey(rows), schema, outputColumns),
     reset: true,
   };
+}
+
+function nativeResetDeltaFromBatches(batches: NativeRowBatch[]): NativeRowDelta {
+  let rowIndex = 0;
+  const chunks: Uint8Array[] = [];
+  for (const batch of batches) {
+    for (const row of batch.rows) {
+      chunks.push(row.rowId, u32Le(rowIndex), u32Le(row.raw.byteLength), row.raw);
+      rowIndex += 1;
+    }
+  }
+  return {
+    __jazzNativeRowDelta: true,
+    added: concatBytes(chunks),
+    removed: new Uint8Array(),
+    updated: new Uint8Array(),
+    addedCount: rowIndex,
+    removedCount: 0,
+    updatedCount: 0,
+    reset: true,
+  };
+}
+
+function plainResetChunkCanStayPacked(
+  subscription: SubscriptionState,
+  chunk: {
+    reset?: boolean;
+    delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
+    relationDelta?: NativeRelationSubscriptionDelta;
+    relationSnapshot?: NativeRelationSubscriptionSnapshot;
+  },
+): boolean {
+  return (
+    chunk.reset === true &&
+    chunk.delta.updated.length === 0 &&
+    chunk.delta.removed.length === 0 &&
+    !chunk.relationDelta &&
+    !chunk.relationSnapshot &&
+    subscription.relationMaterialization.arraySubqueries.length === 0 &&
+    subscription.outputColumns === null
+  );
+}
+
+function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
+  if (!subscription.packedResetBatches) return;
+  subscription.rows = rowsFromBatches(subscription.packedResetBatches, schema);
+  subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
+  subscription.packedResetBatches = null;
+  subscription.packedResetRows = null;
 }
 
 function nativeDeltaFromChanges(

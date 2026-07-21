@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
+import { performance } from "node:perf_hooks";
+import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
 import {
   createRecord,
   PostcardReader,
@@ -4240,6 +4241,73 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 
+describe("NativeRuntimeAdapter TS adapter perf canary", () => {
+  it.skipIf(process.env.JAZZ_TS_ADAPTER_PERF !== "1")(
+    "measures reset delivery for one large subscription and many small subscriptions",
+    () => {
+      const largeRows = Array.from({ length: 24_000 }, (_, index) => ({
+        table: "todos",
+        rowId: indexedUuidBytes(index + 1),
+        title: `large-${index}`,
+      }));
+      const smallChunks = Array.from({ length: 95 }, (_, subscriptionIndex) =>
+        Array.from({ length: 7 }, (_, rowIndex) => ({
+          table: "todos",
+          rowId: indexedUuidBytes(100_000 + subscriptionIndex * 100 + rowIndex),
+          title: `small-${subscriptionIndex}-${rowIndex}`,
+        })),
+      );
+
+      const measurements: Array<{ label: string; rows: number; ms: number }> = [];
+      const runSubscription = (label: string, rows: EncodedTestRow[]) => {
+        const chunk = {
+          type: "delta",
+          reset: true,
+          settled: true,
+          delta: encodeSubscriptionDelta({ added: rows, updated: [], removed: [] }),
+        };
+        const runtime = runtimeWithNativeSubscriptionChunk(chunk);
+        let callbackCount = 0;
+        const handle = runtime.createSubscription(
+          JSON.stringify({ table: "todos" }),
+          null,
+          null,
+          null,
+        );
+        const started = performance.now();
+        runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+          subscriptionFrameBuffersForTest(delta);
+          callbackCount += 1;
+        });
+        const ms = performance.now() - started;
+        expect(callbackCount).toBe(1);
+        measurements.push({ label, rows: rows.length, ms });
+        runtime.close();
+      };
+
+      runSubscription("large-reset", largeRows);
+      for (let index = 0; index < smallChunks.length; index += 1) {
+        runSubscription(`small-reset-${index}`, smallChunks[index]!);
+      }
+
+      const smallMs = measurements.slice(1).reduce((sum, measurement) => sum + measurement.ms, 0);
+      const smallMedian =
+        measurements
+          .slice(1)
+          .map((measurement) => measurement.ms)
+          .sort((left, right) => left - right)[Math.floor(smallChunks.length / 2)] ?? 0;
+      console.info(
+        JSON.stringify({
+          largeMs: measurements[0]!.ms,
+          smallTotalMs: smallMs,
+          smallMedianMs: smallMedian,
+          smallCount: smallChunks.length,
+        }),
+      );
+    },
+  );
+});
+
 const testSchema = {
   todos: {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
@@ -4270,6 +4338,52 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
     1,
     true,
   );
+}
+
+function runtimeWithNativeSubscriptionChunk(chunk: unknown): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => new Uint8Array([0]),
+          prepareQuery: () => ({}),
+          subscribe: () => ({
+            readAll: () => [chunk],
+            close: () => true,
+          }),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+  );
+}
+
+function indexedUuidBytes(index: number): Uint8Array {
+  const bytes = new Uint8Array(16);
+  new DataView(bytes.buffer).setUint32(12, index, false);
+  return bytes;
+}
+
+function subscriptionFrameBuffersForTest(delta: NativeRowDelta): ArrayBuffer[] {
+  return [
+    transferableBufferForTest(delta.added),
+    transferableBufferForTest(delta.removed),
+    transferableBufferForTest(delta.updated),
+  ];
+}
+
+function transferableBufferForTest(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer as ArrayBuffer;
+  }
+  return bytes.slice().buffer;
 }
 
 function readPreparedComparison(query: Uint8Array): {
