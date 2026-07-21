@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { nextTimelinePageSource } from "../../../src/hooks/use-timeline-projection.js";
+import {
+  fetchingMorePosts,
+  nextTimelinePageSource,
+} from "../../../src/hooks/use-timeline-projection.js";
 
 describe("timeline pagination", () => {
   it("reveals cached Jazz rows before asking the BFF for another page", () => {
@@ -24,5 +27,11 @@ describe("timeline pagination", () => {
       localQueryRefreshing: false,
       remoteRowsRemaining: true,
     })).toBe("remote");
+  });
+
+  it("keeps pagination visible until a locally cached page appears", () => {
+    expect(fetchingMorePosts({ localStartCount: 20, itemCount: 20, remote: false })).toBe(true);
+    expect(fetchingMorePosts({ localStartCount: 20, itemCount: 40, remote: false })).toBe(false);
+    expect(fetchingMorePosts({ localStartCount: null, itemCount: 40, remote: true })).toBe(true);
   });
 });
