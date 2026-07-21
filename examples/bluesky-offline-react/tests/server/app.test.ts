@@ -1,3 +1,5 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -162,5 +164,33 @@ describe("BFF routes", () => {
     });
 
     expect(response.status).toBe(404);
+  });
+
+  it("serves the built frontend without hiding missing API routes", async () => {
+    const directory = mkdtempSync(join(process.cwd(), ".static-app-test-"));
+    mkdirSync(join(directory, "assets"));
+    writeFileSync(join(directory, "index.html"), "<main>Jazz app</main>");
+    writeFileSync(join(directory, "assets", "app.js"), "console.log('Jazz app')");
+
+    try {
+      const application = createServer({
+        staticRoot: `./${basename(directory)}`,
+        webOrigin: "http://127.0.0.1:3001",
+      });
+
+      const asset = await application.request("/assets/app.js");
+      expect(asset.status).toBe(200);
+      expect(await asset.text()).toBe("console.log('Jazz app')");
+
+      const navigation = await application.request("/thread/example");
+      expect(navigation.status).toBe(200);
+      expect(await navigation.text()).toBe("<main>Jazz app</main>");
+
+      const missingApiRoute = await application.request("/api/missing");
+      expect(missingApiRoute.status).toBe(404);
+      expect(await missingApiRoute.text()).not.toContain("Jazz app");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
