@@ -2,7 +2,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
-import { parseAtRecordUri } from "../shared/at-uri.js";
+import { parseAtRecordUri } from "../shared/identifiers.js";
 import { InvalidOperationError, parseOperationBatch } from "../shared/operations.js";
 import {
   bffSessionCookie,

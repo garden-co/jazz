@@ -2,7 +2,7 @@ import { Button, Card, Spinner, TextField } from "@radix-ui/themes";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { appId } from "../shared/app-id.js";
+import { jazzAppId } from "../shared/identifiers.js";
 import { SuccessIcon } from "./Icons.js";
 import { Timeline } from "./Timeline.js";
 import { LoadingScreen } from "./TimelineView.js";
@@ -14,7 +14,7 @@ import {
 } from "./auth-state.js";
 
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-const sessionCacheKey = `${appId}:session`;
+const sessionCacheKey = `${jazzAppId}:session`;
 
 function readCachedSession(): Session | undefined {
   try {
@@ -41,7 +41,7 @@ function JazzApp({ session, onJWTExpired }: {
   onJWTExpired: () => Promise<string | null>;
 }) {
   const config: DbConfig = {
-    appId,
+    appId: jazzAppId,
     serverUrl,
     env: "dev",
     userBranch: "main",

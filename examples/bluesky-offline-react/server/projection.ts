@@ -12,8 +12,7 @@ import type { Operation, PostOperation, ReactionOperation } from "../shared/oper
 import { decodeOperation, encodeOperationPayload } from "../shared/operations.js";
 import { app } from "../shared/schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
-import { appId } from "../shared/app-id.js";
-import { formatObjectId, objectIdKey } from "../shared/object-id.js";
+import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";
 import type { db } from "./jazz.js";
 
 type ProjectionDatabase = typeof db;
@@ -23,7 +22,7 @@ type ThreadNode =
   | AppBskyFeedDefs.BlockedPost
   | { $type: string };
 
-export function stableObjectId(namespace: string, value: string, applicationId = appId) {
+export function stableObjectId(namespace: string, value: string, applicationId = jazzAppId) {
   return formatObjectId(
     createHash("sha256")
       .update(objectIdKey(applicationId, namespace, value))

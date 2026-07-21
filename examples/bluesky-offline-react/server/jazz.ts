@@ -1,7 +1,7 @@
 import { createJazzContext } from "jazz-tools/backend";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { appId } from "../shared/app-id.js";
+import { jazzAppId } from "../shared/identifiers.js";
 import { app } from "../shared/schema.js";
 import permissions from "./permissions.js";
 
@@ -15,7 +15,7 @@ const backendSecret = process.env.BACKEND_SECRET;
 if (!backendSecret) throw new Error("BACKEND_SECRET is required");
 
 const context = createJazzContext({
-  appId,
+  appId: jazzAppId,
   app,
   permissions,
   driver: { type: "persistent", dataPath: jazzDbPath },

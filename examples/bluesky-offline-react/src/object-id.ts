@@ -1,10 +1,9 @@
-import { formatObjectId, objectIdKey } from "../shared/object-id.js";
-import { appId } from "../shared/app-id.js";
+import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";
 
 const objectIds = new Map<string, Promise<string>>();
 
 export function stableObjectId(namespace: string, value: string) {
-  const key = objectIdKey(appId, namespace, value);
+  const key = objectIdKey(jazzAppId, namespace, value);
   const cached = objectIds.get(key);
   if (cached) return cached;
   const id = crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))

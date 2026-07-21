@@ -2,7 +2,7 @@ import { defineConfig, loadEnv } from "vite";
 import babel from "@rolldown/plugin-babel";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import { jazzPlugin } from "jazz-tools/dev/vite";
-import { appId } from "./shared/app-id.js";
+import { jazzAppId } from "./shared/identifiers.js";
 import { pwaPlugin } from "./vite/pwa.js";
 
 export default defineConfig(({ mode }) => {
@@ -14,7 +14,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       jazzPlugin({
-        appId,
+        appId: jazzAppId,
         adminSecret: env.JAZZ_ADMIN_SECRET,
         // The Vite plugin's managed runtime accepts this option, but its public
         // Vite options type does not expose it yet. A spread keeps this example
