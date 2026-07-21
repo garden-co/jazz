@@ -19,7 +19,7 @@ Invariant digest:
 
 - `INV-EDGE-1`: A PeerRole::Relay link MUST use AuthorId::SYSTEM as its link identity and MUST NOT terminate a client identity.
 - `INV-EDGE-2`: A relay MUST store/forward TxKind::Mergeable and TxKind::Exclusive commit units as Fate::Pending with DurabilityTier::Local and MUST NOT assign an authority fate.
-- `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as PeerRole::EdgeClient { identity }, and downstream reads on that link MUST use that identity fo...
+- `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as PeerRole::ClientLink { identity }, and downstream reads on that link MUST use that identity fo...
 - `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST rema...
 - `INV-EDGE-5`: Edge-local fate assignment MUST support only TxKind::Mergeable; an edge MUST NOT use the edge mergeable path to assign fate for TxKind::Exclusive.
 - `INV-EDGE-6`: TxKind::Exclusive acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
@@ -116,7 +116,7 @@ the browser. Server-deployed relays are the exception.
 
 The edge-client boundary is where the system binds a link to a user identity and
 applies the last-hop policy view. An edge-client link terminates exactly one
-client `AuthorId` as `PeerRole::EdgeClient { identity }`, and downstream reads on
+client `AuthorId` as `PeerRole::ClientLink { identity }`, and downstream reads on
 that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 
 Upstream commit-unit uploads on a normal session link are authorized under the

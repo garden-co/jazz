@@ -422,6 +422,8 @@ pub struct CommitUnitIngestContext {
     pub identity: AuthorId,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
+    /// Whether this subscriber link is hosted by an edge authority.
+    pub edge_authority: bool,
 }
 
 /// Trust mode for an inbound commit-unit upload.

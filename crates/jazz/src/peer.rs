@@ -73,16 +73,17 @@ pub struct PeerState {
 /// Server-side role for one peer link.
 ///
 /// Relay links are permanent topology links between non-client nodes and serve
-/// system identity views. Edge-client links terminate one connecting client
-/// identity at the edge boundary; all query reads served on that link are
-/// policy-composed for the terminated identity.
+/// system identity views. Client links terminate one connecting client identity;
+/// all query reads served on that link are policy-composed for the terminated
+/// identity. Whether that client link also has edge fate authority is host-wired
+/// outside `PeerRole`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerRole {
     /// Permanent relay/cache link to another node.
     Relay,
-    /// Edge boundary link serving one terminated client identity.
-    EdgeClient {
-        /// Client author identity terminated at this edge boundary.
+    /// Link serving one terminated client identity.
+    ClientLink {
+        /// Client author identity terminated by this link.
         identity: AuthorId,
     },
 }
@@ -91,7 +92,7 @@ impl PeerRole {
     fn identity(self) -> AuthorId {
         match self {
             Self::Relay => AuthorId::SYSTEM,
-            Self::EdgeClient { identity } => identity,
+            Self::ClientLink { identity } => identity,
         }
     }
 }
@@ -260,12 +261,17 @@ impl PeerState {
         Self::default()
     }
 
-    /// Construct an edge peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorId) -> Self {
+    /// Construct a peer link that terminates one client author identity.
+    pub fn client_link(identity: AuthorId) -> Self {
         Self {
-            role: PeerRole::EdgeClient { identity },
+            role: PeerRole::ClientLink { identity },
             ..Self::default()
         }
+    }
+
+    /// Construct an edge-boundary peer that terminates one client author identity.
+    pub fn edge_client(identity: AuthorId) -> Self {
+        Self::client_link(identity)
     }
 
     /// Construct an edge peer whose wire identity and read-policy identity differ.
@@ -277,17 +283,10 @@ impl PeerState {
         permission_identity: AuthorId,
     ) -> Self {
         Self {
-            role: PeerRole::EdgeClient { identity },
+            role: PeerRole::ClientLink { identity },
             permission_identity: Some(permission_identity),
             ..Self::default()
         }
-    }
-
-    /// Construct a peer narrowed to one author identity.
-    ///
-    /// This is retained as the compatibility spelling for edge-client links.
-    pub fn for_author(identity: AuthorId) -> Self {
-        Self::edge_client(identity)
     }
 
     /// Return the named role for this peer link.
@@ -1761,7 +1760,7 @@ impl PeerState {
                 continue;
             }
             let previous_role = self.role;
-            self.role = PeerRole::EdgeClient { identity: writer };
+            self.role = PeerRole::ClientLink { identity: writer };
             let rehydrate = self.rehydrate_query(node, &shape, &binding);
             self.role = previous_role;
             let _ = rehydrate?;
@@ -4823,7 +4822,7 @@ mod tests {
             .unwrap();
         accept_global(&mut core, grant_b, 3);
 
-        let mut peer = PeerState::for_author(user_a);
+        let mut peer = PeerState::client_link(user_a);
         peer.set_ship_complete_exclusive_payloads(true);
         core.reset_query_engine_read_metrics();
         let update = peer.current_rows_update(&mut core, "docs").unwrap();
@@ -5103,7 +5102,7 @@ mod tests {
             .unwrap();
         accept_global(&mut core, first_grant, 2);
 
-        let mut peer = PeerState::for_author(user);
+        let mut peer = PeerState::client_link(user);
         let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
         let version_bundles = version_bundles_for_update(&first_update);
         let SyncMessage::ViewUpdate {

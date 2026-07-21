@@ -41,7 +41,7 @@ use crate::node::{
     NodeState, OpenTxId, PreparedQueryPlanHandle, RelationEdge, RelationSnapshot, RowProvenance,
     ViewUpdateParts,
 };
-use crate::peer::PeerState;
+use crate::peer::{PeerRole, PeerState};
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
@@ -64,7 +64,7 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
     WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
@@ -2706,6 +2706,17 @@ where
             .accept_edge_subscriber_with_claims(transport, identity, claims)
     }
 
+    /// Accept a subscriber whose host shell is wired as an edge fate authority.
+    pub fn accept_edge_authority_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node
+            .accept_edge_authority_subscriber_with_claims(transport, identity, claims)
+    }
+
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
     pub fn accept_subscriber_with_resume(
         &self,
@@ -3391,6 +3402,25 @@ where
             CommitUnitTrust::Session,
             None,
             PeerState::edge_client(identity),
+            false,
+        )
+    }
+
+    /// Accept a subscriber whose host shell is wired as an edge fate authority.
+    pub fn accept_edge_authority_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<S>>> {
+        self.node.borrow_mut().set_session_claims(identity, claims);
+        self.accept_subscriber_with_peer(
+            transport,
+            identity,
+            CommitUnitTrust::Session,
+            None,
+            PeerState::edge_client(identity),
+            true,
         )
     }
 
@@ -3420,9 +3450,9 @@ where
             CommitUnitTrust::TrustedBackend => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
             }
-            CommitUnitTrust::Session => PeerState::for_author(identity),
+            CommitUnitTrust::Session => PeerState::client_link(identity),
         };
-        self.accept_subscriber_with_peer(transport, identity, trust, cursor, peer)
+        self.accept_subscriber_with_peer(transport, identity, trust, cursor, peer, false)
     }
 
     fn accept_subscriber_with_peer(
@@ -3432,6 +3462,7 @@ where
         trust: CommitUnitTrust,
         cursor: Option<ResumeCursor>,
         peer: PeerState,
+        edge_authority: bool,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
         let connection = Rc::new(RefCell::new(PeerConnection {
@@ -3445,7 +3476,11 @@ where
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Subscriber {
                 peer,
-                ingest_context: CommitUnitIngestContext { identity, trust },
+                ingest_context: CommitUnitIngestContext {
+                    identity,
+                    trust,
+                    edge_authority,
+                },
                 outbox: Rc::clone(&self.outbox),
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
@@ -3522,7 +3557,7 @@ where
             let Some((fate, _, durability)) = node.transaction_state(pending.tx_id) else {
                 return true;
             };
-            matches!(fate, Fate::Pending | Fate::Accepted) && durability == DurabilityTier::Local
+            matches!(fate, Fate::Pending | Fate::Accepted) && durability < DurabilityTier::Global
         });
     }
 }
@@ -4325,7 +4360,7 @@ where
         let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
             return None;
         };
-        let replacement = PeerState::for_author(peer.link_identity());
+        let replacement = PeerState::client_link(peer.link_identity());
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
         })
@@ -4891,14 +4926,34 @@ where
                             // binding), plus the write-upload path: any
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
-                            let responses = self
-                                .node
-                                .borrow_mut()
-                                .apply_sync_message_with_ingest_context_and_encoded_len(
-                                    other,
-                                    Some(*ingest_context),
-                                    received.encoded_len,
-                                )?;
+                            let responses = match other {
+                                SyncMessage::CommitUnit { tx, versions }
+                                    if ingest_context.edge_authority
+                                        && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+                                {
+                                    if tx.kind == TxKind::Mergeable {
+                                        peer.ingest_edge_mergeable_commit_unit(
+                                            &mut self.node.borrow_mut(),
+                                            tx,
+                                            versions,
+                                            tick_now_ms,
+                                        )?
+                                    } else {
+                                        self.node
+                                            .borrow_mut()
+                                            .ingest_relay_commit_unit(tx, versions)?;
+                                        Vec::new()
+                                    }
+                                }
+                                other => self
+                                    .node
+                                    .borrow_mut()
+                                    .apply_sync_message_with_ingest_context_and_encoded_len(
+                                        other,
+                                        Some(*ingest_context),
+                                        received.encoded_len,
+                                    )?,
+                            };
                             if let Some(tx_id) = write_state_tx_id {
                                 notify_write_state_waiters(&self.write_state_waiters, tx_id);
                             }

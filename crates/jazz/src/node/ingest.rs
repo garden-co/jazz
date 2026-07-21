@@ -550,6 +550,7 @@ where
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
+            edge_authority: true,
         });
         let mut updates = self.ingest_edge_authority_mergeable_commit_unit_once(
             tx,
