@@ -3099,6 +3099,51 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("delivers packed reset rows with the same public shape as legacy decode when native batches include internal fields", () => {
+    const chunk = {
+      type: "delta",
+      reset: true,
+      settled: true,
+      delta: encodeSubscriptionDelta({
+        added: [
+          {
+            table: "todos",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000123"),
+            title: "packed reset public row",
+            txTime: 123,
+          },
+        ],
+        updated: [],
+        removed: [],
+      }),
+    };
+    const runtime = runtimeWithNativeSubscriptionChunk(chunk);
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+      deltas.push(delta);
+    });
+
+    expect(deltas).toHaveLength(1);
+    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    expect(decoded).toEqual([
+      {
+        kind: 0,
+        id: "00000000-0000-0000-0000-000000000123",
+        index: 0,
+        row: {
+          id: "00000000-0000-0000-0000-000000000123",
+          values: [{ type: "Text", value: "packed reset public row" }],
+        },
+      },
+    ]);
+    expect(decoded[0]?.kind).toBe(0);
+    if (decoded[0]?.kind !== 0) throw new Error("expected added row");
+    expect(Object.keys(decoded[0].row)).toEqual(["id", "values"]);
+    runtime.close();
+  });
+
   it("encodes range id comparisons into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -4268,6 +4313,7 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
         };
         const runtime = runtimeWithNativeSubscriptionChunk(chunk);
         let callbackCount = 0;
+        let addedCount = 0;
         const handle = runtime.createSubscription(
           JSON.stringify({ table: "todos" }),
           null,
@@ -4277,10 +4323,12 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
         const started = performance.now();
         runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
           subscriptionFrameBuffersForTest(delta);
+          addedCount += delta.addedCount;
           callbackCount += 1;
         });
         const ms = performance.now() - started;
         expect(callbackCount).toBe(1);
+        expect(addedCount).toBe(rows.length);
         measurements.push({ label, rows: rows.length, ms });
         runtime.close();
       };
@@ -5395,8 +5443,8 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
 }
 
 function encodeSubscriptionDelta(delta: {
-  added: Array<{ table: string; rowId: Uint8Array; title: string }>;
-  updated: Array<{ table: string; rowId: Uint8Array; title: string }>;
+  added: EncodedTestRow[];
+  updated: EncodedTestRow[];
   removed: Array<{ table: string; rowId: Uint8Array }>;
 }): Uint8Array {
   const writer = new PostcardWriter();
