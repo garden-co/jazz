@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 
 const pollInterval = 5_000;
 
+export type ConnectivityStatus = "checking" | "online" | "offline";
+
+export function connectivityStatus(
+  browserOnline: boolean,
+  apiReachable: boolean | undefined,
+): ConnectivityStatus {
+  if (!browserOnline || apiReachable === false) return "offline";
+  return apiReachable === true ? "online" : "checking";
+}
+
 export async function checkApiReachable(request: typeof fetch = fetch) {
   try {
     return (await request("/api/health", { cache: "no-store" })).ok;
@@ -41,8 +51,7 @@ export function useConnectivity() {
 
   return {
     browserOnline,
-    apiReachable,
-    online: browserOnline && apiReachable !== false,
+    status: connectivityStatus(browserOnline, apiReachable),
     reportApiReachable: setApiReachable,
   };
 }

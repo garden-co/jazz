@@ -15,7 +15,7 @@ import {
 import { stableObjectId } from "./object-id.js";
 import { useConnectivity } from "./use-connectivity.js";
 import { useTimelineActions } from "./use-timeline-actions.js";
-import { useTimelineHydration } from "./use-timeline-hydration.js";
+import { useTimelineProjection } from "./use-timeline-projection.js";
 import {
   AppFooter,
   AppHeader,
@@ -30,7 +30,8 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const [loadingThreadUris, setLoadingThreadUris] = useState(new Set<string>());
   const [localTimelineLimit, setLocalTimelineLimit] = useState(initialTimelineLimit);
   const [includeThreadDetails, setIncludeThreadDetails] = useState(false);
-  const { browserOnline, online, reportApiReachable } = useConnectivity();
+  const { browserOnline, status: connectivity, reportApiReachable } = useConnectivity();
+  const online = connectivity === "online";
   // Keep the feed mounted while an included Jazz query briefly recomputes.
   const lastTimelineRows = useRef<TimelineEntryView[]>([]);
 
@@ -54,13 +55,15 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     loadingMore,
     initialLoading,
     loadMoreRef,
-  } = useTimelineHydration({
+  } = useTimelineProjection({
     did,
-    // The BFF cursor is only used after every currently cached Jazz root is visible.
-    itemCount: localTimelineWindow.hasMore || localQueryRefreshing ? 0 : timelineItems.length,
+    itemCount: timelineItems.length,
     hasLocalRows: visibleTimelineRows.length > 0,
+    cachedRowsRemaining: localTimelineWindow.hasMore,
+    localQueryRefreshing,
     localQueryReady: timelineRows !== undefined,
     browserOnline,
+    revealCachedRows: () => setLocalTimelineLimit(nextTimelineLimit),
     reportApiReachable,
   });
   const hasMore = localTimelineWindow.hasMore || localQueryRefreshing || hasMoreRemoteRows;
@@ -76,24 +79,14 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     }
   }, [includeThreadDetails, timelineRows?.length]);
 
-  useEffect(() => {
-    const sentinel = loadMoreRef.current;
-    if (!sentinel || !localTimelineWindow.hasMore || timelineItems.length === 0) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        setLocalTimelineLimit(nextTimelineLimit);
-      }
-    }, { rootMargin: "500px" });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [localTimelineWindow.hasMore, timelineItems.length]);
   const { flushOperations, publishPost, toggleReaction } = useTimelineActions(
     did,
     browserOnline,
     reportApiReachable,
   );
   const visiblePendingOperations = (pending ?? []).filter((operation) =>
-    operation.state === "failed" || (operation.state === "queued" && (!online || Boolean(operation.error))),
+    operation.state === "failed"
+      || (operation.state === "queued" && (connectivity === "offline" || Boolean(operation.error))),
   );
   const [pendingObjectIds, setPendingObjectIds] = useState({
     posts: new Set<string>(),
@@ -179,6 +172,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
       newEntryPostIds={newEntryPostIds}
       loadingThreadUris={loadingThreadUris}
       online={online}
+      connectivity={connectivity}
       onToggleReaction={toggleReaction}
       onReply={publishReply}
       onLoadThread={loadThread}

@@ -26,6 +26,7 @@ import type {
   TimelineItem,
   TimelinePostNode,
 } from "./timeline-data.js";
+import type { ConnectivityStatus } from "./use-connectivity.js";
 
 export function LoadingScreen({ label = "Opening your local timeline…" }: { label?: string }) {
   return (
@@ -564,6 +565,7 @@ export function TimelineFeed({
   newEntryPostIds,
   loadingThreadUris,
   online,
+  connectivity,
   onToggleReaction,
   onReply,
   onLoadThread,
@@ -573,6 +575,7 @@ export function TimelineFeed({
   hasMore: boolean;
   loadingMore: boolean;
   loadMoreRef: RefObject<HTMLDivElement | null>;
+  connectivity: ConnectivityStatus;
 }) {
   const postState = {
     pendingLikePostIds,
@@ -592,13 +595,15 @@ export function TimelineFeed({
           <div className="timeline-title-row">
             <h2 id="timeline-title">Latest posts</h2>
             <Badge
-              color={online ? "jade" : "gray"}
+              color={connectivity === "online" ? "jade" : "gray"}
               variant="soft"
               role="status"
               aria-live="polite"
             >
               <StatusIcon />
-              {online ? "Online" : "Offline"}
+              {connectivity === "checking"
+                ? "Checking"
+                : connectivity === "online" ? "Online" : "Offline"}
             </Badge>
           </div>
         </div>
