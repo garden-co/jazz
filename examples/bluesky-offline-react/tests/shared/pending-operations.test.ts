@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decodeOperation, parseOperationBatch } from "../../shared/pending-operations.js";
+import {
+  decodeOperation,
+  operationRow,
+  parseOperationBatch,
+} from "../../shared/pending-operations.js";
 
 describe("queued operations", () => {
   const post = {
@@ -49,5 +53,16 @@ describe("queued operations", () => {
     expect(() => decodeOperation({ ...post, kind: "delete" })).toThrow("Unsupported operation kind");
     expect(parseOperationBatch([post], "did:plc:alice")).toHaveLength(1);
     expect(() => parseOperationBatch([post], "did:plc:bob")).toThrow("owner mismatch");
+  });
+
+  it("keeps the Jazz object ID out of pending-operation row data", () => {
+    expect(operationRow(decodeOperation(post))).toEqual({
+      ownerDid: "did:plc:alice",
+      kind: "post",
+      rkey: "3mreply",
+      payload: post.payload,
+      state: "queued",
+      createdAt: "2026-07-16T18:00:00.000Z",
+    });
   });
 });

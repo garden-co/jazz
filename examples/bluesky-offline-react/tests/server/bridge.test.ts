@@ -249,6 +249,28 @@ describe("ATProto to Jazz projection", () => {
     await expect(pagination).resolves.toEqual({ cursor: "oldest", hasMore: true, count: 0 });
   });
 
+  it("starts a fresh head read after the AppView response even when Jazz projection is blocked", async () => {
+    const fetchTimelineFeed = vi.fn()
+      .mockResolvedValueOnce({ feed: [], cursor: "first" })
+      .mockResolvedValueOnce({ feed: [], cursor: "second" });
+    const { bridge } = await loadBridge({
+      api: bluesky({ fetchTimelineFeed }),
+      writer: projectionWriter({
+        projectTimelinePage: vi.fn(() => new Promise(() => undefined)),
+      }),
+    });
+    const session = { fetchHandler: vi.fn() };
+
+    await expect(bridge.projectTimelinePage("did:plc:viewer", session)).resolves.toMatchObject({
+      cursor: "first",
+    });
+    await expect(bridge.projectTimelinePage("did:plc:viewer", session)).resolves.toMatchObject({
+      cursor: "second",
+    });
+
+    expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a background projection failure", async () => {
     const error = new Error("projection exploded");
     const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
