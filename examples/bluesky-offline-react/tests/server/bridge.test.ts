@@ -271,6 +271,40 @@ describe("ATProto to Jazz projection", () => {
     expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
   });
 
+  it("serialises Jazz projection and coalesces repeated head refreshes", async () => {
+    let releaseFirstProjection!: () => void;
+    const firstProjection = new Promise<void>((resolve) => {
+      releaseFirstProjection = resolve;
+    });
+    const firstFeed = [{ marker: "first" }];
+    const latestFeed = [{ marker: "latest" }];
+    const projectTimelinePage = vi.fn()
+      .mockImplementationOnce(() => firstProjection)
+      .mockResolvedValue(undefined);
+    const { bridge } = await loadBridge({
+      api: bluesky({
+        fetchTimelineFeed: vi.fn()
+          .mockResolvedValueOnce({ feed: firstFeed, cursor: "first" })
+          .mockResolvedValueOnce({ feed: latestFeed, cursor: "latest" }),
+      }),
+      writer: projectionWriter({ projectTimelinePage }),
+    });
+    const session = { fetchHandler: vi.fn() };
+
+    await bridge.projectTimelinePage("did:plc:viewer", session);
+    await vi.waitFor(() => expect(projectTimelinePage).toHaveBeenCalledOnce());
+    await bridge.projectTimelinePage("did:plc:viewer", session);
+
+    expect(projectTimelinePage).toHaveBeenCalledOnce();
+    releaseFirstProjection();
+    await vi.waitFor(() => expect(projectTimelinePage).toHaveBeenCalledTimes(2));
+    expect(projectTimelinePage).toHaveBeenLastCalledWith(
+      "did:plc:viewer",
+      latestFeed,
+      undefined,
+    );
+  });
+
   it("reports a background projection failure", async () => {
     const error = new Error("projection exploded");
     const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
