@@ -3769,7 +3769,7 @@ where
             CommitUnitTrust::TrustedBackend => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
             }
-            CommitUnitTrust::Session => PeerState::for_author(identity),
+            CommitUnitTrust::Session => PeerState::client_link(identity),
         };
         self.accept_subscriber_with_peer(transport, identity, trust, cursor, peer, false)
     }
@@ -4893,7 +4893,7 @@ where
         let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
             return None;
         };
-        let replacement = PeerState::for_author(peer.link_identity());
+        let replacement = PeerState::client_link(peer.link_identity());
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
         })
@@ -5709,7 +5709,7 @@ where
                             let responses = match other {
                                 SyncMessage::CommitUnit { tx, versions }
                                     if ingest_context.edge_authority
-                                        && matches!(peer.role(), PeerRole::EdgeClient { .. }) =>
+                                        && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
                                 {
                                     if tx.kind == TxKind::Mergeable {
                                         peer.ingest_edge_mergeable_commit_unit(

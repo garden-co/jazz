@@ -55,7 +55,7 @@ impl DifferentialOracle {
         let mut peers = Vec::new();
         let mut rows = Vec::new();
         for shape in &shapes {
-            let mut peer = PeerState::for_author(shape.identity);
+            let mut peer = PeerState::client_link(shape.identity);
             let update = peer
                 .rehydrate_query(core, &shape.shape, &shape.binding)
                 .unwrap_or_else(|err| {
@@ -76,7 +76,7 @@ impl DifferentialOracle {
             binding_id: aggregate_binding.binding_id(),
             read_view: Default::default(),
         };
-        let mut aggregate_peer = PeerState::for_author(user(0xa1));
+        let mut aggregate_peer = PeerState::client_link(user(0xa1));
         let aggregate_initial = aggregate_peer
             .rehydrate_query(core, &aggregate_shape, &aggregate_binding)
             .unwrap_or_else(|err| {
@@ -265,7 +265,7 @@ fn m3_differential_remote_genuinely_empty_reset_erases() {
     let shape = created_by_shape(&schema);
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let identity = user(0xa1);
-    let mut peer = PeerState::for_author(identity);
+    let mut peer = PeerState::client_link(identity);
 
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let mut maintained_rows = BTreeSet::new();

@@ -82,7 +82,7 @@ impl SyncBench {
             _dirs: dirs,
             core_to_edge: PeerState::new(),
             edge_to_worker: PeerState::new(),
-            worker_to_ui: PeerState::for_author(ui_author),
+            worker_to_ui: PeerState::client_link(ui_author),
             ui_author,
             ui_owner: ui_author,
             other_owner: AuthorId::from_bytes([8; 16]),
