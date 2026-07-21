@@ -66,6 +66,11 @@ admission/session layer and must not be client-supplied query bindings. Predicat
 forms outside the supported direct-evaluation subset, such as range and null
 checks, deny until explicitly supported.
 
+Wire cadence: session claims travel upstream once per connection and again
+only when the claim set actually changes; identical re-applications by client
+layers must not produce wire messages. The server holds per-connection claim
+state, so per-message claims are neither required nor expected.
+
 At the public policy DSL boundary, scalar session-claim checks lower into that
 same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
 to claim/literal equality, and `SessionInList { path: ["claims", "role"],
