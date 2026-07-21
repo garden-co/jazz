@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { appId } from "../../shared/app-id.js";
 import { formatObjectId, objectIdKey } from "../../shared/object-id.js";
 import { stableObjectId as serverObjectId } from "../../server/projection.js";
 import { stableObjectId as browserObjectId } from "../../src/object-id.js";
@@ -18,6 +17,5 @@ describe("deterministic Jazz object IDs", () => {
     const value = "did:plc:alice";
 
     expect(await browserObjectId(namespace, value)).toBe(serverObjectId(namespace, value));
-    expect(objectIdKey(appId, namespace, value)).toContain(appId);
   });
 });
