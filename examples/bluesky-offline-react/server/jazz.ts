@@ -1,9 +1,9 @@
 import { createJazzContext } from "jazz-tools/backend";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { appId } from "../app-id.js";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
+import { appId } from "../shared/app-id.js";
+import { app } from "../shared/schema.js";
+import permissions from "./permissions.js";
 
 const jazzDbPath = "./data/jazz.db";
 mkdirSync(dirname(jazzDbPath), { recursive: true });

@@ -8,12 +8,12 @@ import {
   AppBskyFeedPost,
   AppBskyRichtextFacet,
 } from "@atproto/api";
-import type { Operation, PostOperation, ReactionOperation } from "../operations.js";
-import { decodeOperation, encodeOperationPayload } from "../operations.js";
-import { app } from "../schema.js";
+import type { Operation, PostOperation, ReactionOperation } from "../shared/operations.js";
+import { decodeOperation, encodeOperationPayload } from "../shared/operations.js";
+import { app } from "../shared/schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
-import { appId } from "../app-id.js";
-import { formatObjectId, objectIdKey } from "../object-id.js";
+import { appId } from "../shared/app-id.js";
+import { formatObjectId, objectIdKey } from "../shared/object-id.js";
 import type { db } from "./jazz.js";
 
 type ProjectionDatabase = typeof db;

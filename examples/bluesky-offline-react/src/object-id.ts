@@ -1,5 +1,5 @@
-import { formatObjectId, objectIdKey } from "../object-id.js";
-import { appId } from "../app-id.js";
+import { formatObjectId, objectIdKey } from "../shared/object-id.js";
+import { appId } from "../shared/app-id.js";
 
 const objectIds = new Map<string, Promise<string>>();
 

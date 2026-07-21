@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../shared/schema.js";
 
 type ProfileRow = s.RowOf<typeof app.profiles>;
 type PostRow = s.RowOf<typeof app.posts>;

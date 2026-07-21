@@ -38,16 +38,16 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `server/bluesky.ts`             | Read from AppView; write to the PDS                                                           | No                          | Yes                                 |
 | `server/bridge.ts`              | Fetch authoritative reads, apply ordered PDS writes, and hand their results to the projection | Through its projection      | Yes                                 |
 | `server/projection.ts`          | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                         | Yes                                 |
-| `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
-| `operations.ts`                 | Validate the shared queued-operation contract                                                 | Describes intention rows    | Describes source operations         |
+| `shared/schema.ts`              | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
+| `shared/operations.ts`          | Validate the shared queued-operation contract                                                 | Describes intention rows    | Describes source operations         |
 | `src/Timeline.tsx`              | Compose the reactive view and local-first commands                                            | Yes                         | Only calls trigger/reconcile routes |
 | `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint                                                        | No                          | Knows only trigger metadata         |
 | `src/use-outbox.ts`             | Serialise retries of queued intentions                                                        | Yes                         | Calls the reconcile route           |
 | `src/timeline-model.ts`         | Pure rows-to-thread view model                                                                | No                          | No                                  |
 | `src/TimelineView.tsx`          | Presentational React components                                                               | No                          | No                                  |
-| `pwa.ts`                        | Generate the install manifest and service worker                                              | No                          | Keeps API traffic network-only      |
+| `vite/pwa.ts`                   | Generate the install manifest and service worker                                              | No                          | Keeps API traffic network-only      |
 
-Server tests live under `server/tests/`, leaving the runtime path above uncluttered.
+Tests live under `tests/`, grouped by the boundary they exercise: `server`, `client`, `shared`, or `tooling`. This keeps runtime modules uncluttered and makes each test's scope visible from its path.
 
 The BFF exposes three application-level operations:
 

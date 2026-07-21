@@ -1,9 +1,9 @@
 import { TID } from "@atproto/common-web";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { useEffect, useRef, useState } from "react";
-import { app } from "../schema.js";
-import { parseAtUri } from "../at-uri.js";
-import { decodeOperation, encodeOperationPayload, type Operation } from "../operations.js";
+import { app } from "../shared/schema.js";
+import { parseAtUri } from "../shared/at-uri.js";
+import { decodeOperation, encodeOperationPayload, type Operation } from "../shared/operations.js";
 import {
   initialTimelineLimit,
   nextTimelineLimit,

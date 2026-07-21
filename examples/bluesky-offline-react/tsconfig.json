@@ -10,5 +10,5 @@
     "moduleResolution": "Bundler",
     "types": ["vite/client"]
   },
-  "include": ["src", "schema.ts", "permissions.ts", "vite.config.ts"]
+  "include": ["src", "shared", "vite", "vite.config.ts"]
 }

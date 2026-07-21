@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
-import { parseAtUri } from "../at-uri.js";
-import { InvalidOperationError, parseOperationBatch } from "../operations.js";
+import { parseAtUri } from "../shared/at-uri.js";
+import { InvalidOperationError, parseOperationBatch } from "../shared/operations.js";
 import {
   bffSessionCookie,
   createBffSession,

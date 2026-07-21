@@ -2,8 +2,8 @@ import { defineConfig, loadEnv } from "vite";
 import babel from "@rolldown/plugin-babel";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import { jazzPlugin } from "jazz-tools/dev/vite";
-import { appId } from "./app-id.js";
-import { pwaPlugin } from "./pwa.js";
+import { appId } from "./shared/app-id.js";
+import { pwaPlugin } from "./vite/pwa.js";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");

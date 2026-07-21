@@ -2,7 +2,7 @@ import { Button, Card, Spinner, TextField } from "@radix-ui/themes";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { appId } from "../app-id.js";
+import { appId } from "../shared/app-id.js";
 import { SuccessIcon } from "./Icons.js";
 import { Timeline } from "./Timeline.js";
 import { LoadingScreen } from "./TimelineView.js";

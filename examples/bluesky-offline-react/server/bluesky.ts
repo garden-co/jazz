@@ -1,5 +1,5 @@
 import { Agent, XRPCError } from "@atproto/api";
-import { parseAtUri } from "../at-uri.js";
+import { parseAtUri } from "../shared/at-uri.js";
 import type { OAuthSession } from "./auth.js";
 
 export type SessionFetcher = Pick<OAuthSession, "fetchHandler">;
