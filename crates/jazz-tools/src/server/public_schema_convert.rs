@@ -647,17 +647,6 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
-    convert_policy_with_mode(schema, table_schema, table, path, expr, true)
-}
-
-fn convert_policy_with_mode(
-    schema: &Schema,
-    table_schema: &TableSchema,
-    table: &TableName,
-    path: &str,
-    expr: &PolicyExpr,
-    native_select_inherits: bool,
-) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -675,7 +664,6 @@ fn convert_policy_with_mode(
                     &format!("{path}.And[{index}]"),
                     query,
                     expr,
-                    native_select_inherits,
                 )?;
             }
             Ok(query)
@@ -683,13 +671,12 @@ fn convert_policy_with_mode(
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
             for (index, expr) in exprs.iter().enumerate() {
-                let branch = convert_policy_with_mode(
+                let branch = convert_policy(
                     schema,
                     table_schema,
                     table,
                     &format!("{path}.Or[{index}]"),
                     expr,
-                    native_select_inherits,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -710,7 +697,6 @@ fn convert_policy_with_mode(
             *operation,
             via_column,
             *max_depth,
-            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -776,7 +762,6 @@ fn append_policy_clause(
     path: &str,
     query: Query,
     expr: &PolicyExpr,
-    native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::Inherits {
@@ -792,7 +777,6 @@ fn append_policy_clause(
             *operation,
             via_column,
             *max_depth,
-            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -920,13 +904,12 @@ fn append_inherited_referencing_policy(
     match source_filter {
         Ok(source_filter) => Ok(query.join_via(source_table, via_column, [source_filter])),
         Err(_) if policy_requires_branch(source_policy) => {
-            let source_query = convert_policy_with_mode(
+            let source_query = convert_policy(
                 schema,
                 source_schema,
                 &source_table_name,
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
-                false,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -1757,8 +1740,7 @@ fn append_inherited_policy(
     query: Query,
     operation: Operation,
     via_column: &str,
-    max_depth: Option<usize>,
-    native_select_inherits: bool,
+    _max_depth: Option<usize>,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -1783,26 +1765,31 @@ fn append_inherited_policy(
             format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
         )
     })?;
-    let parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
+    let _parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
         err(
             format!("$.{}.{}", table.as_str(), path),
             format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
-    if operation == Operation::Select
-        && native_select_inherits
-        && policy_select_expansion_requires_native_inherits(
-            schema,
-            parent_schema,
-            parent_table,
-            parent_policy,
-        )
-    {
-        return Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)));
-    }
-    if operation != Operation::Select || (native_select_inherits && max_depth.is_some()) {
-        return Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)));
-    }
+    // Native SELECT inherits now lowers through the derivation-collapse path
+    // documented in crates/jazz/SPEC/14_lowering_to_groove.md section 14.7.
+    // The expansion fallback predates that and multiplies per-derivation work;
+    // keep the helper code below as dead fallback pending removal.
+    Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)))
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn append_inherited_policy_expanded_fallback(
+    schema: &Schema,
+    parent_schema: &TableSchema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    parent_table: &TableName,
+    via_column: &str,
+    parent_policy: &PolicyExpr,
+) -> Result<Query, SchemaConversionError> {
     let parent_filter = convert_policy_predicate(
         parent_table,
         &format!("{path}.Inherits[{parent_table}]"),
@@ -1813,23 +1800,13 @@ fn append_inherited_policy(
             Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
         }
         Err(_) if policy_requires_branch(parent_policy) => {
-            let parent_query = convert_policy_with_mode(
+            let parent_query = convert_policy(
                 schema,
                 parent_schema,
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
-                false,
             )?;
-            if native_select_inherits
-                && PolicyBranch::alternatives_from_query(parent_query.clone())
-                    .iter()
-                    .any(|branch| !branch.reachable.is_empty())
-            {
-                return Ok(
-                    query.inherits_operation(via_column, convert_inherits_operation(operation))
-                );
-            }
             append_inherited_policy_branches(
                 table,
                 path,
@@ -1843,6 +1820,7 @@ fn append_inherited_policy(
     }
 }
 
+#[allow(dead_code)]
 fn policy_select_expansion_requires_native_inherits(
     schema: &Schema,
     table_schema: &TableSchema,
@@ -2865,7 +2843,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_unbounded_inherited_select_when_parent_policy_is_branchable() {
+    fn preserves_unbounded_inherited_select_as_native_atom() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("folders")
@@ -2899,20 +2877,10 @@ mod tests {
             .unwrap();
         let policy = documents.read_policy.as_ref().unwrap();
         assert!(policy.filters.is_empty());
-        assert_eq!(policy.joins.len(), 1);
-        assert!(policy.inherits.is_empty());
-        let join = &policy.joins[0];
-        assert_eq!(join.table, "folders");
-        assert_eq!(join.on_column, "id");
-        assert_eq!(join.target, JoinTarget::RowId);
-        assert_eq!(join.source_column.as_deref(), Some("folder_id"));
-        assert_eq!(
-            join.filters,
-            vec![Predicate::Contains(
-                Operand::Column("owners".to_owned()),
-                Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
-            )]
-        );
+        assert!(policy.joins.is_empty());
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "folder_id");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
     }
 
     #[test]
@@ -3373,7 +3341,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_inherited_select_branch_with_parent_column_join() {
+    fn preserves_inherited_select_branch_parent_policy_as_native_atom() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
             .table(
@@ -3421,14 +3389,15 @@ mod tests {
             .find(|table| table.name == "reactions")
             .unwrap();
         let policy = reactions.read_policy.as_ref().unwrap();
-        assert_eq!(policy.policy_branches.len(), 1);
+        assert!(policy.policy_branches.is_empty());
         assert!(policy.joins.is_empty());
-        assert!(policy.inherits.is_empty());
-        assert_eq!(policy.policy_branches[0].joins.len(), 1);
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "messageId");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
     }
 
     #[test]
-    fn converts_nested_inherited_select_branch_with_composed_source_lookup() {
+    fn preserves_nested_inherited_select_branch_parent_policy_as_native_atom() {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
             .table(
@@ -3476,10 +3445,11 @@ mod tests {
             .find(|table| table.name == "strokes")
             .unwrap();
         let policy = strokes.read_policy.as_ref().unwrap();
-        assert_eq!(policy.policy_branches.len(), 1);
+        assert!(policy.policy_branches.is_empty());
         assert!(policy.joins.is_empty());
-        assert!(policy.inherits.is_empty());
-        assert_eq!(policy.policy_branches[0].joins.len(), 1);
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "canvasId");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
     }
 
     #[test]
