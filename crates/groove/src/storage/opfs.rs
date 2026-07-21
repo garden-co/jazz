@@ -32,6 +32,12 @@ fn browser_fidelity_options() -> BTreeOptions {
     BTreeOptions {
         pin_internal_pages: true,
         read_coalesce_pages: 4,
+        // One tree (and therefore one cache budget) per open db. The library
+        // default is a conservative 32 MiB; browsers hold this much page cache
+        // comfortably, and a working set that fits eliminates both eviction
+        // scans and page reloads for bulk workloads (profiled on the todo
+        // stress test, where the grown store far exceeded the 32 MiB budget).
+        cache_bytes: 128 * 1024 * 1024,
         ..Default::default()
     }
 }
