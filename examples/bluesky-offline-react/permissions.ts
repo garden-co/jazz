@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "./schema.js";
 
 export default s.definePermissions(app, ({ policy, session }) => {
   // oauthSessions intentionally has no client policies. Only the backend can access it.
