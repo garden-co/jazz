@@ -1,6 +1,6 @@
 import { useDb } from "jazz-tools/react";
 import { useEffect, useRef } from "react";
-import { app } from "../shared/schema.js";
+import { app } from "../schema.js";
 import { singleFlight } from "./single-flight.js";
 
 const retryInterval = 15_000;

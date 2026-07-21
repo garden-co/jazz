@@ -4,7 +4,7 @@ import type {
 } from "@atproto/oauth-client-node";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Db } from "jazz-tools";
-import { app } from "../shared/schema.js";
+import { app } from "../schema.js";
 
 type EncryptedSession = {
   v: 1;

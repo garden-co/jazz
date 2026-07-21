@@ -10,7 +10,7 @@ import {
 } from "@atproto/api";
 import type { Operation, PostOperation, ReactionOperation } from "../shared/operations.js";
 import { decodeOperation, encodeOperationPayload } from "../shared/operations.js";
-import { app } from "../shared/schema.js";
+import { app } from "../schema.js";
 import type { QueryBuilder, TableProxy } from "jazz-tools/backend";
 import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";
 import type { db } from "./jazz.js";

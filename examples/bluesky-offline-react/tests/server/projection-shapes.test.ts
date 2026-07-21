@@ -1,7 +1,7 @@
 import type { AppBskyFeedDefs } from "@atproto/api";
 import { describe, expect, it, vi } from "vitest";
 import { createProjection, stableObjectId } from "../../server/projection.js";
-import { app } from "../../shared/schema.js";
+import { app } from "../../schema.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 const testCid = "bafkreie7q3iidccmpvszul7kudcvvuavuo7u6gzlbobczuk5nqk3b4akba";

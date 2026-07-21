@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { app } from "../../shared/schema.js";
+import { app } from "../../schema.js";
 import {
   createBffSessionStore,
   createEncryptedValueStore,

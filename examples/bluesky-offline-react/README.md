@@ -38,7 +38,7 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `server/bluesky.ts`             | Read from AppView; write to the PDS                                                           | No                          | Yes                                 |
 | `server/bridge.ts`              | Fetch authoritative reads, apply ordered PDS writes, and hand their results to the projection | Through its projection      | Yes                                 |
 | `server/projection.ts`          | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                         | Yes                                 |
-| `shared/schema.ts`              | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
+| `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
 | `shared/operations.ts`          | Validate the shared queued-operation contract                                                 | Describes intention rows    | Describes source operations         |
 | `src/Timeline.tsx`              | Compose the reactive view and local-first commands                                            | Yes                         | Only calls trigger/reconcile routes |
 | `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint                                                        | No                          | Knows only trigger metadata         |

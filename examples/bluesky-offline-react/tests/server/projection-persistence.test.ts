@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createProjection } from "../../server/projection.js";
 import type { Operation } from "../../shared/operations.js";
-import { app } from "../../shared/schema.js";
+import { app } from "../../schema.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 

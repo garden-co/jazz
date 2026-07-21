@@ -7,7 +7,7 @@ import { createJazzContext } from "jazz-tools/backend";
 import type { PostOperation, ReactionOperation } from "../../shared/operations.js";
 import permissions from "../../server/permissions.js";
 import { stableObjectId } from "../../server/projection.js";
-import { app } from "../../shared/schema.js";
+import { app } from "../../schema.js";
 
 type BlueskyMocks = ReturnType<typeof bluesky>;
 type WriterMocks = ReturnType<typeof projectionWriter>;

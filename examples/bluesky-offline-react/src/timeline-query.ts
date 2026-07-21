@@ -1,4 +1,4 @@
-import { app } from "../shared/schema.js";
+import { app } from "../schema.js";
 
 export function timelineQuery(ownerDid: string, includeThreadDetails = true) {
   const quotedPost = app.posts.include({
