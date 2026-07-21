@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Operation } from "../operations.js";
-import { app } from "../schema.js";
-import { stableObjectId } from "./projection-model.js";
-import { createProjectionWriter, mergeProfileProjection } from "./projection-writer.js";
+import type { Operation } from "../../operations.js";
+import { app } from "../../schema.js";
+import {
+  createProjection,
+  mergeProfileProjection,
+  stableObjectId,
+} from "../projection.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 
@@ -23,7 +26,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    const writer = createProjectionWriter(database);
+    const writer = createProjection(database);
     const profile = {
       did: "did:plc:viewer",
       handle: "viewer.test",
@@ -49,7 +52,7 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    await expect(createProjectionWriter(database).projectProfile({
+    await expect(createProjection(database).projectProfile({
       did: "did:plc:viewer",
       handle: "viewer.test",
       indexedAt: "2026-07-17T08:00:00.000Z",
@@ -102,7 +105,7 @@ describe("durable reaction projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    const writer = createProjectionWriter(database);
+    const writer = createProjection(database);
     const intents = await writer.loadReactionIntents(operation.ownerDid);
     const post = {
       id: stableObjectId("bluesky-post", operation.payload.subjectUri),
@@ -128,7 +131,7 @@ describe("durable reaction projection", () => {
     expect(database.delete.mock.calls.filter(([table]) => table === app.pendingOperations)).toHaveLength(0);
     expect(database.upsert.mock.calls.filter(([table]) => table === app.likes)).toHaveLength(0);
 
-    const restartedWriter = createProjectionWriter(database);
+    const restartedWriter = createProjection(database);
     const restoredIntents = await restartedWriter.loadReactionIntents(operation.ownerDid);
     await restartedWriter.projectTimelinePage(operation.ownerDid, [{ post: {
       uri: post.uri,
@@ -177,7 +180,7 @@ describe("durable reaction projection", () => {
       indexedAt: operation.createdAt,
       viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
     };
-    await createProjectionWriter(database).projectTimelinePage(
+    await createProjection(database).projectTimelinePage(
       operation.ownerDid,
       [{ post }, { post }],
       "next",
@@ -197,7 +200,7 @@ describe("projection writer API", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    expect(Object.keys(createProjectionWriter(database)).sort()).toEqual([
+    expect(Object.keys(createProjection(database)).sort()).toEqual([
       "completeOperation",
       "deactivateRepostTimelineEntries",
       "loadReactionIntents",
@@ -220,7 +223,7 @@ describe("operation completion", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    const writer = createProjectionWriter(database);
+    const writer = createProjection(database);
     const post: Operation = {
       id: "00000000-0000-0000-0000-000000000001",
       ownerDid: "did:plc:viewer",
@@ -270,7 +273,7 @@ describe("thread projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    const writer = createProjectionWriter(database);
+    const writer = createProjection(database);
     const thread = {
       rootPostId: "root-id",
       entries: [{
@@ -312,7 +315,7 @@ describe("progressive timeline projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     });
 
-    const projection = createProjectionWriter(database).projectTimelinePage(
+    const projection = createProjection(database).projectTimelinePage(
       "did:plc:viewer",
       [
         { post: post("did:plc:author1", "3m12345678921") },

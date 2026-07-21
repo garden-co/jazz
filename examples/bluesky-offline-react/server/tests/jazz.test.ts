@@ -13,11 +13,11 @@ describe("Jazz backend configuration", () => {
   it("refuses to start without Jazz sync credentials", async () => {
     vi.stubEnv("JAZZ_SERVER_URL", "");
     vi.stubEnv("BACKEND_SECRET", "secret");
-    await expect(import("./jazz.js")).rejects.toThrow("JAZZ_SERVER_URL is required");
+    await expect(import("../jazz.js")).rejects.toThrow("JAZZ_SERVER_URL is required");
 
     vi.resetModules();
     vi.stubEnv("JAZZ_SERVER_URL", "http://127.0.0.1:4200");
     vi.stubEnv("BACKEND_SECRET", "");
-    await expect(import("./jazz.js")).rejects.toThrow("BACKEND_SECRET is required");
+    await expect(import("../jazz.js")).rejects.toThrow("BACKEND_SECRET is required");
   });
 });

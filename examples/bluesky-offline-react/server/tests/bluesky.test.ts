@@ -9,7 +9,7 @@ import {
   putRecord,
   recordKey,
   type SessionFetcher,
-} from "./bluesky.js";
+} from "../bluesky.js";
 
 const agent = vi.hoisted(() => ({
   constructor: vi.fn(),

@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJazzContext } from "jazz-tools/backend";
-import type { PostOperation, ReactionOperation } from "../operations.js";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
-import { stableObjectId } from "./projection-model.js";
+import type { PostOperation, ReactionOperation } from "../../operations.js";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
+import { stableObjectId } from "../projection.js";
 
 type BlueskyMocks = ReturnType<typeof bluesky>;
 type WriterMocks = ReturnType<typeof projectionWriter>;
@@ -28,7 +28,7 @@ function mockedApi() {
   return moduleMocks.api;
 }
 
-vi.mock("./bluesky.js", () => ({
+vi.mock("../bluesky.js", () => ({
   deleteRecord: (...args: Parameters<BlueskyMocks["deleteRecord"]>) => mockedApi().deleteRecord(...args),
   fetchPostThread: (...args: Parameters<BlueskyMocks["fetchPostThread"]>) => mockedApi().fetchPostThread(...args),
   fetchProfile: (...args: Parameters<BlueskyMocks["fetchProfile"]>) => mockedApi().fetchProfile(...args),
@@ -39,15 +39,15 @@ vi.mock("./bluesky.js", () => ({
   recordKey: (...args: Parameters<BlueskyMocks["recordKey"]>) => mockedApi().recordKey(...args),
 }));
 
-vi.mock("./projection-writer.js", () => ({
-  createProjectionWriter: () => {
+vi.mock("../projection.js", () => ({
+  createProjection: () => {
     moduleMocks.createProjectionWriter();
     if (!moduleMocks.writer) throw new Error("Projection writer mock is not configured");
     return moduleMocks.writer;
   },
 }));
 
-vi.mock("./jazz.js", () => ({ db: {} }));
+vi.mock("../jazz.js", () => ({ db: {} }));
 
 function projectionWriter(overrides: Record<string, unknown> = {}) {
   return {
@@ -89,7 +89,7 @@ async function loadBridge(options: {
   const writer = options.writer ?? projectionWriter();
   moduleMocks.api = api;
   moduleMocks.writer = writer;
-  return { api, writer, bridge: await import("./bridge.js") };
+  return { api, writer, bridge: await import("../bridge.js") };
 }
 
 function postOperation(rkey: string, createdAt: string): PostOperation {
@@ -152,8 +152,8 @@ describe("ATProto to Jazz projection", () => {
     };
 
     const { createProjectionWriter } = await vi.importActual<
-      typeof import("./projection-writer.js")
-    >("./projection-writer.js");
+      typeof import("../projection.js")
+    >("../projection.js");
     moduleMocks.writer = createProjectionWriter(database);
     moduleMocks.api = bluesky({
       fetchProfile: vi.fn(async () => ({
@@ -165,7 +165,7 @@ describe("ATProto to Jazz projection", () => {
     });
 
     try {
-      const { projectTimelinePage } = await import("./bridge.js");
+      const { projectTimelinePage } = await import("../bridge.js");
       await projectTimelinePage(viewerDid, { fetchHandler: vi.fn() });
 
       await vi.waitFor(async () => {
@@ -186,7 +186,7 @@ describe("ATProto to Jazz projection", () => {
     moduleMocks.api = bluesky();
     moduleMocks.writer = projectionWriter();
 
-    await import("./bridge.js");
+    await import("../bridge.js");
 
     expect(moduleMocks.createProjectionWriter).toHaveBeenCalledOnce();
   });

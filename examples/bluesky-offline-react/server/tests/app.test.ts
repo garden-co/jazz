@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   restoreBffSession: vi.fn(),
 }));
 
-vi.mock("./auth.js", () => ({
+vi.mock("../auth.js", () => ({
   bffSessionCookie: "bff-session",
   createBffSession: vi.fn(),
   createJazzToken: mocks.createJazzToken,
@@ -19,13 +19,13 @@ vi.mock("./auth.js", () => ({
   restoreBffSession: mocks.restoreBffSession,
 }));
 
-vi.mock("./bridge.js", () => ({
+vi.mock("../bridge.js", () => ({
   projectThread: mocks.projectThread,
   projectTimelinePage: mocks.projectTimelinePage,
   reconcileOperations: mocks.reconcileOperations,
 }));
 
-import { createServer } from "./app.js";
+import { createServer } from "../app.js";
 
 const authenticatedSession = {
   did: "did:plc:alice",

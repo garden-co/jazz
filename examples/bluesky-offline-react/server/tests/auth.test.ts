@@ -26,11 +26,11 @@ vi.mock("jose", () => ({
   },
 }));
 
-vi.mock("./jazz.js", () => ({
+vi.mock("../jazz.js", () => ({
   db: {},
 }));
 
-vi.mock("./oauth-session-store.js", () => ({
+vi.mock("../oauth-session-store.js", () => ({
   createBffSessionStore: () => ({
     create: vi.fn(),
     invalidate: mocks.invalidate,
@@ -41,7 +41,7 @@ vi.mock("./oauth-session-store.js", () => ({
   createOAuthStateStore: () => ({}),
 }));
 
-vi.mock("./signing-keys.js", () => ({
+vi.mock("../signing-keys.js", () => ({
   jazzJwt: {
     algorithm: "ES256",
     issuer: "bluesky-offline-react",
@@ -53,7 +53,7 @@ vi.mock("./signing-keys.js", () => ({
   }),
 }));
 
-import { restoreBffSession } from "./auth.js";
+import { restoreBffSession } from "../auth.js";
 
 describe("BFF session restoration", () => {
   beforeEach(() => {

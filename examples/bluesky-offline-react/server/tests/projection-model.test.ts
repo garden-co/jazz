@@ -5,7 +5,7 @@ import {
   normalizeTimelineItem,
   stableObjectId,
   type PostView,
-} from "./projection-model.js";
+} from "../projection.js";
 
 function post(uri: string, indexedAt = "2026-07-15T08:00:01.000Z"): PostView {
   return {

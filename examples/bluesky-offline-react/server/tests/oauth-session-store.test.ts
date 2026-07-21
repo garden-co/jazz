@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { app } from "../schema.js";
+import { app } from "../../schema.js";
 import {
   createBffSessionStore,
   createEncryptedValueStore,
-} from "./oauth-session-store.js";
-import { withTestDatabase } from "./test-support/database.js";
+} from "../oauth-session-store.js";
+import { withTestDatabase } from "./support/database.js";
 
 describe("encrypted authentication storage", () => {
   beforeEach(() => vi.stubEnv("OAUTH_SESSION_ENCRYPTION_KEY", "00".repeat(32)));
