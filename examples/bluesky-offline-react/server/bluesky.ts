@@ -6,6 +6,19 @@ export type SessionFetcher = Pick<OAuthSession, "fetchHandler">;
 
 const timelinePageSize = 20;
 
+function retryableReadError(error: unknown) {
+  return error instanceof TypeError || (error instanceof XRPCError && error.status >= 500);
+}
+
+async function readFromAppView<T>(request: () => Promise<T>) {
+  try {
+    return await request();
+  } catch (error) {
+    if (!retryableReadError(error)) throw error;
+    return request();
+  }
+}
+
 export class OperationError extends Error {
   constructor(
     message: string,
@@ -16,25 +29,27 @@ export class OperationError extends Error {
 }
 
 export async function fetchTimelineFeed(session: SessionFetcher, cursor?: string) {
-  const response = await new Agent(session).getTimeline({
+  const response = await readFromAppView(() => new Agent(session).getTimeline({
     limit: timelinePageSize,
     ...(cursor ? { cursor } : {}),
-  });
+  }));
   return response.data;
 }
 
 export async function fetchViewerPosts(session: SessionFetcher, uris: string[]) {
-  const response = await new Agent(session).getPosts({ uris });
+  const response = await readFromAppView(() => new Agent(session).getPosts({ uris }));
   return response.data.posts;
 }
 
 export async function fetchPostThread(session: SessionFetcher, uri: string) {
-  const response = await new Agent(session).getPostThread({ uri, depth: 100, parentHeight: 100 });
+  const response = await readFromAppView(() =>
+    new Agent(session).getPostThread({ uri, depth: 100, parentHeight: 100 }),
+  );
   return response.data.thread;
 }
 
 export async function fetchProfile(actor: string, session: SessionFetcher) {
-  const response = await new Agent(session).getProfile({ actor });
+  const response = await readFromAppView(() => new Agent(session).getProfile({ actor }));
   return response.data;
 }
 
