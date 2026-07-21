@@ -123,6 +123,16 @@ pub struct OpfsBTree<F: SyncFile> {
     persisted_pages: u64,
     pages: OpfsMap<PageId, Vec<u8>>,
     blob_pages: OpfsSet<PageId>,
+    // Memoized page kinds for the eviction scans (None = header did not parse:
+    // blob/raw pages). Invariant: entries exist only for pages whose kind was
+    // read while clean, and the scans never consult kinds of pinned pages —
+    // so byte changes stay coherent without hot-path bookkeeping: in-place
+    // mutation requires dirtying (kinds of everything written are purged when
+    // the checkpoint un-pins it), WAL replay drops the entry when it replaces
+    // bytes, and removal/eviction drops it with the page. A stale or missing
+    // entry can only degrade victim choice, never correctness — any clean
+    // page is safe to evict.
+    page_kind_cache: OpfsMap<PageId, Option<PageKind>>,
     page_access_epoch: OpfsMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: OpfsSet<PageId>,
@@ -182,6 +192,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             persisted_pages,
             pages: OpfsMap::default(),
             blob_pages: OpfsSet::default(),
+            page_kind_cache: OpfsMap::default(),
             page_access_epoch: OpfsMap::default(),
             access_epoch: 0,
             dirty_pages: OpfsSet::default(),
@@ -508,7 +519,17 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.dirty_pages.clear();
         self.wal_pages.clear();
         self.freelist_dirty = false;
-        self.evict_pages_if_needed(None);
+        // The written pages' bytes changed while they were pinned (and pinned
+        // pages are never consulted by the eviction scans), so their memoized
+        // kinds are purged here in one deduplicated batch instead of once per
+        // write on the hot path.
+        for page_id in &dirty_page_ids {
+            self.page_kind_cache.remove(page_id);
+        }
+        for (page_id, _) in &freelist_pages {
+            self.page_kind_cache.remove(page_id);
+        }
+        self.evict_released_pages_if_needed(&dirty_page_ids);
         Ok(())
     }
 
@@ -1338,8 +1359,6 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; run_bytes];
         self.file.read_exact_at(offset, &mut raw)?;
-        let allowance = self.max_cached_pages() / 4;
-
         for i in 0..run_pages {
             let current_page_id = page_id + i as u64;
             if self.pages.contains_key(&current_page_id) {
@@ -1358,8 +1377,10 @@ impl<F: SyncFile> OpfsBTree<F> {
             };
             self.pages.insert(current_page_id, page_raw.to_vec());
             self.touch_page(current_page_id);
-            self.evict_pages_if_needed_with_allowance(Some(page_id), allowance);
         }
+        // One eviction pass per read run, not per inserted page: the transient
+        // overshoot is bounded by read_coalesce_pages, and a scan per insert
+        // multiplied a full-cache walk by every page of every coalesced read.
         self.evict_pages_if_needed(Some(page_id));
 
         Ok(())
@@ -1580,6 +1601,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 let _ = validate_page(&frame.raw, self.options.page_size)?;
                 self.blob_pages.remove(&frame.page_id);
             }
+            self.page_kind_cache.remove(&frame.page_id);
             self.pages.insert(frame.page_id, frame.raw);
             if frame.is_freelist {
                 self.dirty_pages.remove(&frame.page_id);
@@ -1667,7 +1689,11 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     // Marking an already-cached page dirty cannot grow the cache, so it must
-    // not trigger an eviction scan; only the insertion paths do that.
+    // not trigger an eviction scan; only the insertion paths do that. Nor does
+    // it invalidate the memoized page kind: the eviction scans never consult
+    // kinds of pinned pages, and the checkpoint that un-pins purges the kinds
+    // of everything it wrote — keeping this per-write path free of cache
+    // bookkeeping.
     fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
         self.dirty_pages.insert(page_id);
         self.touch_page(page_id);
@@ -1679,6 +1705,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
         self.dirty_pages.remove(&page_id);
         self.wal_pages.remove(&page_id);
+        self.page_kind_cache.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
         self.blob_pages.remove(&page_id);
         self.pages.remove(&page_id)
@@ -1903,17 +1930,14 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.evict_pages_if_needed_with_allowance(protected_page, 0);
     }
 
-    fn evict_pages_if_needed_with_allowance(
-        &mut self,
-        protected_page: Option<PageId>,
-        over_budget_allowance: usize,
-    ) {
+    // Eviction budget shared by the insertion-time scan and the checkpoint
+    // release path. Dirty and WAL-pinned pages cannot be evicted; they raise
+    // both the floor the scan can reach and the level at which it re-arms.
+    // Without this, a cache pinned above the trigger rescans on every call.
+    // The sum overcounts pages in both sets, which only makes the resting
+    // level conservative; those pages are unevictable either way.
+    fn eviction_target(&self, over_budget_allowance: usize) -> Option<usize> {
         let max_cached_pages = self.max_cached_pages();
-        // Dirty and WAL-pinned pages cannot be evicted; they raise both the
-        // floor the scan can reach and the level at which it re-arms. Without
-        // this, a cache pinned above the trigger rescans on every call. The
-        // sum overcounts pages in both sets, which only makes the resting
-        // level conservative; those pages are unevictable either way.
         let pinned = self.dirty_pages.len() + self.wal_pages.len();
         let steady_cached_pages = max_cached_pages.saturating_sub(max_cached_pages / 4).max(1);
         let resting_pages = steady_cached_pages.max(pinned.saturating_add(max_cached_pages / 8));
@@ -1921,19 +1945,122 @@ impl<F: SyncFile> OpfsBTree<F> {
             .max(resting_pages.saturating_add(max_cached_pages / 4))
             .saturating_add(over_budget_allowance);
         if self.pages.len() <= trigger {
-            return;
+            return None;
         }
-
-        let root_page_id = self.root_page_id;
         let target = self.pages.len().saturating_sub(resting_pages);
-        if target == 0 {
+        (target > 0).then_some(target)
+    }
+
+    // Memoized page-kind lookup + victim priority for one candidate. Parsing
+    // every cached page's header on every scan made eviction O(cache × scans)
+    // in header parses during bulk writes, hence the memoization. Takes the
+    // maps by field reference rather than `&mut self` so callers can evaluate
+    // candidates while iterating `self.pages`.
+    fn eviction_candidate(
+        kind_cache: &mut OpfsMap<PageId, Option<PageKind>>,
+        page_access_epoch: &OpfsMap<PageId, u64>,
+        options: &BTreeOptions,
+        page_id: PageId,
+        page: &[u8],
+    ) -> Option<(u8, u64, PageId)> {
+        let kind = match kind_cache.get(&page_id) {
+            Some(kind) => *kind,
+            None => {
+                let parsed = raw_page_kind(page, options.page_size).ok();
+                kind_cache.insert(page_id, parsed);
+                parsed
+            }
+        };
+        let priority = match kind {
+            Some(kind) => {
+                if options.pin_internal_pages && kind == PageKind::Internal {
+                    return None;
+                }
+                eviction_priority(kind)
+            }
+            None => 0, // blob/raw pages are always evictable when clean
+        };
+        Some((
+            priority,
+            *page_access_epoch.get(&page_id).unwrap_or(&0),
+            page_id,
+        ))
+    }
+
+    // One pass top-k selection: keep only the k worst eviction candidates in a
+    // bounded max heap. Candidate ordering is (priority, access_epoch, page_id),
+    // where smaller values are better eviction victims.
+    fn offer_victim(
+        victims: &mut BinaryHeap<(u8, u64, PageId)>,
+        target: usize,
+        candidate: (u8, u64, PageId),
+    ) {
+        if victims.len() < target {
+            victims.push(candidate);
             return;
         }
+        if let Some(worst_kept) = victims.peek()
+            && candidate < *worst_kept
+        {
+            let _ = victims.pop();
+            victims.push(candidate);
+        }
+    }
 
-        // One pass top-k selection:
-        // Keep only the k worst eviction candidates in a bounded max heap.
-        // Candidate ordering is (priority, access_epoch, page_id), where smaller
-        // values are better eviction victims.
+    fn evict_victims(&mut self, victims: BinaryHeap<(u8, u64, PageId)>) {
+        for (_, _, page_id) in victims {
+            self.pages.remove(&page_id);
+            self.page_kind_cache.remove(&page_id);
+            self.page_access_epoch.remove(&page_id);
+        }
+    }
+
+    // Checkpoint-scoped eviction: victims are selected only among the pages the
+    // checkpoint just released from dirty/WAL pinning — the only step change in
+    // evictable cache size — so checkpoint-per-batch workloads don't pay a
+    // full-cache walk per checkpoint. Any surplus the released set cannot cover
+    // is bounded by the clean-page budget the regular trigger enforces between
+    // checkpoints, and is reclaimed by that path on subsequent insertions.
+    fn evict_released_pages_if_needed(&mut self, released: &[PageId]) {
+        let Some(target) = self.eviction_target(0) else {
+            return;
+        };
+        let root_page_id = self.root_page_id;
+        let mut victims: BinaryHeap<(u8, u64, PageId)> =
+            BinaryHeap::with_capacity(target.min(released.len()));
+        for page_id in released {
+            if Some(*page_id) == root_page_id
+                || self.dirty_pages.contains(page_id)
+                || self.wal_pages.contains(page_id)
+            {
+                continue;
+            }
+            let Some(page) = self.pages.get(page_id) else {
+                continue;
+            };
+            let Some(candidate) = Self::eviction_candidate(
+                &mut self.page_kind_cache,
+                &self.page_access_epoch,
+                &self.options,
+                *page_id,
+                page,
+            ) else {
+                continue;
+            };
+            Self::offer_victim(&mut victims, target, candidate);
+        }
+        self.evict_victims(victims);
+    }
+
+    fn evict_pages_if_needed_with_allowance(
+        &mut self,
+        protected_page: Option<PageId>,
+        over_budget_allowance: usize,
+    ) {
+        let Some(target) = self.eviction_target(over_budget_allowance) else {
+            return;
+        };
+        let root_page_id = self.root_page_id;
         let mut victims: BinaryHeap<(u8, u64, PageId)> = BinaryHeap::with_capacity(target);
         for (page_id, page) in &self.pages {
             if Some(*page_id) == protected_page
@@ -1943,40 +2070,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             {
                 continue;
             }
-
-            let priority = match raw_page_kind(page, self.options.page_size) {
-                Ok(kind) => {
-                    if self.options.pin_internal_pages && kind == PageKind::Internal {
-                        continue;
-                    }
-                    eviction_priority(kind)
-                }
-                Err(_) => 0, // blob/raw pages are always evictable when clean
-            };
-
-            let candidate = (
-                priority,
-                *self.page_access_epoch.get(page_id).unwrap_or(&0),
+            let Some(candidate) = Self::eviction_candidate(
+                &mut self.page_kind_cache,
+                &self.page_access_epoch,
+                &self.options,
                 *page_id,
-            );
-
-            if victims.len() < target {
-                victims.push(candidate);
+                page,
+            ) else {
                 continue;
-            }
-
-            if let Some(worst_kept) = victims.peek()
-                && candidate < *worst_kept
-            {
-                let _ = victims.pop();
-                victims.push(candidate);
-            }
+            };
+            Self::offer_victim(&mut victims, target, candidate);
         }
-
-        for (_, _, page_id) in victims {
-            self.pages.remove(&page_id);
-            self.page_access_epoch.remove(&page_id);
-        }
+        self.evict_victims(victims);
     }
 
     fn checkpoint_superblock(
@@ -3267,6 +3372,114 @@ mod tests {
             .filter(|idx| tree.pages.contains_key(&(10_000 + *idx as u64)))
             .count();
         assert_eq!(surviving_dirty, pinned, "dirty pages must never be evicted");
+    }
+
+    #[test]
+    fn checkpoint_trims_cache_to_budget_and_keeps_data_readable() {
+        let file = MemoryFile::new();
+        let mut options = tiny_cache_options();
+        options.cache_bytes = 4 * 1024 * 64;
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+        let max_cached = tree.max_cached_pages();
+
+        // Enough rows that the dirty-pinned working set exceeds the cache
+        // budget before the checkpoint releases it.
+        let value = vec![0xabu8; 512];
+        for i in 0..2_000u32 {
+            tree.put(format!("key-{i:08}").as_bytes(), &value)
+                .expect("put");
+        }
+        assert!(
+            tree.pages.len() > max_cached,
+            "test setup must pin the cache over budget before the checkpoint"
+        );
+        tree.checkpoint().expect("checkpoint");
+
+        assert!(
+            tree.pages.len() <= max_cached,
+            "checkpoint must trim the released pages back within the cache \
+             budget (got {} cached pages for a budget of {})",
+            tree.pages.len(),
+            max_cached,
+        );
+
+        for i in (0..2_000u32).step_by(97) {
+            let got = tree
+                .get(format!("key-{i:08}").as_bytes())
+                .expect("get")
+                .expect("row present");
+            assert_eq!(got, value);
+        }
+    }
+
+    fn fill_pages(tree: &mut OpfsBTree<MemoryFile>, base_id: PageId, count: usize, raw: &[u8]) {
+        for idx in 0..count {
+            let page_id = base_id + idx as u64;
+            tree.pages.insert(page_id, raw.to_vec());
+            tree.touch_page(page_id);
+        }
+    }
+
+    // Internal test (like the rest of this module's eviction coverage):
+    // kind-based victim pinning is not observable through public APIs. Asserts
+    // eviction outcomes only — a page pinned as Internal must become evictable
+    // once its bytes are rewritten as a leaf and the pin is released, which
+    // fails if the scan trusts a stale memoized kind.
+    #[test]
+    fn eviction_reclassifies_rewritten_pages() {
+        let file = MemoryFile::new();
+        let mut options = tiny_cache_options();
+        options.cache_bytes = 4 * 1024 * 64;
+        options.pin_internal_pages = true;
+        let mut tree = OpfsBTree::open(file, options).expect("open tree");
+        let max_cached = tree.max_cached_pages();
+        let page_size = tree.options.page_size;
+
+        let rewritten_page_id = 20_000u64;
+        let internal_raw = encode_page(
+            &Page::Internal {
+                keys: vec![b"k".to_vec()],
+                children: vec![1, 2],
+            },
+            page_size,
+        )
+        .expect("encode internal page");
+        tree.pages.insert(rewritten_page_id, internal_raw);
+        tree.touch_page(rewritten_page_id);
+
+        let leaf_raw = encode_page(
+            &Page::Leaf {
+                entries: Vec::new(),
+                next: None,
+            },
+            page_size,
+        )
+        .expect("encode leaf page");
+
+        // Two pressure scans memoize the kind and prove the internal pin.
+        fill_pages(&mut tree, 30_000, max_cached * 2, &leaf_raw);
+        tree.evict_pages_if_needed(None);
+        assert!(
+            tree.pages.contains_key(&rewritten_page_id),
+            "internal pages stay pinned even with the oldest access epoch"
+        );
+
+        // Rewrite the page as a leaf through the dirty path, then release the
+        // pin the way checkpoint() does: un-pin plus kind purge of everything
+        // that was written.
+        tree.pages.insert(rewritten_page_id, leaf_raw.clone());
+        tree.mark_dirty_loaded_page(rewritten_page_id);
+        tree.dirty_pages.remove(&rewritten_page_id);
+        tree.page_kind_cache.remove(&rewritten_page_id);
+
+        // Under pressure the rewritten page is now the oldest leaf and must be
+        // evicted; a stale Internal kind would keep it pinned forever.
+        fill_pages(&mut tree, 50_000, max_cached * 2, &leaf_raw);
+        tree.evict_pages_if_needed(None);
+        assert!(
+            !tree.pages.contains_key(&rewritten_page_id),
+            "a page rewritten as a leaf must be evictable again"
+        );
     }
 
     #[test]
