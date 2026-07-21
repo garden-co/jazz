@@ -39,6 +39,8 @@ export {
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
+  publishStoredSchema,
+  type PublishStoredSchemaOptions,
   type PublishStoredPermissionsOptions,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
