@@ -674,7 +674,6 @@ async fn handle_ws_connection(
                             .await;
                             break;
                         }
-                        core_server_shell.notify_activity();
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
@@ -719,7 +718,6 @@ async fn drain_ws_outbound(
     send_ws_encoded_frames(socket, &outbound)
         .await
         .map_err(|error| error.to_string())?;
-    core_server_shell.notify_activity();
     Ok(())
 }
 
