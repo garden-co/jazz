@@ -66,6 +66,17 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
+Binding subscription row batches carry core-assigned positions alongside each
+row identity. The wasm/native row payload is `{ row_id, index, deleted, raw }`;
+removed rows are `{ table, row_id, index }`. The index is the zero-based
+application-result position after additions/updates and before removals. Host
+bindings must reduce these positions verbatim; they may transport, cache, or
+batch the bytes, but must not recompute semantic result order from row values.
+This binding ABI is downstream of `SyncMessage::ViewUpdate`: peer wire remains
+member-grained (`ResultMemberEntry` adds/removes plus program facts), while the
+Db subscription stream maps maintained root deltas to positional application
+events.
+
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
 the edge of the core, so handshake, socket state, malformed-byte errors, and

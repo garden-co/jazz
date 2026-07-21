@@ -5,9 +5,9 @@ const textDecoder = new TextDecoder();
 
 export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
 export type DescriptorField = { name?: string; valueType: ValueType };
-export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
+export type NativeRow = { rowId: Uint8Array; index: number; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
-export type NativeRemovedRow = { table: string; rowId: Uint8Array };
+export type NativeRemovedRow = { table: string; rowId: Uint8Array; index: number };
 export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
   updated: NativeRowBatch[];
@@ -61,6 +61,7 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
     descriptor: readDescriptor(reader),
     rows: reader.readVec((rowReader) => ({
       rowId: rowReader.bytes(),
+      index: rowReader.u64(),
       deleted: rowReader.bool(),
       raw: rowReader.bytes(),
     })),
@@ -104,6 +105,7 @@ export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedR
   return {
     table: reader.string(),
     rowId: reader.bytes(),
+    index: reader.u64(),
   };
 }
 
