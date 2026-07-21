@@ -337,13 +337,14 @@ export function createProjection(database: ProjectionDatabase) {
   ) {
     const existing = await database.one(table.where({ id: { eq: id } }));
     if (existing && projectionMatches(existing, data)) return;
-    // The BFF projects into its local Jazz store; Jazz replicates to connected
-    // clients asynchronously, so an unavailable edge must not stall ingestion.
+    // React reads from another Jazz replica, so a BFF write is delivered only
+    // after the edge acknowledges it. The bridge runs projection in the
+    // background, keeping AppView reads responsive while transport recovers.
     if (existing) {
-      await database.update(table, id, data).wait({ tier: "local" });
+      await database.update(table, id, data).wait({ tier: "edge" });
       return;
     }
-    await database.upsert(table, data, { id }).wait({ tier: "local" });
+    await database.upsert(table, data, { id }).wait({ tier: "edge" });
   }
 
   type ProfileProjection = {
@@ -407,7 +408,7 @@ export function createProjection(database: ProjectionDatabase) {
     await Promise.all(
       existingImages
         .filter((image) => !expectedImages.has(image.id))
-        .map((image) => database.delete(app.postImages, image.id).wait({ tier: "local" })),
+        .map((image) => database.delete(app.postImages, image.id).wait({ tier: "edge" })),
     );
   }
 
@@ -507,7 +508,7 @@ export function createProjection(database: ProjectionDatabase) {
           });
         }
       }
-      if (intent) await database.delete(app.pendingOperations, intent.id).wait({ tier: "local" });
+      if (intent) await database.delete(app.pendingOperations, intent.id).wait({ tier: "edge" });
     }
   }
 
@@ -649,7 +650,7 @@ export function createProjection(database: ProjectionDatabase) {
 
   async function completeOperation(operation: Operation) {
     if (operation.kind === "post") {
-      await database.delete(app.pendingOperations, operation.id).wait({ tier: "local" });
+      await database.delete(app.pendingOperations, operation.id).wait({ tier: "edge" });
       return;
     }
     await projectRow(database, app.pendingOperations, operation.id, {
