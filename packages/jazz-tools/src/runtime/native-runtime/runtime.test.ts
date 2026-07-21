@@ -1015,6 +1015,88 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("Native runtime mergeable transaction cannot mix write identities");
   });
 
+  it("routes session-scoped transaction reads through the identity-aware native method", async () => {
+    const alice = uuidBytes("00000000-0000-0000-0000-0000000000a1");
+    const bob = uuidBytes("00000000-0000-0000-0000-0000000000b2");
+    const tx = fakeTx();
+    const seenAuthors: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            allForIdentity: () => encodeRows([]),
+            allInTransactionForIdentity: (
+              _query: object,
+              receivedTx: TxForTest,
+              author: Uint8Array,
+            ) => {
+              expect(receivedTx).toBe(tx);
+              seenAuthors.push(formatUuidForTest(author));
+              return sameBytesForTest(author, alice)
+                ? encodeRows([
+                    {
+                      table: "todos",
+                      rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                      title: "alice pending",
+                    },
+                  ])
+                : encodeRows([]);
+            },
+            mergeableTxForIdentity: () => tx,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const transactionId = runtime.beginTransaction("mergeable");
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "alice pending" } },
+      JSON.stringify({
+        batch_id: transactionId,
+        session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+      }),
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+        "local",
+        JSON.stringify({ transaction_batch_id: transactionId }),
+      ),
+    ).resolves.toEqual([]);
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000a1" }),
+        "local",
+        JSON.stringify({ transaction_batch_id: transactionId }),
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "alice pending" }],
+      },
+    ]);
+    expect(seenAuthors).toEqual([
+      "00000000-0000-0000-0000-0000000000b2",
+      "00000000-0000-0000-0000-0000000000a1",
+    ]);
+  });
+
   it("decodes fixed-width array columns from native row batches", async () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -5557,6 +5639,11 @@ function uuidBytes(value: string): Uint8Array {
 function formatUuidForTest(bytes: Uint8Array): string {
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function sameBytesForTest(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((byte, index) => byte === right[index]);
 }
 
 function doubleBytes(value: number): Uint8Array {
