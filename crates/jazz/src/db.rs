@@ -2038,6 +2038,29 @@ where
             .map_err(Into::into)
     }
 
+    /// Read a prepared query inside an owned exclusive transaction handle.
+    pub fn exclusive_all(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+    }
+
+    /// Read a prepared query inside an owned exclusive transaction handle as `author`.
+    pub fn exclusive_all_for_identity(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
+            .map_err(Into::into)
+    }
+
     /// Stage a full row value inside an owned exclusive transaction handle.
     pub fn exclusive_write(
         &self,
@@ -2097,6 +2120,15 @@ where
         self.finalize_local_exclusive_unit(tx_id, unit)?;
         self.refresh_subscriptions()?;
         Ok(tx_id)
+    }
+
+    /// Abandon an owned exclusive transaction handle.
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .abandon_tx(open_tx_id)
+            .map_err(Into::into)
     }
 
     pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
