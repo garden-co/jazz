@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { keepMountedSession, refreshAuthentication, type Session } from "../../src/auth-state.js";
+import { keepMountedSession, refreshAuthentication, type JazzCredentials } from "../../src/auth-state.js";
 
-const cached: Session = { did: "did:plc:alice", token: "cached-token" };
+const cached: JazzCredentials = { did: "did:plc:alice", token: "cached-token" };
 
 describe("authentication refresh", () => {
   it("keeps the mounted Jazz session stable when only its JWT is refreshed", () => {
