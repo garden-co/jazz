@@ -21,6 +21,8 @@ func main() {
 	httpHost := flag.String("http-host", "127.0.0.1", "Viewer + SQL bind host")
 	httpPort := flag.Int("http-port", 4319, "Viewer + SQL HTTP port")
 	retentionDays := flag.Int("retention-days", 2, "Days of rotated files to keep")
+	maxFileMB := flag.Int("max-file-mb", 100, "Rotate each signal file after this many megabytes")
+	maxBackups := flag.Int("max-backups", 100, "Rotated files to keep per signal (with max-file-mb, caps total size)")
 	flag.Parse()
 
 	absData, err := filepath.Abs(*dataDir)
@@ -43,7 +45,7 @@ func main() {
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return runCollector(ctx, *otlpHost, *otlpPort, absData, *retentionDays)
+		return runCollector(ctx, *otlpHost, *otlpPort, absData, *retentionDays, *maxFileMB, *maxBackups)
 	})
 
 	g.Go(func() error {

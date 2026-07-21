@@ -34,6 +34,17 @@ func runHTTPServer(ctx context.Context, host string, port int, dataDir string, b
 	}
 	defer db.Close()
 
+	// Bound query memory so a large capture degrades to spilling instead of
+	// pinning tens of GiB (the attribute UNNESTs are memory-hungry).
+	for _, pragma := range []string{
+		"SET memory_limit='4GB'",
+		"SET preserve_insertion_order=false",
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("duckdb pragma %q: %w", pragma, err)
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sql", func(w http.ResponseWriter, r *http.Request) {
 		handleSQL(w, r, db, dataDir)
@@ -155,6 +166,22 @@ func refreshViews(ctx context.Context, db *sql.DB, dataDir string) {
 	for _, s := range []string{"traces", "logs", "metrics"} {
 		matches, _ := filepath.Glob(filepath.Join(dataDir, s+"*.jsonl"))
 		if len(matches) == 0 {
+			// Keep the schema queryable when files are absent (fresh start,
+			// wiped data dir): an empty raw view yields zero-row flat views
+			// instead of stale views erroring on a matchless glob.
+			empty := fmt.Sprintf(
+				"CREATE OR REPLACE VIEW raw_%s AS SELECT NULL::JSON AS doc WHERE false",
+				s,
+			)
+			if _, err := db.ExecContext(ctx, empty); err != nil {
+				log.Printf("empty raw_%s view: %v", s, err)
+				continue
+			}
+			if stmt, ok := flatViewSQL[s]; ok {
+				if _, err := db.ExecContext(ctx, stmt); err != nil {
+					log.Printf("flat %s view: %v", s, err)
+				}
+			}
 			continue
 		}
 		glob := filepath.Join(dataDir, s+"*.jsonl")

@@ -41,6 +41,8 @@ Flags:
 | `--http-host`      | `127.0.0.1` | Viewer + SQL bind host        |
 | `--http-port`      | `4319`      | Viewer + SQL HTTP port        |
 | `--retention-days` | `2`         | Days of rotated files to keep |
+| `--max-file-mb`    | `100`       | Rotate each signal file after this many MB |
+| `--max-backups`    | `100`       | Rotated files kept per signal; with `--max-file-mb` this caps total disk |
 
 CORS is `*` on the HTTP port so browser tooling can hit it from any origin.
 

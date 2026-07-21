@@ -18,7 +18,7 @@ import (
 
 const memScheme = "memcfg"
 
-func runCollector(ctx context.Context, host string, port int, dataDir string, retentionDays int) error {
+func runCollector(ctx context.Context, host string, port int, dataDir string, retentionDays, maxFileMB, maxBackups int) error {
 	factories := func() (otelcol.Factories, error) {
 		otlpRecv := otlpreceiver.NewFactory()
 		fileExp := fileexporter.NewFactory()
@@ -37,7 +37,7 @@ func runCollector(ctx context.Context, host string, port int, dataDir string, re
 		}, nil
 	}
 
-	cfg := buildConfigMap(host, port, dataDir, retentionDays)
+	cfg := buildConfigMap(host, port, dataDir, retentionDays, maxFileMB, maxBackups)
 
 	settings := otelcol.CollectorSettings{
 		Factories: factories,
@@ -88,16 +88,21 @@ func (p *inMemoryProvider) Retrieve(_ context.Context, _ string, _ confmap.Watch
 func (p *inMemoryProvider) Scheme() string                   { return memScheme }
 func (p *inMemoryProvider) Shutdown(_ context.Context) error { return nil }
 
-func buildConfigMap(host string, port int, dataDir string, retentionDays int) map[string]any {
+func buildConfigMap(
+	host string,
+	port int,
+	dataDir string,
+	retentionDays, maxFileMB, maxBackups int,
+) map[string]any {
 	fileExp := func(signal string) map[string]any {
 		return map[string]any{
 			"path":             fmt.Sprintf("%s/%s.jsonl", dataDir, signal),
 			"format":           "json",
 			"create_directory": true,
 			"rotation": map[string]any{
-				"max_megabytes": 100,
+				"max_megabytes": maxFileMB,
 				"max_days":      retentionDays,
-				"max_backups":   100,
+				"max_backups":   maxBackups,
 			},
 		}
 	}
