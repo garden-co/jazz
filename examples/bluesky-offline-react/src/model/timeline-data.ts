@@ -148,10 +148,13 @@ export function buildThread(rootId: string, posts: IncludedPost[]) {
 
 export function buildTimeline(rows: TimelineEntryView[]) {
   const items: TimelineItem[] = [];
+  const seenPostUris = new Set<string>();
   const seenThreads = new Set<string>();
   const orderedRows = [...rows].sort((a, b) =>
     b.sortAt.localeCompare(a.sortAt) || a.id.localeCompare(b.id));
   for (const row of orderedRows) {
+    if (seenPostUris.has(row.post.uri)) continue;
+    seenPostUris.add(row.post.uri);
     if (!row.repostId && seenThreads.has(row.threadRootId)) continue;
     if (!row.repostId) seenThreads.add(row.threadRootId);
     const repostedReply = Boolean(row.repostId && row.post.replyParentId);
