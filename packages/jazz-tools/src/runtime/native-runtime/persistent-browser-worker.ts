@@ -6,6 +6,8 @@ import {
   isNativeRowDelta,
   type PersistentBrowserOpfsOwnerRequest,
   type PersistentBrowserSubscriptionFrame,
+  type PersistentBrowserWriteBatchItem,
+  type PersistentBrowserWriteBatchResult,
 } from "./persistent-browser-protocol.js";
 
 type OpenMessage = Extract<PersistentBrowserOpfsOwnerRequest, { method: "open" }>;
@@ -50,6 +52,33 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
         const result = dispatchWrite(message);
         await getRuntime().waitForTransaction(result.transactionId, "local");
         postResult(message.id, result);
+        return;
+      }
+      case "writeBatch": {
+        // Apply every item first, then settle local durability once per
+        // distinct transaction — one message and one wait set instead of a
+        // postMessage round-trip and a wait per write.
+        const [items] = message.args;
+        const results: PersistentBrowserWriteBatchResult[] = [];
+        const transactionIds = new Set<string>();
+        for (const item of items) {
+          try {
+            const result = dispatchWrite(item);
+            transactionIds.add(result.transactionId);
+            results.push({ ok: result });
+          } catch (error) {
+            results.push({
+              error:
+                error instanceof Error
+                  ? { name: error.name, message: error.message }
+                  : { message: String(error) },
+            });
+          }
+        }
+        for (const transactionId of transactionIds) {
+          await getRuntime().waitForTransaction(transactionId, "local");
+        }
+        postResult(message.id, results);
         return;
       }
       case "waitForTransaction": {
@@ -150,7 +179,9 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
   }
 }
 
-function dispatchWrite(message: WriteMessage): { transactionId: string } {
+function dispatchWrite(message: WriteMessage | PersistentBrowserWriteBatchItem): {
+  transactionId: string;
+} {
   const runtime = getRuntime();
   let result: { transactionId: string };
   switch (message.method) {

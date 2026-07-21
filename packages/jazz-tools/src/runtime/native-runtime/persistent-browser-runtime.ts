@@ -7,6 +7,8 @@ import type {
   PersistentBrowserOpfsOwnerRequest,
   PersistentBrowserRequestArgs,
   PersistentBrowserWorkerMethod,
+  PersistentBrowserWriteBatchItem,
+  PersistentBrowserWriteBatchResult,
   PersistentBrowserWriteRequest,
 } from "./persistent-browser-protocol.js";
 import {
@@ -54,6 +56,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private nextCallId = 1;
   private nextSubscriptionId = 1;
   private closed = false;
+  // Synchronous write bursts coalesce here and flush as one writeBatch
+  // message; see queueWrite/flushBatchedWrites.
+  private pendingBatchedWrites: Array<{
+    method: PersistentBrowserWriteRequest["method"];
+    args: unknown[];
+    batchId: string | undefined;
+    resolve: (transactionId: string) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private writeFlushScheduled = false;
   private closing = false;
   private readonly opened: Promise<void>;
 
@@ -423,20 +435,24 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     // The worker owns the real NativeRuntimeAdapter, so durability waits must use the
     // worker's transaction id. The public Runtime API is synchronous, so the
     // result returned from insert/update/etc. is only a pending handle.
-    const write = this.opened.then(async () => {
-      if (batchId && this.completedTxs.get(batchId) === "rolled_back") {
-        return batchId;
-      }
-      const translatedArgs = (await this.translateWriteArgs(
+    //
+    // Writes are buffered synchronously and flushed as one writeBatch message
+    // per burst: a synchronous run of inserts becomes a single postMessage
+    // round-trip instead of one per row, which is where per-message envelope
+    // and microtask overhead dominated bulk-write profiles.
+    const write = new Promise<string>((resolve, reject) => {
+      this.pendingBatchedWrites.push({
         method,
-        args,
-      )) as PersistentBrowserRequestArgs<Method>;
-      const result = (await this.send(method, translatedArgs)) as { transactionId: string };
-      if (!result || typeof result.transactionId !== "string") {
-        throw new Error("Persistent browser worker write did not return a transaction id");
-      }
-      return result.transactionId;
+        args: args as unknown[],
+        batchId,
+        resolve,
+        reject,
+      });
     });
+    if (!this.writeFlushScheduled) {
+      this.writeFlushScheduled = true;
+      queueMicrotask(() => void this.flushBatchedWrites());
+    }
     this.writes.set(transactionId, write);
     if (batchId) {
       const writes = this.transactionWrites.get(batchId) ?? [];
@@ -444,6 +460,58 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       this.transactionWrites.set(batchId, writes);
     }
     void write.catch(() => undefined);
+  }
+
+  private async flushBatchedWrites(): Promise<void> {
+    this.writeFlushScheduled = false;
+    const pending = this.pendingBatchedWrites;
+    if (pending.length === 0) return;
+    this.pendingBatchedWrites = [];
+    try {
+      await this.opened;
+    } catch (error) {
+      for (const entry of pending) entry.reject(error);
+      return;
+    }
+    const toSend: typeof pending = [];
+    const items: PersistentBrowserWriteBatchItem[] = [];
+    for (const entry of pending) {
+      if (entry.batchId && this.completedTxs.get(entry.batchId) === "rolled_back") {
+        entry.resolve(entry.batchId);
+        continue;
+      }
+      const translatedArgs = await this.translateWriteArgs(
+        entry.method,
+        entry.args as PersistentBrowserRequestArgs<typeof entry.method>,
+      );
+      toSend.push(entry);
+      items.push({ method: entry.method, args: translatedArgs } as PersistentBrowserWriteBatchItem);
+    }
+    if (items.length === 0) return;
+    let results: PersistentBrowserWriteBatchResult[];
+    try {
+      const response = await this.send("writeBatch", [items]);
+      results = response as PersistentBrowserWriteBatchResult[];
+    } catch (error) {
+      for (const entry of toSend) entry.reject(error);
+      return;
+    }
+    toSend.forEach((entry, index) => {
+      const result = results[index];
+      if (!result) {
+        entry.reject(new Error("Persistent browser worker write batch returned too few results"));
+        return;
+      }
+      if ("error" in result) {
+        entry.reject(new Error(result.error.message));
+        return;
+      }
+      if (typeof result.ok?.transactionId !== "string") {
+        entry.reject(new Error("Persistent browser worker write did not return a transaction id"));
+        return;
+      }
+      entry.resolve(result.ok.transactionId);
+    });
   }
 
   private batchIdFromWriteArgs<Method extends PersistentBrowserWriteRequest["method"]>(

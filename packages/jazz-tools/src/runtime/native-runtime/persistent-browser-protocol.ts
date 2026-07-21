@@ -64,8 +64,26 @@ export type PersistentBrowserWriteRequest =
       args: [table: string, objectId: string, writeContext: string | null | undefined];
     };
 
+/** One write of a coalesced batch: a write request minus its own message id. */
+export type PersistentBrowserWriteBatchItem = {
+  [Method in PersistentBrowserWriteRequest["method"]]: {
+    method: Method;
+    args: Extract<PersistentBrowserWriteRequest, { method: Method }>["args"];
+  };
+}[PersistentBrowserWriteRequest["method"]];
+
+/** Per-item outcome of a write batch, in item order. */
+export type PersistentBrowserWriteBatchResult =
+  | { ok: { transactionId: string } }
+  | { error: { name?: string; message: string } };
+
 export type PersistentBrowserOpfsOwnerRequest =
   | OpenRequest
+  | {
+      id: number;
+      method: "writeBatch";
+      args: [items: PersistentBrowserWriteBatchItem[]];
+    }
   | {
       id: number;
       method: "destroyBrowserStorage";
