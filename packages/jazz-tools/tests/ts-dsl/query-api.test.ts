@@ -521,7 +521,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         ownerId: undefined,
       });
 
-      const result = await readOne(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
+      const result = await readOne(
+        app.todos.where({ id: { eq: todoId } }).include({ owner: true }),
+      );
 
       assert(result, "Result is not defined");
       expectTypeOf(result.owner).toEqualTypeOf<User | null>();
