@@ -45,15 +45,50 @@ impl JoinState {
         left_descriptor: &RecordDescriptor,
         right_descriptor: &RecordDescriptor,
         output_descriptor: &RecordDescriptor,
+        // how to map the the fields from the inputs to the ouput
+        // example:
+        // Left album fields:
+        // 0 = id
+        // 1 = artist_id
+        // 2 = title
+        //
+        // Right artist fields:
+        // 0 = id
+        // 1 = name
+        //
+        // Desire output:
+        // 0 = album id
+        // 1 = album title
+        // 2 = artist name
+        //
+        // [
+        //    (0, 0), // output field 0 comes from left field 0
+        //    (0, 2), // output field 1 comes from left field 2
+        //    (1, 1), // output field 2 comes from right field 1
+        // ]
+        //
+        // 0 is left
+        // 1 is right
         output_mapping: &[(usize, usize)],
+        // left fields of join such as `["id"]
         left_on: &[String],
+        // right fields of join such as `["artist_id"]
         right_on: &[String],
+        // Changed left records with signed weights
         left_delta: &[RecordDelta],
         right_delta: &[RecordDelta],
         left_sub_tick: SubTick,
         right_sub_tick: SubTick,
         update_mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        // Fields have to be the same:
+        // left:  (country_id, artist_id)
+        // right: (country_id, id)
+        // This is ok!
+        //
+        // left:  (country_id, artist_id)
+        // right: (id)
+        // This is not ok
         if left_on.len() != right_on.len() {
             return Err(IvmRuntimeError::JoinKeyArityMismatch {
                 left: left_on.len(),
@@ -61,6 +96,16 @@ impl JoinState {
             });
         }
 
+        // let's get the deltas left and right, adding the join keys. For example:
+        // Left RecordDelta:
+        // album(13, artist_id=7, "Yellow") -> +1
+        //
+        // Keyed left delta:
+        // key = encode(7)
+        // record = album(13, 7, "Yellow")
+        // weight = +1
+        //
+        // The Key will be use to get throught the right_arrangement.index.get(&left_delta.key) fast the matching raws:
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
         let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
         let estimated_output_bytes = left_delta
@@ -68,11 +113,14 @@ impl JoinState {
             .chain(right_delta)
             .map(|delta| delta.record.len())
             .sum::<usize>();
+
         let mut output = JoinOutputBuffer {
             bytes: BytesMut::with_capacity(estimated_output_bytes),
             deltas: Vec::new(),
             variable_scratch: Vec::new(),
         };
+
+        // Let's create the context of the Join, with all the descriptors (schema-side description needed to interpret compact record bytes)
         let context = JoinChangeContext {
             left_descriptor,
             right_descriptor,
@@ -80,6 +128,7 @@ impl JoinState {
             output_mapping,
         };
 
+        // Update arrangement
         advance_arrangement(
             left_arrangement,
             &keyed_left_delta,
@@ -459,9 +508,31 @@ struct JoinChangeContext<'a> {
     output_mapping: &'a [(usize, usize)],
 }
 
+/// Builds the changed rows produced by a join.
+///
+/// All encoded rows are kept next to each other in `bytes`. For example:
+///
+/// ```text
+/// bytes:  [joined row A][joined row B]
+/// ranges:       0..20         20..45
+/// deltas: (0..20, +1), (20..45, -1)
+/// ```
+///
+/// When the join finishes, `bytes` is frozen once. Each range then becomes the
+/// `Bytes` value of one `RecordDelta`. This avoids one allocation per row.
 struct JoinOutputBuffer {
+    /// All encoded joined rows, stored one after another.
     bytes: BytesMut,
+    /// Where each row is inside `bytes`, together with its weight.
+    ///
+    /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
+    /// `+1`.”
     deltas: Vec<(Range<usize>, i64)>,
+    /// Temporary work area for fields such as strings, bytes, and arrays.
+    ///
+    /// Each item stores which input row owns the field (`0` for left, `1` for
+    /// right) and where the field's bytes are in that row. The encoder clears
+    /// and reuses this vector for every joined row.
     variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
