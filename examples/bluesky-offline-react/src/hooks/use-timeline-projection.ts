@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 const pollInterval = 15_000;
+const minimumSpinnerDuration = 300;
 
 type TimelinePayload = {
   cursor?: string;
@@ -20,6 +21,32 @@ export function nextTimelinePageSource({
   if (cachedRowsRemaining) return "local" as const;
   if (!localQueryRefreshing && remoteRowsRemaining) return "remote" as const;
   return undefined;
+}
+
+export function fetchingMorePosts({
+  localStartCount,
+  itemCount,
+  remote,
+}: {
+  localStartCount: number | null;
+  itemCount: number;
+  remote: boolean;
+}) {
+  return remote || (localStartCount !== null && itemCount <= localStartCount);
+}
+
+export function nextInfiniteScrollState({
+  armed,
+  intersecting,
+  canLoad,
+}: {
+  armed: boolean;
+  intersecting: boolean;
+  canLoad: boolean;
+}) {
+  if (!intersecting) return { armed: true, trigger: false };
+  if (!armed || !canLoad) return { armed, trigger: false };
+  return { armed: false, trigger: true };
 }
 
 export function useTimelineProjection({
@@ -45,11 +72,14 @@ export function useTimelineProjection({
 }) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [remoteLoadingMore, setRemoteLoadingMore] = useState(false);
+  const [localStartCount, setLocalStartCount] = useState<number | null>(null);
+  const [localFetchStartedAt, setLocalFetchStartedAt] = useState<number | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const refreshInFlight = useRef(false);
   const paginationInFlight = useRef(false);
   const paginationStarted = useRef(false);
+  const loadMoreArmed = useRef(true);
   const requestGeneration = useRef(0);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
@@ -61,7 +91,7 @@ export function useTimelineProjection({
     const paginationWasStarted = paginationStarted.current;
     if (cursor) {
       paginationStarted.current = true;
-      setLoadingMore(true);
+      setRemoteLoadingMore(true);
     }
     try {
       // This endpoint returns only projection metadata. Timeline rows still
@@ -88,7 +118,7 @@ export function useTimelineProjection({
     } finally {
       if (generation === requestGeneration.current) {
         inFlight.current = false;
-        if (cursor) setLoadingMore(false);
+        if (cursor) setRemoteLoadingMore(false);
       }
     }
   }
@@ -98,15 +128,28 @@ export function useTimelineProjection({
     refreshInFlight.current = false;
     paginationInFlight.current = false;
     paginationStarted.current = false;
+    loadMoreArmed.current = true;
     setNextCursor(null);
     setHasMore(false);
-    setLoadingMore(false);
+    setRemoteLoadingMore(false);
+    setLocalStartCount(null);
+    setLocalFetchStartedAt(null);
     setInitialLoading(true);
   }, [did]);
 
   useEffect(() => {
     if (hasLocalRows || (localQueryReady && !browserOnline)) setInitialLoading(false);
   }, [browserOnline, hasLocalRows, localQueryReady]);
+
+  useEffect(() => {
+    if (localStartCount === null || localFetchStartedAt === null || itemCount <= localStartCount) return;
+    const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - localFetchStartedAt));
+    const timer = window.setTimeout(() => {
+      setLocalStartCount(null);
+      setLocalFetchStartedAt(null);
+    }, remaining);
+    return () => window.clearTimeout(timer);
+  }, [itemCount, localFetchStartedAt, localStartCount]);
 
   useEffect(() => {
     if (!localQueryReady || !browserOnline) return;
@@ -119,14 +162,29 @@ export function useTimelineProjection({
     const sentinel = loadMoreRef.current;
     if (!sentinel) return;
     const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting) || itemCount === 0) return;
+      const intersecting = entries.some((entry) => entry.isIntersecting);
       const source = nextTimelinePageSource({
         cachedRowsRemaining,
         localQueryRefreshing,
         remoteRowsRemaining: Boolean(nextCursor && hasMore),
       });
-      if (source === "local") revealCachedRows();
-      else if (source === "remote" && nextCursor && !loadingMore) loadPage(nextCursor);
+      const loadingMore = fetchingMorePosts({
+        localStartCount,
+        itemCount,
+        remote: remoteLoadingMore,
+      });
+      const nextState = nextInfiniteScrollState({
+        armed: loadMoreArmed.current,
+        intersecting,
+        canLoad: itemCount > 0 && source !== undefined && !loadingMore,
+      });
+      loadMoreArmed.current = nextState.armed;
+      if (!nextState.trigger) return;
+      if (source === "local") {
+        setLocalStartCount(itemCount);
+        setLocalFetchStartedAt(Date.now());
+        revealCachedRows();
+      } else if (source === "remote" && nextCursor) loadPage(nextCursor);
     }, { rootMargin: "500px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -134,11 +192,17 @@ export function useTimelineProjection({
     cachedRowsRemaining,
     hasMore,
     itemCount,
-    loadingMore,
+    localStartCount,
     localQueryRefreshing,
     nextCursor,
+    remoteLoadingMore,
     revealCachedRows,
   ]);
 
+  const loadingMore = fetchingMorePosts({
+    localStartCount,
+    itemCount,
+    remote: remoteLoadingMore,
+  });
   return { hasMore, loadingMore, initialLoading, loadMoreRef };
 }

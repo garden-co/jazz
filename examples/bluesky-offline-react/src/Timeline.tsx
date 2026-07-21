@@ -57,7 +57,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     loadMoreRef,
   } = useTimelineProjection({
     did,
-    itemCount: timelineItems.length,
+    itemCount: visibleTimelineRows.length,
     hasLocalRows: visibleTimelineRows.length > 0,
     cachedRowsRemaining: localTimelineWindow.hasMore,
     localQueryRefreshing,

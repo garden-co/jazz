@@ -660,7 +660,7 @@ export function TimelineFeed({
       {loadingMore && (
         <p className="pagination-status">
           <Spinner aria-hidden="true" />
-          Loading more posts…
+          Fetching more posts…
         </p>
       )}
       {!hasMore && items.length > 0 && (
