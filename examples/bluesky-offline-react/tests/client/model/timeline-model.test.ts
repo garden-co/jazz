@@ -131,4 +131,39 @@ describe("timeline model", () => {
       threadUrl: "https://bsky.app/profile/did:plc:author/post/reply",
     });
   });
+
+  it("shows the same post only once when it has multiple top-level events", () => {
+    const sharedPost = post("shared");
+    const direct: TimelineEntryView = {
+      id: "direct-entry",
+      ownerDid: "did:plc:viewer",
+      postId: sharedPost.id,
+      threadRootId: sharedPost.id,
+      repostId: null,
+      sortAt: "2026-07-16T10:00:00.000Z",
+      active: true,
+      post: sharedPost,
+      threadRoot: sharedPost,
+    };
+    const repost: TimelineEntryView = {
+      ...direct,
+      id: "repost-entry",
+      repostId: "repost",
+      sortAt: "2026-07-16T11:00:00.000Z",
+      repost: {
+        id: "repost",
+        uri: null,
+        cid: null,
+        active: true,
+        actorDid: "did:plc:reposter",
+        actorProfileId: "reposter-profile",
+        subjectPostId: sharedPost.id,
+        createdAt: "2026-07-16T11:00:00.000Z",
+      },
+    };
+
+    expect(buildTimeline([direct, repost])).toMatchObject([
+      { id: "repost-entry", node: { post: { id: sharedPost.id } } },
+    ]);
+  });
 });
