@@ -54,7 +54,10 @@ describe("AppView reads", () => {
     const page = { feed: [], cursor: "next-page" };
     agent.getTimeline.mockResolvedValue({ data: page });
 
-    await expect(fetchTimelineFeed(session, "current-page")).resolves.toEqual(page);
+    const result = await fetchTimelineFeed(session, "current-page");
+
+    expect(result).toEqual(page);
+    expect(result.feed).toBe(page.feed);
     expect(agent.constructor).toHaveBeenCalledWith(session);
     expect(agent.getTimeline).toHaveBeenCalledWith({ limit: 20, cursor: "current-page" });
   });
@@ -68,9 +71,13 @@ describe("AppView reads", () => {
     agent.getPostThread.mockResolvedValue({ data: { thread } });
     agent.getProfile.mockResolvedValue({ data: profile });
 
-    await expect(fetchViewerPosts(session, [uri])).resolves.toEqual([post]);
-    await expect(fetchPostThread(session, uri)).resolves.toEqual(thread);
-    await expect(fetchProfile("did:plc:alice", session)).resolves.toEqual(profile);
+    const posts = await fetchViewerPosts(session, [uri]);
+    const loadedThread = await fetchPostThread(session, uri);
+    const loadedProfile = await fetchProfile("did:plc:alice", session);
+
+    expect(posts[0]).toBe(post);
+    expect(loadedThread).toBe(thread);
+    expect(loadedProfile).toBe(profile);
 
     expect(agent.getPosts).toHaveBeenCalledWith({ uris: [uri] });
     expect(agent.getPostThread).toHaveBeenCalledWith({ uri, depth: 100, parentHeight: 100 });
