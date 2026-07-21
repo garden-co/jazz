@@ -25,7 +25,7 @@ import type {
   DisplayPost,
   TimelineItem,
   TimelinePostNode,
-} from "./timeline-model.js";
+} from "./timeline-data.js";
 
 export function LoadingScreen({ label = "Opening your local timeline…" }: { label?: string }) {
   return (

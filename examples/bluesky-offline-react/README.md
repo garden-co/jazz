@@ -41,10 +41,11 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
 | `permissions.ts`                | Client access to projected rows and locally queued intentions                                  | Yes                         | No                                  |
 | `shared/pending-operations.ts`  | Serialise and validate the offline-write contract                                              | Describes intention rows    | Describes source operations         |
-| `src/Timeline.tsx`              | Compose the reactive view and local-first commands                                            | Yes                         | Only calls trigger/reconcile routes |
+| `src/Timeline.tsx`              | Compose reactive Jazz data, connectivity, actions, and presentation                           | Through its data and actions | Only calls the thread trigger route |
+| `src/timeline-data.ts`          | Define the reactive Jazz query and turn its inferred rows into display threads                | Yes                         | No                                  |
+| `src/use-timeline-actions.ts`   | Apply optimistic posts and reactions to Jazz before asking the outbox to reconcile them        | Yes                         | Through the outbox                  |
 | `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint                                                        | No                          | Knows only trigger metadata         |
 | `src/use-outbox.ts`             | Serialise retries of queued intentions                                                        | Yes                         | Calls the reconcile route           |
-| `src/timeline-model.ts`         | Pure rows-to-thread view model                                                                | No                          | No                                  |
 | `src/TimelineView.tsx`          | Presentational React components                                                               | No                          | No                                  |
 | `vite/pwa.ts`                   | Generate the install manifest and service worker                                              | No                          | Keeps API traffic network-only      |
 
