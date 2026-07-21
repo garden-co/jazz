@@ -7,6 +7,13 @@ import {
   Text,
   TextArea,
 } from "@radix-ui/themes";
+import {
+  Content as AccordionContent,
+  Header as AccordionHeader,
+  Item as AccordionItem,
+  Root as AccordionRoot,
+  Trigger as AccordionTrigger,
+} from "@radix-ui/react-accordion";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import {
   BackIcon,
@@ -196,23 +203,30 @@ export function AppHeader({
 export function Intro() {
   return (
     <Card asChild size="3">
-      <details className="intro" aria-labelledby="intro-title" open>
-        <summary className="intro-summary">
-          <span>
-            <span className="eyebrow">Why Jazz?</span>
-            <span className="intro-title" id="intro-title">
-              Your Bluesky timeline, available offline.
-            </span>
-          </span>
-          <DisclosureIcon />
-        </summary>
-        <p className="intro-body">
-          Jazz updates your feed live with posts and reposts from people you follow
-          while you’re online, then keeps them available without a connection. You
-          can even write offline. Your changes stay safely queued until you’re back
-          online.
-        </p>
-      </details>
+      <AccordionRoot
+        className="intro"
+        type="single"
+        collapsible
+        defaultValue="why-jazz"
+      >
+        <AccordionItem value="why-jazz">
+          <AccordionHeader className="intro-heading">
+            <AccordionTrigger className="intro-summary">
+              <span className="eyebrow">Why Jazz?</span>
+              <DisclosureIcon />
+            </AccordionTrigger>
+          </AccordionHeader>
+          <AccordionContent className="intro-content">
+            <h2 id="intro-title">Your Bluesky timeline, available offline.</h2>
+            <p className="intro-body">
+              Jazz updates your feed live with posts and reposts from people you follow
+              while you’re online, then keeps them available without a connection. You
+              can even write offline. Your changes stay safely queued until you’re back
+              online.
+            </p>
+          </AccordionContent>
+        </AccordionItem>
+      </AccordionRoot>
     </Card>
   );
 }

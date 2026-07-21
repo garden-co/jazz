@@ -20,13 +20,13 @@ h2 { margin-bottom: 10px; font-size: clamp(1.45rem, 3vw, 1.85rem); }
 .profile-name { display: inline-flex; align-items: baseline; min-width: 0; gap: 4px; }
 .profile-name-separator, .profile-handle, time { color: var(--gray-11); font-weight: 500; }
 .intro { margin-bottom: 18px; }
-.intro-summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; cursor: pointer; list-style: none; }
-.intro-summary::-webkit-details-marker { display: none; }
-.intro-summary .eyebrow { display: block; }
-.intro-title { display: block; font-size: clamp(1.45rem, 3vw, 1.85rem); font-weight: 700; line-height: 1.25; }
+.intro-heading { margin: 0; }
+.intro-summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; width: 100%; padding: 0; border: 0; color: inherit; background: none; cursor: pointer; font: inherit; text-align: left; }
+.intro-summary .eyebrow { margin: 0; }
 .intro-summary svg { flex: none; transition: transform 160ms ease; }
-.intro[open] .intro-summary svg { transform: rotate(90deg); }
-.intro-body { margin: 14px 0 0; }
+.intro-summary[data-state="open"] svg { transform: rotate(90deg); }
+.intro-content { overflow: hidden; padding-top: 18px; }
+.intro-body { margin-bottom: 0; }
 .composer { display: grid; gap: 13px; margin-bottom: 38px; }
 .composer-heading, .composer-actions, .sync-banner, .section-heading, .timeline-title-row, .repost-reason, .post-header, .quoted-post-header, .post-actions, .reply-composer > div, .pagination-status, .app-footer { display: flex; align-items: center; }
 .composer-heading, .sync-banner, .section-heading, .app-footer { justify-content: space-between; }
