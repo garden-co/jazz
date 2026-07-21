@@ -1,6 +1,6 @@
 import { useDb } from "jazz-tools/react";
 import { useEffect, useRef } from "react";
-import { app } from "../schema.js";
+import { app } from "../../schema.js";
 
 const retryInterval = 15_000;
 

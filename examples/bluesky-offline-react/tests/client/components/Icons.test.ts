@@ -5,10 +5,11 @@ import {
   BackIcon,
   DisclosureIcon,
   LikeIcon,
+  ReplyIcon,
   RepostIcon,
   SuccessIcon,
   ThreadLinkIcon,
-} from "../../src/Icons.js";
+} from "../../../src/components/Icons.js";
 
 describe("interface icons", () => {
   it("renders decorative vector icons instead of Unicode symbols", () => {
@@ -17,6 +18,7 @@ describe("interface icons", () => {
       createElement(DisclosureIcon),
       createElement(LikeIcon, { active: false }),
       createElement(LikeIcon, { active: true }),
+      createElement(ReplyIcon),
       createElement(RepostIcon),
       createElement(SuccessIcon),
       createElement(ThreadLinkIcon),

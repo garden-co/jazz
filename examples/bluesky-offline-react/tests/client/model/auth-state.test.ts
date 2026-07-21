@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { keepMountedSession, refreshAuthentication, type JazzCredentials } from "../../src/auth-state.js";
+import { keepMountedSession, refreshAuthentication, type JazzCredentials } from "../../../src/model/auth-state.js";
 
 const cached: JazzCredentials = { did: "did:plc:alice", token: "cached-token" };
 

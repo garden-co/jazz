@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextTimelinePageSource } from "../../src/use-timeline-projection.js";
+import { nextTimelinePageSource } from "../../../src/hooks/use-timeline-projection.js";
 
 describe("timeline pagination", () => {
   it("reveals cached Jazz rows before asking the BFF for another page", () => {

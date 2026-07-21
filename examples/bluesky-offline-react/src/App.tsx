@@ -2,15 +2,15 @@ import type { DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
 import { useEffect, useRef, useState } from "react";
 import { jazzAppId } from "../shared/identifiers.js";
-import { LoginView } from "./LoginView.js";
+import { LoginView } from "./components/LoginView.js";
+import { LoadingScreen } from "./components/TimelineView.js";
 import { Timeline } from "./Timeline.js";
-import { LoadingScreen } from "./TimelineView.js";
 import {
   keepMountedSession,
   refreshAuthentication,
   type AuthenticationState,
   type JazzCredentials,
-} from "./auth-state.js";
+} from "./model/auth-state.js";
 
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 const sessionCacheKey = `${jazzAppId}:session`;

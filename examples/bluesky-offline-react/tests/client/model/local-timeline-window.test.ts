@@ -4,7 +4,7 @@ import {
   nextTimelineLimit,
   timelineQueryLimit,
   windowTimelineRows,
-} from "../../src/timeline-data.js";
+} from "../../../src/model/timeline-data.js";
 
 describe("local timeline window", () => {
   it("reveals cached roots 20 at a time while querying one look-ahead row", () => {

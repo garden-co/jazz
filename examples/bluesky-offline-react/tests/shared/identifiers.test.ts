@@ -6,7 +6,7 @@ import {
   parseAtRecordUri,
 } from "../../shared/identifiers.js";
 import { stableObjectId as serverObjectId } from "../../server/projection.js";
-import { stableObjectId as browserObjectId } from "../../src/object-id.js";
+import { stableObjectId as browserObjectId } from "../../src/model/object-id.js";
 
 describe("shared identifiers", () => {
   it("adapts ATProto record URIs to PDS identifiers", () => {

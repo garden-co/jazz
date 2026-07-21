@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AppTheme } from "../../src/AppTheme.js";
+import { AppTheme } from "../../../src/components/AppTheme.js";
 
 describe("AppTheme", () => {
   it("provides the shared visual theme without hiding application content", () => {

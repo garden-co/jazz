@@ -4,7 +4,7 @@ import {
   writableReplyCount,
   type IncludedPost,
   type TimelineEntryView,
-} from "../../src/timeline-data.js";
+} from "../../../src/model/timeline-data.js";
 
 function post(id: string, replyParentId?: string): IncludedPost {
   return {

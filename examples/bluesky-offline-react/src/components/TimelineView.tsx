@@ -12,6 +12,7 @@ import {
   BackIcon,
   DisclosureIcon,
   LikeIcon,
+  ReplyIcon,
   RepostIcon,
   SignOutIcon,
   StatusIcon,
@@ -19,14 +20,13 @@ import {
   ThreadLinkIcon,
 } from "./Icons.js";
 import { ProfileName, profileNameParts } from "./ProfileName.js";
-import { ReplyIcon } from "./ReplyIcon.js";
-import { segmentRichText } from "./rich-text.js";
+import { segmentRichText } from "../model/rich-text.js";
 import type {
   DisplayPost,
   TimelineItem,
   TimelinePostNode,
-} from "./timeline-data.js";
-import type { ConnectivityStatus } from "./use-connectivity.js";
+} from "../model/timeline-data.js";
+import type { ConnectivityStatus } from "../hooks/use-connectivity.js";
 
 export function LoadingScreen({ label = "Opening your local timeline…" }: { label?: string }) {
   return (

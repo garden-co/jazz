@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { segmentRichText } from "../../src/rich-text.js";
+import { segmentRichText } from "../../../src/model/rich-text.js";
 
 describe("segmentRichText", () => {
   it("uses UTF-8 byte offsets when extracting link labels", () => {

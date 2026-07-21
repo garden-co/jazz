@@ -1,11 +1,11 @@
 import { TID } from "@atproto/common-web";
 import { useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema.js";
-import { parseAtRecordUri } from "../shared/identifiers.js";
-import { decodeOperation, encodeOperationPayload, type Operation } from "../shared/pending-operations.js";
-import { stableObjectId } from "./object-id.js";
-import { nextReactionIntent } from "./reactions.js";
-import { writableReplyCount, type DisplayPost } from "./timeline-data.js";
+import { app } from "../../schema.js";
+import { parseAtRecordUri } from "../../shared/identifiers.js";
+import { decodeOperation, encodeOperationPayload, type Operation } from "../../shared/pending-operations.js";
+import { stableObjectId } from "../model/object-id.js";
+import { nextReactionIntent } from "../model/reactions.js";
+import { writableReplyCount, type DisplayPost } from "../model/timeline-data.js";
 import { useOutbox } from "./use-outbox.js";
 
 function recordKey(uri: string | null | undefined, kind: "like" | "repost") {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkApiReachable, connectivityStatus } from "../../src/use-connectivity.js";
+import { checkApiReachable, connectivityStatus } from "../../../src/hooks/use-connectivity.js";
 
 describe("API connectivity", () => {
   it("distinguishes checking from confirmed online and offline states", () => {

@@ -11,11 +11,11 @@ import {
   windowTimelineRows,
   type DisplayPost,
   type TimelineEntryView,
-} from "./timeline-data.js";
-import { stableObjectId } from "./object-id.js";
-import { useConnectivity } from "./use-connectivity.js";
-import { useTimelineActions } from "./use-timeline-actions.js";
-import { useTimelineProjection } from "./use-timeline-projection.js";
+} from "./model/timeline-data.js";
+import { stableObjectId } from "./model/object-id.js";
+import { useConnectivity } from "./hooks/use-connectivity.js";
+import { useTimelineActions } from "./hooks/use-timeline-actions.js";
+import { useTimelineProjection } from "./hooks/use-timeline-projection.js";
 import {
   AppFooter,
   AppHeader,
@@ -23,7 +23,7 @@ import {
   Intro,
   SyncBanner,
   TimelineFeed,
-} from "./TimelineView.js";
+} from "./components/TimelineView.js";
 
 export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => void }) {
   const [text, setText] = useState("");

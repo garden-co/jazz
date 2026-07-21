@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextReactionIntent } from "../../src/reactions.js";
+import { nextReactionIntent } from "../../../src/model/reactions.js";
 
 describe("offline reaction intentions", () => {
   it("collapses a queued repost followed by an undo back to the synced state", () => {

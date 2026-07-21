@@ -1,4 +1,4 @@
-import { formatObjectId, jazzAppId, objectIdKey } from "../shared/identifiers.js";
+import { formatObjectId, jazzAppId, objectIdKey } from "../../shared/identifiers.js";
 
 const objectIds = new Map<string, Promise<string>>();
 

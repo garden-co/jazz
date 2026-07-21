@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { profileNameParts } from "../../src/ProfileName.js";
+import { profileNameParts } from "../../../src/components/ProfileName.js";
 
 describe("profile names", () => {
   it("shows a display name and an explicit @handle when both are available", () => {

@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../../schema.js";
 
 function includedPost(ownerDid: string) {
   const quotedPost = app.posts.include({
