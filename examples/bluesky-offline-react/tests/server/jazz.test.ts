@@ -4,7 +4,7 @@ const contexts = vi.hoisted(() => {
   const authenticationDb = { role: "authentication" };
   const projectionDb = { role: "projection" };
   const createJazzContext = vi.fn()
-    .mockReturnValueOnce({ asBackend: () => authenticationDb })
+    .mockReturnValueOnce({ db: () => authenticationDb })
     .mockReturnValueOnce({ asBackend: () => projectionDb });
   return { authenticationDb, projectionDb, createJazzContext };
 });
@@ -31,7 +31,7 @@ describe("server Jazz contexts", () => {
     await expect(import("../../server/jazz.js")).rejects.toThrow("BACKEND_SECRET is required");
   });
 
-  it("keeps credentials and projections in separate synced replicas", async () => {
+  it("keeps credentials local and syncs only the projection replica", async () => {
     vi.stubEnv("JAZZ_SERVER_URL", "http://127.0.0.1:4200");
     vi.stubEnv("BACKEND_SECRET", "backend-secret");
     vi.stubEnv("JAZZ_ADMIN_SECRET", "admin-secret");
@@ -41,11 +41,11 @@ describe("server Jazz contexts", () => {
     expect(contexts.createJazzContext).toHaveBeenCalledTimes(2);
     const authenticationConfig = contexts.createJazzContext.mock.calls[0]?.[0];
     expect(contexts.createJazzContext).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      backendSecret: "backend-secret",
       driver: { type: "persistent", dataPath: "./data/auth.db" },
-      serverUrl: "http://127.0.0.1:4200",
     }));
-    expect(authenticationConfig).toHaveProperty("adminSecret", "admin-secret");
+    expect(authenticationConfig).not.toHaveProperty("serverUrl");
+    expect(authenticationConfig).not.toHaveProperty("backendSecret");
+    expect(authenticationConfig).not.toHaveProperty("adminSecret");
     expect(contexts.createJazzContext).toHaveBeenNthCalledWith(2, expect.objectContaining({
       driver: { type: "persistent", dataPath: "./data/projection.db" },
       serverUrl: "http://127.0.0.1:4200",
