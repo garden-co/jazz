@@ -851,6 +851,7 @@ function toFlatConditions(conditions: BuiltCondition[]): BuiltCondition[] {
  */
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+  const aggregate = (JSON.parse(builderJson) as { aggregate?: unknown }).aggregate;
   const relations = analyzeRelations(schema);
   const hasExplicitSelect = builder.select.length > 0;
   const selectColumns = hasExplicitSelect
@@ -863,6 +864,9 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   });
 
   if (usesNativeRelationFeatures(builder)) {
+    if (aggregate != null) {
+      throw new Error("Aggregate queries cannot be combined with hops, gather, or union yet.");
+    }
     const relation = translateBuilderToRelationIr(builderJson, schema);
     return JSON.stringify({
       table: builder.table,
@@ -886,6 +890,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     table: builder.table,
     conditions: toFlatConditions(builder.conditions),
     array_subqueries: arraySubqueries,
+    ...(aggregate != null ? { aggregate } : {}),
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
     ...(orderBy.length > 0 ? { order_by: orderBy } : {}),

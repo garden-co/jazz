@@ -6,7 +6,7 @@ export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const trimmedFilterTitle = filterTitle.trim();
-  let todosQuery = app.todos.limit(100);
+  let todosQuery = app.todos.limit(100).orderBy("title");
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
   }
@@ -18,6 +18,8 @@ export function TodoList() {
   // #region reading-reactive-hooks-react
   const { data: todos = [] } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
+  const { data: countRows = [] } = useAll(app.todos.count());
+  const totalTodos = countRows[0]?.count ?? 0;
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
   const [title, setTitle] = useState("");
@@ -64,6 +66,7 @@ export function TodoList() {
           Done only
         </label>
       </div>
+      <p id="todo-count">{totalTodos} todos total</p>
       <ul id="todo-list">
         {todos.map((todo) => (
           <li key={todo.id} className={todo.done ? "done" : ""}>

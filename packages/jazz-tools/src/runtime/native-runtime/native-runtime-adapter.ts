@@ -27,6 +27,8 @@ import {
   type NativeRelationSubscriptionEdge,
   type NativeRowBatch,
   type NativeRemovedRow,
+  type QueryAggregate,
+  type QueryAggregateSpec,
   type QueryArraySubquery,
   type QueryLiteral,
   type QueryOrder,
@@ -42,6 +44,7 @@ import {
   createRecordValueDecoder,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
+import { aggregateOutputColumns } from "../aggregate-columns.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -2422,9 +2425,17 @@ function subscriptionOutputColumns(
     select_columns?: unknown;
     array_subqueries?: unknown;
     relation_ir?: unknown;
+    aggregate?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
+  }
+  const aggregate = readQueryAggregate(parsed.aggregate);
+  if (aggregate) {
+    return {
+      rootTable: parsed.table,
+      rootColumns: aggregateOutputColumns(aggregate, schema[parsed.table]?.columns ?? []),
+    };
   }
   return {
     rootTable: parsed.table,
@@ -2623,6 +2634,7 @@ function rejectionReason(message: string): string {
 
 function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
+    aggregate?: unknown;
     array_subqueries?: unknown;
     conditions?: unknown;
     table?: unknown;
@@ -2644,7 +2656,40 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by ?? parsed.orderBy)),
     select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
     arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
+    aggregate: readQueryAggregate(parsed.aggregate),
   });
+}
+
+const QUERY_AGGREGATE_FUNCTIONS = new Set(["count", "sum", "avg", "min", "max"]);
+
+function readQueryAggregate(value: unknown): QueryAggregateSpec | undefined {
+  if (value == null) return undefined;
+  const spec = value as { aggregates?: unknown; group_by?: unknown };
+  if (!Array.isArray(spec.aggregates) || spec.aggregates.length === 0) {
+    throw new Error("Query aggregate must declare at least one aggregate expression");
+  }
+  const aggregates = spec.aggregates.map((entry) => {
+    const record = entry as { function?: unknown; column?: unknown; alias?: unknown };
+    if (typeof record.function !== "string" || !QUERY_AGGREGATE_FUNCTIONS.has(record.function)) {
+      throw new Error(`Unsupported aggregate function: ${String(record.function)}`);
+    }
+    if (typeof record.alias !== "string" || record.alias.length === 0) {
+      throw new Error("Aggregate expressions require an alias");
+    }
+    if (record.column != null && typeof record.column !== "string") {
+      throw new Error("Aggregate column must be a string when present");
+    }
+    return {
+      function: record.function as QueryAggregate["function"],
+      column: record.column ?? undefined,
+      alias: record.alias,
+    } as QueryAggregate;
+  });
+  const groupBy = spec.group_by;
+  if (groupBy != null && typeof groupBy !== "string") {
+    throw new Error("Aggregate group_by must be a string when present");
+  }
+  return { aggregates, groupBy: (groupBy as string | undefined) ?? undefined };
 }
 
 function unsupportedQueryEncodingError(context?: string): Error {
@@ -3672,7 +3717,9 @@ function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeR
     const type =
       name === "$createdBy" || name === "$updatedBy"
         ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+        : (magicColumnType(name) ??
+          columnsByName.get(name)?.column_type ??
+          columnTypeFromDescriptorValueType(batch.descriptor[index]?.valueType));
     plans.push({
       name,
       index,
@@ -4064,6 +4111,34 @@ function relationKey(table: string, id: string, relation: string): string {
 
 function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
   return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
+}
+
+/**
+ * Fields absent from the table schema (aggregate aliases and other synthetic
+ * outputs) decode via the batch descriptor's own value type. Only scalar tags
+ * with an unambiguous ColumnType mapping are covered; the rest keep the raw
+ * Bytea fallback. Tags follow groove's ValueType enum order.
+ */
+function columnTypeFromDescriptorValueType(
+  valueType: ValueType | undefined,
+): ColumnType | undefined {
+  if (!valueType) return undefined;
+  if (valueType.tag === 12) return columnTypeFromDescriptorValueType(valueType.inner);
+  switch (valueType.tag) {
+    case 3: // U64
+    case 13: // I64
+      return { type: "BigInt" };
+    case 4: // F64
+      return { type: "Double" };
+    case 5: // Bool
+      return { type: "Boolean" };
+    case 6: // String
+      return { type: "Text" };
+    case 8: // Uuid
+      return { type: "Uuid" };
+    default:
+      return undefined;
+  }
 }
 
 function decodePlannedField(

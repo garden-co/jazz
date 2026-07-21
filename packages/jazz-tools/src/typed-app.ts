@@ -760,6 +760,17 @@ type BuiltGather = {
   step_hops: string[];
 };
 
+type BuiltAggregate = {
+  aggregates: Array<{ function: "count"; column?: string; alias: string }>;
+  group_by?: string;
+};
+
+/** Result row of a {@link TypedTableQueryBuilder.count} query. */
+export type CountRow = { id: string; count: number };
+
+/** Query handle produced by {@link TypedTableQueryBuilder.count}. */
+export type CountQueryHandle = QueryBuilder<CountRow>;
+
 function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
   return { ...condition };
 }
@@ -816,6 +827,7 @@ export class TypedTableQueryBuilder<
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
+  private _aggregateVal?: BuiltAggregate;
   _columnTransforms?: ColumnTransformMap;
 
   constructor(
@@ -826,6 +838,29 @@ export class TypedTableQueryBuilder<
     this._table = table;
     this._schema = schema;
     this._columnTransforms = columnTransforms;
+  }
+
+  /**
+   * Count matching rows. Terminal: returns a query whose single result row is
+   * `{ count }`, evaluated by the engine — no row payloads move. Composes with
+   * `where(...)`; not yet with includes, hops/gather/union, or windows.
+   *
+   * ```ts
+   * const [{ count }] = await db.all(app.todos.where({ done: false }).count());
+   * ```
+   */
+  count(): CountQueryHandle {
+    if (this._hops.length > 0 || this._gatherVal || this._unionVal) {
+      throw new Error("count() cannot be combined with hops, gather, or union yet.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("count() cannot be combined with include(...) yet.");
+    }
+    const clone = this._clone<TInclude, TSelection, TRequired>();
+    clone._aggregateVal = {
+      aggregates: [{ function: "count", alias: "count" }],
+    };
+    return clone as unknown as CountQueryHandle;
   }
 
   where(
@@ -1014,6 +1049,7 @@ export class TypedTableQueryBuilder<
         hops: this._hops,
         gather: this._gatherVal,
         ...(this._unionVal ? { union: cloneBuiltRelation(this._unionVal).union } : {}),
+        ...(this._aggregateVal ? { aggregate: this._aggregateVal } : {}),
       },
       queryBuilderJsonReplacer,
     );
@@ -1044,6 +1080,9 @@ export class TypedTableQueryBuilder<
     clone._hops = [...this._hops];
     clone._gatherVal = this._gatherVal ? cloneBuiltGather(this._gatherVal) : undefined;
     clone._unionVal = this._unionVal ? cloneBuiltRelation(this._unionVal) : undefined;
+    clone._aggregateVal = this._aggregateVal
+      ? { aggregates: this._aggregateVal.aggregates.map((entry) => ({ ...entry })) }
+      : undefined;
     return clone;
   }
 

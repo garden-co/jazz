@@ -294,6 +294,37 @@ export function transformRows<T>(
   });
 }
 
+/**
+ * Transform aggregate result rows. Aggregate outputs are not table rows — the
+ * fields are the aggregate aliases (plus any group columns), so the table
+ * column transform does not apply. Integer aggregate values (count) decode as
+ * bigint on the wire and surface as plain numbers.
+ */
+export function transformAggregateRows<T>(rows: WasmRow[], aliases: readonly string[]): T[] {
+  return rows.map((row: WasmRowWithNamedValues) => {
+    const obj: Record<string, unknown> = {};
+    if (row.id !== undefined) obj.id = row.id;
+    const values = row.values as WasmValue[];
+    aliases.forEach((alias, index) => {
+      const value = hasNamedValue(row.valuesByColumn, alias)
+        ? getNamedValue(row.valuesByColumn, alias)
+        : values[index];
+      if (value !== undefined) {
+        const unwrapped = unwrapValue(value, undefined, alias);
+        obj[alias] = typeof unwrapped === "bigint" ? bigintToNumber(unwrapped, alias) : unwrapped;
+      }
+    });
+    return obj as T;
+  });
+}
+
+function bigintToNumber(value: bigint, fieldName: string): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < -BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Aggregate value "${fieldName}" exceeds Number.MAX_SAFE_INTEGER`);
+  }
+  return Number(value);
+}
+
 export function transformRow<T>(
   row: WasmRow,
   schema: WasmSchema,

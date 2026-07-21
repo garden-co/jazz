@@ -41,7 +41,8 @@ import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.j
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRow, transformRows } from "./row-transformer.js";
+import { transformAggregateRows, transformRow, transformRows } from "./row-transformer.js";
+import { aggregateOutputColumns, type AggregateColumnSpec } from "./aggregate-columns.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionChannel } from "./subscription-channel.js";
@@ -211,6 +212,33 @@ function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
   }
   const { subscriptionMode: _subscriptionMode, ...nativeOptions } = options;
   return nativeOptions;
+}
+
+function builtAggregateSpec(builderJson: string): AggregateColumnSpec | undefined {
+  const aggregate = (
+    JSON.parse(builderJson) as {
+      aggregate?: {
+        aggregates?: Array<{ function?: unknown; column?: unknown; alias?: unknown }>;
+        group_by?: unknown;
+      };
+    }
+  ).aggregate;
+  const aggregates = aggregate?.aggregates?.filter(
+    (entry): entry is { function: string; column?: string; alias: string } =>
+      typeof entry.function === "string" &&
+      typeof entry.alias === "string" &&
+      (entry.column == null || typeof entry.column === "string"),
+  );
+  if (!aggregates || aggregates.length === 0) return undefined;
+  return {
+    aggregates,
+    groupBy: typeof aggregate?.group_by === "string" ? aggregate.group_by : undefined,
+  };
+}
+
+function builtAggregateAliases(builderJson: string): string[] | undefined {
+  const spec = builtAggregateSpec(builderJson);
+  return spec ? spec.aggregates.map((entry) => entry.alias) : undefined;
 }
 
 function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -881,6 +909,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       },
       session,
     );
+    const aggregateAliases = builtAggregateAliases(builderJson);
+    if (aggregateAliases) {
+      return transformAggregateRows(rows, aggregateAliases);
+    }
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -1523,6 +1555,10 @@ export class Db {
       context || usesRelationTraversal
         ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
         : await client.query(wasmQuery, queryOptions);
+    const aggregateAliases = builtAggregateAliases(builderJson);
+    if (aggregateAliases) {
+      return transformAggregateRows(rows, aggregateAliases);
+    }
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -1638,19 +1674,25 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const nativeOutputColumns = resolveNativeSubscriptionColumns(
-      outputTable,
-      outputSchema,
-      outputIncludes,
-      builtQuery.select,
-    );
+    const aggregateSpec = builtAggregateSpec(builderJson);
+    const nativeOutputColumns = aggregateSpec
+      ? aggregateOutputColumns(aggregateSpec, outputSchema[outputTable]?.columns ?? [])
+      : resolveNativeSubscriptionColumns(
+          outputTable,
+          outputSchema,
+          outputIncludes,
+          builtQuery.select,
+        );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
+    const aggregateAliases = aggregateSpec?.aggregates.map((entry) => entry.alias);
     const transform = (row: WasmRow): T =>
-      transformOutputRow(
-        outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
-      );
+      aggregateAliases
+        ? transformAggregateRows<T>([row], aggregateAliases)[0]!
+        : transformOutputRow(
+            outputTable === builtQuery.table ? query : {},
+            transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+          );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
       callback(typedDelta);

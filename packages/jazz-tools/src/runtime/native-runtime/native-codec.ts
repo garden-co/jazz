@@ -207,12 +207,36 @@ export type QueryArraySubquery = {
   nestedArrays?: QueryArraySubquery[];
 };
 
+export type QueryAggregateFunction = "count" | "sum" | "avg" | "min" | "max";
+
+export type QueryAggregate = {
+  function: QueryAggregateFunction;
+  column?: string;
+  alias: string;
+};
+
+export type QueryAggregateSpec = {
+  aggregates: QueryAggregate[];
+  groupBy?: string;
+};
+
+// Postcard enum discriminants for jazz::query::AggregateFunction, in variant
+// declaration order.
+const AGGREGATE_FUNCTION_DISCRIMINANTS: Record<QueryAggregateFunction, number> = {
+  count: 0,
+  sum: 1,
+  avg: 2,
+  min: 3,
+  max: 4,
+};
+
 export type QueryOptions = {
   limit?: number;
   offset?: number;
   orderBy?: QueryOrder[];
   select?: string[];
   arraySubqueries?: QueryArraySubquery[];
+  aggregate?: QueryAggregateSpec;
 };
 
 export function queryWithEqFilters(
@@ -233,7 +257,7 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
+  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [], aggregate } = queryOptions;
   if (limit != null && (!Number.isSafeInteger(limit) || limit < 0)) {
     throw new Error("query limit must be a non-negative safe integer");
   }
@@ -268,7 +292,28 @@ export function queryWithPredicates(
     order.string(term.column);
     order.u64(term.direction === "Asc" ? 0 : 1);
   }, orderBy.length);
-  writer.none();
+  // jazz::query::Query.aggregate — Option<AggregateQuery { aggregates, group_by }>.
+  if (aggregate == null) {
+    writer.none();
+  } else {
+    writer.some((aggregateWriter) => {
+      aggregateWriter.vec((item, index) => {
+        const spec = aggregate.aggregates[index]!;
+        item.u64(AGGREGATE_FUNCTION_DISCRIMINANTS[spec.function]);
+        if (spec.column == null) {
+          item.none();
+        } else {
+          item.some((columnWriter) => columnWriter.string(spec.column!));
+        }
+        item.string(spec.alias);
+      }, aggregate.aggregates.length);
+      if (aggregate.groupBy == null) {
+        aggregateWriter.none();
+      } else {
+        aggregateWriter.some((groupWriter) => groupWriter.string(aggregate.groupBy!));
+      }
+    });
+  }
   if (limit == null) {
     writer.none();
   } else {
