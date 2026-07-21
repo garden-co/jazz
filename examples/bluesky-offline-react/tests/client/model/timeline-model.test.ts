@@ -134,6 +134,7 @@ describe("timeline model", () => {
 
   it("shows the same post only once when it has multiple top-level events", () => {
     const sharedPost = post("shared");
+    const duplicatePost = { ...post("shared-copy"), uri: sharedPost.uri };
     const direct: TimelineEntryView = {
       id: "direct-entry",
       ownerDid: "did:plc:viewer",
@@ -148,8 +149,12 @@ describe("timeline model", () => {
     const repost: TimelineEntryView = {
       ...direct,
       id: "repost-entry",
+      postId: duplicatePost.id,
+      threadRootId: duplicatePost.id,
       repostId: "repost",
       sortAt: "2026-07-16T11:00:00.000Z",
+      post: duplicatePost,
+      threadRoot: duplicatePost,
       repost: {
         id: "repost",
         uri: null,
@@ -157,13 +162,13 @@ describe("timeline model", () => {
         active: true,
         actorDid: "did:plc:reposter",
         actorProfileId: "reposter-profile",
-        subjectPostId: sharedPost.id,
+        subjectPostId: duplicatePost.id,
         createdAt: "2026-07-16T11:00:00.000Z",
       },
     };
 
     expect(buildTimeline([direct, repost])).toMatchObject([
-      { id: "repost-entry", node: { post: { id: sharedPost.id } } },
+      { id: "repost-entry", node: { post: { uri: sharedPost.uri } } },
     ]);
   });
 });
