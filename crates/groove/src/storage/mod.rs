@@ -1006,10 +1006,10 @@ where
                     max_windows,
                     &mut consolidated,
                 )?;
+                cursor = Some(key);
                 if consolidated.windows >= max_windows {
                     break;
                 }
-                cursor = Some(key);
                 continue;
             }
             plain_run.push((key, value));
@@ -1023,10 +1023,10 @@ where
                     max_windows,
                     &mut consolidated,
                 )?;
+                cursor = next_cursor;
                 if consolidated.windows >= max_windows {
                     break;
                 }
-                cursor = next_cursor;
             }
         }
         if consolidate_tail && consolidated.windows < max_windows {
@@ -1041,9 +1041,6 @@ where
             )?;
             cursor = next_cursor;
         }
-        if owned_operations.is_empty() {
-            return Ok(WindowConsolidation::default());
-        }
         if consolidated.records > 0 && !self.window_marker_present()? {
             owned_operations.push(OwnedWriteOperation::Set {
                 cf: self.column_family.to_owned(),
@@ -1051,15 +1048,19 @@ where
                 value: Vec::new(),
             });
         }
-        if use_cursor
-            && consolidated.records > 0
-            && let Some(cursor) = cursor
-        {
-            owned_operations.push(OwnedWriteOperation::Set {
-                cf: self.column_family.to_owned(),
-                key: WINDOW_CURSOR_KEY.to_vec(),
-                value: cursor,
-            });
+        if use_cursor && let Some(last_seen) = cursor {
+            let cursor = cursor_after_last_seen(last_seen.as_slice());
+            let current_cursor = self.window_consolidation_cursor()?;
+            if cursor.as_slice() > current_cursor.as_slice() {
+                owned_operations.push(OwnedWriteOperation::Set {
+                    cf: self.column_family.to_owned(),
+                    key: WINDOW_CURSOR_KEY.to_vec(),
+                    value: cursor,
+                });
+            }
+        }
+        if owned_operations.is_empty() {
+            return Ok(WindowConsolidation::default());
         }
         let operations = owned_operations
             .iter()
@@ -1324,6 +1325,12 @@ fn lexicographic_predecessor(key: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+fn cursor_after_last_seen(key: &[u8]) -> Vec<u8> {
+    let mut cursor = key.to_vec();
+    cursor.push(0);
+    cursor
 }
 
 struct DecodedWindowValue<'a> {
@@ -3793,6 +3800,67 @@ mod tests {
         assert_eq!(
             store.get_raw(&expected[8].0).unwrap(),
             Some(expected[8].1.clone())
+        );
+    }
+
+    #[test]
+    fn full_window_consolidation_cursor_advances_past_encoded_windows() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        seed_window_records(&storage, descriptor, 12);
+        let store = window_store(&storage, &descriptor);
+
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 1).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 3
+            }
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 1).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 3
+            }
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation {
+                windows: 2,
+                records: 6
+            }
+        );
+
+        let cursor_before = storage
+            .get("jazz_docs_history", WINDOW_CURSOR_KEY)
+            .unwrap()
+            .expect("cursor should be persisted");
+        let remaining = storage
+            .range("jazz_docs_history", &cursor_before, WINDOW_MARKER_KEY)
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .all(|(key, _)| key == WINDOW_CURSOR_KEY || key == WINDOW_MARKER_KEY),
+            "cursor should sit past all already encoded windows"
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation::default()
+        );
+        let cursor_after = storage
+            .get("jazz_docs_history", WINDOW_CURSOR_KEY)
+            .unwrap()
+            .expect("cursor should still be persisted");
+        assert_eq!(cursor_after, cursor_before);
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation::default()
+        );
+        assert_eq!(
+            storage.get("jazz_docs_history", WINDOW_CURSOR_KEY).unwrap(),
+            Some(cursor_after)
         );
     }
 

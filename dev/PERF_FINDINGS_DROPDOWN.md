@@ -332,3 +332,136 @@ Gates (all exit 0): jazz suite, groove suite, JAZZ_SEED_COUNT=300 oracle,
 shared-coverage differential (exact), jazz-tools --features test, jazz-server,
 cargo check jazz-sim --benches, cargo check jazz+jazz-sim lib/tests/examples,
 cargo fmt jazz+groove. crates/groove source untouched.
+
+## Phase 8 results (client wasm attribution)
+
+Final real-app receipt directory: `/Users/anselm/boredm-harness-v2/browser-profile-20260721T093651Z`.
+This was captured from the served production BoredM app after temporarily swapping in a profiling `jazz-wasm` build from this worktree. The served `jazz_wasm_bg.wasm` and `jazz_wasm.js` were restored afterward; md5s matched the pre-swap backups:
+
+| Artifact | Restored md5 |
+| --- | --- |
+| `jazz_wasm_bg.wasm` | `3673f5012c18891661b2799cfb8dad96` |
+| `jazz_wasm.js` | `79d3b1f69a9770e01777ecc36bc8cf1a` |
+
+Instrumentation note: the first pass emitted per-node operator spans and made the harness fail with `RangeError: Invalid string length`. The final pass emitted cumulative Groove operator buckets with exclusive operator timing, plus named maintained-open stage spans.
+
+Warm dominant subscription: `dropdown_entry`, 24,081 delivered rows.
+
+| Stage | ms | us/row | Share of 5,437.9ms worker `createExecutedSubscription` |
+| --- | ---: | ---: | ---: |
+| compile | 0.4 | 0.02 | 0.0% |
+| Groove subscribe/hydrate | 517.6 | 21.5 | 9.5% |
+| snapshot recv | 0.0 | 0.0 | 0.0% |
+| wasm maintained-view apply | 383.6 | 15.9 | 7.1% |
+| wasm-core named open total | 901.6 | 37.4 | 16.6% |
+| TS/browser `subscription_apply_chunk` for 24,045 rows | 2,085.8 | 86.7 | 38.4% |
+| Remaining worker request time outside these spans | ~2,450.5 | ~101.8 | 45.1% |
+
+Warm `dropdown_entry` Groove subscribe/hydrate exclusive operator buckets:
+
+| Operator | Calls | ms | rows_in | rows_out | us/row out |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `map_project` | 25 | 263.7 | 336,810 | 336,810 | 0.8 |
+| `join_apply` | 1 | 122.3 | 48,090 | 24,045 | 5.1 |
+| `semi_join_apply` | 3 | 27.4 | 72,243 | 24,117 | 1.1 |
+| `unwrap_nullable` | 1 | 23.5 | 24,045 | 24,045 | 1.0 |
+| `anti_join_apply` | 2 | 20.6 | 48,090 | 48,090 | 0.4 |
+| `table_source` | 4 | 0.5 | 0 | 24,081 | ~0.0 |
+
+Warm `dropdown_entry` raw snapshot table hydration is not the owner: 10 `snapshot_table_deltas` calls, 96,288 rows emitted, 51.0ms total. OPFS read time for the whole warm run was only 27.3ms. The warm retained bottleneck is therefore not browser IO; it is mostly client-side materialization outside Groove, with a smaller Groove join/project hydrate component.
+
+Policy operators after the Phase 7 derivation-collapse fix are present but no longer dominant: `join_apply` + `semi_join_apply` + `anti_join_apply` total 170.3ms of the 5,437.9ms dominant worker request (3.1%) and 170.3ms of the 901.6ms wasm-core open (18.9%). No `arg_max_by` bucket appeared in the `dropdown_entry` warm open; the lowered semi-join reduction does not show up as a warm client hot bucket in this capture.
+
+Cold big-tick exclusive operator split, all tables:
+
+| Operator | Calls | ms | rows_in | rows_out | us/row out |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `table_source` | 620,886 | 705.5 | 0 | 78,473 | 9.0 |
+| `map_project` | 488,592 | 366.0 | 369,835 | 369,835 | 1.0 |
+| `persist` | 879,564 | 341.6 | 105,958 | 105,958 | 3.2 |
+| `index_by` | 879,564 | 166.3 | 105,904 | 105,958 | 1.6 |
+| `join_apply` | 16,356 | 159.9 | 52,226 | 26,113 | 6.1 |
+| `semi_join_apply` | 67,860 | 84.5 | 83,914 | 26,982 | 3.1 |
+| `anti_join_apply` | 32,712 | 60.1 | 52,226 | 52,226 | 1.2 |
+| `unwrap_nullable` | 51,156 | 36.2 | 27,541 | 27,527 | 1.3 |
+
+Cold whole-run timing: wall 22,117ms, Jazz path 15,250ms, wire ingest ticks 7,432.1ms, subscription apply chunks 6,924.0ms. The largest tick was 4,337.5ms; the exclusive Groove buckets above explain only about 1.9s of operator body time across all ticks, so the remaining cold tick time is outside the measured operator apply bodies: runtime traversal/memo/arrangement state management, record movement/clone/drop, and persistence/index write plumbing around the operators. OPFS write time was only 30.0ms, so this is CPU/object-work in wasm, not storage latency.
+
+The 24,045-row apply chunk is TS-side dominated. In cold, the 24,045-row `subscription_apply_chunk` took 2,010.3ms. In warm, the same chunk took 2,085.8ms. The wasm-core maintained-view apply inside `open_seeded_maintained_subscription_view` for `dropdown_entry` was 383.6ms, so the chunk wrapper/adapter/materialization work outside that core apply accounts for roughly 1.7s of the dominant row apply in warm.
+
+Ranked conclusion:
+
+1. CLEARLY-GOOD: optimize TS/browser subscription materialization for large same-table chunks. Measured share: ~2.09s of warm 5.44s dominant create call, and 2.01s of cold apply for the 24,045-row chunk. Owning span/function surface: `subscription_apply_chunk` around `createExecutedSubscription` result delivery, outside `open_seeded_maintained_subscription_view`'s wasm-core apply. Estimated ceiling: ~1.5-2.0s warm and cold for this workload if per-row JS object/adaptor work is reduced or chunked.
+2. CLEARLY-GOOD: reduce wasm cold tick runtime overhead around table-source hydration and persist/index maintenance. Measured share: cold `server_pump_tick` total 7.43s, with exclusive operator bodies led by `table_source` 705.5ms, `persist` 341.6ms, `map_project` 366.0ms, `index_by` 166.3ms; the unmeasured remainder is runtime traversal/memo/state-management around those bodies. Estimated ceiling: several seconds cold, especially the 4.34s largest tick.
+3. SPECULATIVE: further policy-join tuning client-side. Measured share after Phase 7 is small: warm `dropdown_entry` policy-ish join buckets are 170.3ms of a 5.44s worker call; cold join/semi/anti buckets total 304.5ms across all ticks. Ceiling is likely sub-500ms unless a hidden non-operator policy cost is found.
+4. SPECULATIVE: raw OPFS/read batching for warm reopen. Measured warm OPFS read time is 27.3ms and `snapshot_table_deltas` for `dropdown_entry` is 51.0ms total, so storage latency is ruled out for the browser warm path. Ceiling is low for this profile.
+
+Gate/build/capture results:
+
+| Step | Exit code |
+| --- | ---: |
+| `cargo check -p jazz -j 2` after initial instrumentation | 0 |
+| `cargo check -p groove -j 2` after initial instrumentation | 0 |
+| first `wasm-pack build --target web --profiling` | 0 |
+| first capture with per-node spans | 1 (`RangeError: Invalid string length`) |
+| reduced cumulative-span `wasm-pack build --target web --profiling` | 0 |
+| cumulative-span capture | 0 (`/Users/anselm/boredm-harness-v2/browser-profile-20260721T093200Z`) |
+| exclusive-timing `cargo check -p jazz -j 2` | 0 |
+| exclusive-timing `wasm-pack build --target web --profiling` | 0 |
+| final exclusive-timing capture | 0 (`/Users/anselm/boredm-harness-v2/browser-profile-20260721T093651Z`) |
+| artifact restore md5 verification | 0 |
+| restored-stack `scripts/demo-stack.sh --skip-build --prod` | 0 |
+| restored-source `cargo check -p jazz -j 2` | 0 |
+
+Tooling-friction: a worker-span side channel that writes bounded binary/NDJSON receipts directly, instead of serializing all console messages into one JSON result, would have allowed finer per-operator spans without perturbing or overflowing the harness.
+
+## Consolidation spin
+
+Mechanism: `jazz::db::Db::tick_stats` calls `Node::post_tick_consolidate_history_windows`, which calls `groove::db::Database::consolidate_history_windows` with `POST_TICK_HISTORY_WINDOW_BUDGET = 4`. That walks every schema table/direct store whose physical name is a windowed history table and calls `RecordStore::consolidate_full_windows_bounded`.
+
+Convergence contract: full-window maintenance uses `consolidate_windows_bounded_inner(..., consolidate_tail = false)`, so it scans `OrderedKvStorage::range(column_family, window_consolidation_cursor(), WINDOW_MARKER_KEY)`. Plain records are accumulated into runs of `TARGET_RECORDS_PER_WINDOW`; each appended window rewrites the plain records into one codec window, deletes the original plain keys, and writes `WINDOW_MARKER_KEY` if this is the first window. For cursor-mode history maintenance, it writes `WINDOW_CURSOR_KEY` only when `consolidated.records > 0`, using the last window key or last plain key observed before the budget stopped. A later call resumes from that cursor. Encountering already encoded windows flushes the current plain run and then moves the in-memory cursor candidate to that window key; however, no durable cursor is written when no new records were consolidated.
+
+Rescheduling owner: the production `jazz-tools` websocket path calls `ServerShellHandle::tick_take`, which calls `InMemoryServerShell::tick`; if outbound frames are produced, `drain_ws_outbound` calls `notify_activity`, causing another activity-driven tick. The plain server shell owner thread itself blocks on its job queue; there is no autonomous idle tick interval in `crates/jazz-tools/src/server/core_server_shell.rs`.
+
+Verdict from this lane: strict headless repro was negative on the copied store. I copied `/Users/anselm/boredm-harness-v2/store-snapshots/boredm-2026-07-21T114247764Z` to `/tmp/jazz-consolidation-spin.gdnQHW/store`, built `/Users/anselm/jazz_core-perf-dropdown/target/release/jazz-tools` with `--features cli`, and started PID `18513` on port `6299` with app id `019dcd19-a699-7191-b0bc-b8ce08eb7cd6`. With zero clients and no websocket/session activity, sampled CPU stayed at `0.0%` for 60s at elapsed times `01:45`, `01:55`, `02:05`, `02:15`, `02:25`, and `02:35`. Because no idle tick ran, temporary env-gated consolidation logging did not produce cursor evidence for loop-vs-backlog in this strict headless mode.
+
+Failure hypotheses after source read:
+
+1. CLEARLY-GOOD: stop rescheduling purely because a tick succeeded. If an activity loop calls `notify_activity` after every non-empty outbound drain, consolidation work can ride that loop at a 100% duty cycle while bounded maintenance still has backlog.
+2. CLEARLY-GOOD: add progress telemetry/assertions around cursor-mode consolidation: log/table-counter start cursor, end cursor, visited rows, consolidated windows/records, and `advanced`; treat `records == 0 && visited > 0 && cursor unchanged` as a no-progress condition with backoff.
+3. CLEARLY-GOOD: persist skip-when-converged bookkeeping per history store/table, or avoid scanning a store again until a write dirties it. Today `consolidate_history_windows` starts from the first windowed history table on every call and relies on each `RecordStore` cursor scan to discover no work.
+4. SPECULATIVE: increase the per-tick consolidation budget. If the observed spin is legitimate backlog, the current budget of 4 windows per tick makes a large imported history drain through many tiny range scans and write batches.
+5. SPECULATIVE: fix cursor advancement if instrumentation on an activity-driven repro shows the same table/cursor repeating with `records > 0` or `visited > 0`. Source inspection did not prove that bug in the strict idle run.
+
+## Consolidation spin (armed repro + fix)
+
+Armed repro result in this worktree: the exact persistent 100% post-disconnect burn did not reproduce with the public `jazz-tools` websocket route, but the cursor bug that can make a periodic tick driver rescan completed windows was reproduced from source and pinned with a Groove regression. Scratch PIDs used: `29161`, `41169`, and `46064` on port `6299`; all used copied stores under `/tmp/jazz-armed-*`, never the original snapshot.
+
+Mechanism found: cursor-mode consolidation used an inclusive lower bound: `range(cf, window_consolidation_cursor(), WINDOW_MARKER_KEY)`. The code persisted the last seen key itself, including encoded window keys, so a later tick could start by seeing the same encoded window again. The budget-full path also updated the in-memory cursor after the budget check, so budgeted calls could persist a stale cursor. In a driver that keeps calling `InMemoryServerShell::tick` (for example a periodic websocket/loopback driver), this turns convergence into repeated no-progress scans of already encoded windows.
+
+Fix: persist an exclusive lower-bound cursor by storing `last_seen_key + 0x00`, and update the in-memory cursor before budget-break checks. This keeps completed prefixes from being revisited without changing the window codec or the produced consolidated window bytes.
+
+Evidence:
+
+| Run | CPU trace | Result |
+| --- | --- | --- |
+| Pre-fix public armed scratch, PID `29161` | `12.1%` immediate, then `0.0%` by 5s | Public route quiesced; store compacted from 60M to 15M |
+| Fixed armed scratch, PID `41169` | `13.2%`, `3.3%`, `0.0%`, `0.0%`, `0.0%` | Quiesced by 5s after arming |
+| Fixed second arming, PID `41169` | `7.9%`, `2.1%`, `0.0%`, `0.0%` | Did not restart sustained burn |
+| Fixed write-after-convergence, PID `41169` | `45.0%`, `1.9%`, `0.0%`, `0.0%` | Three public `spell_check` writes synced and quiesced |
+| Fixed diagnostic run, PID `46064` | `0.0%`, `2.8%`, `0.0%`, `0.0%`, `0.0%` | Six diagnostic tick reports, all final no-progress: `windows=0 records=0`; driver stopped |
+
+Regression: `full_window_consolidation_cursor_advances_past_encoded_windows` covers budgeted cursor-mode consolidation. It asserts that after several bounded passes, the durable cursor sits past all already encoded windows and a no-work call does not mutate or restart scanning.
+
+Gate results:
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --check -p groove -p jazz` | pass |
+| `cargo test -p groove -j 2` | pass |
+| `cargo test -p jazz -j 2` | pass |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact` | pass |
+| `cargo check -p jazz-sim --benches -j 2` | pass |
