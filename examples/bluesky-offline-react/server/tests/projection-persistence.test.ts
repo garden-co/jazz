@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Operation } from "../../operations.js";
 import { app } from "../../schema.js";
-import {
-  createProjection,
-  mergeProfileProjection,
-  stableObjectId,
-} from "../projection.js";
+import { createProjection } from "../projection.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 
@@ -52,102 +48,131 @@ describe("profile projection", () => {
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    await expect(createProjection(database).projectProfile({
-      did: "did:plc:viewer",
-      handle: "viewer.test",
-      indexedAt: "2026-07-17T08:00:00.000Z",
-    })).rejects.toThrow("Insert denied on table profiles");
+    await expect(
+      createProjection(database).projectProfile({
+        did: "did:plc:viewer",
+        handle: "viewer.test",
+        indexedAt: "2026-07-17T08:00:00.000Z",
+      }),
+    ).rejects.toThrow("Insert denied on table profiles");
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
-    expect(mergeProfileProjection({
+    const existing = {
+      id: "profile-id",
       did: "did:plc:author",
       handle: "author.test",
       displayName: "Author",
       description: null,
       avatar: null,
       indexedAt: "2026-07-16T11:00:00.000Z",
-    }, {
-      id: "profile-id",
-      did: "did:plc:author",
-      indexedAt: "2026-07-16T10:00:00.000Z",
-    })).toEqual({
-      did: "did:plc:author",
-      handle: undefined,
-      displayName: undefined,
-      description: undefined,
-      avatar: undefined,
-      indexedAt: "2026-07-16T11:00:00.000Z",
-    });
-  });
-});
-
-describe("durable reaction projection", () => {
-  it.each(["queued", "sent"] as const)("preserves a %s intention across writer instances until AppView confirms it", async (state) => {
-    const operation: Operation = {
-      id: "00000000-0000-0000-0000-000000000001",
-      ownerDid: "did:plc:viewer",
-      kind: "like",
-      rkey: "3mlike",
-      state,
-      createdAt: "2026-07-16T10:00:00.000Z",
-      payload: {
-        subjectUri: "at://author/app.bsky.feed.post/post",
-        subjectCid: "bafypost",
-        active: true,
-        createdAt: "2026-07-16T10:00:00.000Z",
-      },
     };
     const database = {
-      all: vi.fn(async () => [{ ...operation, payload: JSON.stringify(operation.payload) }]),
-      one: vi.fn(async () => null),
+      all: vi.fn(async () => []),
+      one: vi.fn(async () => existing),
       upsert: vi.fn(settledWrite),
       update: vi.fn(settledWrite),
       delete: vi.fn(settledWrite),
     };
-    const writer = createProjection(database);
-    const intents = await writer.loadReactionIntents(operation.ownerDid);
-    const post = {
-      id: stableObjectId("bluesky-post", operation.payload.subjectUri),
-      uri: operation.payload.subjectUri,
-      authorDid: "did:plc:author",
-      authorProfileId: "profile-id",
-      text: "post",
-      createdAt: operation.createdAt,
-      indexedAt: operation.createdAt,
-      replyCount: 0,
-      likeCount: 0,
-      repostCount: 0,
-      state: "synced" as const,
-    };
 
-    await writer.projectTimelinePage(operation.ownerDid, [{ post: {
-      uri: post.uri,
-      cid: "bafypost",
-      author: { did: post.authorDid, handle: "author.test" },
-      record: { text: post.text, createdAt: post.createdAt },
-      indexedAt: post.indexedAt,
-    } }], "next", intents);
-    expect(database.delete.mock.calls.filter(([table]) => table === app.pendingOperations)).toHaveLength(0);
-    expect(database.upsert.mock.calls.filter(([table]) => table === app.likes)).toHaveLength(0);
+    await createProjection(database).projectProfile({
+      did: "did:plc:author",
+      indexedAt: "2026-07-16T10:00:00.000Z",
+    });
 
-    const restartedWriter = createProjection(database);
-    const restoredIntents = await restartedWriter.loadReactionIntents(operation.ownerDid);
-    await restartedWriter.projectTimelinePage(operation.ownerDid, [{ post: {
-      uri: post.uri,
-      cid: "bafypost",
-      author: { did: post.authorDid, handle: "author.test" },
-      record: { text: post.text, createdAt: post.createdAt },
-      indexedAt: post.indexedAt,
-      viewer: { like: "at://viewer/app.bsky.feed.like/3mlike" },
-    } }], "next", restoredIntents);
-    expect(database.delete).toHaveBeenCalledWith(app.pendingOperations, operation.id);
-    expect(database.upsert.mock.calls).toContainEqual([
-      app.likes,
-      expect.objectContaining({ active: true }),
-      expect.anything(),
-    ]);
+    expect(database.update).not.toHaveBeenCalled();
   });
+});
+
+describe("durable reaction projection", () => {
+  it.each(["queued", "sent"] as const)(
+    "preserves a %s intention across writer instances until AppView confirms it",
+    async (state) => {
+      const operation: Operation = {
+        id: "00000000-0000-0000-0000-000000000001",
+        ownerDid: "did:plc:viewer",
+        kind: "like",
+        rkey: "3mlike",
+        state,
+        createdAt: "2026-07-16T10:00:00.000Z",
+        payload: {
+          subjectUri: "at://author/app.bsky.feed.post/post",
+          subjectCid: "bafypost",
+          active: true,
+          createdAt: "2026-07-16T10:00:00.000Z",
+        },
+      };
+      const database = {
+        all: vi
+          .fn()
+          .mockResolvedValueOnce([{ ...operation, payload: JSON.stringify(operation.payload) }])
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ ...operation, payload: JSON.stringify(operation.payload) }])
+          .mockResolvedValue([]),
+        one: vi.fn(async () => null),
+        upsert: vi.fn(settledWrite),
+        update: vi.fn(settledWrite),
+        delete: vi.fn(settledWrite),
+      };
+      const writer = createProjection(database);
+      const post = {
+        uri: operation.payload.subjectUri,
+        authorDid: "did:plc:author",
+        authorProfileId: "profile-id",
+        text: "post",
+        createdAt: operation.createdAt,
+        indexedAt: operation.createdAt,
+        replyCount: 0,
+        likeCount: 0,
+        repostCount: 0,
+        state: "synced" as const,
+      };
+
+      await writer.projectTimelinePage(
+        operation.ownerDid,
+        [
+          {
+            post: {
+              uri: post.uri,
+              cid: "bafypost",
+              author: { did: post.authorDid, handle: "author.test" },
+              record: { text: post.text, createdAt: post.createdAt },
+              indexedAt: post.indexedAt,
+            },
+          },
+        ],
+        "next",
+      );
+      expect(
+        database.delete.mock.calls.filter(([table]) => table === app.pendingOperations),
+      ).toHaveLength(0);
+      expect(database.upsert.mock.calls.filter(([table]) => table === app.likes)).toHaveLength(0);
+
+      const restartedWriter = createProjection(database);
+      await restartedWriter.projectTimelinePage(
+        operation.ownerDid,
+        [
+          {
+            post: {
+              uri: post.uri,
+              cid: "bafypost",
+              author: { did: post.authorDid, handle: "author.test" },
+              record: { text: post.text, createdAt: post.createdAt },
+              indexedAt: post.indexedAt,
+              viewer: { like: "at://viewer/app.bsky.feed.like/3mlike" },
+            },
+          },
+        ],
+        "next",
+      );
+      expect(database.delete).toHaveBeenCalledWith(app.pendingOperations, operation.id);
+      expect(database.upsert.mock.calls).toContainEqual([
+        app.likes,
+        expect.objectContaining({ active: true }),
+        expect.anything(),
+      ]);
+    },
+  );
 
   it("confirms one pending reaction once when a post appears twice", async () => {
     const subjectUri = "at://did:plc:author/app.bsky.feed.post/3m12345678921";
@@ -166,7 +191,10 @@ describe("durable reaction projection", () => {
       },
     };
     const database = {
-      all: vi.fn(async () => []),
+      all: vi
+        .fn()
+        .mockResolvedValueOnce([{ ...operation, payload: JSON.stringify(operation.payload) }])
+        .mockResolvedValue([]),
       one: vi.fn(async () => null),
       upsert: vi.fn(settledWrite),
       update: vi.fn(settledWrite),
@@ -184,14 +212,13 @@ describe("durable reaction projection", () => {
       operation.ownerDid,
       [{ post }, { post }],
       "next",
-      new Map([[`like:${stableObjectId("bluesky-post", subjectUri)}`, operation]]),
     );
 
     expect(database.delete).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("projection writer API", () => {
+describe("projection API", () => {
   it("exposes only operations used by the bridge", async () => {
     const database = {
       all: vi.fn(async () => []),
@@ -201,15 +228,11 @@ describe("projection writer API", () => {
       delete: vi.fn(settledWrite),
     };
     expect(Object.keys(createProjection(database)).sort()).toEqual([
-      "completeOperation",
-      "deactivateRepostTimelineEntries",
-      "loadReactionIntents",
+      "projectPostOperation",
       "projectProfile",
+      "projectReactionOperation",
       "projectThread",
       "projectTimelinePage",
-      "writeLike",
-      "writePostBundle",
-      "writeRepost",
     ]);
   });
 });
@@ -248,8 +271,23 @@ describe("operation completion", () => {
       },
     };
 
-    await writer.completeOperation(post);
-    await writer.completeOperation(like);
+    const postView = {
+      uri: `at://${post.ownerDid}/app.bsky.feed.post/${post.rkey}`,
+      cid: "bafypost",
+      author: { did: post.ownerDid },
+      record: post.payload,
+      indexedAt: post.createdAt,
+    };
+    await writer.projectPostOperation(post, postView);
+    await writer.projectReactionOperation(
+      like,
+      {
+        ...postView,
+        uri: like.payload.subjectUri,
+        cid: like.payload.subjectCid,
+      },
+      { uri: `at://${like.ownerDid}/app.bsky.feed.like/${like.rkey}` },
+    );
 
     expect(database.delete).toHaveBeenCalledWith(expect.anything(), post.id);
     expect(database.upsert).toHaveBeenCalledWith(
@@ -274,19 +312,13 @@ describe("thread projection", () => {
       delete: vi.fn(settledWrite),
     };
     const writer = createProjection(database);
-    const thread = {
-      rootPostId: "root-id",
-      entries: [{
-        postId: "missing-id",
-        sortOrder: 0,
-        state: "not-found" as const,
-      }],
-    };
+    const uri = "at://did:plc:author/app.bsky.feed.post/missing";
+    const thread = { uri, notFound: true };
 
     vi.setSystemTime("2026-07-16T10:00:00.000Z");
-    await writer.projectThread("did:plc:viewer", thread, new Map());
+    await writer.projectThread("did:plc:viewer", uri, thread);
     vi.setSystemTime("2026-07-16T11:00:00.000Z");
-    await writer.projectThread("did:plc:viewer", thread, new Map());
+    await writer.projectThread("did:plc:viewer", uri, thread);
 
     expect(database.update).not.toHaveBeenCalled();
   });
@@ -300,7 +332,8 @@ describe("progressive timeline projection", () => {
     });
     const database = {
       all: vi.fn(async () => []),
-      one: vi.fn()
+      one: vi
+        .fn()
         .mockImplementationOnce(() => firstLookup)
         .mockResolvedValue(null),
       upsert: vi.fn(settledWrite),
@@ -322,7 +355,6 @@ describe("progressive timeline projection", () => {
         { post: post("did:plc:author2", "3m12345678922") },
       ],
       undefined,
-      new Map(),
     );
 
     try {

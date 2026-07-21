@@ -10,20 +10,96 @@ import {
 } from "@atproto/api";
 import { parseAtUri } from "../at-uri.js";
 import type { OAuthSession } from "./auth.js";
-import type {
-  FeedViewPost,
-  PostRecord,
-  PostView,
-  ProfileView,
-  ThreadViewNode,
-} from "./projection-model.js";
 
 export type SessionFetcher = Pick<OAuthSession, "fetchHandler">;
+
+export type ProfileView = {
+  did?: string;
+  handle?: string;
+  displayName?: string;
+  description?: string;
+  avatar?: string;
+};
+
+type StrongRef = { uri?: string; cid?: string };
+
+export type PostRecord = {
+  text?: string;
+  createdAt?: string;
+  facets?: Array<{
+    index?: { byteStart?: number; byteEnd?: number };
+    features?: Array<{ $type?: string; uri?: string }>;
+  }>;
+  reply?: { parent?: StrongRef; root?: StrongRef };
+};
+
+type PostImageView = {
+  thumb?: string;
+  fullsize?: string;
+  alt?: string;
+  aspectRatio?: { width?: number; height?: number };
+};
+
+type EmbeddedRecordView = {
+  $type?: string;
+  uri?: string;
+  cid?: string;
+  author?: ProfileView;
+  value?: PostRecord;
+  indexedAt?: string;
+  embeds?: PostEmbedView[];
+};
+
+export type PostEmbedView = {
+  images?: PostImageView[];
+  media?: { images?: PostImageView[] };
+  record?: EmbeddedRecordView & { record?: EmbeddedRecordView };
+};
+
+export type PostView = {
+  uri?: string;
+  cid?: string;
+  author?: ProfileView;
+  record?: PostRecord;
+  indexedAt?: string;
+  replyCount?: number;
+  likeCount?: number;
+  repostCount?: number;
+  viewer?: { like?: string; repost?: string };
+  embed?: PostEmbedView;
+};
+
+type RepostReason = {
+  $type?: string;
+  by?: ProfileView;
+  uri?: string;
+  cid?: string;
+  indexedAt?: string;
+};
+
+export type FeedViewPost = {
+  post?: PostView;
+  reply?: { root?: PostView; parent?: PostView };
+  reason?: RepostReason;
+};
+
+export type ThreadViewNode = {
+  $type?: string;
+  uri?: string;
+  blocked?: boolean;
+  notFound?: boolean;
+  post?: PostView;
+  parent?: ThreadViewNode;
+  replies?: ThreadViewNode[];
+};
 
 const timelinePageSize = 20;
 
 export class OperationError extends Error {
-  constructor(message: string, readonly status: 400 | 502) {
+  constructor(
+    message: string,
+    readonly status: 400 | 502,
+  ) {
     super(message);
   }
 }
@@ -35,9 +111,7 @@ function toPostRecord(value: Record<string, unknown>): PostRecord | undefined {
   return {
     text: record.text,
     createdAt: record.createdAt,
-    reply: record.reply
-      ? { parent: record.reply.parent, root: record.reply.root }
-      : undefined,
+    reply: record.reply ? { parent: record.reply.parent, root: record.reply.root } : undefined,
     facets: record.facets?.map((facet) => ({
       index: facet.index,
       features: facet.features.map((feature) => {
@@ -68,9 +142,7 @@ function toEmbeddedRecord(record: AppBskyEmbedRecord.ViewRecord) {
 }
 
 function toRecordEmbed(embed: AppBskyEmbedRecord.View) {
-  return AppBskyEmbedRecord.isViewRecord(embed.record)
-    ? toEmbeddedRecord(embed.record)
-    : undefined;
+  return AppBskyEmbedRecord.isViewRecord(embed.record) ? toEmbeddedRecord(embed.record) : undefined;
 }
 
 function toPostEmbed(embed: AppBskyFeedDefs.PostView["embed"]): PostView["embed"] {
@@ -108,12 +180,14 @@ function toPostView(post: AppBskyFeedDefs.PostView): PostView {
 
 function toFeedViewPost(item: AppBskyFeedDefs.FeedViewPost): FeedViewPost {
   const reason = AppBskyFeedDefs.isReasonRepost(item.reason) ? item.reason : undefined;
-  const root = item.reply && AppBskyFeedDefs.isPostView(item.reply.root)
-    ? toPostView(item.reply.root)
-    : undefined;
-  const parent = item.reply && AppBskyFeedDefs.isPostView(item.reply.parent)
-    ? toPostView(item.reply.parent)
-    : undefined;
+  const root =
+    item.reply && AppBskyFeedDefs.isPostView(item.reply.root)
+      ? toPostView(item.reply.root)
+      : undefined;
+  const parent =
+    item.reply && AppBskyFeedDefs.isPostView(item.reply.parent)
+      ? toPostView(item.reply.parent)
+      : undefined;
   return {
     post: toPostView(item.post),
     ...(root || parent ? { reply: { root, parent } } : {}),
@@ -121,10 +195,13 @@ function toFeedViewPost(item: AppBskyFeedDefs.FeedViewPost): FeedViewPost {
   };
 }
 
-function toThreadViewNode(node: AppBskyFeedDefs.ThreadViewPost
-  | AppBskyFeedDefs.NotFoundPost
-  | AppBskyFeedDefs.BlockedPost
-  | { $type: string }): ThreadViewNode {
+function toThreadViewNode(
+  node:
+    | AppBskyFeedDefs.ThreadViewPost
+    | AppBskyFeedDefs.NotFoundPost
+    | AppBskyFeedDefs.BlockedPost
+    | { $type: string },
+): ThreadViewNode {
   if (AppBskyFeedDefs.isThreadViewPost(node)) {
     return {
       $type: node.$type,
@@ -163,7 +240,10 @@ export async function fetchPostThread(session: SessionFetcher, uri: string) {
   return toThreadViewNode(response.data.thread);
 }
 
-export async function fetchProfile(actor: string, session: SessionFetcher): Promise<ProfileView & { indexedAt?: string }> {
+export async function fetchProfile(
+  actor: string,
+  session: SessionFetcher,
+): Promise<ProfileView & { indexedAt?: string }> {
   const response = await new Agent(session).getProfile({ actor });
   return response.data;
 }
@@ -177,9 +257,8 @@ export function recordKey(uri: string | undefined, did: string, collection: stri
 
 function operationError(nsid: string, error: unknown) {
   const upstreamStatus = error instanceof XRPCError ? error.status : undefined;
-  const status = upstreamStatus !== undefined && upstreamStatus !== 429 && upstreamStatus < 500
-    ? 400
-    : 502;
+  const status =
+    upstreamStatus !== undefined && upstreamStatus !== 429 && upstreamStatus < 500 ? 400 : 502;
   const detail = error instanceof Error ? error.message : String(error);
   return new OperationError(`PDS ${nsid} failed: ${detail}`, status);
 }
@@ -192,26 +271,30 @@ async function writeRecord<T>(nsid: string, request: () => Promise<T>) {
   }
 }
 
-export async function putRecord(session: SessionFetcher, input: {
-  repo: string;
-  collection: string;
-  rkey: string;
-  record: Record<string, unknown>;
-}) {
-  const response = await writeRecord(
-    "com.atproto.repo.putRecord",
-    () => new Agent(session).com.atproto.repo.putRecord(input),
+export async function putRecord(
+  session: SessionFetcher,
+  input: {
+    repo: string;
+    collection: string;
+    rkey: string;
+    record: Record<string, unknown>;
+  },
+) {
+  const response = await writeRecord("com.atproto.repo.putRecord", () =>
+    new Agent(session).com.atproto.repo.putRecord(input),
   );
   return response.data;
 }
 
-export async function deleteRecord(session: SessionFetcher, input: {
-  repo: string;
-  collection: string;
-  rkey: string;
-}) {
-  await writeRecord(
-    "com.atproto.repo.deleteRecord",
-    () => new Agent(session).com.atproto.repo.deleteRecord(input),
+export async function deleteRecord(
+  session: SessionFetcher,
+  input: {
+    repo: string;
+    collection: string;
+    rkey: string;
+  },
+) {
+  await writeRecord("com.atproto.repo.deleteRecord", () =>
+    new Agent(session).com.atproto.repo.deleteRecord(input),
   );
 }

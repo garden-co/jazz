@@ -28,27 +28,26 @@ Bluesky PDS <──── Bluesky adapter <──── Jazz bridge <───�
 
 The example keeps the boundary between the authoritative system and Jazz deliberately narrow:
 
-| Component | Responsibility | Knows about Jazz? | Knows about Bluesky? |
-| --- | --- | --- | --- |
-| `server/app.ts` | Session guard, HTTP validation, and error mapping | Authentication only | Only application-level route inputs |
-| `server/auth.ts` | Compose ATProto OAuth, opaque BFF sessions, and Jazz JWTs | Yes | Yes |
-| `server/oauth-session-store.ts` | Encrypt and persist authentication material in a backend-only Jazz table | Yes | No |
-| `server/signing-keys.ts` | Persist the stable ES256 key used to sign Jazz JWTs | Through its encrypted store | No |
-| `server/jazz.ts` | Shared server-side Jazz context | Yes | No |
-| `server/bluesky.ts` | Read from AppView; write to the PDS | No | Yes |
-| `server/timeline.ts` | Pure Bluesky-to-projection normalisation | Only the projection shape | Yes |
-| `server/projector.ts` | Single-flight AppView reads and observable projection jobs | Through its writer | Calls the Bluesky adapter |
-| `server/projection-writer.ts` | Typed, idempotent projection writes into Jazz | Yes | Only normalised projection values |
-| `server/reconciler.ts` | Apply queued intentions to the PDS, then project the result | Through its writer | Yes |
-| `server/bridge.ts` | Compose the read and write sides into application operations | Yes | Yes |
-| `schema.ts` | Local relational projection and pending intentions | Yes | No protocol calls |
-| `operations.ts` | Validate the shared queued-operation contract | Describes intention rows | Describes source operations |
-| `src/Timeline.tsx` | Compose the reactive view and local-first commands | Yes | Only calls trigger/reconcile routes |
-| `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint | No | Knows only trigger metadata |
-| `src/use-outbox.ts` | Serialise retries of queued intentions | Yes | Calls the reconcile route |
-| `src/timeline-model.ts` | Pure rows-to-thread view model | No | No |
-| `src/TimelineView.tsx` | Presentational React components | No | No |
-| `pwa.ts` | Generate the install manifest and service worker | No | Keeps API traffic network-only |
+| Component                       | Responsibility                                                                                | Knows about Jazz?           | Knows about Bluesky?                |
+| ------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------- |
+| `server/app.ts`                 | Session guard, HTTP validation, and error mapping                                             | Authentication only         | Only application-level route inputs |
+| `server/auth.ts`                | Compose ATProto OAuth, opaque BFF sessions, and Jazz JWTs                                     | Yes                         | Yes                                 |
+| `server/oauth-session-store.ts` | Encrypt and persist authentication material in a backend-only Jazz table                      | Yes                         | No                                  |
+| `server/signing-keys.ts`        | Persist the stable ES256 key used to sign Jazz JWTs                                           | Through its encrypted store | No                                  |
+| `server/jazz.ts`                | Shared server-side Jazz context                                                               | Yes                         | No                                  |
+| `server/bluesky.ts`             | Read from AppView; write to the PDS                                                           | No                          | Yes                                 |
+| `server/bridge.ts`              | Fetch authoritative reads, apply ordered PDS writes, and hand their results to the projection | Through its projection      | Yes                                 |
+| `server/projection.ts`          | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                         | Yes                                 |
+| `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
+| `operations.ts`                 | Validate the shared queued-operation contract                                                 | Describes intention rows    | Describes source operations         |
+| `src/Timeline.tsx`              | Compose the reactive view and local-first commands                                            | Yes                         | Only calls trigger/reconcile routes |
+| `src/use-timeline-hydration.ts` | Poll and paginate the trigger endpoint                                                        | No                          | Knows only trigger metadata         |
+| `src/use-outbox.ts`             | Serialise retries of queued intentions                                                        | Yes                         | Calls the reconcile route           |
+| `src/timeline-model.ts`         | Pure rows-to-thread view model                                                                | No                          | No                                  |
+| `src/TimelineView.tsx`          | Presentational React components                                                               | No                          | No                                  |
+| `pwa.ts`                        | Generate the install manifest and service worker                                              | No                          | Keeps API traffic network-only      |
+
+Server tests live under `server/tests/`, leaving the runtime path above uncluttered.
 
 The BFF exposes three application-level operations:
 
@@ -88,7 +87,7 @@ Loopback origins are considered secure for PWA development; a deployed copy must
 
 ## Layering Jazz over another database
 
-For a conventional SQL-backed application, keep the Jazz-facing projection and client pattern. Replace `server/bluesky.ts` with an adapter around the existing service or database, and replace the small source-specific normalisation/reconciliation mapping in `server/timeline.ts` and `server/bridge.ts`:
+For a conventional SQL-backed application, keep the Jazz-facing projection and client pattern. Replace `server/bluesky.ts` with an adapter around the existing service or database, and replace the source-specific mapping in `server/projection.ts` and `server/bridge.ts`:
 
 1. Read a stable page from the existing database using its normal cursor or primary key.
 2. Normalise those records into the projection rows expected by the bridge.

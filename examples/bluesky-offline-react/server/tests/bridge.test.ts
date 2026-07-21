@@ -15,9 +15,12 @@ type WriterMocks = ReturnType<typeof projectionWriter>;
 const moduleMocks = vi.hoisted(() => ({
   api: null as BlueskyMocks | null,
   writer: null as WriterMocks | null,
-  createProjectionWriter: vi.fn(),
+  createProjection: vi.fn(),
   OperationError: class OperationError extends Error {
-    constructor(message: string, readonly status: 400 | 502 = 502) {
+    constructor(
+      message: string,
+      readonly status: 400 | 502 = 502,
+    ) {
       super(message);
     }
   },
@@ -29,37 +32,42 @@ function mockedApi() {
 }
 
 vi.mock("../bluesky.js", () => ({
-  deleteRecord: (...args: Parameters<BlueskyMocks["deleteRecord"]>) => mockedApi().deleteRecord(...args),
-  fetchPostThread: (...args: Parameters<BlueskyMocks["fetchPostThread"]>) => mockedApi().fetchPostThread(...args),
-  fetchProfile: (...args: Parameters<BlueskyMocks["fetchProfile"]>) => mockedApi().fetchProfile(...args),
-  fetchTimelineFeed: (...args: Parameters<BlueskyMocks["fetchTimelineFeed"]>) => mockedApi().fetchTimelineFeed(...args),
-  fetchViewerPosts: (...args: Parameters<BlueskyMocks["fetchViewerPosts"]>) => mockedApi().fetchViewerPosts(...args),
+  deleteRecord: (...args: Parameters<BlueskyMocks["deleteRecord"]>) =>
+    mockedApi().deleteRecord(...args),
+  fetchPostThread: (...args: Parameters<BlueskyMocks["fetchPostThread"]>) =>
+    mockedApi().fetchPostThread(...args),
+  fetchProfile: (...args: Parameters<BlueskyMocks["fetchProfile"]>) =>
+    mockedApi().fetchProfile(...args),
+  fetchTimelineFeed: (...args: Parameters<BlueskyMocks["fetchTimelineFeed"]>) =>
+    mockedApi().fetchTimelineFeed(...args),
+  fetchViewerPosts: (...args: Parameters<BlueskyMocks["fetchViewerPosts"]>) =>
+    mockedApi().fetchViewerPosts(...args),
   OperationError: moduleMocks.OperationError,
   putRecord: (...args: Parameters<BlueskyMocks["putRecord"]>) => mockedApi().putRecord(...args),
   recordKey: (...args: Parameters<BlueskyMocks["recordKey"]>) => mockedApi().recordKey(...args),
 }));
 
-vi.mock("../projection.js", () => ({
-  createProjection: () => {
-    moduleMocks.createProjectionWriter();
-    if (!moduleMocks.writer) throw new Error("Projection writer mock is not configured");
-    return moduleMocks.writer;
-  },
-}));
+vi.mock("../projection.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../projection.js")>();
+  return {
+    ...actual,
+    createProjection: () => {
+      moduleMocks.createProjection();
+      if (!moduleMocks.writer) throw new Error("Projection mock is not configured");
+      return moduleMocks.writer;
+    },
+  };
+});
 
 vi.mock("../jazz.js", () => ({ db: {} }));
 
 function projectionWriter(overrides: Record<string, unknown> = {}) {
   return {
-    completeOperation: vi.fn(async () => undefined),
-    deactivateRepostTimelineEntries: vi.fn(async () => undefined),
-    loadReactionIntents: vi.fn(async () => new Map()),
+    projectPostOperation: vi.fn(async () => undefined),
     projectProfile: vi.fn(async () => undefined),
+    projectReactionOperation: vi.fn(async () => undefined),
     projectThread: vi.fn(async () => ({ rootPostId: "root", count: 0 })),
     projectTimelinePage: vi.fn(async () => undefined),
-    writeLike: vi.fn(async () => undefined),
-    writePostBundle: vi.fn(async () => undefined),
-    writeRepost: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -80,10 +88,12 @@ function bluesky(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function loadBridge(options: {
-  api?: ReturnType<typeof bluesky>;
-  writer?: ReturnType<typeof projectionWriter>;
-} = {}) {
+async function loadBridge(
+  options: {
+    api?: ReturnType<typeof bluesky>;
+    writer?: ReturnType<typeof projectionWriter>;
+  } = {},
+) {
   vi.resetModules();
   const api = options.api ?? bluesky();
   const writer = options.writer ?? projectionWriter();
@@ -124,7 +134,7 @@ function reactionOperation(kind: "like" | "repost", active: boolean): ReactionOp
 afterEach(() => {
   moduleMocks.api = null;
   moduleMocks.writer = null;
-  moduleMocks.createProjectionWriter.mockClear();
+  moduleMocks.createProjection.mockClear();
   vi.restoreAllMocks();
   vi.resetModules();
 });
@@ -151,10 +161,9 @@ describe("ATProto to Jazz projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     };
 
-    const { createProjectionWriter } = await vi.importActual<
-      typeof import("../projection.js")
-    >("../projection.js");
-    moduleMocks.writer = createProjectionWriter(database);
+    const { createProjection } =
+      await vi.importActual<typeof import("../projection.js")>("../projection.js");
+    moduleMocks.writer = createProjection(database);
     moduleMocks.api = bluesky({
       fetchProfile: vi.fn(async () => ({
         did: viewerDid,
@@ -169,12 +178,20 @@ describe("ATProto to Jazz projection", () => {
       await projectTimelinePage(viewerDid, { fetchHandler: vi.fn() });
 
       await vi.waitFor(async () => {
-        expect(await database.one(app.profiles.where({
-          id: { eq: stableObjectId("bluesky-profile", authorDid) },
-        }))).toMatchObject({ handle: "author.test" });
-        expect(await database.one(app.posts.where({
-          id: { eq: stableObjectId("bluesky-post", post.uri) },
-        }))).toMatchObject({ text: "Hello" });
+        expect(
+          await database.one(
+            app.profiles.where({
+              id: { eq: stableObjectId("bluesky-profile", authorDid) },
+            }),
+          ),
+        ).toMatchObject({ handle: "author.test" });
+        expect(
+          await database.one(
+            app.posts.where({
+              id: { eq: stableObjectId("bluesky-post", post.uri) },
+            }),
+          ),
+        ).toMatchObject({ text: "Hello" });
       });
     } finally {
       await context.shutdown();
@@ -188,7 +205,7 @@ describe("ATProto to Jazz projection", () => {
 
     await import("../bridge.js");
 
-    expect(moduleMocks.createProjectionWriter).toHaveBeenCalledOnce();
+    expect(moduleMocks.createProjection).toHaveBeenCalledOnce();
   });
 
   it("projects the signed-in profile without waiting for the timeline", async () => {
@@ -209,10 +226,12 @@ describe("ATProto to Jazz projection", () => {
 
   it("shares an in-flight projection but keeps pagination and head refreshes separate", async () => {
     const releases = new Map<string, (value: { feed: never[]; cursor?: string }) => void>();
-    const fetchTimelineFeed = vi.fn((_session: unknown, cursor?: string) =>
-      new Promise<{ feed: never[]; cursor?: string }>((resolve) => {
-        releases.set(cursor ?? "head", resolve);
-      }));
+    const fetchTimelineFeed = vi.fn(
+      (_session: unknown, cursor?: string) =>
+        new Promise<{ feed: never[]; cursor?: string }>((resolve) => {
+          releases.set(cursor ?? "head", resolve);
+        }),
+    );
     const { bridge } = await loadBridge({ api: bluesky({ fetchTimelineFeed }) });
     const session = { fetchHandler: vi.fn() };
 
@@ -234,12 +253,18 @@ describe("ATProto to Jazz projection", () => {
     const error = new Error("projection exploded");
     const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { bridge } = await loadBridge({
-      writer: projectionWriter({ projectTimelinePage: vi.fn(async () => { throw error; }) }),
+      writer: projectionWriter({
+        projectTimelinePage: vi.fn(async () => {
+          throw error;
+        }),
+      }),
     });
 
     await bridge.projectTimelinePage("did:plc:viewer", { fetchHandler: vi.fn() });
 
-    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith("Timeline projection failed", error));
+    await vi.waitFor(() =>
+      expect(reportError).toHaveBeenCalledWith("Timeline projection failed", error),
+    );
   });
 });
 
@@ -253,47 +278,50 @@ describe("Jazz outbox to ATProto reconciliation", () => {
     const api = bluesky();
     const { bridge, writer } = await loadBridge({ api });
 
-    await bridge.reconcileOperations(
-      earlier.ownerDid,
-      { fetchHandler: vi.fn() },
-      [later, earlier],
-    );
+    await bridge.reconcileOperations(earlier.ownerDid, { fetchHandler: vi.fn() }, [later, earlier]);
 
     expect(api.putRecord.mock.calls.map(([, request]) => request.rkey)).toEqual(["1", "2"]);
-    expect(api.putRecord).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      record: expect.objectContaining({ reply: { root, parent } }),
-    }));
-    expect(writer.completeOperation).toHaveBeenCalledTimes(2);
+    expect(api.putRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        record: expect.objectContaining({ reply: { root, parent } }),
+      }),
+    );
+    expect(writer.projectPostOperation).toHaveBeenCalledTimes(2);
   });
 
   it("does not complete an operation when its PDS write fails", async () => {
     const error = new moduleMocks.OperationError("PDS write failed");
     const writer = projectionWriter();
     const { bridge } = await loadBridge({
-      api: bluesky({ putRecord: vi.fn(async () => { throw error; }) }),
+      api: bluesky({
+        putRecord: vi.fn(async () => {
+          throw error;
+        }),
+      }),
       writer,
     });
     const operation = postOperation("3mpost", "2026-07-16T18:00:00.000Z");
 
-    await expect(bridge.reconcileOperations(
-      operation.ownerDid,
-      { fetchHandler: vi.fn() },
-      [operation],
-    )).rejects.toBe(error);
-    expect(writer.completeOperation).not.toHaveBeenCalled();
+    await expect(
+      bridge.reconcileOperations(operation.ownerDid, { fetchHandler: vi.fn() }, [operation]),
+    ).rejects.toBe(error);
+    expect(writer.projectPostOperation).not.toHaveBeenCalled();
   });
 
   it("does not create another reaction when AppView already matches the intention", async () => {
     const operation = reactionOperation("like", true);
     const api = bluesky({
-      fetchViewerPosts: vi.fn(async () => [{
-        uri: operation.payload.subjectUri,
-        cid: "bafy-current-version",
-        author: { did: "did:plc:author", handle: "author.test" },
-        record: { text: "Post", createdAt: operation.createdAt },
-        indexedAt: operation.createdAt,
-        viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
-      }]),
+      fetchViewerPosts: vi.fn(async () => [
+        {
+          uri: operation.payload.subjectUri,
+          cid: "bafy-current-version",
+          author: { did: "did:plc:author", handle: "author.test" },
+          record: { text: "Post", createdAt: operation.createdAt },
+          indexedAt: operation.createdAt,
+          viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
+        },
+      ]),
     });
     const { bridge, writer } = await loadBridge({ api });
 
@@ -301,31 +329,42 @@ describe("Jazz outbox to ATProto reconciliation", () => {
 
     expect(api.putRecord).not.toHaveBeenCalled();
     expect(api.deleteRecord).not.toHaveBeenCalled();
-    expect(writer.writeLike).toHaveBeenCalledWith(expect.objectContaining({ active: true }));
+    expect(writer.projectReactionOperation).toHaveBeenCalledWith(
+      operation,
+      expect.objectContaining({ viewer: { like: expect.any(String) } }),
+      expect.objectContaining({ uri: expect.any(String) }),
+    );
   });
 
   it("deletes a repost and deactivates its timeline entries", async () => {
     const operation = reactionOperation("repost", false);
     const api = bluesky({
-      fetchViewerPosts: vi.fn(async () => [{
-        uri: operation.payload.subjectUri,
-        cid: "bafy-current-version",
-        author: { did: "did:plc:author", handle: "author.test" },
-        record: { text: "Post", createdAt: operation.createdAt },
-        indexedAt: operation.createdAt,
-        viewer: { repost: "at://did:plc:viewer/app.bsky.feed.repost/3mrepost" },
-      }]),
+      fetchViewerPosts: vi.fn(async () => [
+        {
+          uri: operation.payload.subjectUri,
+          cid: "bafy-current-version",
+          author: { did: "did:plc:author", handle: "author.test" },
+          record: { text: "Post", createdAt: operation.createdAt },
+          indexedAt: operation.createdAt,
+          viewer: { repost: "at://did:plc:viewer/app.bsky.feed.repost/3mrepost" },
+        },
+      ]),
     });
     const { bridge, writer } = await loadBridge({ api });
 
     await bridge.reconcileOperations(operation.ownerDid, { fetchHandler: vi.fn() }, [operation]);
 
-    expect(api.deleteRecord).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      collection: "app.bsky.feed.repost",
-      rkey: "record-key",
-    }));
-    expect(writer.writeRepost).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
-    expect(writer.deactivateRepostTimelineEntries).toHaveBeenCalledOnce();
+    expect(api.deleteRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        collection: "app.bsky.feed.repost",
+        rkey: "record-key",
+      }),
+    );
+    expect(writer.projectReactionOperation).toHaveBeenCalledWith(operation, expect.anything(), {
+      uri: undefined,
+      cid: undefined,
+    });
   });
 
   it("treats an already-missing reaction record as reconciled", async () => {
@@ -336,25 +375,27 @@ describe("Jazz outbox to ATProto reconciliation", () => {
         deleteRecord: vi.fn(async () => {
           throw new moduleMocks.OperationError("PDS delete failed: RecordNotFound", 400);
         }),
-        fetchViewerPosts: vi.fn(async () => [{
-          uri: operation.payload.subjectUri,
-          cid: "bafy-current-version",
-          author: { did: "did:plc:author", handle: "author.test" },
-          record: { text: "Post", createdAt: operation.createdAt },
-          indexedAt: operation.createdAt,
-          viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
-        }]),
+        fetchViewerPosts: vi.fn(async () => [
+          {
+            uri: operation.payload.subjectUri,
+            cid: "bafy-current-version",
+            author: { did: "did:plc:author", handle: "author.test" },
+            record: { text: "Post", createdAt: operation.createdAt },
+            indexedAt: operation.createdAt,
+            viewer: { like: "at://did:plc:viewer/app.bsky.feed.like/3mlike" },
+          },
+        ]),
       }),
       writer,
     });
 
-    await expect(bridge.reconcileOperations(
-      operation.ownerDid,
-      { fetchHandler: vi.fn() },
-      [operation],
-    )).resolves.toBeUndefined();
-    expect(writer.writeLike).toHaveBeenCalledWith(expect.objectContaining({ active: false }));
-    expect(writer.completeOperation).toHaveBeenCalledWith(operation);
+    await expect(
+      bridge.reconcileOperations(operation.ownerDid, { fetchHandler: vi.fn() }, [operation]),
+    ).resolves.toBeUndefined();
+    expect(writer.projectReactionOperation).toHaveBeenCalledWith(operation, expect.anything(), {
+      uri: undefined,
+      cid: undefined,
+    });
   });
 });
 
