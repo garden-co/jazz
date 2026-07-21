@@ -465,3 +465,36 @@ Gate results:
 | `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact` | pass |
 | `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact` | pass |
 | `cargo check -p jazz-sim --benches -j 2` | pass |
+
+## Consolidation treadmill (partial-tail convergence)
+
+Mechanism: the live production burn was a two-part treadmill. The store has about 26k imported history records spread across about 200 windowed history tables, so most stores are permanent partial tails below `TARGET_RECORDS_PER_WINDOW = 256`. `consolidate_full_windows_bounded` correctly refuses to encode those tails, and the cursor correctly cannot advance past them. Without per-store convergence state, each maintenance pass rescanned each table tail and produced `windows=0 records=0`.
+
+The persistent-client repro also exposed a separate scheduling self-rearm: `ServerShellHandle::tick_take` unconditionally called `notify_activity` after every successful tick. A websocket listener woken by activity would call `tick_take`, which would notify activity again even with no inbound frames and no outbound frames. With the partial-tail scan bug, that made one persistent backend websocket enough to drive `InMemoryServerShell::tick` at a 100% duty cycle forever.
+
+Fix: `groove::db::Database` now keeps an in-memory set of converged windowed history stores. A store is marked converged when bounded full-window consolidation returns zero windows. Later history maintenance skips that store, and `consolidate_history_windows` returns immediately once all windowed history stores are converged. Successful writes to a windowed history table clear only that store's convergence mark. The websocket route no longer re-broadcasts activity after merely sending outbound frames, and `ServerShellHandle::tick_take` no longer re-arms activity after a no-input tick.
+
+Evidence:
+
+| Run | Trace | Result |
+| --- | --- | --- |
+| Pre-fix persistent-client scratch, PID `67566` | `98.0%`, `98.4%`, `98.2%`, `99.3%`, `97.4%`, `98.1%`, `99.5%`; CPU time `0:21.02` to `3:16.56` over 180s | Reproduced sustained burn with one idle persistent websocket |
+| First convergence-only attempt, PID `78807` | `71.1%`, `46.5%`, `117.4%`, `114.1%`, `110.8%`, `118.1%`, `116.1%` | Convergence state alone removed scans but exposed websocket tick self-rearm |
+| Temporary diagnostic run, PID `79777` | First call: `windows=0 records=0 scanned=215 skipped=0 marked=215 converged=215`; then repeated `early_out all_converged` | Store convergence worked; remaining CPU was tick scheduling |
+| Final fixed persistent-client scratch, PID `80380` | `0.0%` at every sample over 180s; CPU time flat at `0:01.45` | Persistent idle websocket stayed connected without burn |
+| Final fixed write-past-256 check, PID `80380` | After 260 `spell_check` writes: `0.0%`, `0.0%`, `0.0%`, `0.0%`, `0.0%`; CPU time `0:04.09` to `0:04.10` over 60s | Writes dirtied history, work ran, and server reconverged |
+
+Regression: `partial_history_tail_is_marked_converged_until_dirtied` uses the public `Database` batch API over a real `jazz_docs_history` table and a scan-counting memory storage wrapper. It asserts that a below-window partial tail is scanned once, skipped on the next maintenance call, dirtied by a later write, consolidated after reaching the test window target, and then skipped again after reconvergence.
+
+Gate results:
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p groove -j 2` | pass |
+| `cargo test -p jazz -j 2` | pass |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact` | pass |
+| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact` | pass |
+| `cargo fmt --check -p groove -p jazz` | pass |
+| `cargo check -p jazz-sim --benches -j 2` | pass |

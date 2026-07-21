@@ -7,6 +7,8 @@
 //! runtime module.
 
 use super::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
@@ -23,7 +25,10 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
-use crate::storage::{MemoryStorage, RocksDbStorage, StorageLayout};
+use crate::storage::{
+    ColumnFamilyName, Error as StorageError, Key, KeyValue, MemoryStorage, OrderedKvStorage,
+    RocksDbStorage, ScanVisitor, StorageLayout, Value as StorageValue, WriteOperation,
+};
 use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
 
 fn albums_schema() -> DatabaseSchema {
@@ -1894,6 +1899,51 @@ fn history_consolidation_visits_direct_record_stores() {
     );
 }
 
+#[test]
+fn partial_history_tail_is_marked_converged_until_dirtied() {
+    let schema = jazz_docs_history_schema();
+    let layout = StorageLayout::jazz_class_v1();
+    let physical_cfs = layout.physical_column_families(schema.column_families());
+    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = ScanCountingStorage::new(&physical_cf_refs);
+    let counter = storage.clone();
+    let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
+
+    seed_jazz_docs_history(&mut database, 0, 3);
+    let scans_after_seed = counter.scan_range_count();
+
+    let first = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(first, WindowConsolidation::default());
+    assert!(counter.scan_range_count() > scans_after_seed);
+
+    let scans_after_first = counter.scan_range_count();
+    let second = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(second, WindowConsolidation::default());
+    assert_eq!(counter.scan_range_count(), scans_after_first);
+
+    seed_jazz_docs_history(&mut database, 3, 1);
+    let scans_after_dirty = counter.scan_range_count();
+    let after_dirty = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(
+        after_dirty,
+        WindowConsolidation {
+            windows: 1,
+            records: 4
+        }
+    );
+    assert!(counter.scan_range_count() > scans_after_dirty);
+
+    let scans_after_reconverge = counter.scan_range_count();
+    let after_reconverge = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(after_reconverge, WindowConsolidation::default());
+    assert!(counter.scan_range_count() > scans_after_reconverge);
+
+    let scans_after_tail_converged = counter.scan_range_count();
+    let skipped = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(skipped, WindowConsolidation::default());
+    assert_eq!(counter.scan_range_count(), scans_after_tail_converged);
+}
+
 fn jazz_docs_history_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "jazz_docs_history",
@@ -1924,7 +1974,107 @@ fn jazz_docs_history_database() -> Database<MemoryStorage> {
     Database::new_with_storage_layout(schema, storage, layout).unwrap()
 }
 
-fn seed_jazz_docs_history(database: &mut Database<MemoryStorage>, start_idx: u64, row_count: u64) {
+#[derive(Clone)]
+struct ScanCountingStorage {
+    inner: MemoryStorage,
+    scan_range_count: Rc<Cell<usize>>,
+}
+
+impl ScanCountingStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            scan_range_count: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn scan_range_count(&self) -> usize {
+        self.scan_range_count.get()
+    }
+}
+
+impl OrderedKvStorage for ScanCountingStorage {
+    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<StorageValue>, StorageError> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), StorageError> {
+        self.inner.delete(cf, key)
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, StorageError> {
+        self.inner.approximate_class_bytes(cf)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.scan_range_count
+            .set(self.scan_range_count.get().saturating_add(1));
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.inner.scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, StorageError> {
+        self.inner.last_with_prefix(cf, prefix)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, StorageError> {
+        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), StorageError> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+fn seed_jazz_docs_history<S: OrderedKvStorage>(
+    database: &mut Database<S>,
+    start_idx: u64,
+    row_count: u64,
+) {
     let mut batch = database.open_batch();
     for idx in start_idx..start_idx + row_count {
         batch.insert(
