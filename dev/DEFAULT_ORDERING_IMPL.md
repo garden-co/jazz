@@ -89,3 +89,78 @@ Tooling-friction: a public subscription probe that separates core maintained
 acceptance, reset-result-set churn, ordered delta indices, and fallback one-shot
 refresh counts would have avoided mixing the old fallback read benchmark with
 the new maintained acceptance check.
+
+## Slice 2
+
+Scoping rule implemented: default row-id ordering is only injected for simple
+root app/result plans with no auxiliary sources, closure paths, or join
+contributions, and only at the root window boundary already handled by slice 1;
+recursive, RLS/policy, relation-subgraph, auxiliary, and coverage terminals are
+not rewritten.
+
+Unbounded root result outcome: the public `jazz-tools` subscription adapter now
+derives ordered delta indices from the prepared query's ordered `all()` snapshot
+after each core subscription event, so unbounded todo-style subscriptions expose
+ascending row-id order for one-shot reads, resets, and delta positions. This is
+intentionally scoped at the app subscription boundary after a naive unbounded
+core `TopBy(usize::MAX)` injection reproduced the slice-1 RLS miss pattern in
+`maintained_subscription_view_emits_expected_owner_policy_updates` and
+`maintained_subscription_view_real_peer_path_emits_expected_view_updates`.
+
+Cost note: the current app-boundary unbounded position fix is O(result size) per
+public subscription event because it re-reads the ordered prepared query result
+before translating core rows into `OrderedRowDelta` indices. The core maintained
+delivery canaries still pass, but this is not the desired final mechanism for
+large unbounded app subscriptions; a core event shape that carries ordered
+positions, or a maintained ordered-membership index exposed to the adapter, would
+avoid the extra full-result read.
+
+Churn-test outcome: `crates/jazz-tools/tests/edge_server_mode.rs::
+default_order_limit_subscription_emits_ordered_window_indices` is unignored and
+passes. The new unbounded black-box test
+`default_order_unbounded_subscription_keeps_row_id_order_across_deltas` inserts
+rows across ticks and verifies a later lower id lands at index `0`, with expected
+ids sorted to avoid same-millisecond UUIDv7 assumptions.
+
+Customer cold-start receipt:
+
+| Metric | Before reference | Slice 2 after |
+| --- | ---: | ---: |
+| Cold wall_ms | 13,461 | 12,320 |
+| Cold dominant_child_opened_ms | not recorded in the reference table | 466 |
+| Cold dominant_child_materialized_ms | 12,765 | 11,675 |
+| Cold dominant_child_rows | 23,831 | 23,831 |
+| Warm wall_ms | 7,229 | 7,239 |
+| Warm dominant_child_opened_ms | not recorded in the reference table | 537 |
+| Warm dominant_child_materialized_ms | 5,960 | 5,993 |
+| Warm dominant_child_rows | 23,831 | 23,831 |
+
+Before reference is the prior same-branch native receipt in
+`dev/PERF_FINDINGS_DROPDOWN.md` Phase 7. After command:
+`JAZZ_REHYDRATE_TRACE=1 JAZZ_CUSTOMER_PHASES=cold,warm cargo bench -p jazz-sim --bench customer_cold_start -j 2`
+with exit code `0`.
+
+Gate table:
+
+| Command | Exit | Notes |
+| --- | ---: | --- |
+| `cargo test -p jazz maintained_subscription_view_ -j 2` | 0 | RLS/recursive maintained focused suite passed after backing out unbounded core injection |
+| `cargo test -p jazz --test incremental_delivery_canary -j 2` | 0 | all three canaries passed |
+| `cargo test -p jazz-tools --features test --test edge_server_mode default_order_ -j 2` | 0 | limited churn test active; unbounded todo-example test passed |
+| `cargo test -p jazz-tools --features test --test edge_server_mode default_order_limit_subscription_emits_ordered_window_indices -j 2 -- --ignored` | 0 | pre-unignore focused confirmation |
+| `cargo test -p jazz -j 2` | 1 | first run overlapped other cargo work and failed only in doctest crate resolution |
+| `cargo test -p jazz -j 2` | 0 | rerun alone passed, including doctests |
+| `cargo test -p jazz-tools --features test -j 2` | 0 | full jazz-tools gate passed |
+| `cargo test -p jazz-server -j 2` | 0 | passed |
+| `cargo test -p groove -j 2` | 101 | first run overlapped other cargo work and failed only in doctest crate-version skew |
+| `cargo test -p groove -j 2` | 0 | rerun alone passed, including doctests |
+| `cargo check -p jazz-sim --benches` | 0 | passed |
+| `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | 0 | passed in 131.24s |
+| `dev/gates/ts-wire-codec.sh` | 0 | 84 passed, 1 skipped |
+| `cargo fmt --check -p jazz -p jazz-tools` | 0 | passed |
+| `dev/benchmarks/smoke.sh` | 0 | passed; ledger appended at `dev/benchmarks/SMOKE_LEDGER.md`, results in `dev/benchmarks/results/20260721T215603Z` |
+
+Tooling-friction: core subscription events do not expose ordered positions, so
+the public adapter had to choose between append-biased deltas and an O(result)
+ordered snapshot refresh; a position-bearing core delta would have made this
+slice both cleaner and scale-proof.

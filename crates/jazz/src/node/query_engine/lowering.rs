@@ -783,7 +783,7 @@ fn analyze_query_plan(
         gaps.push(analyzed.unwrap_err());
         return Err(gaps);
     };
-    let plan = plan_with_default_result_order(plan);
+    let plan = plan_with_default_result_order(plan, request);
     validate_output_capabilities(request, &plan, &mut gaps);
 
     for plan_source in analyzed_plan_sources(&plan) {
@@ -837,7 +837,24 @@ fn validate_output_capabilities(
     ));
 }
 
-fn plan_with_default_result_order(mut plan: AnalyzedQueryPlan) -> AnalyzedQueryPlan {
+fn plan_with_default_result_order(
+    mut plan: AnalyzedQueryPlan,
+    request: &QueryProgramRequest,
+) -> AnalyzedQueryPlan {
+    if !request.output.app_rows.is_some()
+        && !request
+            .output
+            .facts
+            .contains(&ProgramFactKey::ResultMembership)
+    {
+        return plan;
+    }
+    if !request.input.shape.auxiliary_sources.is_empty()
+        || !request.input.shape.closure_paths.is_empty()
+        || !request.input.shape.join_contributions.is_empty()
+    {
+        return plan;
+    }
     inject_default_order_in_plan(&mut plan);
     plan
 }

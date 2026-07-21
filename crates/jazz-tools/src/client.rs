@@ -1218,7 +1218,7 @@ impl ClientDbInner {
             (inner.db.clone(), prepared)
         };
         let stream = db
-            .subscribe(&prepared, opts)
+            .subscribe(&prepared, opts.clone())
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
         let inner = Rc::clone(inner);
@@ -1238,13 +1238,11 @@ impl ClientDbInner {
                     .iter()
                     .map(|row| ObjectId::from_uuid(row.row_uuid().0))
                     .collect();
-                JazzClient::apply_core_subscription_rows(
-                    &mut current_rows,
-                    reset,
-                    &added,
-                    &updated,
-                    &removed,
-                );
+                let next_rows = db.all(&prepared, opts.clone()).await;
+                let Ok(next_rows) = next_rows else {
+                    break;
+                };
+                current_rows = next_rows;
                 inner.borrow_mut().remember_rows(&table, &current_rows);
                 let delta = if reset {
                     JazzClient::core_subscription_reset_delta(&db, &previous_row_ids, &current_rows)
@@ -1937,41 +1935,6 @@ impl JazzClient {
         let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
         delta.removed = removed;
         Ok(delta)
-    }
-
-    fn apply_core_subscription_rows(
-        current_rows: &mut Vec<jazz::node::CurrentRow>,
-        reset: bool,
-        added_rows: &[jazz::node::CurrentRow],
-        updated_rows: &[jazz::node::CurrentRow],
-        removed_rows: &[jazz::db::RemovedRow],
-    ) {
-        if reset {
-            current_rows.clear();
-        }
-        current_rows.retain(|row| {
-            !removed_rows
-                .iter()
-                .any(|removed| row.row_uuid() == removed.row_uuid)
-        });
-        for row in updated_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
-            {
-                current_rows[position] = row.clone();
-            }
-        }
-        for row in added_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
-            {
-                current_rows[position] = row.clone();
-            } else {
-                current_rows.push(row.clone());
-            }
-        }
     }
 
     fn core_subscription_change_delta(

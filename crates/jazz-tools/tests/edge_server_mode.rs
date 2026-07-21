@@ -38,7 +38,6 @@ fn uuid_from_u128(value: u128) -> Uuid {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "tracking: subscriber currently emits reset/removal churn before fine-grained default-order window positions"]
 async fn default_order_limit_subscription_emits_ordered_window_indices() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -161,6 +160,121 @@ async fn default_order_limit_subscription_emits_ordered_window_indices() {
             .await;
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_order_unbounded_subscription_keeps_row_id_order_across_deltas() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(
+                server
+                    .make_client_context_for_user(schema.clone(), "default-order-unbounded-writer"),
+            )
+            .await
+            .expect("connect writer");
+            let reader = JazzClient::connect(
+                server.make_client_context_for_user(schema, "default-order-unbounded-reader"),
+            )
+            .await
+            .expect("connect reader");
+
+            wait_for_edge_query_ready(&writer, "todos", Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&reader, "todos", Duration::from_secs(30)).await;
+
+            let query = QueryBuilder::new("todos").build();
+            let mut stream = reader
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe unbounded todos");
+
+            let id20 = ObjectId::from_uuid(uuid_from_u128(20));
+            writer
+                .insert_with_id(
+                    "todos",
+                    Some(*id20.uuid()),
+                    row_input!("title" => "twenty", "done" => false),
+                )
+                .expect("insert twenty");
+            expect_unbounded_order_delta(&mut stream, &reader, &query, vec![id20], id20, 0).await;
+
+            let id40 = ObjectId::from_uuid(uuid_from_u128(40));
+            writer
+                .insert_with_id(
+                    "todos",
+                    Some(*id40.uuid()),
+                    row_input!("title" => "forty", "done" => false),
+                )
+                .expect("insert forty");
+            expect_unbounded_order_delta(&mut stream, &reader, &query, vec![id20, id40], id40, 1)
+                .await;
+
+            let id10 = ObjectId::from_uuid(uuid_from_u128(10));
+            writer
+                .insert_with_id(
+                    "todos",
+                    Some(*id10.uuid()),
+                    row_input!("title" => "ten", "done" => false),
+                )
+                .expect("insert ten");
+            expect_unbounded_order_delta(
+                &mut stream,
+                &reader,
+                &query,
+                vec![id10, id20, id40],
+                id10,
+                0,
+            )
+            .await;
+        })
+        .await;
+}
+
+async fn expect_unbounded_order_delta(
+    stream: &mut jazz_tools::SubscriptionStream,
+    reader: &JazzClient,
+    query: &jazz_tools::Query,
+    mut expected_ids: Vec<ObjectId>,
+    inserted_id: ObjectId,
+    inserted_index: usize,
+) {
+    expected_ids.sort_by_key(|id| *id.uuid());
+    let delta = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let delta = stream
+                .next()
+                .await
+                .expect("subscription stream should stay open");
+            if delta.added.iter().any(|added| added.id == inserted_id) {
+                break delta;
+            }
+            assert!(
+                delta.is_empty() || delta.pending,
+                "unexpected delta before inserted row: {delta:#?}"
+            );
+        }
+    })
+    .await
+    .expect("unbounded insert delta");
+    assert_eq!(
+        delta
+            .added
+            .iter()
+            .filter(|added| added.id == inserted_id)
+            .map(|added| added.index)
+            .collect::<Vec<_>>(),
+        vec![inserted_index]
+    );
+    wait_for_query(
+        reader,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "reader sees row-id ordered unbounded todos",
+        |rows| (rows.iter().map(|(id, _)| *id).collect::<Vec<_>>() == expected_ids).then_some(()),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
