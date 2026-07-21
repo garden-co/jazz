@@ -661,8 +661,8 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    if !outbound.is_empty() {
-                        if let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
+                    if !outbound.is_empty()
+                        && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
                             send_ws_error(
                                 &mut socket,
                                 WireError::new(
@@ -674,7 +674,6 @@ async fn handle_ws_connection(
                             .await;
                             break;
                         }
-                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Ping(payload))) => {
