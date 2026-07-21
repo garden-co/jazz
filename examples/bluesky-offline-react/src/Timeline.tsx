@@ -2,7 +2,7 @@ import { TID } from "@atproto/common-web";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { useEffect, useRef, useState } from "react";
 import { app } from "../shared/schema.js";
-import { parseAtUri } from "../shared/at-uri.js";
+import { parseAtRecordUri } from "../shared/at-uri.js";
 import { decodeOperation, encodeOperationPayload, type Operation } from "../shared/operations.js";
 import {
   initialTimelineLimit,
@@ -32,8 +32,8 @@ import {
 } from "./TimelineView.js";
 
 function recordKey(uri: string | null | undefined, kind: "like" | "repost") {
-  const parsed = parseAtUri(uri);
-  return parsed?.collection === `app.bsky.feed.${kind}` ? parsed.recordKey : undefined;
+  const parsed = parseAtRecordUri(uri);
+  return parsed?.collection === `app.bsky.feed.${kind}` ? parsed.rkey : undefined;
 }
 
 export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => void }) {

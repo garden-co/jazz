@@ -1,5 +1,5 @@
 import { Agent, XRPCError } from "@atproto/api";
-import { parseAtUri } from "../shared/at-uri.js";
+import { parseAtRecordUri } from "../shared/at-uri.js";
 import type { OAuthSession } from "./auth.js";
 
 export type SessionFetcher = Pick<OAuthSession, "fetchHandler">;
@@ -39,9 +39,9 @@ export async function fetchProfile(actor: string, session: SessionFetcher) {
 }
 
 export function recordKey(uri: string | undefined, did: string, collection: string) {
-  const parsed = parseAtUri(uri);
-  return parsed?.repository === did && parsed.collection === collection
-    ? parsed.recordKey
+  const parsed = parseAtRecordUri(uri);
+  return parsed?.repo === did && parsed.collection === collection
+    ? parsed.rkey
     : undefined;
 }
 

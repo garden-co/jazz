@@ -2,7 +2,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
-import { parseAtUri } from "../shared/at-uri.js";
+import { parseAtRecordUri } from "../shared/at-uri.js";
 import { InvalidOperationError, parseOperationBatch } from "../shared/operations.js";
 import {
   bffSessionCookie,
@@ -109,7 +109,7 @@ export function createServer({
 
   server.get("/api/thread", async (c) => {
     const uri = c.req.query("uri");
-    const parsedUri = parseAtUri(uri);
+    const parsedUri = parseAtRecordUri(uri);
     if (!uri || !parsedUri || parsedUri.collection !== "app.bsky.feed.post") {
       return c.json({ error: "invalid post URI" }, 400);
     }
