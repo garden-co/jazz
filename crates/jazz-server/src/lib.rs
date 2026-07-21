@@ -361,7 +361,7 @@ impl ShellDb {
         }
     }
 
-    fn accept_edge_subscriber_with_claims(
+    fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn jazz::db::Transport>,
         identity: AuthorId,
@@ -369,11 +369,11 @@ impl ShellDb {
     ) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
             ),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => ShellPeerConnection::Rocks(
-                db.accept_edge_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
             ),
         }
     }
@@ -635,8 +635,11 @@ impl InMemoryServerShell {
         let transport = SharedWireTransport::default();
         let transport_adapter = Box::new(WireTransportAdapter::current(transport.clone()));
         let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
-            self.db
-                .accept_edge_subscriber_with_claims(transport_adapter, identity, claims)
+            self.db.accept_edge_authority_subscriber_with_claims(
+                transport_adapter,
+                identity,
+                claims,
+            )
         } else {
             self.db.accept_subscriber_with_claims_and_trust(
                 transport_adapter,
