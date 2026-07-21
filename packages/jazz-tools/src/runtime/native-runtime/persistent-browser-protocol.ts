@@ -2,6 +2,11 @@ import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
 
+export type PersistentBrowserTelemetryOptions = {
+  collectorUrl: string;
+  appId: string;
+};
+
 type OpenRequest = {
   id: number;
   method: "open";
@@ -11,6 +16,7 @@ type OpenRequest = {
     schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
+    telemetry?: PersistentBrowserTelemetryOptions,
   ];
 };
 

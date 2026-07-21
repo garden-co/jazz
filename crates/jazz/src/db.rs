@@ -4069,6 +4069,14 @@ where
         if let Err(message) = validate_sync_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
+        let _sync_send_span = tracing::debug_span!(
+            "sync.send",
+            payload = sync_message_variant_name(&message),
+            payload_json = %sync_message_payload_json(&message, payload.len()),
+            peer_id = %wire_session_peer_label(self.session.as_ref()),
+            encoded_len = payload.len() as u64,
+        )
+        .entered();
         let payload = match self.outbound_stream.encode_message(&payload) {
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
@@ -4154,6 +4162,14 @@ where
                     let payload_len = payload.len();
                     match decode_sync_message_for_receive(&payload) {
                         Ok(message) => {
+                            let _sync_recv_span = tracing::debug_span!(
+                                "sync.recv",
+                                payload = sync_message_variant_name(&message),
+                                payload_json = %sync_message_payload_json(&message, payload_len),
+                                peer_id = %wire_session_peer_label(self.session.as_ref()),
+                                encoded_len = payload_len as u64,
+                            )
+                            .entered();
                             return Some(ReceivedSyncMessage::with_encoded_len(
                                 message,
                                 payload_len,
@@ -5245,7 +5261,6 @@ where
     }
 }
 
-#[cfg(feature = "sync-autopsy")]
 fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
     format!(
         "shape={} binding={} read_view={}",
@@ -5253,7 +5268,43 @@ fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
     )
 }
 
-#[cfg(feature = "sync-autopsy")]
+fn sync_message_variant_name(message: &SyncMessage) -> &'static str {
+    match message {
+        SyncMessage::SessionClaims { .. } => "SessionClaims",
+        SyncMessage::CommitUnit { .. } => "CommitUnit",
+        SyncMessage::FateUpdate { .. } => "FateUpdate",
+        SyncMessage::RegisterShape { .. } => "RegisterShape",
+        SyncMessage::Subscribe { .. } => "Subscribe",
+        SyncMessage::SubscribeRejected { .. } => "SubscribeRejected",
+        SyncMessage::Unsubscribe { .. } => "Unsubscribe",
+        SyncMessage::PublishSchema { .. } => "PublishSchema",
+        SyncMessage::PublishLens { .. } => "PublishLens",
+        SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
+        SyncMessage::CatalogueAck { .. } => "CatalogueAck",
+        SyncMessage::ViewUpdate { .. } => "ViewUpdate",
+        SyncMessage::ViewUpdateChunk { .. } => "ViewUpdateChunk",
+        SyncMessage::FetchContentExtent { .. } => "FetchContentExtent",
+        SyncMessage::ContentExtents { .. } => "ContentExtents",
+        SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
+        SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
+    }
+}
+
+fn sync_message_payload_json(message: &SyncMessage, encoded_len: usize) -> String {
+    serde_json::json!({
+        "summary": summarize_sync_message(message),
+        "encoded_len": encoded_len,
+    })
+    .to_string()
+}
+
+fn wire_session_peer_label(session: Option<&WireSession>) -> String {
+    session
+        .and_then(|session| session.identity.as_ref())
+        .map(|identity| identity.0.to_string())
+        .unwrap_or_default()
+}
+
 fn summarize_sync_message(message: &SyncMessage) -> String {
     match message {
         SyncMessage::RegisterShape { shape_id, opts, .. } => {

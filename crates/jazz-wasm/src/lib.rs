@@ -36,11 +36,42 @@ static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocato
 
 /// Initialize the WASM module.
 ///
-/// Sets up panic hook for better error messages in the browser console.
+/// Sets up panic hook for better error messages in the browser console, and
+/// installs the wasm-tracing subscriber so `tracing` spans/events emitted by
+/// the engine can be collected as trace entries and drained from JavaScript.
+/// Collection is off until `setTraceEntryCollectionEnabled(true)` is called;
+/// console echo stays disabled so an attached collector never spams devtools.
 #[wasm_bindgen(start)]
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+
+    let _ = wasm_tracing::set_as_global_default_with_config(
+        wasm_tracing::WasmLayerConfig::new()
+            .with_max_level(tracing::Level::DEBUG)
+            .disable(),
+    );
+}
+
+/// Enable or disable buffering of `tracing` entries for JavaScript drains.
+#[wasm_bindgen(js_name = setTraceEntryCollectionEnabled)]
+pub fn set_trace_entry_collection_enabled(enabled: bool) {
+    wasm_tracing::set_trace_entry_collection_enabled(enabled);
+}
+
+/// Drain buffered `tracing` entries as a JavaScript array.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = drainTraceEntries)]
+pub fn drain_trace_entries() -> JsValue {
+    wasm_tracing::drain_trace_entries()
+}
+
+/// Register a callback invoked when buffered `tracing` entries are ready.
+/// Returns an unsubscribe function.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = subscribeTraceEntries)]
+pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
+    wasm_tracing::subscribe_trace_entries(callback)
 }
 
 /// Generate a new UUID v7 (time-ordered).

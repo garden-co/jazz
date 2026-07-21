@@ -1,4 +1,5 @@
 import { loadWasmModule } from "../client.js";
+import { installWasmTelemetry } from "../sync-telemetry.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -16,6 +17,7 @@ type WriteMessage = Extract<
 
 let runtime: NativeRuntimeAdapter | null = null;
 let runtimeNamespace: string | null = null;
+let disposeWorkerTelemetry: (() => void) | null = null;
 const pendingWriteTransactionIds = new Set<string>();
 
 const workerScope = self as unknown as {
@@ -174,8 +176,16 @@ function dispatchWrite(message: WriteMessage): { transactionId: string } {
 }
 
 async function openRuntime(message: OpenMessage): Promise<void> {
-  const [runtimeSources, dbName, schema, node, author] = message.args;
+  const [runtimeSources, dbName, schema, node, author, telemetry] = message.args;
   const wasmModule = await loadWasmModule(runtimeSources);
+  if (telemetry && !disposeWorkerTelemetry) {
+    disposeWorkerTelemetry = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: telemetry.collectorUrl,
+      appId: telemetry.appId,
+      runtimeThread: "worker",
+    });
+  }
   runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
@@ -201,6 +211,8 @@ async function closeForStorageClear(): Promise<string> {
 
 async function closeRuntime(): Promise<void> {
   await settlePendingWrites();
+  disposeWorkerTelemetry?.();
+  disposeWorkerTelemetry = null;
   await runtime?.close?.();
   runtime = null;
   runtimeNamespace = null;

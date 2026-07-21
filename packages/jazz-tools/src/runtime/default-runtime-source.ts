@@ -13,7 +13,7 @@ import {
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
-import { installWasmTelemetry } from "./sync-telemetry.js";
+import { installWasmTelemetry, resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import { parseJwtPayload } from "./client-session.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -108,6 +108,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = subject
       ? authorBytesForSubject(subject, identitySeed)
       : deterministicBytes(`${identitySeed}:author`);
+    const workerCollectorUrl =
+      resolveTelemetryCollectorUrlFromEnv() ?? config.telemetryCollectorUrl;
     const mainThreadPeerRuntime = persistentBrowserDbName
       ? new PersistentBrowserOpfsRuntime(
           config.runtimeSources,
@@ -115,6 +117,9 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           persistentBrowserDbName,
           node,
           author,
+          workerCollectorUrl
+            ? { collectorUrl: workerCollectorUrl, appId: config.appId }
+            : undefined,
         )
       : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true);
 
