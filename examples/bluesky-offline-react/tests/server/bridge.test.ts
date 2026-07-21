@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJazzContext } from "jazz-tools/backend";
 import type { PostOperation, ReactionOperation } from "../../shared/operations.js";
-import permissions from "../../server/permissions.js";
+import permissions from "../../permissions.js";
 import { stableObjectId } from "../../server/projection.js";
 import { app } from "../../schema.js";
 

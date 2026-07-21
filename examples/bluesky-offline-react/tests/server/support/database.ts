@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Db } from "jazz-tools";
 import { createJazzContext } from "jazz-tools/backend";
-import permissions from "../../../server/permissions.js";
+import permissions from "../../../permissions.js";
 import { app } from "../../../schema.js";
 
 export async function withTestDatabase(run: (database: Db) => Promise<void>) {

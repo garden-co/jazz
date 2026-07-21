@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { jazzAppId } from "../shared/identifiers.js";
 import { app } from "../schema.js";
-import permissions from "./permissions.js";
+import permissions from "../permissions.js";
 
 const jazzDbPath = "./data/jazz.db";
 mkdirSync(dirname(jazzDbPath), { recursive: true });
