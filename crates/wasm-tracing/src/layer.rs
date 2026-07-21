@@ -35,7 +35,10 @@ struct SpanTiming {
     start_unix_nano: UnixNano,
 }
 
-const MAX_TRACE_ENTRIES: usize = 5_000;
+// Sized for debugging completeness rather than memory thrift: the buffer only
+// fills while a collector is attached, and a synchronous burst (one long tick)
+// must fit entirely between microtask drains or entries are dropped.
+const MAX_TRACE_ENTRIES: usize = 200_000;
 
 static TRACE_ENTRY_COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING: AtomicBool = AtomicBool::new(false);

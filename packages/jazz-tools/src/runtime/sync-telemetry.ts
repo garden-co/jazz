@@ -54,8 +54,11 @@ interface WasmTelemetryExporterState {
   };
 }
 
-const MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE = 256;
-const MAX_PENDING_WASM_TELEMETRY_RECORDS = 5_000;
+// Sized for debugging completeness: the OTel batch processors silently drop
+// past maxQueueSize, and a sync burst can outrun the 500ms export cadence by
+// tens of thousands of records before the exporter catches up.
+const MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE = 2_048;
+const MAX_PENDING_WASM_TELEMETRY_RECORDS = 200_000;
 // SpanKind.INTERNAL — inlined to avoid a dynamic import of @opentelemetry/api.
 const SPAN_KIND_INTERNAL = 1;
 const SEVERITY_NUMBER = {
@@ -270,7 +273,7 @@ async function createWasmTelemetryExporter(
   const batchOptions = {
     maxExportBatchSize: MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE,
     maxQueueSize: MAX_PENDING_WASM_TELEMETRY_RECORDS,
-    scheduledDelayMillis: 1_000,
+    scheduledDelayMillis: 500,
   };
   const traceProvider = new BasicTracerProvider({
     resource,
