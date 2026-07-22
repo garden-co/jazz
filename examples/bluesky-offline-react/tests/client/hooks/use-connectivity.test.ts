@@ -21,8 +21,8 @@ describe("API connectivity", () => {
     );
   });
 
-  it("does not treat the public health endpoint as proof of an authenticated connection", () => {
-    expect(reachabilityAfterHealthCheck(undefined, true)).toBeUndefined();
+  it("uses the health endpoint to report BFF connectivity", () => {
+    expect(reachabilityAfterHealthCheck(undefined, true)).toBe(true);
     expect(reachabilityAfterHealthCheck(true, true)).toBe(true);
     expect(reachabilityAfterHealthCheck(undefined, false)).toBe(false);
   });
