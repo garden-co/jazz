@@ -70,13 +70,13 @@ Slice canary receipt:
 | Before corrected guard |                            7.13ms |          1.42ms total |      0.008ms | This receipt was invalid as a pass-through proof: the fake `db.all()` returned an empty snapshot, so the old dead guard was not caught by row-count assertions.                                        |
 | After corrected guard  |                           24.84ms |          1.78ms total |      0.013ms | Canary now asserts delivered `addedCount` equals source row count. The 24k reset path is really engaged and includes envelope parse, public-frame build, and worker-style `transferableBuffer` checks. |
 
-End-to-end real-app verification note: `/Users/anselm/jazz-private/workspaces/boredm` serves the worker from the main checkout through symlinks. The orchestrator runs that post-merge; this lane records the local adapter gates only.
+End-to-end real-app verification note: `/Users/anselm/jazz-private/workspaces/customer-app` serves the worker from the main checkout through symlinks. The orchestrator runs that post-merge; this lane records the local adapter gates only.
 
 ## Packed reset real-app guard trace
 
-Trace setup: temporarily emitted worker spans from `plainResetChunkCanStayPacked` and the packed reset frame builder, rebuilt `packages/jazz-tools` dist in this worktree, relinked the boredm app's `node_modules/jazz-tools` and `node_modules/jazz-wasm` to this worktree, and restarted `/Users/anselm/jazz-private/workspaces/boredm` with `JAZZ_CORE_ROOT=/Users/anselm/jazz_core-ts-adapter scripts/demo-stack.sh --skip-build --prod`.
+Trace setup: temporarily emitted worker spans from `plainResetChunkCanStayPacked` and the packed reset frame builder, rebuilt `packages/jazz-tools` dist in this worktree, relinked the customer-app app's `node_modules/jazz-tools` and `node_modules/jazz-wasm` to this worktree, and restarted `/Users/anselm/jazz-private/workspaces/customer-app` with `JAZZ_CORE_ROOT=/Users/anselm/jazz_core-ts-adapter scripts/demo-stack.sh --skip-build --prod`.
 
-Important setup correction: `demo-stack.sh` defaults `ENGINE_ROOT` to `/Users/anselm/Documents/jazz_core`, and the boredm `node_modules` symlinks also pointed at that main checkout. Early trace runs were therefore measuring the main checkout bundle, not this worktree. The final verification used the worktree links above; `jazz-napi` remained linked to the built main package because this slice only changes `jazz-tools` TypeScript.
+Important setup correction: `demo-stack.sh` defaults `ENGINE_ROOT` to `/Users/anselm/Documents/jazz_core`, and the customer-app `node_modules` symlinks also pointed at that main checkout. Early trace runs were therefore measuring the main checkout bundle, not this worktree. The final verification used the worktree links above; `jazz-napi` remained linked to the built main package because this slice only changes `jazz-tools` TypeScript.
 
 Empirical guard finding for the 24,045-row `dropdown_entry` reset chunk:
 
@@ -102,10 +102,10 @@ Second trace finding after enabling that guard: the fast path engaged, but the m
 
 Real-app receipts:
 
-| Run                                    | Harness dir                                                        | Warm apply result                                                                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Before fix, worktree-linked with trace | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T212100Z` | `subscription_apply_chunk` max `2048.1ms`, 24,045 rows; guard declined on `relationDelta`, branch `snapshot-refresh`.                                |
-| Guard-only fix, before optional rewrap | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T212457Z` | Worker apply max `100ms`, but page failed decoding because packed frame bytes did not match output column nullability.                               |
-| Final clean fix                        | `/Users/anselm/boredm-harness-v2/browser-profile-20260721T213401Z` | Warm `subscription_apply_chunk` total `120.6ms`, max `98.8ms`; no apply span over 1000 rows, so the 24,045-row reset stayed packed. UI guard passed. |
+| Run                                    | Harness dir                                                     | Warm apply result                                                                                                                                    |
+| -------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Before fix, worktree-linked with trace | `/Users/anselm/app-harness-v2/browser-profile-20260721T212100Z` | `subscription_apply_chunk` max `2048.1ms`, 24,045 rows; guard declined on `relationDelta`, branch `snapshot-refresh`.                                |
+| Guard-only fix, before optional rewrap | `/Users/anselm/app-harness-v2/browser-profile-20260721T212457Z` | Worker apply max `100ms`, but page failed decoding because packed frame bytes did not match output column nullability.                               |
+| Final clean fix                        | `/Users/anselm/app-harness-v2/browser-profile-20260721T213401Z` | Warm `subscription_apply_chunk` total `120.6ms`, max `98.8ms`; no apply span over 1000 rows, so the 24,045-row reset stayed packed. UI guard passed. |
 
 Temporary instrumentation was removed before the final clean run.
