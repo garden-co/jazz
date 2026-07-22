@@ -467,7 +467,7 @@ fn dispatch(
                 move || SlateDbStorage::open_bridged(path.clone(), &refs).expect("open slatedb"),
             )
         }
-        "slatedb-localwal-sync" => {
+        "slatedb-localwal" => {
             let checkpoint_path = dir.path().join("slatedb-checkpoint");
             let wal_path = dir.path().join("local.wal");
             let root_for_size = dir.path().to_path_buf();
@@ -551,7 +551,7 @@ fn dispatch(
         }
         other => {
             panic!(
-                "unknown storage adapter '{other}' (expected memory|rocksdb|btree|slatedb|slatedb-localwal-sync|sqlite|redb|postgres)"
+                "unknown storage adapter '{other}' (expected memory|rocksdb|btree|slatedb|slatedb-localwal|sqlite|redb|postgres)"
             )
         }
     }
@@ -2872,7 +2872,7 @@ fn parse_args() -> Args {
                     "jazz-ingest-bench — storage ingestion/cold-load benchmark (USDA plants)\n\
                      \n\
                      Two layers on the same dataset and metrics:\n\
-                     \x20 --storage <list>  through the Jazz Db API: memory,rocksdb,btree,slatedb,slatedb-localwal-sync,sqlite,redb,postgres\n\
+                     \x20 --storage <list>  through the Jazz Db API: memory,rocksdb,btree,slatedb,slatedb-localwal,sqlite,redb,postgres\n\
                      \x20 --raw <list>      direct native engine API (no Jazz): rocksdb,slatedb,sqlite,redb,postgres\n\
                      (with neither flag, defaults to --raw rocksdb,slatedb)\n\
                      \n\
@@ -2881,11 +2881,11 @@ fn parse_args() -> Args {
                      \x20 --batch-size <n>  rows per transaction/write-batch (default 1000)\n\
                      \x20 --limit <n>       ingest only the first n rows\n\
                      \x20 --ebs-delay-ms <n>\n\
-                     \x20                   fixed local WAL fsync delay for slatedb-localwal-sync (default 0)\n\
+                     \x20                   fixed local WAL fsync delay for slatedb-localwal (default 0)\n\
                      \x20 --ebs-jitter-ms <n>\n\
                      \x20                   deterministic 0..n ms local WAL fsync jitter per sync batch (default 0)\n\
                      \x20 --safekeeper-delay-ms <n>\n\
-                     \x20                   fixed remote ack delay for slatedb-localwal-sync (default 0)\n\
+                     \x20                   fixed remote ack delay for slatedb-localwal (default 0)\n\
                      \x20 --safekeeper-jitter-ms <n>\n\
                      \x20                   deterministic 0..n ms remote ack jitter per sync batch (default 0)\n\
                      \x20 --json            also emit one machine-readable JSON line per run\n\
