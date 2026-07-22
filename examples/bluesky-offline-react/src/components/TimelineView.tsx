@@ -7,6 +7,7 @@ import {
   Trigger as AccordionTrigger,
 } from "@radix-ui/react-accordion";
 import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { flushSync } from "react-dom";
 import {
   BackIcon,
   DisclosureIcon,
@@ -452,13 +453,15 @@ function TimelinePostTree({
   node,
   threadRoot,
   onReroot,
+  navigationTarget,
   postState,
   actions,
   depth = 0,
 }: TimelineThreadProps & {
   node: TimelinePostNode;
   threadRoot: DisplayPost;
-  onReroot: (id: string) => void;
+  onReroot: (id: string, control: HTMLButtonElement) => void;
+  navigationTarget?: "back" | string;
   depth?: number;
 }) {
   const hasUncachedReplies = node.post.replyCount > node.replies.length;
@@ -485,6 +488,7 @@ function TimelinePostTree({
                 node={reply}
                 threadRoot={threadRoot}
                 onReroot={onReroot}
+                navigationTarget={navigationTarget}
                 postState={postState}
                 actions={actions}
                 depth={depth + 1}
@@ -496,7 +500,12 @@ function TimelinePostTree({
             className="thread-control"
             variant="ghost"
             size="1"
-            onClick={() => onReroot(node.post.id)}
+            style={
+              navigationTarget === node.post.id
+                ? { viewTransitionName: "thread-navigation" }
+                : undefined
+            }
+            onClick={(event) => onReroot(node.post.id, event.currentTarget)}
           >
             <DisclosureIcon />
             Show {node.replies.length === 1 ? "reply" : `${node.replies.length} replies`}
@@ -562,9 +571,31 @@ function TimelineThreadContent({
   actions,
 }: TimelineThreadProps & { item: TimelineItem }) {
   const [focusedId, setFocusedId] = useState(item.node.post.id);
+  const [navigationTarget, setNavigationTarget] = useState<"back" | string>();
   const findNode = (node: TimelinePostNode): TimelinePostNode | undefined =>
     node.post.id === focusedId ? node : node.replies.map(findNode).find(Boolean);
   const focusedNode = findNode(item.node) ?? item.node;
+  const reroot = (id: string, control: HTMLButtonElement) => {
+    const target = id === item.node.post.id ? focusedId : "back";
+    const updateFocus = () => {
+      flushSync(() => {
+        setFocusedId(id);
+        setNavigationTarget(target);
+      });
+    };
+    if (
+      typeof document.startViewTransition !== "function" ||
+      matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      setFocusedId(id);
+      return;
+    }
+    control.style.viewTransitionName = "thread-navigation";
+    document.startViewTransition(updateFocus).finished.finally(() => {
+      control.style.removeProperty("view-transition-name");
+      setNavigationTarget(undefined);
+    });
+  };
   const reposter = item.repost?.actorProfile;
   const reposterFallback = item.repost?.actorDid ?? "Unknown account";
   const reposterName = profileNameParts(reposter, reposterFallback).name;
@@ -590,7 +621,10 @@ function TimelineThreadContent({
           className="thread-control"
           variant="ghost"
           size="1"
-          onClick={() => setFocusedId(item.node.post.id)}
+          style={
+            navigationTarget === "back" ? { viewTransitionName: "thread-navigation" } : undefined
+          }
+          onClick={(event) => reroot(item.node.post.id, event.currentTarget)}
         >
           <BackIcon />
           Back to top level
@@ -599,7 +633,8 @@ function TimelineThreadContent({
       <TimelinePostTree
         node={focusedNode}
         threadRoot={item.threadRoot}
-        onReroot={setFocusedId}
+        onReroot={reroot}
+        navigationTarget={navigationTarget}
         postState={postState}
         actions={actions}
       />
