@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   fetchingMorePosts,
-  nextInfiniteScrollState,
   nextTimelinePageSource,
+  shouldLoadNextPage,
 } from "../../../src/hooks/use-timeline-projection.js";
 
 describe("timeline pagination", () => {
@@ -42,18 +42,15 @@ describe("timeline pagination", () => {
     expect(fetchingMorePosts({ localStartCount: null, itemCount: 40, remote: true })).toBe(true);
   });
 
-  it("requires the sentinel to leave before triggering another page", () => {
-    expect(nextInfiniteScrollState({ armed: true, intersecting: true, canLoad: true })).toEqual({
-      armed: false,
-      trigger: true,
-    });
-    expect(nextInfiniteScrollState({ armed: false, intersecting: true, canLoad: true })).toEqual({
-      armed: false,
-      trigger: false,
-    });
-    expect(nextInfiniteScrollState({ armed: false, intersecting: false, canLoad: true })).toEqual({
-      armed: true,
-      trigger: false,
-    });
+  it("loads again while the sentinel remains visible once the previous page settles", () => {
+    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: false })).toBe(
+      true,
+    );
+    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: true })).toBe(
+      false,
+    );
+    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: false })).toBe(
+      true,
+    );
   });
 });
