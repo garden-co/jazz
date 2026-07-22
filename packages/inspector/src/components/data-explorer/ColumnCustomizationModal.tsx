@@ -4,8 +4,7 @@ import styles from "./ColumnCustomizationModal.module.css";
 export interface CustomizableColumn {
   id: string;
   header: string;
-  // `true` unless specified
-  visibleByDefault?: boolean;
+  hiddenByDefault?: true;
 }
 
 export interface ColumnPreference {
@@ -45,7 +44,7 @@ export function reconcileColumnPreferences(
 
   for (const column of columns) {
     if (!seenColumnIds.has(column.id)) {
-      preferences.push({ id: column.id, visible: column.visibleByDefault ?? true });
+      preferences.push({ id: column.id, visible: !column.hiddenByDefault });
     }
   }
 
@@ -282,7 +281,7 @@ export function ColumnCustomizationModal({
               setDraftPreferences(
                 columns.map((column) => ({
                   id: column.id,
-                  visible: column.visibleByDefault ?? true,
+                  visible: !column.hiddenByDefault,
                 })),
               );
             }}

@@ -82,8 +82,7 @@ interface GridColumn {
   accessorKey: string;
   header: string;
   enableSorting: boolean;
-  // `true` unless specified
-  visibleByDefault?: boolean;
+  hiddenByDefault?: true;
 }
 
 const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
@@ -98,7 +97,7 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     accessorKey: "$createdBy",
     header: "$createdBy",
     enableSorting: true,
-    visibleByDefault: false,
+    hiddenByDefault: true,
   },
   {
     id: "$updatedAt",
@@ -111,7 +110,7 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     accessorKey: "$updatedBy",
     header: "$updatedBy",
     enableSorting: true,
-    visibleByDefault: false,
+    hiddenByDefault: true,
   },
 ];
 
