@@ -363,13 +363,16 @@ time {
   margin-bottom: 0;
   color: var(--gray-11);
 }
-.feed-sentinel {
-  height: 1px;
-}
 .pagination-status {
   justify-content: center;
   gap: 8px;
+  min-height: 32px;
   margin-top: 22px;
+}
+.pagination-status > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .app-footer {
   gap: 16px;

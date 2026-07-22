@@ -25,31 +25,29 @@ export function nextTimelinePageSource({
 
 export function fetchingMorePosts({
   startCount,
-  itemCount,
+  rowCount,
   remote,
 }: {
   startCount: number | null;
-  itemCount: number;
+  rowCount: number;
   remote: boolean;
 }) {
-  return remote || (startCount !== null && itemCount <= startCount);
+  return remote || (startCount !== null && rowCount <= startCount);
 }
 
-export function shouldLoadNextPage({
-  intersecting,
-  canLoad,
+export function canLoadNextPage({
+  source,
   loadingMore,
 }: {
-  intersecting: boolean;
-  canLoad: boolean;
+  source: "local" | "remote" | undefined;
   loadingMore: boolean;
 }) {
-  return intersecting && canLoad && !loadingMore;
+  return source !== undefined && !loadingMore;
 }
 
 export function useTimelineProjection({
   did,
-  itemCount,
+  rowCount,
   hasLocalRows,
   cachedRowsRemaining,
   localQueryRefreshing,
@@ -59,7 +57,7 @@ export function useTimelineProjection({
   reportApiReachable,
 }: {
   did: string;
-  itemCount: number;
+  rowCount: number;
   hasLocalRows: boolean;
   cachedRowsRemaining: boolean;
   localQueryRefreshing: boolean;
@@ -78,7 +76,6 @@ export function useTimelineProjection({
   const paginationInFlight = useRef(false);
   const paginationStarted = useRef(false);
   const requestGeneration = useRef(0);
-  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   async function loadPage(cursor: string | null) {
     const generation = requestGeneration.current;
@@ -89,7 +86,7 @@ export function useTimelineProjection({
     if (cursor) {
       paginationStarted.current = true;
       setRemoteLoadingMore(true);
-      setPageStartCount(itemCount);
+      setPageStartCount(rowCount);
       setPageFetchStartedAt(Date.now());
     }
     try {
@@ -148,7 +145,7 @@ export function useTimelineProjection({
   }, [browserOnline, hasLocalRows, localQueryReady]);
 
   useEffect(() => {
-    if (pageStartCount === null || pageFetchStartedAt === null || itemCount <= pageStartCount)
+    if (pageStartCount === null || pageFetchStartedAt === null || rowCount <= pageStartCount)
       return;
     const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - pageFetchStartedAt));
     const timer = window.setTimeout(() => {
@@ -156,7 +153,7 @@ export function useTimelineProjection({
       setPageFetchStartedAt(null);
     }, remaining);
     return () => window.clearTimeout(timer);
-  }, [itemCount, pageFetchStartedAt, pageStartCount]);
+  }, [rowCount, pageFetchStartedAt, pageStartCount]);
 
   useEffect(() => {
     if (!localQueryReady || !browserOnline) return;
@@ -165,53 +162,29 @@ export function useTimelineProjection({
     return () => window.clearInterval(timer);
   }, [did, browserOnline, localQueryReady]);
 
-  useEffect(() => {
-    const sentinel = loadMoreRef.current;
-    if (!sentinel) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const intersecting = entries.some((entry) => entry.isIntersecting);
-        const source = nextTimelinePageSource({
-          cachedRowsRemaining,
-          localQueryRefreshing,
-          remoteRowsRemaining: Boolean(nextCursor && hasMore),
-        });
-        const loadingMore = fetchingMorePosts({
-          startCount: pageStartCount,
-          itemCount,
-          remote: remoteLoadingMore,
-        });
-        const shouldLoad = shouldLoadNextPage({
-          intersecting,
-          canLoad: itemCount > 0 && source !== undefined,
-          loadingMore,
-        });
-        if (!shouldLoad) return;
-        if (source === "local") {
-          setPageStartCount(itemCount);
-          setPageFetchStartedAt(Date.now());
-          revealCachedRows();
-        } else if (source === "remote" && nextCursor) loadPage(nextCursor);
-      },
-      { rootMargin: "500px" },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [
+  const source = nextTimelinePageSource({
     cachedRowsRemaining,
-    hasMore,
-    itemCount,
-    pageStartCount,
     localQueryRefreshing,
-    nextCursor,
-    remoteLoadingMore,
-    revealCachedRows,
-  ]);
+    remoteRowsRemaining: Boolean(nextCursor && hasMore),
+  });
 
   const loadingMore = fetchingMorePosts({
     startCount: pageStartCount,
-    itemCount,
+    rowCount,
     remote: remoteLoadingMore,
   });
-  return { hasMore, loadingMore, initialLoading, loadMoreRef };
+  const canLoadMore = rowCount > 0 && canLoadNextPage({ source, loadingMore });
+
+  async function loadMore() {
+    if (!canLoadMore) return;
+    if (source === "local") {
+      setPageStartCount(rowCount);
+      setPageFetchStartedAt(Date.now());
+      revealCachedRows();
+    } else if (nextCursor) {
+      await loadPage(nextCursor);
+    }
+  }
+
+  return { hasMore, canLoadMore, loadMore, loadingMore, initialLoading };
 }

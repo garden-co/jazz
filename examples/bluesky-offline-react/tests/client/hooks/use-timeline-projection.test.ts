@@ -37,9 +37,9 @@ describe("timeline pagination", () => {
   });
 
   it("keeps pagination visible until a locally cached page appears", () => {
-    expect(fetchingMorePosts({ startCount: 20, itemCount: 20, remote: false })).toBe(true);
-    expect(fetchingMorePosts({ startCount: 20, itemCount: 40, remote: false })).toBe(false);
-    expect(fetchingMorePosts({ startCount: null, itemCount: 40, remote: true })).toBe(true);
+    expect(fetchingMorePosts({ startCount: 20, rowCount: 20, remote: false })).toBe(true);
+    expect(fetchingMorePosts({ startCount: 20, rowCount: 40, remote: false })).toBe(false);
+    expect(fetchingMorePosts({ startCount: null, rowCount: 40, remote: true })).toBe(true);
   });
 
   it("enables explicit pagination only when another page is ready", () => {

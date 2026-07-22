@@ -64,12 +64,13 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const localQueryRefreshing = timelineRows === undefined && lastTimelineRows.current.length > 0;
   const {
     hasMore: hasMoreRemoteRows,
+    canLoadMore,
+    loadMore,
     loadingMore,
     initialLoading,
-    loadMoreRef,
   } = useTimelineProjection({
     did,
-    itemCount: visibleTimelineRows.length,
+    rowCount: visibleTimelineRows.length,
     hasLocalRows: visibleTimelineRows.length > 0,
     cachedRowsRemaining: localTimelineWindow.hasMore,
     localQueryRefreshing,
@@ -195,8 +196,9 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
         items={timelineItems}
         waiting={waitingForTimeline}
         hasMore={hasMore}
+        canLoadMore={canLoadMore}
         loadingMore={loadingMore}
-        loadMoreRef={loadMoreRef}
+        onLoadMore={loadMore}
         pendingLikePostIds={pendingObjectIds.likes}
         pendingRepostPostIds={pendingObjectIds.reposts}
         pendingPostIds={pendingObjectIds.posts}

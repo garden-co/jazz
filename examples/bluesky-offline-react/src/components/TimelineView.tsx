@@ -6,7 +6,7 @@ import {
   Root as AccordionRoot,
   Trigger as AccordionTrigger,
 } from "@radix-ui/react-accordion";
-import { useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import {
   BackIcon,
@@ -654,8 +654,9 @@ export function TimelineFeed({
   items,
   waiting,
   hasMore,
+  canLoadMore,
   loadingMore,
-  loadMoreRef,
+  onLoadMore,
   pendingLikePostIds,
   pendingRepostPostIds,
   pendingPostIds,
@@ -672,8 +673,9 @@ export function TimelineFeed({
     items: TimelineItem[];
     waiting: boolean;
     hasMore: boolean;
+    canLoadMore: boolean;
     loadingMore: boolean;
-    loadMoreRef: RefObject<HTMLDivElement | null>;
+    onLoadMore: () => Promise<void>;
     connectivity: ConnectivityStatus;
     relations: TimelineRelations;
   }) {
@@ -740,20 +742,20 @@ export function TimelineFeed({
           </div>
         )}
       </div>
-      <div ref={loadMoreRef} className="feed-sentinel" aria-hidden="true" />
-      {loadingMore && (
-        <p className="pagination-status">
-          <Spinner aria-hidden="true" />
-          Fetching more posts…
-        </p>
-      )}
-      {!hasMore && items.length > 0 && (
-        <p className="pagination-status">
-          <span>
-            <SuccessIcon />
-          </span>
-          You’re all caught up
-        </p>
+      {items.length > 0 && (
+        <div className="pagination-status" aria-live="polite">
+          {hasMore ? (
+            <Button variant="soft" disabled={!canLoadMore} onClick={onLoadMore}>
+              {loadingMore && <Spinner aria-hidden="true" />}
+              {loadingMore ? "Fetching more posts…" : "Load more"}
+            </Button>
+          ) : (
+            <span>
+              <SuccessIcon />
+              You’re all caught up
+            </span>
+          )}
+        </div>
       )}
     </section>
   );
