@@ -178,10 +178,12 @@ describe("timeline model", () => {
       buildTimeline(
         [row],
         relations([root, parent, reply], {
+          viewerDid: "did:plc:viewer",
           reposts: [repost],
         }),
       )[0],
     ).toMatchObject({
+      repost: { actorDid: "did:plc:reposter" },
       node: { post: { id: reply.id }, replies: [] },
       threadRoot: { id: root.id },
       threadUrl: "https://bsky.app/profile/did:plc:author/post/reply",
@@ -223,9 +225,16 @@ describe("timeline model", () => {
       buildTimeline(
         [direct, repost],
         relations([sharedPost, duplicatePost], {
+          viewerDid: "did:plc:viewer",
           reposts: [repostRow],
         }),
       ),
-    ).toMatchObject([{ id: "repost-entry", node: { post: { uri: sharedPost.uri } } }]);
+    ).toMatchObject([
+      {
+        id: "repost-entry",
+        repost: { actorDid: "did:plc:reposter" },
+        node: { post: { uri: sharedPost.uri, repost: undefined } },
+      },
+    ]);
   });
 });
