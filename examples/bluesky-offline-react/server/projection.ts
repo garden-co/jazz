@@ -337,14 +337,13 @@ export function createProjection(database: ProjectionDatabase) {
   ) {
     const existing = await database.one(table.where({ id: { eq: id } }));
     if (existing && projectionMatches(existing, data)) return;
-    // React reads from another Jazz replica, so a BFF write is delivered only
-    // after the edge acknowledges it. The bridge runs projection in the
-    // background, keeping AppView reads responsive while transport recovers.
+    // Await local acceptance only. Edge delivery continues independently; making
+    // the projection lane wait for the network would block every later refresh.
     if (existing) {
-      await database.update(table, id, data).wait({ tier: "edge" });
+      await database.update(table, id, data);
       return;
     }
-    await database.upsert(table, data, { id }).wait({ tier: "edge" });
+    await database.upsert(table, data, { id });
   }
 
   type ProfileProjection = {
@@ -408,7 +407,7 @@ export function createProjection(database: ProjectionDatabase) {
     await Promise.all(
       existingImages
         .filter((image) => !expectedImages.has(image.id))
-        .map((image) => database.delete(app.postImages, image.id).wait({ tier: "edge" })),
+        .map((image) => database.delete(app.postImages, image.id)),
     );
   }
 
@@ -508,7 +507,7 @@ export function createProjection(database: ProjectionDatabase) {
           });
         }
       }
-      if (intent) await database.delete(app.pendingOperations, intent.id).wait({ tier: "edge" });
+      if (intent) await database.delete(app.pendingOperations, intent.id);
     }
   }
 
@@ -650,7 +649,7 @@ export function createProjection(database: ProjectionDatabase) {
 
   async function completeOperation(operation: Operation) {
     if (operation.kind === "post") {
-      await database.delete(app.pendingOperations, operation.id).wait({ tier: "edge" });
+      await database.delete(app.pendingOperations, operation.id);
       return;
     }
     await projectRow(database, app.pendingOperations, operation.id, {
