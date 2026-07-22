@@ -13,22 +13,16 @@ export default defineConfig(({ mode }) => {
   };
   return {
     plugins: [
-      jazzPlugin({
-        appId: jazzAppId,
-        adminSecret: env.JAZZ_ADMIN_SECRET,
-        // The Vite plugin's managed runtime accepts this option, but its public
-        // Vite options type does not expose it yet. A spread keeps this example
-        // scoped to the public plugin while giving the separate BFF process the
-        // same explicit backend identity as the local Jazz server.
-        ...{ backendSecret: env.BACKEND_SECRET },
-        server: {
-          port: 4200,
-          // Offline clients can reconnect with queued writes from an older
-          // schema, so the local sync server must retain its catalogue across
-          // Vite restarts.
-          jwksUrl: "http://127.0.0.1:3001/.well-known/jazz-jwks.json",
-        },
-      }),
+      jazzPlugin(({
+	appId: jazzAppId,
+	adminSecret: env.JAZZ_ADMIN_SECRET,
+	backendSecret: env.BACKEND_SECRET,
+	inspector: false,
+	server: {
+		port: 4200,
+		jwksUrl: 'http://127.0.0.1:3001/.well-known/jazz-jwks.json'
+	}
+})),
       react(),
       babel({ presets: [reactCompilerPreset()] }),
       pwaPlugin(),

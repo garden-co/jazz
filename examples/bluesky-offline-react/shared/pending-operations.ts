@@ -43,7 +43,10 @@ type OperationBase = {
 };
 
 export class InvalidOperationError extends Error {
-  constructor(message: string, readonly status: 400 | 403 = 400) {
+  constructor(
+    message: string,
+    readonly status: 400 | 403 = 400,
+  ) {
     super(message);
   }
 }
@@ -129,6 +132,18 @@ export function encodeOperationPayload(operation: Pick<Operation, "payload">) {
   return JSON.stringify(operation.payload);
 }
 
+export function operationRow(operation: Operation) {
+  return {
+    ownerDid: operation.ownerDid,
+    kind: operation.kind,
+    rkey: operation.rkey,
+    payload: encodeOperationPayload(operation),
+    state: operation.state,
+    ...(operation.error !== undefined ? { error: operation.error } : {}),
+    createdAt: operation.createdAt,
+  };
+}
+
 export function decodeOperation(row: unknown): Operation {
   if (!isRecord(row)) throw new InvalidOperationError("Invalid operation");
   const kind = row.kind;
@@ -146,7 +161,8 @@ export function decodeOperation(row: unknown): Operation {
 }
 
 export function parseOperationBatch(value: unknown, ownerDid: string) {
-  if (!Array.isArray(value) || value.length > 100) throw new InvalidOperationError("invalid operations");
+  if (!Array.isArray(value) || value.length > 100)
+    throw new InvalidOperationError("invalid operations");
   const operations = value.map(decodeOperation);
   if (operations.some((operation) => operation.ownerDid !== ownerDid)) {
     throw new InvalidOperationError("owner mismatch", 403);

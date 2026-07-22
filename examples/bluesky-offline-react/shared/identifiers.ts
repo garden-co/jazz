@@ -1,12 +1,10 @@
 // The browser, BFF, and Jazz sync server use this ID to address the same Jazz application.
-export const jazzAppId = "bluesky-offline-react-v2";
+export const jazzAppId = "2b231499-5315-4cab-852f-bb3e29c72b95";
 
 // Jazz retains the authoritative ATProto URI; reconciliation extracts its PDS record key.
 export function parseAtRecordUri(uri: string | null | undefined) {
   const match = uri?.match(/^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/);
-  return match
-    ? { repo: match[1], collection: match[2], rkey: match[3] }
-    : undefined;
+  return match ? { repo: match[1], collection: match[2], rkey: match[3] } : undefined;
 }
 
 export function objectIdKey(applicationId: string, namespace: string, value: string) {

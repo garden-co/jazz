@@ -17,7 +17,9 @@ const sessionCacheKey = `${jazzAppId}:session`;
 
 function readCachedSession(): JazzCredentials | undefined {
   try {
-    const value = JSON.parse(localStorage.getItem(sessionCacheKey) ?? "null") as Partial<JazzCredentials> | null;
+    const value = JSON.parse(
+      localStorage.getItem(sessionCacheKey) ?? "null",
+    ) as Partial<JazzCredentials> | null;
     return typeof value?.did === "string" && typeof value.token === "string"
       ? { did: value.did, token: value.token }
       : undefined;
@@ -39,7 +41,10 @@ async function signOut() {
   }
 }
 
-function JazzApp({ session, onJWTExpired }: {
+function JazzApp({
+  session,
+  onJWTExpired,
+}: {
   session: JazzCredentials;
   onJWTExpired: () => Promise<string | null>;
 }) {
@@ -53,6 +58,7 @@ function JazzApp({ session, onJWTExpired }: {
   return (
     <JazzProvider
       config={config}
+      autoAttachDevTools={false}
       fallback={<LoadingScreen label="Opening your local cache…" />}
       onJWTExpired={onJWTExpired}
     >
@@ -127,5 +133,9 @@ export function App() {
   if (authentication.kind === "signed-in") {
     return <JazzApp session={authentication.session} onJWTExpired={refreshJazzToken} />;
   }
-  return <LoginView sessionError={authentication.kind === "unavailable" ? authentication.message : undefined} />;
+  return (
+    <LoginView
+      sessionError={authentication.kind === "unavailable" ? authentication.message : undefined}
+    />
+  );
 }
