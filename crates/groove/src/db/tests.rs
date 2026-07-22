@@ -9012,7 +9012,7 @@ fn persist_maintains_schema_index_entries() {
     let prefix = b"albums\0albums_by_title\0";
     let entries = database.storage.prefix("indices", prefix).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(persisted_index_value(&entries[0].1), []);
+    assert_eq!(persisted_index_value(&entries[0].1), Vec::<u8>::new());
 
     let mut batch = database.open_batch();
     batch.update(
@@ -9029,7 +9029,7 @@ fn persist_maintains_schema_index_entries() {
             .windows("Giant Steps".len())
             .any(|window| window == b"Giant Steps")
     );
-    assert_eq!(persisted_index_value(&entries[0].1), []);
+    assert_eq!(persisted_index_value(&entries[0].1), Vec::<u8>::new());
 
     let mut batch = database.open_batch();
     batch.delete("albums", PrimaryKeyValue::U64(7));
