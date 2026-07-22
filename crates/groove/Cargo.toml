@@ -26,6 +26,7 @@ rustc-hash.workspace = true
 opfs-btree = { path = "../opfs-btree" }
 slatedb = { version = "0.14.1", default-features = false, features = [
   "moka",
+  "zstd",
 ], optional = true }
 tokio = { version = "1", features = [
   "rt-multi-thread",

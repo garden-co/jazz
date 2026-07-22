@@ -50,6 +50,17 @@ const COLUMNS: [&str; 5] = [
 const SCI_TOKEN: &str = "Carex"; // substring searched in scientific_name
 const FAMILY_SET: [&str; 3] = ["Poaceae", "Asteraceae", "Cyperaceae"];
 const TOP_N: usize = 100;
+/// Extra repeats after the cold+warm reads; `hot` is the best (min) of these,
+/// i.e. the fully-warmed steady-state latency.
+const HOT_ITERS: usize = 10;
+
+/// When set, the DB is reopened (dropping the in-process block cache) before
+/// each query, so every query's `cold` number is a true cold-cache read rather
+/// than a hit on a cache that an earlier query warmed. Run-wide; set in `main`.
+static COLD_PER_QUERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn cold_per_query() -> bool {
+    COLD_PER_QUERY.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // Dataset
@@ -227,14 +238,25 @@ fn queries(sample: &Plant) -> Vec<(String, Query)> {
     ]
 }
 
-fn run_query<S>(db: &Db<S>, query: &Query) -> (Duration, usize)
+/// Returns (cold_ms, warm_ms, hot_ms, rows): the first read (cold), the second
+/// (warm), and the best of `HOT_ITERS` further reads (hot / steady-state).
+fn run_query<S>(db: &Db<S>, query: &Query) -> (f64, f64, f64, usize)
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let prepared = db.prepare_query(query).expect("prepare query");
-    let t = Instant::now();
-    let rows = db.read(&prepared).expect("read query");
-    (t.elapsed(), rows.len())
+    let read = || {
+        let t = Instant::now();
+        let rows = db.read(&prepared).expect("read query").len();
+        (t.elapsed().as_secs_f64() * 1e3, rows)
+    };
+    let (cold, rows) = read();
+    let (warm, _) = read();
+    let mut hot = warm;
+    for _ in 0..HOT_ITERS {
+        hot = hot.min(read().0);
+    }
+    (cold, warm, hot, rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +268,7 @@ struct QueryReport {
     rows: usize,
     cold_ms: Option<f64>,
     warm_ms: f64,
+    hot_ms: f64,
 }
 
 struct Report {
@@ -323,30 +346,54 @@ where
         let cold_db = open_db(schema, open());
         cold_open_time = Some(t_open.elapsed());
 
-        for (name, query) in &query_set {
-            let (cold, rows) = run_query(&cold_db, query); // first read = cold
-            let (warm, _) = run_query(&cold_db, query); // second read = warm
-            queries_out.push(QueryReport {
-                name: name.clone(),
-                rows,
-                cold_ms: Some(cold.as_secs_f64() * 1e3),
-                warm_ms: warm.as_secs_f64() * 1e3,
-            });
-        }
-        if let Err(e) = cold_db.close() {
-            eprintln!("  warning: {adapter} cold close() failed: {e}");
+        if cold_per_query() {
+            // Reopen a fresh DB (cold block cache) for each query so its `cold`
+            // number is a true cold read, not a hit on a cache an earlier query
+            // warmed. Drop the shared handle first to release the storage lock;
+            // each per-query handle is opened and dropped sequentially.
+            if let Err(e) = cold_db.close() {
+                eprintln!("  warning: {adapter} cold close() failed: {e}");
+            }
+            drop(cold_db);
+            for (name, query) in &query_set {
+                let db = open_db(schema, open());
+                let (cold, warm, hot, rows) = run_query(&db, query);
+                let _ = db.close();
+                queries_out.push(QueryReport {
+                    name: name.clone(),
+                    rows,
+                    cold_ms: Some(cold),
+                    warm_ms: warm,
+                    hot_ms: hot,
+                });
+            }
+        } else {
+            for (name, query) in &query_set {
+                let (cold, warm, hot, rows) = run_query(&cold_db, query);
+                queries_out.push(QueryReport {
+                    name: name.clone(),
+                    rows,
+                    cold_ms: Some(cold),
+                    warm_ms: warm,
+                    hot_ms: hot,
+                });
+            }
+            if let Err(e) = cold_db.close() {
+                eprintln!("  warning: {adapter} cold close() failed: {e}");
+            }
         }
     } else {
         // In-memory: no disk, no cold path — query the warm DB, then close.
         physical_bytes = None;
         cold_open_time = None;
         for (name, query) in &query_set {
-            let (warm, rows) = run_query(&db, query);
+            let (_, warm, hot, rows) = run_query(&db, query);
             queries_out.push(QueryReport {
                 name: name.clone(),
                 rows,
                 cold_ms: None,
-                warm_ms: warm.as_secs_f64() * 1e3,
+                warm_ms: warm,
+                hot_ms: hot,
             });
         }
         let t_close = Instant::now();
@@ -560,38 +607,69 @@ fn run_rocksdb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report {
     let cold_open_time = Some(t_open.elapsed());
 
     let key0 = plant_key(&plants[0]);
-    // Full scan applying a value predicate — shared by the filter queries.
-    let scan_pred = |pred: fn(&[u8]) -> bool| {
-        db.iterator(IteratorMode::Start)
-            .filter(|item| item.as_ref().map(|(_, v)| pred(v)).unwrap_or(false))
-            .count()
-    };
-    let point = || db.get(&key0).expect("get").is_some() as usize;
-    let prefix = || {
-        let mut ro = ReadOptions::default();
-        ro.set_iterate_upper_bound(b"AC".to_vec());
-        db.iterator_opt(IteratorMode::From(b"AB", Direction::Forward), ro)
-            .count()
-    };
-    let family = || scan_pred(pred_family_malvaceae);
-    let full = || db.iterator(IteratorMode::Start).count();
-    let contains_sci = || scan_pred(pred_contains_sci);
-    let common = || scan_pred(pred_common_present);
-    let family_set = || scan_pred(pred_family_in_set);
-    // Ordered keys already sort by symbol, so a forward take(N) is the top-N.
-    let top_n = || db.iterator(IteratorMode::Start).take(TOP_N).count();
+    // Each query as a fn over a `&DB`, so it can run against the shared handle
+    // or a freshly-reopened (cold-cache) one.
+    type RocksQuery = Box<dyn Fn(&DB) -> usize>;
+    let specs: Vec<(&str, RocksQuery)> = vec![
+        ("point_by_key", {
+            let k = key0.clone();
+            Box::new(move |db: &DB| db.get(&k).expect("get").is_some() as usize)
+        }),
+        (
+            "prefix_scan_AB",
+            Box::new(|db: &DB| {
+                let mut ro = ReadOptions::default();
+                ro.set_iterate_upper_bound(b"AC".to_vec());
+                db.iterator_opt(IteratorMode::From(b"AB", Direction::Forward), ro)
+                    .count()
+            }),
+        ),
+        (
+            "filter_family_Malvaceae",
+            Box::new(|db: &DB| scan_pred_rocks(db, pred_family_malvaceae)),
+        ),
+        (
+            "full_scan",
+            Box::new(|db: &DB| db.iterator(IteratorMode::Start).count()),
+        ),
+        (
+            "contains_scientific_Carex",
+            Box::new(|db: &DB| scan_pred_rocks(db, pred_contains_sci)),
+        ),
+        (
+            "common_name_present",
+            Box::new(|db: &DB| scan_pred_rocks(db, pred_common_present)),
+        ),
+        (
+            "family_in_set",
+            Box::new(|db: &DB| scan_pred_rocks(db, pred_family_in_set)),
+        ),
+        (
+            "top_100_by_symbol",
+            Box::new(|db: &DB| db.iterator(IteratorMode::Start).take(TOP_N).count()),
+        ),
+    ];
 
-    let queries = run_query_pair(&[
-        ("point_by_key", &point as &dyn Fn() -> usize),
-        ("prefix_scan_AB", &prefix),
-        ("filter_family_Malvaceae", &family),
-        ("full_scan", &full),
-        ("contains_scientific_Carex", &contains_sci),
-        ("common_name_present", &common),
-        ("family_in_set", &family_set),
-        ("top_100_by_symbol", &top_n),
-    ]);
-    drop(db);
+    let queries: Vec<QueryReport> = if cold_per_query() {
+        // Release the shared lock, then reopen a fresh cold DB per query.
+        drop(db);
+        specs
+            .iter()
+            .map(|(name, f)| {
+                let qdb = DB::open(&rocks_options(), dir).expect("reopen rocksdb");
+                let qr = measure_query(name, || f(&qdb));
+                drop(qdb);
+                qr
+            })
+            .collect()
+    } else {
+        let out = specs
+            .iter()
+            .map(|(name, f)| measure_query(name, || f(&db)))
+            .collect();
+        drop(db);
+        out
+    };
 
     Report {
         adapter: "raw:rocksdb".to_owned(),
@@ -607,34 +685,64 @@ fn run_rocksdb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report {
     }
 }
 
-/// Run each `(name, exec)` query cold (first call) then warm (second call).
-fn run_query_pair(specs: &[(&str, &dyn Fn() -> usize)]) -> Vec<QueryReport> {
-    specs
-        .iter()
-        .map(|(name, exec)| {
-            let (cold_ms, rows) = timed(exec);
-            let (warm_ms, _) = timed(exec);
-            QueryReport {
-                name: (*name).to_owned(),
-                rows,
-                cold_ms: Some(cold_ms),
-                warm_ms,
-            }
-        })
-        .collect()
+/// Time one query cold (first call), warm (second), then hot (best of
+/// `HOT_ITERS` further calls) into a [`QueryReport`].
+fn measure_query(name: &str, exec: impl Fn() -> usize) -> QueryReport {
+    let (cold_ms, rows) = timed(&exec);
+    let (warm_ms, _) = timed(&exec);
+    let mut hot_ms = warm_ms;
+    for _ in 0..HOT_ITERS {
+        hot_ms = hot_ms.min(timed(&exec).0);
+    }
+    QueryReport {
+        name: name.to_owned(),
+        rows,
+        cold_ms: Some(cold_ms),
+        warm_ms,
+        hot_ms,
+    }
+}
+
+/// Full scan applying a value predicate — shared by the RocksDB filter queries.
+fn scan_pred_rocks(db: &rocksdb::DB, pred: fn(&[u8]) -> bool) -> usize {
+    db.iterator(rocksdb::IteratorMode::Start)
+        .filter(|item| item.as_ref().map(|(_, v)| pred(v)).unwrap_or(false))
+        .count()
 }
 
 // --- SlateDB, via the `slatedb` crate directly (async). ---
 
-fn run_slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report {
+fn run_slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path, settle: Duration) -> Report {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
-    rt.block_on(slatedb_raw(plants, batch_size, dir))
+    rt.block_on(slatedb_raw(plants, batch_size, dir, settle))
 }
 
-async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report {
+/// SlateDB settings tuned to match the RocksDB raw path's strengths:
+/// (a) Zstd SST compression, and (b) an aggressive WAL garbage collector
+/// (`min_age`/`interval` = 1s) so the duplicated WAL is reclaimed once a short
+/// settle period has elapsed, instead of lingering for the default 60s.
+fn slatedb_settings() -> slatedb::config::Settings {
+    use slatedb::config::{
+        CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions, Settings,
+    };
+    Settings {
+        compression_codec: Some(CompressionCodec::Zstd),
+        garbage_collector_options: Some(GarbageCollectorOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                interval: Some(Duration::from_secs(1)),
+                min_age: Duration::from_secs(1),
+                dry_run: false,
+            }),
+            ..GarbageCollectorOptions::default()
+        }),
+        ..Default::default()
+    }
+}
+
+async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path, settle: Duration) -> Report {
     use slatedb::config::WriteOptions;
     use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
     use std::sync::Arc;
@@ -646,7 +754,11 @@ async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report 
     };
     let store: Arc<dyn ObjectStore> =
         Arc::new(LocalFileSystem::new_with_prefix(dir).expect("local fs store"));
+    // Run the garbage collector on the ambient runtime so the WAL GC actually
+    // fires during the settle window.
     let db = slatedb::Db::builder("bench", store.clone())
+        .with_settings(slatedb_settings())
+        .with_gc_runtime(tokio::runtime::Handle::current())
         .build()
         .await
         .expect("open slatedb");
@@ -663,23 +775,29 @@ async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report 
     }
     let write_time = t_write.elapsed();
 
-    let t_close = Instant::now();
+    let t_flush = Instant::now();
     db.flush().await.expect("flush slatedb");
-    db.close().await.expect("close slatedb");
-    let flush_close_time = t_close.elapsed();
+    let mut flush_close_time = t_flush.elapsed();
+    // (b) Keep the DB alive so the WAL GC can reclaim the duplicated WAL before
+    // we measure the on-disk footprint.
+    if !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+    }
     let physical_bytes = Some(dir_size(dir));
+    let t_close = Instant::now();
+    db.close().await.expect("close slatedb");
+    flush_close_time += t_close.elapsed();
 
     // Cold reopen.
     let t_open = Instant::now();
     let db = slatedb::Db::builder("bench", store.clone())
+        .with_settings(slatedb_settings())
         .build()
         .await
         .expect("reopen slatedb");
     let cold_open_time = Some(t_open.elapsed());
 
     let key0 = plant_key(&plants[0]);
-    let full_range = vec![0u8]..vec![0xffu8];
-    let prefix_range = b"AB".to_vec()..b"AC".to_vec();
 
     async fn count_scan(db: &slatedb::Db, range: std::ops::Range<Vec<u8>>) -> usize {
         let mut iter = db.scan(range).await.expect("scan");
@@ -712,55 +830,96 @@ async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report 
         n
     }
 
+    // Query kinds, so each can run against the shared cold DB or a fresh
+    // per-query one.
+    enum Sq {
+        Point,
+        Prefix,
+        FilterMalvaceae,
+        Full,
+        Contains,
+        Common,
+        FamilySet,
+        TopN,
+    }
+    async fn exec_sq(db: &slatedb::Db, q: &Sq, key0: &[u8]) -> usize {
+        let full = || vec![0u8]..vec![0xffu8];
+        match q {
+            Sq::Point => db.get(key0).await.expect("get").is_some() as usize,
+            Sq::Prefix => count_scan(db, b"AB".to_vec()..b"AC".to_vec()).await,
+            Sq::FilterMalvaceae => count_where(db, full(), pred_family_malvaceae).await,
+            Sq::Full => count_scan(db, full()).await,
+            Sq::Contains => count_where(db, full(), pred_contains_sci).await,
+            Sq::Common => count_where(db, full(), pred_common_present).await,
+            Sq::FamilySet => count_where(db, full(), pred_family_in_set).await,
+            Sq::TopN => count_take_n(db, full(), TOP_N).await,
+        }
+    }
+    async fn measure_sq(db: &slatedb::Db, q: &Sq, key0: &[u8]) -> (f64, f64, f64, usize) {
+        let t = Instant::now();
+        let rows = exec_sq(db, q, key0).await;
+        let cold = t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        let _ = exec_sq(db, q, key0).await;
+        let warm = t.elapsed().as_secs_f64() * 1e3;
+        let mut hot = warm;
+        for _ in 0..HOT_ITERS {
+            let t = Instant::now();
+            let _ = exec_sq(db, q, key0).await;
+            hot = hot.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (cold, warm, hot, rows)
+    }
+
+    let specs = [
+        ("point_by_key", Sq::Point),
+        ("prefix_scan_AB", Sq::Prefix),
+        ("filter_family_Malvaceae", Sq::FilterMalvaceae),
+        ("full_scan", Sq::Full),
+        ("contains_scientific_Carex", Sq::Contains),
+        ("common_name_present", Sq::Common),
+        ("family_in_set", Sq::FamilySet),
+        ("top_100_by_symbol", Sq::TopN),
+    ];
     let mut queries = Vec::new();
-    // Time an async query expression cold (first eval) then warm (second eval).
-    macro_rules! timed_query {
-        ($name:expr, $body:expr) => {{
-            let t = Instant::now();
-            let rows = $body;
-            let cold = t.elapsed().as_secs_f64() * 1e3;
-            let t = Instant::now();
-            let _ = $body;
-            let warm = t.elapsed().as_secs_f64() * 1e3;
+    if cold_per_query() {
+        if let Err(e) = db.close().await {
+            eprintln!("  warning: raw:slatedb cold close() failed: {e}");
+        }
+        drop(db);
+        for (name, q) in &specs {
+            let qdb = slatedb::Db::builder("bench", store.clone())
+                .with_settings(slatedb_settings())
+                .build()
+                .await
+                .expect("reopen slatedb");
+            let (cold, warm, hot, rows) = measure_sq(&qdb, q, &key0).await;
+            if let Err(e) = qdb.close().await {
+                eprintln!("  warning: raw:slatedb close() failed: {e}");
+            }
             queries.push(QueryReport {
-                name: $name.to_owned(),
+                name: (*name).to_owned(),
                 rows,
                 cold_ms: Some(cold),
                 warm_ms: warm,
+                hot_ms: hot,
             });
-        }};
+        }
+    } else {
+        for (name, q) in &specs {
+            let (cold, warm, hot, rows) = measure_sq(&db, q, &key0).await;
+            queries.push(QueryReport {
+                name: (*name).to_owned(),
+                rows,
+                cold_ms: Some(cold),
+                warm_ms: warm,
+                hot_ms: hot,
+            });
+        }
+        if let Err(e) = db.close().await {
+            eprintln!("  warning: raw:slatedb cold close() failed: {e}");
+        }
     }
-    timed_query!(
-        "point_by_key",
-        db.get(&key0).await.expect("get").is_some() as usize
-    );
-    timed_query!(
-        "prefix_scan_AB",
-        count_scan(&db, prefix_range.clone()).await
-    );
-    timed_query!(
-        "filter_family_Malvaceae",
-        count_where(&db, full_range.clone(), pred_family_malvaceae).await
-    );
-    timed_query!("full_scan", count_scan(&db, full_range.clone()).await);
-    timed_query!(
-        "contains_scientific_Carex",
-        count_where(&db, full_range.clone(), pred_contains_sci).await
-    );
-    timed_query!(
-        "common_name_present",
-        count_where(&db, full_range.clone(), pred_common_present).await
-    );
-    timed_query!(
-        "family_in_set",
-        count_where(&db, full_range.clone(), pred_family_in_set).await
-    );
-    timed_query!(
-        "top_100_by_symbol",
-        count_take_n(&db, full_range.clone(), TOP_N).await
-    );
-
-    db.close().await.expect("close cold slatedb");
 
     Report {
         adapter: "raw:slatedb".to_owned(),
@@ -776,11 +935,11 @@ async fn slatedb_raw(plants: &[Plant], batch_size: usize, dir: &Path) -> Report 
     }
 }
 
-fn dispatch_raw(engine: &str, plants: &[Plant], batch_size: usize) -> Report {
+fn dispatch_raw(engine: &str, plants: &[Plant], batch_size: usize, settle: Duration) -> Report {
     let dir = tempfile::tempdir().expect("tempdir");
     match engine {
         "rocksdb" => run_rocksdb_raw(plants, batch_size, dir.path()),
-        "slatedb" => run_slatedb_raw(plants, batch_size, dir.path()),
+        "slatedb" => run_slatedb_raw(plants, batch_size, dir.path(), settle),
         other => panic!("unknown raw engine '{other}' (expected rocksdb|slatedb)"),
     }
 }
@@ -845,12 +1004,12 @@ fn print_report(report: &Report) {
     for q in &report.queries {
         match q.cold_ms {
             Some(cold) => println!(
-                "    {:<28} {:>7} rows   cold {:>8.3} ms   warm {:>8.3} ms",
-                q.name, q.rows, cold, q.warm_ms
+                "    {:<28} {:>7} rows   cold {:>8.3} ms   warm {:>8.3} ms   hot {:>8.3} ms",
+                q.name, q.rows, cold, q.warm_ms, q.hot_ms
             ),
             None => println!(
-                "    {:<28} {:>7} rows   warm {:>8.3} ms",
-                q.name, q.rows, q.warm_ms
+                "    {:<28} {:>7} rows   warm {:>8.3} ms   hot {:>8.3} ms",
+                q.name, q.rows, q.warm_ms, q.hot_ms
             ),
         }
     }
@@ -865,8 +1024,8 @@ fn print_json(report: &Report) {
             None => "null".to_owned(),
         };
         q_json.push(format!(
-            "{{\"name\":\"{}\",\"rows\":{},\"cold_ms\":{},\"warm_ms\":{:.3}}}",
-            q.name, q.rows, cold, q.warm_ms
+            "{{\"name\":\"{}\",\"rows\":{},\"cold_ms\":{},\"warm_ms\":{:.3},\"hot_ms\":{:.3}}}",
+            q.name, q.rows, cold, q.warm_ms, q.hot_ms
         ));
     }
     let (phys, amp_raw, amp_enc) = match report.physical_bytes {
@@ -916,6 +1075,8 @@ struct Args {
     batch_size: usize,
     limit: Option<usize>,
     json: bool,
+    slatedb_settle_ms: u64,
+    cold_per_query: bool,
 }
 
 fn parse_args() -> Args {
@@ -927,6 +1088,10 @@ fn parse_args() -> Args {
         batch_size: 1000,
         limit: None,
         json: false,
+        // (b) A WAL-GC settle is available, but once Zstd compression (a) is on
+        // the WAL no longer dominates the footprint, so it is off by default.
+        slatedb_settle_ms: 0,
+        cold_per_query: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -956,6 +1121,14 @@ fn parse_args() -> Args {
                 );
             }
             "--json" => args.json = true,
+            "--cold-per-query" => args.cold_per_query = true,
+            "--slatedb-settle-ms" => {
+                args.slatedb_settle_ms = it
+                    .next()
+                    .expect("--slatedb-settle-ms needs a number")
+                    .parse()
+                    .expect("--slatedb-settle-ms must be a number");
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "jazz-ingest-bench — storage ingestion/cold-load benchmark (USDA plants)\n\
@@ -966,10 +1139,12 @@ fn parse_args() -> Args {
                      (with neither flag, defaults to --raw rocksdb,slatedb)\n\
                      \n\
                      Options:\n\
-                     \x20 --input <path>    CSV dataset (default bundled USDA plantlst.txt)\n\
-                     \x20 --batch-size <n>  rows per transaction/write-batch (default 1000)\n\
-                     \x20 --limit <n>       ingest only the first n rows\n\
-                     \x20 --json            also emit one machine-readable JSON line per run"
+                     \x20 --input <path>          CSV dataset (default bundled USDA plantlst.txt)\n\
+                     \x20 --batch-size <n>        rows per transaction/write-batch (default 1000)\n\
+                     \x20 --limit <n>             ingest only the first n rows\n\
+                     \x20 --slatedb-settle-ms <n> raw:slatedb wait for WAL GC before sizing (default 0)\n\
+                     \x20 --cold-per-query        reopen the DB before each query for a true cold-cache read\n\
+                     \x20 --json                  also emit one machine-readable JSON line per run"
                 );
                 std::process::exit(0);
             }
@@ -984,6 +1159,7 @@ fn main() {
     if args.storage.is_empty() && args.raw.is_empty() {
         args.raw = vec!["rocksdb".to_owned(), "slatedb".to_owned()];
     }
+    COLD_PER_QUERY.store(args.cold_per_query, std::sync::atomic::Ordering::Relaxed);
     let plants = load_dataset(&args.input, args.limit);
     assert!(
         !plants.is_empty(),
@@ -1019,10 +1195,11 @@ fn main() {
         }
     }
 
+    let settle = Duration::from_millis(args.slatedb_settle_ms);
     for engine in &args.raw {
         let label = format!("raw:{engine}");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dispatch_raw(engine, &plants, args.batch_size)
+            dispatch_raw(engine, &plants, args.batch_size, settle)
         }));
         match result {
             Ok(report) => emit(&report),

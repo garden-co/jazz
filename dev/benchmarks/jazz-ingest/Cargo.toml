@@ -22,5 +22,5 @@ rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = fal
   "lz4",
   "zstd",
 ] }
-slatedb = { version = "0.14.1", default-features = false, features = ["moka"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+slatedb = { version = "0.14.1", default-features = false, features = ["moka", "zstd"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }

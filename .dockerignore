@@ -1,0 +1,11 @@
+target
+**/target
+.git
+node_modules
+**/node_modules
+packages
+examples
+docs
+dev/benchmarks/results
+dev/benchmarks/SMOKE_LEDGER.md
+*.log

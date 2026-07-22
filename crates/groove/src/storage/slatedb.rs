@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ::slatedb::config::{PutOptions, WriteOptions};
+use ::slatedb::config::{CompressionCodec, PutOptions, Settings, WriteOptions};
 use ::slatedb::object_store::ObjectStore;
 use ::slatedb::object_store::local::LocalFileSystem;
 
@@ -52,6 +52,12 @@ impl SlateDbStorage {
                 .map_err(|err| Error::SlateDbBackend(format!("open local object store: {err}")))?,
         );
         let db = ::slatedb::Db::builder("groove", object_store)
+            .with_settings(Settings {
+                // Zstd SST compression: the encoded keyspace is highly
+                // compressible and this roughly halves the on-disk footprint.
+                compression_codec: Some(CompressionCodec::Zstd),
+                ..Settings::default()
+            })
             .build()
             .await?;
         Ok(Self {

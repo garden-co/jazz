@@ -61,10 +61,18 @@ list and can be combined in one run:
 | `slatedb`                   | `SlateDbStorage` (LSM, prototype) | yes       |
 | `memory`                    | `MemoryStorage` (baseline)        | no (warm) |
 
-| `--raw` (native crate API) | engine                                                | cold-load |
-| -------------------------- | ----------------------------------------------------- | --------- |
-| `rocksdb`                  | `rocksdb` crate: WriteBatch + LZ4/Zstd, block cache   | yes       |
-| `slatedb`                  | `slatedb` crate: async WriteBatch over `object_store` | yes       |
+| `--raw` (native crate API) | engine                                                            | cold-load |
+| -------------------------- | ----------------------------------------------------------------- | --------- |
+| `rocksdb`                  | `rocksdb` crate: WriteBatch + LZ4/Zstd, block cache               | yes       |
+| `slatedb`                  | `slatedb` crate: async WriteBatch, Zstd SSTs, over `object_store` | yes       |
+
+Both native engines are configured to their strengths so the comparison is
+engine-vs-engine, not config-vs-config: RocksDB uses LZ4 + bottommost Zstd; the
+`slatedb` path enables Zstd SST compression (`--raw slatedb`). SlateDB also
+retains a WAL that its background GC reclaims only after `min_age`; the optional
+`--slatedb-settle-ms <n>` waits before sizing so that GC can run. With Zstd on
+the compacted SST dominates and the WAL is no longer significant, so it defaults
+to `0` (off).
 
 Each run is labelled `jazz:<adapter>` or `raw:<engine>`, and failures are
 isolated so one backend can't abort the comparison.
