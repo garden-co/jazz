@@ -1045,6 +1045,7 @@ where
         );
         let (sender, receiver) = unbounded();
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
+        let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
@@ -1057,6 +1058,7 @@ where
             remote_read_tier,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
+            snapshot_index,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
@@ -3709,8 +3711,11 @@ where
                                 (fallback, false)
                             };
                         if let Some(update) = maintained_update {
+                            let mut snapshot_index =
+                                RelationSnapshotIndex::from_snapshot(&snapshot);
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
+                                &mut snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3751,8 +3756,10 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
+                            let state_ref = &mut *state_ref;
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
+                                &mut state_ref.snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3903,6 +3910,7 @@ where
                 subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -6703,9 +6711,36 @@ struct SubscriptionState {
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
+    snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
     sender: UnboundedSender<SubscriptionEvent>,
+}
+
+#[derive(Clone, Default)]
+struct RelationSnapshotIndex {
+    roots: BTreeMap<(String, RowUuid), usize>,
+    related: BTreeMap<(String, RowUuid), usize>,
+    edges: BTreeSet<RelationEdge>,
+}
+
+impl RelationSnapshotIndex {
+    fn from_snapshot(snapshot: &RelationSnapshot) -> Self {
+        let mut index = Self::default();
+        for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
+            index
+                .roots
+                .insert((row.table().to_owned(), row.row_uuid()), position);
+        }
+        for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
+            index.related.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count + offset,
+            );
+        }
+        index.edges = snapshot.edges.iter().cloned().collect();
+        index
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6933,14 +6968,11 @@ fn subscription_delta_event_with_reset(
 
 fn apply_maintained_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
-    fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
-        row.table() == table && row.row_uuid() == row_uuid
-    }
-
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
         removed: update_removed,
@@ -6958,6 +6990,7 @@ fn apply_maintained_update_to_snapshot(
             snapshot.root_count = update_added.len();
             snapshot.rows.reserve(update_added.len());
             snapshot.rows.extend(update_added.iter().cloned());
+            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
             return SubscriptionEvent::Delta {
                 reset: false,
                 added: update_added,
@@ -6998,6 +7031,7 @@ fn apply_maintained_update_to_snapshot(
             .reserve(event_added.len() + added_related.len());
         snapshot.rows.extend(event_added.iter().cloned());
         snapshot.rows.extend(added_related.iter().cloned());
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
 
         return SubscriptionEvent::Delta {
             reset: false,
@@ -7021,20 +7055,21 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
                 updated.push(row.clone());
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
+            for position in snapshot_index.related.values_mut() {
+                *position += 1;
+            }
+            snapshot_index.roots.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count,
+            );
             snapshot.root_count += 1;
             added.push(row.clone());
         }
@@ -7042,12 +7077,17 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
+        let row_key = (
+            snapshot.rows[index].table().to_owned(),
+            snapshot.rows[index].row_uuid(),
+        );
         if update_removed
             .iter()
-            .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
+            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
+            snapshot_index.roots.remove(&row_key);
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
@@ -7056,62 +7096,56 @@ fn apply_maintained_update_to_snapshot(
             index += 1;
         }
     }
+    if !update_removed.is_empty() {
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    }
 
-    snapshot
-        .edges
-        .retain(|edge| !update_removed_edges.iter().any(|removed| removed == edge));
+    if !update_removed_edges.is_empty() {
+        snapshot.edges.retain(|edge| {
+            let remove = update_removed_edges.iter().any(|removed| removed == edge);
+            if remove {
+                snapshot_index.edges.remove(edge);
+            }
+            !remove
+        });
+    }
 
     for (edge, row) in &update_added_edges {
-        if !snapshot.edges.iter().any(|current| current == edge) {
+        if snapshot_index.edges.insert(edge.clone()) {
             snapshot.edges.push(edge.clone());
         }
         let Some(row) = row else {
             continue;
         };
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .any(|root| row_matches(root, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if snapshot_index.roots.contains_key(&key) {
             continue;
         }
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .skip(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
-            let position = snapshot.root_count + position;
+        if let Some(position) = snapshot_index.related.get(&key).copied() {
             snapshot.rows[position] = row.clone();
         } else {
+            snapshot_index.related.insert(key, snapshot.rows.len());
             snapshot.rows.push(row.clone());
         }
         added_related.push(row.clone());
     }
 
     for removed_edge in &update_removed_edges {
-        let still_referenced = snapshot.edges.iter().any(|edge| {
+        let still_referenced = snapshot_index.edges.iter().any(|edge| {
             edge.target_table == removed_edge.target_table
                 && edge.target_row == removed_edge.target_row
         });
-        let is_root = snapshot.rows.iter().take(snapshot.root_count).any(|row| {
-            row_matches(
-                row,
-                removed_edge.target_table.as_str(),
-                removed_edge.target_row,
-            )
-        });
+        let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
+        let is_root = snapshot_index.roots.contains_key(&target_key);
         if !still_referenced && !is_root {
-            snapshot.rows.retain(|row| {
-                !row_matches(
-                    row,
-                    removed_edge.target_table.as_str(),
-                    removed_edge.target_row,
-                )
-            });
+            if let Some(position) = snapshot_index.related.remove(&target_key) {
+                snapshot.rows.remove(position);
+                for indexed_position in snapshot_index.related.values_mut() {
+                    if *indexed_position > position {
+                        *indexed_position -= 1;
+                    }
+                }
+            }
         }
     }
 
