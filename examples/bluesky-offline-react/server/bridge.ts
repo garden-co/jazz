@@ -14,7 +14,9 @@ import { projectionDb } from "./jazz.js";
 import { createProjection } from "./projection.js";
 
 type TimelineResult = { cursor?: string; hasMore: boolean; count: number };
-type TimelineJob = { ready: Promise<TimelineResult> };
+type TimelineJob = { ready: Promise<TimelineResult>; freshUntil: number };
+
+const timelineRefreshFreshnessMs = 10_000;
 
 const projection = createProjection(projectionDb);
 const timelineJobs = new Map<string, TimelineJob>();
@@ -41,14 +43,19 @@ function startTimelineJob(ownerDid: string, session: SessionFetcher, cursor?: st
       count: response.feed?.length ?? 0,
     };
   });
-  const job = { ready };
+  const job = { ready, freshUntil: Number.POSITIVE_INFINITY };
   const jobKey = timelineJobKey(ownerDid, cursor);
 
   timelineJobs.set(jobKey, job);
-  const releaseJob = () => {
+  const completeJob = () => {
+    if (timelineJobs.get(jobKey) !== job) return;
+    if (cursor) timelineJobs.delete(jobKey);
+    else job.freshUntil = Date.now() + timelineRefreshFreshnessMs;
+  };
+  const discardJob = () => {
     if (timelineJobs.get(jobKey) === job) timelineJobs.delete(jobKey);
   };
-  ready.then(releaseJob, releaseJob);
+  ready.then(completeJob, discardJob);
   return job;
 }
 
@@ -58,7 +65,11 @@ export async function projectTimelinePage(
   cursor?: string,
 ) {
   const current = timelineJobs.get(timelineJobKey(ownerDid, cursor));
-  return (current ?? startTimelineJob(ownerDid, session, cursor)).ready;
+  const job =
+    current && current.freshUntil > Date.now()
+      ? current
+      : startTimelineJob(ownerDid, session, cursor);
+  return job.ready;
 }
 
 export async function projectThread(ownerDid: string, session: SessionFetcher, uri: string) {
