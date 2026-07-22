@@ -27,7 +27,7 @@ use crate::metadata::DeleteKind;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
 };
-use crate::row_format::{EncodingError, encode_row, encode_value_with_type};
+use crate::row_format::{EncodingError, decode_row, encode_row, encode_value_with_type};
 use crate::sync_manager::DurabilityTier;
 
 use super::codecs::{flat_user_values, malformed, tier_satisfies};
@@ -119,6 +119,68 @@ pub(super) fn current_winner_batch_id(
     column_winner
         .map(StoredRowBatch::batch_id)
         .unwrap_or_else(|| fallback.batch_id())
+}
+
+pub(crate) fn has_counter_merge_strategy(descriptor: &RowDescriptor) -> bool {
+    descriptor
+        .columns
+        .iter()
+        .any(|column| matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)))
+}
+
+pub(crate) fn rebase_counter_data(
+    descriptor: &RowDescriptor,
+    source_base_data: &[u8],
+    source_result_data: &[u8],
+    target_base_data: &[u8],
+) -> Result<Option<Vec<u8>>, EncodingError> {
+    if !has_counter_merge_strategy(descriptor) {
+        return Ok(None);
+    }
+
+    let source_base_values = decode_row(descriptor, source_base_data)?;
+    let source_result_values = decode_row(descriptor, source_result_data)?;
+    let target_base_values = decode_row(descriptor, target_base_data)?;
+    let mut rebased_values = source_result_values.clone();
+
+    let counter_value = |column: &ColumnDescriptor, value: &Value| match value {
+        Value::Integer(value) => Ok(*value),
+        Value::Null => Ok(0),
+        other => Err(malformed(format!(
+            "counter rebase expected INTEGER for column '{}', got {:?}",
+            column.name_str(),
+            other
+        ))),
+    };
+
+    for (index, column) in descriptor.columns.iter().enumerate() {
+        if !matches!(column.merge_strategy, Some(ColumnMergeStrategy::Counter)) {
+            continue;
+        }
+
+        let source_base = counter_value(column, &source_base_values[index])?;
+        let source_result = counter_value(column, &source_result_values[index])?;
+        let target_base = counter_value(column, &target_base_values[index])?;
+        let delta = source_result.checked_sub(source_base).ok_or_else(|| {
+            malformed(format!(
+                "counter rebase delta overflow for column '{}'",
+                column.name_str()
+            ))
+        })?;
+        let rebased = target_base.checked_add(delta).ok_or_else(|| {
+            malformed(format!(
+                "counter rebase overflow for column '{}'",
+                column.name_str()
+            ))
+        })?;
+        rebased_values[index] = Value::Integer(rebased);
+    }
+
+    if rebased_values == source_result_values {
+        return Ok(None);
+    }
+
+    encode_row(descriptor, &rebased_values).map(Some)
 }
 
 #[derive(Clone, Copy)]

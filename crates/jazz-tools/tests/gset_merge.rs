@@ -335,6 +335,156 @@ async fn concurrent_writes_never_remove_a_shared_element() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+/// Keeps a scoped GSet replay's merged elements when bob writes another column offline.
+///
+/// ```text
+/// bob ── offline +bob ──► server ◄── +alice ── alice
+/// bob ◄──────────── scoped merged snapshot ─────────── server
+/// bob ── offline name update ──► merged tags remain visible
+/// ```
+async fn scoped_replay_preserves_merged_elements_for_a_local_write() {
+    let _suite_guard = lock_gset_suite().await;
+    let schema = gset_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-gset-scoped-replay")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+    let (mut bob_context, bob) = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-gset-scoped-replay")
+        .with_persistent_storage()
+        .connect_with_context()
+        .await;
+
+    let (doc_id, _, _) = alice
+        .insert("docs", doc_values("shared", &["seed"]))
+        .expect("alice creates the document");
+    let query = QueryBuilder::new("docs").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees the shared document base",
+        |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(()),
+    )
+    .await;
+
+    bob.shutdown()
+        .await
+        .expect("bob shuts down before the offline write");
+    bob_context.server_url = String::new();
+    let bob_offline = JazzClient::connect(bob_context.clone())
+        .await
+        .expect("bob opens his persistent storage offline");
+    bob_offline
+        .update(
+            doc_id,
+            vec![("tags".to_string(), tags_value(&["seed", "bob"]))],
+        )
+        .expect("bob adds his tag offline");
+    bob_offline
+        .shutdown()
+        .await
+        .expect("bob shuts down after the offline write");
+    bob_context.server_url = server.base_url();
+
+    let alice_batch = alice
+        .update(
+            doc_id,
+            vec![("tags".to_string(), tags_value(&["seed", "alice"]))],
+        )
+        .expect("alice adds her tag");
+    alice
+        .wait_for_batch(alice_batch, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's write settles at the server");
+
+    let expected_tags = vec!["alice".to_string(), "bob".to_string(), "seed".to_string()];
+    let bob_restarted = JazzClient::connect(bob_context.clone())
+        .await
+        .expect("bob reconnects with persistent storage");
+    wait_for_query(
+        &bob_restarted,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "restarted bob sees the merged tags",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == doc_id
+                && tags_of(&rows[0]) == Some(expected_tags.clone()))
+            .then_some(())
+        },
+    )
+    .await;
+
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("charlie-gset-scoped-replay")
+        .ready_on("docs", READY_TIMEOUT)
+        .connect()
+        .await;
+    wait_for_query(
+        &observer,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "fresh observer sees the merged tags",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == doc_id
+                && tags_of(&rows[0]) == Some(expected_tags.clone()))
+            .then_some(())
+        },
+    )
+    .await;
+
+    bob_restarted
+        .shutdown()
+        .await
+        .expect("bob shuts down after receiving the scoped merge");
+
+    bob_context.server_url = String::new();
+    let bob_offline_after_merge = JazzClient::connect(bob_context)
+        .await
+        .expect("bob reopens the merged document offline");
+    bob_offline_after_merge
+        .update(
+            doc_id,
+            vec![(
+                "name".to_string(),
+                Value::Text("edited while offline".to_string()),
+            )],
+        )
+        .expect("bob updates the document name offline");
+    let local_rows = bob_offline_after_merge
+        .query(query, None)
+        .await
+        .expect("query bob's offline document");
+    let local_row = local_rows
+        .iter()
+        .find(|row| row.0 == doc_id)
+        .expect("offline document remains visible");
+    assert_eq!(tags_of(local_row), Some(expected_tags));
+    bob_offline_after_merge
+        .shutdown()
+        .await
+        .expect("shutdown bob after the offline follow-up");
+
+    observer.shutdown().await.expect("shutdown observer");
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
 /// `docs` table with a `scores` float-array column merging as a grow-only set.
 fn gset_float_schema() -> Schema {
     let scores = ColumnDescriptor::new(

@@ -9,7 +9,10 @@ use crate::batch_fate::BatchFate;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{BatchId, QueryRowBatch, RowState, RowVisibilityChange, StoredRowBatch};
+use crate::row_histories::{
+    BatchId, QueryRowBatch, RowState, RowVisibilityChange, StoredRowBatch,
+    has_counter_merge_strategy, rebase_counter_data,
+};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
     translate_table_name_to_schema,
@@ -2513,6 +2516,67 @@ impl QueryManager {
         Some((current_table_name.to_string(), row))
     }
 
+    fn current_counter_descriptor_for_branch<'a>(
+        table: &str,
+        branch: &str,
+        schema_context: &'a SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<&'a RowDescriptor> {
+        if branch_schema_map.get(branch).copied() != Some(schema_context.current_hash) {
+            return None;
+        }
+        let descriptor = schema_context
+            .current_schema
+            .get(&TableName::new(table))
+            .map(|table_schema| &table_schema.columns)?;
+        has_counter_merge_strategy(descriptor).then_some(descriptor)
+    }
+
+    fn rebase_pending_counter_projection(
+        storage: &dyn Storage,
+        table: &str,
+        row_id: ObjectId,
+        mut pending_row: QueryRowBatch,
+        visible_row: &QueryRowBatch,
+        descriptor: &RowDescriptor,
+    ) -> QueryRowBatch {
+        let branch = pending_row.branch.as_str();
+        if visible_row.branch.as_str() != branch {
+            return pending_row;
+        }
+        let Ok(Some(stored_pending_row)) =
+            storage.load_history_row_batch(table, branch, row_id, pending_row.batch_id)
+        else {
+            return pending_row;
+        };
+        let [parent] = stored_pending_row.parents.as_slice() else {
+            return pending_row;
+        };
+        let Ok(Some(raw_parent)) = storage.load_history_row_batch(table, branch, row_id, *parent)
+        else {
+            return pending_row;
+        };
+
+        match rebase_counter_data(
+            descriptor,
+            &raw_parent.data,
+            &pending_row.data,
+            &visible_row.data,
+        ) {
+            Ok(Some(data)) => pending_row.data = data.into(),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(
+                    row_id = %row_id,
+                    batch_id = %pending_row.batch_id,
+                    error = %error,
+                    "failed to rebase pending counter projection"
+                );
+            }
+        }
+        pending_row
+    }
+
     fn load_best_visible_row_batch_from_storage_with_table_hint(
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -2709,17 +2773,49 @@ impl QueryManager {
         };
         let pending_staged_row = || {
             let pending_version = local_pending_version?;
-            let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
+            let (table, row) = Self::load_local_pending_query_row_with_hint_or_locator(
                 storage,
                 pending_version,
                 table_hint,
                 schema_context,
             )?;
-            let (_, row) = &resolved;
             (row.batch_id == pending_version.batch_id
                 && row.branch.as_str() == pending_version.branch_name.as_str()
                 && matches!(row.state, RowState::StagingPending))
-            .then_some(resolved)
+            .then(|| {
+                let descriptor = Self::current_counter_descriptor_for_branch(
+                    &table,
+                    row.branch.as_str(),
+                    schema_context,
+                    branch_schema_map,
+                );
+                let visible_row = descriptor.and_then(|descriptor| {
+                    Self::load_best_visible_row_batch_with_hint_or_locator(
+                        storage,
+                        row_id,
+                        table_hint,
+                        branches,
+                        durability_tier,
+                        schema_context,
+                        branch_schema_map,
+                    )
+                    .filter(|(visible_table, _)| visible_table == &table)
+                    .map(|(_, visible_row)| (descriptor, visible_row))
+                });
+                let row = if let Some((descriptor, visible_row)) = visible_row {
+                    Self::rebase_pending_counter_projection(
+                        storage,
+                        &table,
+                        row_id,
+                        row,
+                        &visible_row,
+                        descriptor,
+                    )
+                } else {
+                    row
+                };
+                (table, row)
+            })
         };
         let best_visible_row = || {
             Self::load_best_visible_row_batch_with_hint_or_locator(

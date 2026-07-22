@@ -4,9 +4,11 @@ use std::ops::Bound;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
-    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor, Value,
+    ColumnMergeStrategy, ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+    Value,
 };
 use crate::row_format::decode_row;
+use crate::row_histories::{RowState, rebase_counter_data};
 
 use super::{SourceContext, SourceNode};
 
@@ -97,6 +99,45 @@ impl IndexScanNode {
         values.get(column_index).cloned()
     }
 
+    fn rebased_staged_counter_data(
+        &self,
+        ctx: &SourceContext,
+        row_id: ObjectId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Option<Vec<u8>> {
+        if !matches!(
+            self.row_descriptor
+                .column(self.column.as_str())
+                .and_then(|column| column.merge_strategy),
+            Some(ColumnMergeStrategy::Counter)
+        ) {
+            return None;
+        }
+        let pending_row = ctx
+            .storage
+            .load_history_row_batch(self.table.as_str(), &self.branch, row_id, batch_id)
+            .ok()??;
+        let [parent] = pending_row.parents.as_slice() else {
+            return None;
+        };
+        let raw_parent = ctx
+            .storage
+            .load_history_row_batch(self.table.as_str(), &self.branch, row_id, *parent)
+            .ok()??;
+        let visible_row = ctx
+            .storage
+            .load_visible_query_row(self.table.as_str(), &self.branch, row_id)
+            .ok()??;
+
+        rebase_counter_data(
+            &self.row_descriptor,
+            &raw_parent.data,
+            &pending_row.data,
+            &visible_row.data,
+        )
+        .ok()?
+    }
+
     fn apply_local_overlay_rows(&self, ctx: &SourceContext, new_ids: &mut AHashSet<ObjectId>) {
         let Some(local_overlay_rows) = ctx.local_overlay_rows else {
             return;
@@ -118,10 +159,18 @@ impl IndexScanNode {
                 new_ids.insert(row_id);
             } else if row.is_soft_deleted() || row.is_hard_deleted() {
                 new_ids.remove(&row_id);
-            } else if self.overlay_value_matches_condition(row_id, &row.data) {
-                new_ids.insert(row_id);
             } else {
-                new_ids.remove(&row_id);
+                let rebased_data = matches!(row.state, RowState::StagingPending)
+                    .then(|| self.rebased_staged_counter_data(ctx, row_id, row.batch_id))
+                    .flatten();
+                if self.overlay_value_matches_condition(
+                    row_id,
+                    rebased_data.as_deref().unwrap_or(&row.data),
+                ) {
+                    new_ids.insert(row_id);
+                } else {
+                    new_ids.remove(&row_id);
+                }
             }
         }
     }
