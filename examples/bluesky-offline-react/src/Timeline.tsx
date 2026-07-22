@@ -11,6 +11,7 @@ import {
   windowTimelineRows,
   type DisplayPost,
   type TimelineEntryView,
+  type TimelineRelations,
 } from "./model/timeline-data.js";
 import { stableObjectId } from "./model/object-id.js";
 import { useConnectivity } from "./hooks/use-connectivity.js";
@@ -29,26 +30,37 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const [text, setText] = useState("");
   const [loadingThreadUris, setLoadingThreadUris] = useState(new Set<string>());
   const [localTimelineLimit, setLocalTimelineLimit] = useState(initialTimelineLimit);
-  const [includeThreadDetails, setIncludeThreadDetails] = useState(false);
   const { browserOnline, status: connectivity, reportApiReachable } = useConnectivity();
   const online = connectivity === "online";
   // Keep the feed mounted while an included Jazz query briefly recomputes.
   const lastTimelineRows = useRef<TimelineEntryView[]>([]);
+  const seenEntries = useRef(new Set<string>());
+  const timelineHydrated = useRef(false);
 
-  // This is the client-side seam: one reactive Jazz query supplies the entire view.
-  const timelineRows = useAll(timelineQuery(did, includeThreadDetails)
-    .limit(timelineQueryLimit(localTimelineLimit)));
-  const pending = useAll(app.pendingOperations.where({ ownerDid: { eq: did } }));
-  const ownProfileRows = useAll(app.profiles
-    .where({ did: { eq: did } })
-    .orderBy("indexedAt", "desc")
-    .limit(1));
-  const ownProfile = ownProfileRows?.[0];
+  // This is the client-side seam: small, flat Jazz subscriptions are joined
+  // into the timeline view model without a deeply nested reactive query.
+  const { data: timelineRows } = useAll(
+    timelineQuery(did).limit(timelineQueryLimit(localTimelineLimit)),
+  );
+  const { data: posts } = useAll(app.posts.where({}));
+  const { data: profiles } = useAll(app.profiles.where({}));
+  const { data: images } = useAll(app.postImages.where({}));
+  const { data: likes } = useAll(app.likes.where({ actorDid: { eq: did } }));
+  const { data: reposts } = useAll(app.reposts.where({ actorDid: { eq: did } }));
+  const { data: pending } = useAll(app.pendingOperations.where({ ownerDid: { eq: did } }));
+  const ownProfile = profiles?.find((profile) => profile.did === did);
   const ownHandle = ownProfile?.handle ?? ownProfile?.displayName ?? did;
   const availableTimelineRows = timelineRows?.length ? timelineRows : lastTimelineRows.current;
   const localTimelineWindow = windowTimelineRows(availableTimelineRows, localTimelineLimit);
   const visibleTimelineRows = localTimelineWindow.rows;
-  const timelineItems = buildTimeline(visibleTimelineRows);
+  const relations: TimelineRelations = {
+    posts: posts ?? [],
+    profiles: profiles ?? [],
+    images: images ?? [],
+    likes: likes ?? [],
+    reposts: reposts ?? [],
+  };
+  const timelineItems = buildTimeline(visibleTimelineRows, relations);
   const localQueryRefreshing = timelineRows === undefined && lastTimelineRows.current.length > 0;
   const {
     hasMore: hasMoreRemoteRows,
@@ -70,23 +82,20 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
 
   useEffect(() => {
     setLocalTimelineLimit(initialTimelineLimit);
-    setIncludeThreadDetails(false);
+    lastTimelineRows.current = [];
+    seenEntries.current.clear();
+    timelineHydrated.current = false;
   }, [did]);
-
-  useEffect(() => {
-    if (!includeThreadDetails && timelineRows?.length) {
-      requestAnimationFrame(() => setIncludeThreadDetails(true));
-    }
-  }, [includeThreadDetails, timelineRows?.length]);
 
   const { flushOperations, publishPost, toggleReaction } = useTimelineActions(
     did,
     browserOnline,
     reportApiReachable,
   );
-  const visiblePendingOperations = (pending ?? []).filter((operation) =>
-    operation.state === "failed"
-      || (operation.state === "queued" && (connectivity === "offline" || Boolean(operation.error))),
+  const visiblePendingOperations = (pending ?? []).filter(
+    (operation) =>
+      operation.state === "failed" ||
+      (operation.state === "queued" && (connectivity === "offline" || Boolean(operation.error))),
   );
   const [pendingObjectIds, setPendingObjectIds] = useState({
     posts: new Set<string>(),
@@ -98,30 +107,46 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     const postUris = visiblePendingOperations
       .filter((operation) => operation.kind === "post")
       .map((operation) => `at://${operation.ownerDid}/app.bsky.feed.post/${operation.rkey}`);
-    const reactionUris = (kind: "like" | "repost") => visiblePendingOperations.flatMap((operation) => {
-      if (operation.kind !== kind) return [];
-      try {
-        const decoded = decodeOperation(operation);
-        return decoded.kind === "post" ? [] : [decoded.payload.subjectUri];
-      } catch {
-        return [];
-      }
-    });
+    const reactionUris = (kind: "like" | "repost") =>
+      visiblePendingOperations.flatMap((operation) => {
+        if (operation.kind !== kind) return [];
+        try {
+          const decoded = decodeOperation(operation);
+          return decoded.kind === "post" ? [] : [decoded.payload.subjectUri];
+        } catch {
+          return [];
+        }
+      });
     Promise.all([
       Promise.all(postUris.map((uri) => stableObjectId("bluesky-post", uri))),
       Promise.all(reactionUris("like").map((uri) => stableObjectId("bluesky-post", uri))),
       Promise.all(reactionUris("repost").map((uri) => stableObjectId("bluesky-post", uri))),
     ]).then(([posts, likes, reposts]) => {
-      if (!stopped) setPendingObjectIds({ posts: new Set(posts), likes: new Set(likes), reposts: new Set(reposts) });
+      if (!stopped)
+        setPendingObjectIds({
+          posts: new Set(posts),
+          likes: new Set(likes),
+          reposts: new Set(reposts),
+        });
     });
-    return () => { stopped = true; };
+    return () => {
+      stopped = true;
+    };
   }, [online, pending]);
-  const seenEntries = useRef(new Set(visibleTimelineRows.map((entry) => entry.id)));
-  const newEntryPostIds = new Set(visibleTimelineRows
-    .filter((entry) => !seenEntries.current.has(entry.id))
-    .map((entry) => entry.postId));
+  // Cached rows are initial hydration, not new arrivals. Only animate entries
+  // delivered by Jazz after the first non-empty timeline has rendered.
+  const newEntryPostIds = timelineHydrated.current
+    ? new Set(
+        visibleTimelineRows
+          .filter((entry) => !seenEntries.current.has(entry.id))
+          .map((entry) => entry.postId),
+      )
+    : new Set<string>();
   useEffect(() => {
-    if (timelineRows?.length) lastTimelineRows.current = timelineRows;
+    if (timelineRows?.length) {
+      lastTimelineRows.current = timelineRows;
+      timelineHydrated.current = true;
+    }
     for (const entry of visibleTimelineRows) seenEntries.current.add(entry.id);
   }, [timelineRows]);
 
@@ -154,29 +179,37 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     }
   }
 
-  const waitingForTimeline = visibleTimelineRows.length === 0 && (timelineRows === undefined || initialLoading);
-  return <main className="app-shell">
-    <AppHeader profile={ownProfile} handle={ownHandle} onSignOut={onSignOut} />
-    <Intro />
-    <Composer text={text} onChange={setText} onPublish={publish} />
-    <SyncBanner count={visiblePendingOperations.length} online={online} onSync={flushOperations} />
-    <TimelineFeed
-      items={timelineItems}
-      waiting={waitingForTimeline}
-      hasMore={hasMore}
-      loadingMore={loadingMore}
-      loadMoreRef={loadMoreRef}
-      pendingLikePostIds={pendingObjectIds.likes}
-      pendingRepostPostIds={pendingObjectIds.reposts}
-      pendingPostIds={pendingObjectIds.posts}
-      newEntryPostIds={newEntryPostIds}
-      loadingThreadUris={loadingThreadUris}
-      online={online}
-      connectivity={connectivity}
-      onToggleReaction={toggleReaction}
-      onReply={publishReply}
-      onLoadThread={loadThread}
-    />
-    <AppFooter onSignOut={onSignOut} />
-  </main>;
+  const waitingForTimeline =
+    visibleTimelineRows.length === 0 && (timelineRows === undefined || initialLoading);
+  return (
+    <main className="app-shell">
+      <AppHeader profile={ownProfile} handle={ownHandle} onSignOut={onSignOut} />
+      <Intro />
+      <Composer text={text} onChange={setText} onPublish={publish} />
+      <SyncBanner
+        count={visiblePendingOperations.length}
+        online={online}
+        onSync={flushOperations}
+      />
+      <TimelineFeed
+        items={timelineItems}
+        waiting={waitingForTimeline}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
+        loadMoreRef={loadMoreRef}
+        pendingLikePostIds={pendingObjectIds.likes}
+        pendingRepostPostIds={pendingObjectIds.reposts}
+        pendingPostIds={pendingObjectIds.posts}
+        newEntryPostIds={newEntryPostIds}
+        loadingThreadUris={loadingThreadUris}
+        online={online}
+        connectivity={connectivity}
+        relations={relations}
+        onToggleReaction={toggleReaction}
+        onReply={publishReply}
+        onLoadThread={loadThread}
+      />
+      <AppFooter onSignOut={onSignOut} />
+    </main>
+  );
 }
