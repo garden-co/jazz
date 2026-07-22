@@ -15,63 +15,32 @@ import { createProjection } from "./projection.js";
 
 type TimelineResult = { cursor?: string; hasMore: boolean; count: number };
 type TimelineJob = { ready: Promise<TimelineResult> };
-type TimelineResponse = Awaited<ReturnType<typeof fetchTimelineFeed>>;
-type ProjectionLane = {
-  pending?: TimelineResponse;
-  running: Promise<void>;
-};
 
 const projection = createProjection(projectionDb);
 const timelineJobs = new Map<string, TimelineJob>();
-const projectionLanes = new Map<string, ProjectionLane>();
 
 function timelineJobKey(ownerDid: string, cursor?: string) {
   return `${ownerDid}\n${cursor ?? "head"}`;
 }
 
-function scheduleTimelineProjection(ownerDid: string, response: TimelineResponse, cursor?: string) {
-  const laneKey = timelineJobKey(ownerDid, cursor);
-  const existingLane = projectionLanes.get(laneKey);
-  if (existingLane) {
-    // Only the newest repeated response matters once the current projection settles.
-    existingLane.pending = response;
-    return;
-  }
-
-  const lane: ProjectionLane = { running: Promise.resolve() };
-  projectionLanes.set(laneKey, lane);
-  lane.running = (async () => {
-    let next: TimelineResponse | undefined = response;
-    while (next) {
-      const current = next;
-      lane.pending = undefined;
-      try {
-        await projection.projectTimelinePage(ownerDid, current.feed ?? [], cursor);
-      } catch (error) {
-        console.error("Timeline projection failed", error);
-      }
-      next = lane.pending;
-    }
-  })().finally(() => {
-    if (projectionLanes.get(laneKey) === lane) projectionLanes.delete(laneKey);
-  });
-}
-
 function startTimelineJob(ownerDid: string, session: SessionFetcher, cursor?: string) {
   const timeline = fetchTimelineFeed(session, cursor);
-  const ready = timeline.then((response) => ({
-    cursor: response.cursor,
-    hasMore: Boolean(response.cursor),
-    count: response.feed?.length ?? 0,
-  }));
   const profileProjection = cursor
     ? Promise.resolve()
     : fetchProfile(ownerDid, session)
         .then((profile) => projection.projectProfile(profile))
         .catch((error: unknown) => console.error("Profile projection failed", error));
-  const timelineProjection = timeline
-    .then((response) => scheduleTimelineProjection(ownerDid, response, cursor))
-    .catch((error: unknown) => console.error("Timeline projection failed", error));
+  const ready = timeline.then(async (response) => {
+    await Promise.all([
+      projection.projectTimelinePage(ownerDid, response.feed ?? [], cursor),
+      profileProjection,
+    ]);
+    return {
+      cursor: response.cursor,
+      hasMore: Boolean(response.cursor),
+      count: response.feed?.length ?? 0,
+    };
+  });
   const job = { ready };
   const jobKey = timelineJobKey(ownerDid, cursor);
 
@@ -79,10 +48,7 @@ function startTimelineJob(ownerDid: string, session: SessionFetcher, cursor?: st
   const releaseJob = () => {
     if (timelineJobs.get(jobKey) === job) timelineJobs.delete(jobKey);
   };
-  // Coalesce only the AppView read. Jazz projection runs in the background and
-  // must not freeze future head reads if edge acknowledgement is delayed.
   ready.then(releaseJob, releaseJob);
-  Promise.all([timelineProjection, profileProjection]);
   return job;
 }
 
