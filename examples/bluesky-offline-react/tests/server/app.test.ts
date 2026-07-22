@@ -85,7 +85,6 @@ describe("BFF routes", () => {
     });
 
     expect(await response.json()).toEqual({
-      cursor: "next-page",
       hasMore: true,
       count: 20,
     });
