@@ -20,15 +20,6 @@ export async function checkApiReachable(request: typeof fetch = fetch) {
   }
 }
 
-export function reachabilityAfterHealthCheck(
-  current: boolean | undefined,
-  healthReachable: boolean,
-) {
-  // The public health endpoint can prove the BFF is unavailable, but only a
-  // successful authenticated request can confirm that the app is online.
-  return healthReachable ? current : false;
-}
-
 export function useConnectivity() {
   const [browserOnline, setBrowserOnline] = useState(navigator.onLine);
   const [apiReachable, setApiReachable] = useState<boolean | undefined>();
@@ -44,7 +35,7 @@ export function useConnectivity() {
       }
       checkApiReachable().then((reachable) => {
         if (active) {
-          setApiReachable((current) => reachabilityAfterHealthCheck(current, reachable));
+          setApiReachable(reachable);
         }
       });
     };

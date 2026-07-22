@@ -1,9 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  checkApiReachable,
-  connectivityStatus,
-  reachabilityAfterHealthCheck,
-} from "../../../src/hooks/use-connectivity.js";
+import { checkApiReachable, connectivityStatus } from "../../../src/hooks/use-connectivity.js";
 
 describe("API connectivity", () => {
   it("distinguishes checking from confirmed online and offline states", () => {
@@ -19,11 +15,5 @@ describe("API connectivity", () => {
     await expect(checkApiReachable(vi.fn().mockRejectedValue(new Error("offline")))).resolves.toBe(
       false,
     );
-  });
-
-  it("uses the health endpoint to report BFF connectivity", () => {
-    expect(reachabilityAfterHealthCheck(undefined, true)).toBe(true);
-    expect(reachabilityAfterHealthCheck(true, true)).toBe(true);
-    expect(reachabilityAfterHealthCheck(undefined, false)).toBe(false);
   });
 });
