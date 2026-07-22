@@ -1,14 +1,14 @@
 #![cfg(feature = "test")]
 
 use jazz_tools::server::JazzServer;
-use jazz_tools::{QueryBuilder, Value};
+use jazz_tools::{JazzClient, QueryBuilder, Value};
 
 use crate::common::{
     ClientPair, NO_DELTA_WINDOW, QUERY_TIMEOUT, READY_TIMEOUT, TodoSeed, create_todo,
     subscription_schema,
 };
 use crate::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, wait_for_rows,
+    TestingClient, collect_stream_deltas, has_added, has_any_change, wait_for_query, wait_for_rows,
     wait_for_subscription_update,
 };
 
@@ -363,6 +363,114 @@ async fn subscribe_all_sorted_limited_subscription_reorders_when_new_top_row_arr
     assert_eq!(rows[1].1[0], Value::Text("Alice".to_string()));
 
     pair.shutdown().await;
+}
+
+/// Verifies that a subscription preserves its sort order through pagination and projection
+/// (including magic columns) when an update changes the active sort key
+#[tokio::test]
+async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
+    let client = JazzClient::test_client(subscription_schema()).await;
+    let query = QueryBuilder::new("todos")
+        .select(&["id", "title", "priority", "$createdAt", "$updatedAt"])
+        .order_by("priority")
+        .limit(3)
+        .build();
+    let mut stream = client
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to sorted projected query");
+    let mut log = Vec::new();
+
+    let alice_id = create_todo(
+        &client,
+        TodoSeed {
+            title: "Alice",
+            done: false,
+            priority: Some(100),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let bob_id = create_todo(
+        &client,
+        TodoSeed {
+            title: "Bob",
+            done: false,
+            priority: Some(50),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+    let charlie_id = create_todo(
+        &client,
+        TodoSeed {
+            title: "Charlie",
+            done: false,
+            priority: Some(75),
+            tags: &["page"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_query(
+        &client,
+        query.clone(),
+        None,
+        QUERY_TIMEOUT,
+        "initial projected rows are sorted by priority",
+        |rows| {
+            (rows.len() == 3
+                && rows[0].0 == bob_id
+                && rows[1].0 == charlie_id
+                && rows[2].0 == alice_id)
+                .then_some(rows)
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+    log.clear();
+
+    client
+        .update(alice_id, vec![("priority".to_string(), Value::Integer(25))])
+        .expect("update the active sort key");
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "updated row moves to the first subscription position",
+        |log| {
+            log.iter().any(|delta| {
+                delta
+                    .updated
+                    .iter()
+                    .any(|change| change.id == alice_id && change.new_index == 0)
+            })
+        },
+    )
+    .await;
+
+    let rows = wait_for_query(
+        &client,
+        query,
+        None,
+        QUERY_TIMEOUT,
+        "projected query returns the updated sort order",
+        |rows| {
+            (rows.len() == 3
+                && rows[0].0 == alice_id
+                && rows[1].0 == bob_id
+                && rows[2].0 == charlie_id)
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows[0].1[1], Value::Integer(25));
+
+    client.shutdown().await.expect("shutdown client");
 }
 
 /// Verifies that deleting a row before an offset/limited page shifts the live

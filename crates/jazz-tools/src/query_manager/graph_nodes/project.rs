@@ -1,6 +1,7 @@
 use ahash::AHashSet;
 
 use crate::query_manager::encoding::{decode_column, encode_row};
+use crate::query_manager::graph_nodes::tuple_delta::compute_tuple_delta;
 use crate::query_manager::relation_ir::{ProjectColumn, ProjectExpr, RowIdRef};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Tuple, TupleDelta, TupleDescriptor,
@@ -33,6 +34,7 @@ pub struct ProjectNode {
     output_tuple_descriptor: TupleDescriptor,
     projection_fields: Vec<ProjectionField>,
     current_tuples: AHashSet<Tuple>,
+    ordered_tuples: Vec<Tuple>,
     dirty: bool,
 }
 
@@ -162,6 +164,7 @@ impl ProjectNode {
             output_tuple_descriptor,
             projection_fields,
             current_tuples: AHashSet::new(),
+            ordered_tuples: Vec::new(),
             dirty: true,
         }
     }
@@ -169,6 +172,28 @@ impl ProjectNode {
     /// Get the output tuple descriptor.
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_tuple_descriptor
+    }
+
+    /// Projected tuples in the same order as an ordered upstream node.
+    pub fn ordered_tuples(&self) -> &[Tuple] {
+        &self.ordered_tuples
+    }
+
+    /// Process an update while preserving the exact order supplied by an
+    /// upstream sort, pagination, or ordered projection node.
+    pub fn process_with_ordered_input(
+        &mut self,
+        input: TupleDelta,
+        ordered_input: &[Tuple],
+    ) -> TupleDelta {
+        let old_ordered = std::mem::take(&mut self.ordered_tuples);
+        RowNode::process(self, input);
+        self.ordered_tuples = ordered_input
+            .iter()
+            .filter_map(|tuple| self.project_tuple(tuple))
+            .collect();
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
+        compute_tuple_delta(&old_ordered, &self.ordered_tuples)
     }
 
     fn projected_value(&self, tuple: &Tuple, source: &ProjectionSource) -> Option<Value> {

@@ -389,6 +389,16 @@ impl QueryGraph {
         }
     }
 
+    fn ordered_tuples_from_node(&self, node_id: NodeId) -> Option<&[Tuple]> {
+        match self.get_node(node_id) {
+            Some(GraphNode::Sort(node)) => Some(node.sorted_tuples()),
+            Some(GraphNode::LimitOffset(node)) => Some(node.windowed_tuples()),
+            Some(GraphNode::MagicColumns(node)) => Some(node.ordered_tuples()),
+            Some(GraphNode::Project(node)) => Some(node.ordered_tuples()),
+            _ => None,
+        }
+    }
+
     /// Settle the graph - process all dirty nodes in topological order.
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
@@ -547,14 +557,20 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Project(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let input_delta = input_node
+                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
                         .unwrap_or_default();
+                    let ordered_input = input_node
+                        .and_then(|dep| self.ordered_tuples_from_node(dep))
+                        .map(<[Tuple]>::to_vec);
 
                     if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
-                        let delta = RowNode::process(project_node, input_delta);
+                        let delta = if let Some(ordered) = ordered_input {
+                            project_node.process_with_ordered_input(input_delta, &ordered)
+                        } else {
+                            RowNode::process(project_node, input_delta)
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -643,18 +659,29 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::MagicColumns(_)) => {
-                    let input_delta = self
-                        .get_inputs(node_id)
-                        .first()
-                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                    let input_node = self.get_inputs(node_id).first().copied();
+                    let input_delta = input_node
+                        .and_then(|dep| tuple_deltas.get(&dep).cloned())
                         .unwrap_or_default();
+                    let ordered_input = input_node
+                        .and_then(|dep| self.ordered_tuples_from_node(dep))
+                        .map(<[Tuple]>::to_vec);
 
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
-                        let delta = magic_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut |id, hint| row_loader(id, hint),
-                        );
+                        let delta = if let Some(ordered) = ordered_input {
+                            magic_node.process_with_ordered_input(
+                                input_delta,
+                                &ordered,
+                                storage,
+                                &mut |id, hint| row_loader(id, hint),
+                            )
+                        } else {
+                            magic_node.process_with_context(
+                                input_delta,
+                                storage,
+                                &mut |id, hint| row_loader(id, hint),
+                            )
+                        };
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -798,15 +825,9 @@ impl QueryGraph {
                 }
                 Some(GraphNode::Output(_)) => {
                     let input_node = self.get_inputs(node_id).first().copied();
-                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
-                        Some(GraphNode::LimitOffset(lo_node)) => {
-                            Some(lo_node.windowed_tuples().to_vec())
-                        }
-                        Some(GraphNode::Sort(sort_node)) => {
-                            Some(sort_node.sorted_tuples().to_vec())
-                        }
-                        _ => None,
-                    });
+                    let ordered_input = input_node
+                        .and_then(|dep| self.ordered_tuples_from_node(dep))
+                        .map(<[Tuple]>::to_vec);
 
                     if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
                         let delta = if let Some(ordered) = ordered_input {
