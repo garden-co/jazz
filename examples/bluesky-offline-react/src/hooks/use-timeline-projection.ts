@@ -34,6 +34,14 @@ export function needsMoreRootCards({
   return itemCount < targetItemCount;
 }
 
+export function visibleRootCards<Item>(items: Item[], visibleItemCount: number) {
+  return items.slice(0, visibleItemCount);
+}
+
+export function nextVisibleRootCount(itemCount: number, visibleItemCount: number) {
+  return Math.min(itemCount, visibleItemCount) + rootCardsPerPage;
+}
+
 export function canLoadNextPage({
   source,
   loadingMore,
@@ -73,6 +81,7 @@ export function useTimelineProjection({
   const [pageStartCount, setPageStartCount] = useState<number | null>(null);
   const [pageFetchStartedAt, setPageFetchStartedAt] = useState<number | null>(null);
   const [targetItemCount, setTargetItemCount] = useState<number | null>(null);
+  const [visibleItemCount, setVisibleItemCount] = useState(rootCardsPerPage);
   const [initialLoading, setInitialLoading] = useState(true);
   const refreshInFlight = useRef(false);
   const paginationInFlight = useRef(false);
@@ -140,6 +149,7 @@ export function useTimelineProjection({
     setPageStartCount(null);
     setPageFetchStartedAt(null);
     setTargetItemCount(null);
+    setVisibleItemCount(rootCardsPerPage);
     setInitialLoading(true);
   }, [did]);
 
@@ -173,7 +183,9 @@ export function useTimelineProjection({
 
   const loadingMore =
     targetItemCount !== null && needsMoreRootCards({ itemCount, targetItemCount });
-  const canLoadMore = rowCount > 0 && canLoadNextPage({ source, loadingMore });
+  const hasBufferedRootCards = itemCount > visibleItemCount;
+  const canLoadMore =
+    rowCount > 0 && (hasBufferedRootCards || canLoadNextPage({ source, loadingMore }));
 
   async function loadNextPage(nextSource: "local" | "remote") {
     if (nextSource === "local") {
@@ -187,18 +199,29 @@ export function useTimelineProjection({
 
   async function loadMore() {
     if (!canLoadMore) return;
-    setTargetItemCount(itemCount + rootCardsPerPage);
-    if (source) await loadNextPage(source);
+    const nextTarget = nextVisibleRootCount(itemCount, visibleItemCount);
+    if (itemCount >= nextTarget) {
+      setVisibleItemCount(nextTarget);
+      return;
+    }
+    if (!source) {
+      setVisibleItemCount(itemCount);
+      return;
+    }
+    setTargetItemCount(nextTarget);
+    await loadNextPage(source);
   }
 
   useEffect(() => {
     if (targetItemCount === null) return;
     if (!needsMoreRootCards({ itemCount, targetItemCount })) {
+      setVisibleItemCount(targetItemCount);
       setTargetItemCount(null);
       return;
     }
     if (pageStartCount !== null || remoteLoadingMore || localQueryRefreshing) return;
     if (!source) {
+      setVisibleItemCount(itemCount);
       setTargetItemCount(null);
       return;
     }
@@ -215,5 +238,12 @@ export function useTimelineProjection({
     targetItemCount,
   ]);
 
-  return { hasMore, canLoadMore, loadMore, loadingMore, initialLoading };
+  return {
+    hasMore: hasMore || hasBufferedRootCards,
+    canLoadMore,
+    loadMore,
+    loadingMore,
+    initialLoading,
+    visibleItemCount,
+  };
 }
