@@ -24,29 +24,27 @@ export function nextTimelinePageSource({
 }
 
 export function fetchingMorePosts({
-  localStartCount,
+  startCount,
   itemCount,
   remote,
 }: {
-  localStartCount: number | null;
+  startCount: number | null;
   itemCount: number;
   remote: boolean;
 }) {
-  return remote || (localStartCount !== null && itemCount <= localStartCount);
+  return remote || (startCount !== null && itemCount <= startCount);
 }
 
-export function nextInfiniteScrollState({
-  armed,
+export function shouldLoadNextPage({
   intersecting,
   canLoad,
+  loadingMore,
 }: {
-  armed: boolean;
   intersecting: boolean;
   canLoad: boolean;
+  loadingMore: boolean;
 }) {
-  if (!intersecting) return { armed: true, trigger: false };
-  if (!armed || !canLoad) return { armed, trigger: false };
-  return { armed: false, trigger: true };
+  return intersecting && canLoad && !loadingMore;
 }
 
 export function useTimelineProjection({
@@ -73,13 +71,12 @@ export function useTimelineProjection({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [remoteLoadingMore, setRemoteLoadingMore] = useState(false);
-  const [localStartCount, setLocalStartCount] = useState<number | null>(null);
-  const [localFetchStartedAt, setLocalFetchStartedAt] = useState<number | null>(null);
+  const [pageStartCount, setPageStartCount] = useState<number | null>(null);
+  const [pageFetchStartedAt, setPageFetchStartedAt] = useState<number | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const refreshInFlight = useRef(false);
   const paginationInFlight = useRef(false);
   const paginationStarted = useRef(false);
-  const loadMoreArmed = useRef(true);
   const requestGeneration = useRef(0);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
@@ -92,6 +89,8 @@ export function useTimelineProjection({
     if (cursor) {
       paginationStarted.current = true;
       setRemoteLoadingMore(true);
+      setPageStartCount(itemCount);
+      setPageFetchStartedAt(Date.now());
     }
     try {
       // This endpoint returns only projection metadata. Timeline rows still
@@ -107,12 +106,20 @@ export function useTimelineProjection({
         setNextCursor(result.cursor ?? null);
         setHasMore(Boolean(result.hasMore));
       }
+      if (cursor && !result.count) {
+        setPageStartCount(null);
+        setPageFetchStartedAt(null);
+      }
       // A non-empty response is not the data itself. Keep showing the honest
       // waiting state until Jazz delivers the first projected row.
       if (!cursor && !result.count) setInitialLoading(false);
     } catch {
       if (generation !== requestGeneration.current) return;
       if (cursor && !paginationWasStarted) paginationStarted.current = false;
+      if (cursor) {
+        setPageStartCount(null);
+        setPageFetchStartedAt(null);
+      }
       if (!cursor) setInitialLoading(false);
       reportApiReachable(false);
     } finally {
@@ -128,12 +135,11 @@ export function useTimelineProjection({
     refreshInFlight.current = false;
     paginationInFlight.current = false;
     paginationStarted.current = false;
-    loadMoreArmed.current = true;
     setNextCursor(null);
     setHasMore(false);
     setRemoteLoadingMore(false);
-    setLocalStartCount(null);
-    setLocalFetchStartedAt(null);
+    setPageStartCount(null);
+    setPageFetchStartedAt(null);
     setInitialLoading(true);
   }, [did]);
 
@@ -142,15 +148,15 @@ export function useTimelineProjection({
   }, [browserOnline, hasLocalRows, localQueryReady]);
 
   useEffect(() => {
-    if (localStartCount === null || localFetchStartedAt === null || itemCount <= localStartCount)
+    if (pageStartCount === null || pageFetchStartedAt === null || itemCount <= pageStartCount)
       return;
-    const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - localFetchStartedAt));
+    const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - pageFetchStartedAt));
     const timer = window.setTimeout(() => {
-      setLocalStartCount(null);
-      setLocalFetchStartedAt(null);
+      setPageStartCount(null);
+      setPageFetchStartedAt(null);
     }, remaining);
     return () => window.clearTimeout(timer);
-  }, [itemCount, localFetchStartedAt, localStartCount]);
+  }, [itemCount, pageFetchStartedAt, pageStartCount]);
 
   useEffect(() => {
     if (!localQueryReady || !browserOnline) return;
@@ -171,20 +177,19 @@ export function useTimelineProjection({
           remoteRowsRemaining: Boolean(nextCursor && hasMore),
         });
         const loadingMore = fetchingMorePosts({
-          localStartCount,
+          startCount: pageStartCount,
           itemCount,
           remote: remoteLoadingMore,
         });
-        const nextState = nextInfiniteScrollState({
-          armed: loadMoreArmed.current,
+        const shouldLoad = shouldLoadNextPage({
           intersecting,
-          canLoad: itemCount > 0 && source !== undefined && !loadingMore,
+          canLoad: itemCount > 0 && source !== undefined,
+          loadingMore,
         });
-        loadMoreArmed.current = nextState.armed;
-        if (!nextState.trigger) return;
+        if (!shouldLoad) return;
         if (source === "local") {
-          setLocalStartCount(itemCount);
-          setLocalFetchStartedAt(Date.now());
+          setPageStartCount(itemCount);
+          setPageFetchStartedAt(Date.now());
           revealCachedRows();
         } else if (source === "remote" && nextCursor) loadPage(nextCursor);
       },
@@ -196,7 +201,7 @@ export function useTimelineProjection({
     cachedRowsRemaining,
     hasMore,
     itemCount,
-    localStartCount,
+    pageStartCount,
     localQueryRefreshing,
     nextCursor,
     remoteLoadingMore,
@@ -204,7 +209,7 @@ export function useTimelineProjection({
   ]);
 
   const loadingMore = fetchingMorePosts({
-    localStartCount,
+    startCount: pageStartCount,
     itemCount,
     remote: remoteLoadingMore,
   });
