@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canLoadNextPage,
   needsMoreRootCards,
+  nextVisibleRootCount,
   nextTimelinePageSource,
   visibleRootCards,
 } from "../../../src/hooks/use-timeline-projection.js";
@@ -45,6 +46,8 @@ describe("timeline pagination", () => {
 
   it("shows exactly the requested number of root cards after overfetching", () => {
     expect(visibleRootCards([1, 2, 3, 4, 5], 3)).toEqual([1, 2, 3]);
+    expect(nextVisibleRootCount(19, 20)).toBe(39);
+    expect(nextVisibleRootCount(65, 40)).toBe(60);
   });
 
   it("enables explicit pagination only when another page is ready", () => {
