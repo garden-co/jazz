@@ -1,11 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
-const pollInterval = 15_000;
-const minimumSpinnerDuration = 300;
 const rootCardsPerPage = 20;
+const projectionDeliveryTimeout = 2_000;
 
 type TimelinePayload = {
-  cursor?: string;
   hasMore?: boolean;
   count?: number;
 };
@@ -75,110 +73,68 @@ export function useTimelineProjection({
   revealCachedRows: () => void;
   reportApiReachable: (reachable: boolean) => void;
 }) {
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   const [remoteLoadingMore, setRemoteLoadingMore] = useState(false);
   const [pageStartCount, setPageStartCount] = useState<number | null>(null);
-  const [pageFetchStartedAt, setPageFetchStartedAt] = useState<number | null>(null);
   const [targetItemCount, setTargetItemCount] = useState<number | null>(null);
   const [visibleItemCount, setVisibleItemCount] = useState(rootCardsPerPage);
-  const [initialLoading, setInitialLoading] = useState(true);
-  const refreshInFlight = useRef(false);
   const paginationInFlight = useRef(false);
-  const paginationStarted = useRef(false);
   const requestGeneration = useRef(0);
 
-  async function loadPage(cursor: string | null) {
+  async function loadRemotePage() {
     const generation = requestGeneration.current;
-    const inFlight = cursor ? paginationInFlight : refreshInFlight;
-    if (inFlight.current || !browserOnline) return;
-    inFlight.current = true;
-    const paginationWasStarted = paginationStarted.current;
-    if (cursor) {
-      paginationStarted.current = true;
-      setRemoteLoadingMore(true);
-      setPageStartCount(rowCount);
-      setPageFetchStartedAt(Date.now());
-    }
+    if (paginationInFlight.current || !browserOnline) return;
+    paginationInFlight.current = true;
+    setRemoteLoadingMore(true);
+    setPageStartCount(rowCount);
     try {
-      // This endpoint returns only projection metadata. Timeline rows still
-      // arrive through the reactive Jazz query in Timeline.tsx.
-      const response = await fetch(
-        cursor ? `/api/timeline?cursor=${encodeURIComponent(cursor)}` : "/api/timeline",
-      );
+      // This is a semantic command. The BFF owns AppView cursors, while the
+      // resulting rows still arrive exclusively through Jazz.
+      const response = await fetch("/api/timeline/more", { method: "POST" });
       if (!response.ok) throw new Error("Timeline projection failed");
       const result = (await response.json()) as TimelinePayload;
       if (generation !== requestGeneration.current) return;
       reportApiReachable(true);
-      if (cursor !== null || !paginationStarted.current) {
-        setNextCursor(result.cursor ?? null);
-        setHasMore(Boolean(result.hasMore));
-      }
-      if (cursor && !result.count) {
-        setPageStartCount(null);
-        setPageFetchStartedAt(null);
-      }
-      // A non-empty response is not the data itself. Keep showing the honest
-      // waiting state until Jazz delivers the first projected row.
-      if (!cursor && !result.count) setInitialLoading(false);
+      setHasMore(Boolean(result.hasMore));
+      if (!result.count) setPageStartCount(null);
     } catch {
       if (generation !== requestGeneration.current) return;
-      if (cursor && !paginationWasStarted) paginationStarted.current = false;
-      if (cursor) {
-        setPageStartCount(null);
-        setPageFetchStartedAt(null);
-      }
-      if (!cursor) setInitialLoading(false);
+      setPageStartCount(null);
       reportApiReachable(false);
     } finally {
       if (generation === requestGeneration.current) {
-        inFlight.current = false;
-        if (cursor) setRemoteLoadingMore(false);
+        paginationInFlight.current = false;
+        setRemoteLoadingMore(false);
       }
     }
   }
 
   useEffect(() => {
     requestGeneration.current += 1;
-    refreshInFlight.current = false;
     paginationInFlight.current = false;
-    paginationStarted.current = false;
-    setNextCursor(null);
-    setHasMore(false);
+    setHasMore(true);
     setRemoteLoadingMore(false);
     setPageStartCount(null);
-    setPageFetchStartedAt(null);
     setTargetItemCount(null);
     setVisibleItemCount(rootCardsPerPage);
-    setInitialLoading(true);
   }, [did]);
 
   useEffect(() => {
-    if (hasLocalRows || (localQueryReady && !browserOnline)) setInitialLoading(false);
-  }, [browserOnline, hasLocalRows, localQueryReady]);
-
-  useEffect(() => {
-    if (pageStartCount === null || pageFetchStartedAt === null || rowCount <= pageStartCount)
+    if (pageStartCount === null) return;
+    if (rowCount > pageStartCount) {
+      setPageStartCount(null);
       return;
-    const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - pageFetchStartedAt));
+    }
     const timer = window.setTimeout(() => {
       setPageStartCount(null);
-      setPageFetchStartedAt(null);
-    }, remaining);
+    }, projectionDeliveryTimeout);
     return () => window.clearTimeout(timer);
-  }, [rowCount, pageFetchStartedAt, pageStartCount]);
-
-  useEffect(() => {
-    if (!localQueryReady || !browserOnline) return;
-    loadPage(null);
-    const timer = window.setInterval(() => loadPage(null), pollInterval);
-    return () => window.clearInterval(timer);
-  }, [did, browserOnline, localQueryReady]);
+  }, [rowCount, pageStartCount]);
 
   const source = nextTimelinePageSource({
     cachedRowsRemaining,
     localQueryRefreshing,
-    remoteRowsRemaining: Boolean(nextCursor && hasMore),
+    remoteRowsRemaining: browserOnline && hasMore,
   });
 
   const loadingMore =
@@ -190,10 +146,9 @@ export function useTimelineProjection({
   async function loadNextPage(nextSource: "local" | "remote") {
     if (nextSource === "local") {
       setPageStartCount(rowCount);
-      setPageFetchStartedAt(Date.now());
       revealCachedRows();
-    } else if (nextCursor) {
-      await loadPage(nextCursor);
+    } else {
+      await loadRemotePage();
     }
   }
 
@@ -231,7 +186,6 @@ export function useTimelineProjection({
     hasMore,
     itemCount,
     localQueryRefreshing,
-    nextCursor,
     pageStartCount,
     remoteLoadingMore,
     rowCount,
@@ -243,7 +197,7 @@ export function useTimelineProjection({
     canLoadMore,
     loadMore,
     loadingMore,
-    initialLoading,
+    initialLoading: !hasLocalRows && (!localQueryReady || browserOnline),
     visibleItemCount,
   };
 }

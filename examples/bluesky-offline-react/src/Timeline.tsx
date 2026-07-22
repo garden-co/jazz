@@ -8,10 +8,10 @@ import {
   nextTimelineLimit,
   timelineQuery,
   timelineQueryLimit,
+  timelineRelations,
   windowTimelineRows,
   type DisplayPost,
-  type TimelineEntryView,
-  type TimelineRelations,
+  type TimelineQueryRow,
 } from "./model/timeline-data.js";
 import { stableObjectId } from "./model/object-id.js";
 import { useConnectivity } from "./hooks/use-connectivity.js";
@@ -33,34 +33,28 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const { browserOnline, status: connectivity, reportApiReachable } = useConnectivity();
   const online = connectivity === "online";
   // Keep the feed mounted while an included Jazz query briefly recomputes.
-  const lastTimelineRows = useRef<TimelineEntryView[]>([]);
+  const lastTimelineRows = useRef<TimelineQueryRow[]>([]);
   const seenEntries = useRef(new Set<string>());
   const timelineHydrated = useRef(false);
 
-  // This is the client-side seam: small, flat Jazz subscriptions are joined
-  // into the timeline view model without a deeply nested reactive query.
+  // This is the client-side seam: one bounded, owner-scoped Jazz query supplies
+  // complete cards as their required relations become locally available.
   const { data: timelineRows } = useAll(
     timelineQuery(did).limit(timelineQueryLimit(localTimelineLimit)),
   );
-  const { data: posts } = useAll(app.posts.where({}));
-  const { data: profiles } = useAll(app.profiles.where({}));
-  const { data: images } = useAll(app.postImages.where({}));
-  const { data: likes } = useAll(app.likes.where({ actorDid: { eq: did } }));
-  const { data: reposts } = useAll(app.reposts.where({}));
   const { data: pending } = useAll(app.pendingOperations.where({ ownerDid: { eq: did } }));
-  const ownProfile = profiles?.find((profile) => profile.did === did);
+  const { data: ownProfiles } = useAll(
+    app.profiles
+      .where({ did: { eq: did } })
+      .orderBy("indexedAt", "desc")
+      .limit(1),
+  );
+  const ownProfile = ownProfiles?.[0];
   const ownHandle = ownProfile?.handle ?? ownProfile?.displayName ?? did;
   const availableTimelineRows = timelineRows?.length ? timelineRows : lastTimelineRows.current;
   const localTimelineWindow = windowTimelineRows(availableTimelineRows, localTimelineLimit);
   const visibleTimelineRows = localTimelineWindow.rows;
-  const relations: TimelineRelations = {
-    viewerDid: did,
-    posts: posts ?? [],
-    profiles: profiles ?? [],
-    images: images ?? [],
-    likes: likes ?? [],
-    reposts: reposts ?? [],
-  };
+  const relations = timelineRelations(visibleTimelineRows, did);
   const timelineItems = buildTimeline(visibleTimelineRows, relations);
   const localQueryRefreshing = timelineRows === undefined && lastTimelineRows.current.length > 0;
   const {

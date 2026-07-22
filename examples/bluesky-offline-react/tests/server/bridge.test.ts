@@ -460,6 +460,9 @@ it("exposes only the application operations", async () => {
   const { bridge } = await loadBridge();
 
   expect(Object.keys(bridge).sort()).toEqual([
+    "activateTimeline",
+    "deactivateTimeline",
+    "projectNextTimelinePage",
     "projectThread",
     "projectTimelinePage",
     "reconcileOperations",

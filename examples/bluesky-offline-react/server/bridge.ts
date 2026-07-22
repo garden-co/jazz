@@ -12,8 +12,8 @@ import {
 } from "./bluesky.js";
 import { projectionDb } from "./jazz.js";
 import { createProjection } from "./projection.js";
+import { createTimelineCoordinator, type TimelineResult } from "./timeline-coordinator.js";
 
-type TimelineResult = { cursor?: string; hasMore: boolean; count: number };
 type TimelineJob = { ready: Promise<TimelineResult>; freshUntil: number };
 
 const timelineRefreshFreshnessMs = 10_000;
@@ -71,6 +71,11 @@ export async function projectTimelinePage(
       : startTimelineJob(ownerDid, session, cursor);
   return job.ready;
 }
+
+const timelineCoordinator = createTimelineCoordinator(projectTimelinePage);
+export const activateTimeline = timelineCoordinator.activate;
+export const projectNextTimelinePage = timelineCoordinator.loadMore;
+export const deactivateTimeline = timelineCoordinator.deactivate;
 
 export async function projectThread(ownerDid: string, session: SessionFetcher, uri: string) {
   const thread = await fetchPostThread(session, uri);

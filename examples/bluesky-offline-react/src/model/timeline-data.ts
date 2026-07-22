@@ -1,10 +1,46 @@
 import { schema as s } from "jazz-tools";
 import { app } from "../../schema.js";
 
+function includedPost(ownerDid: string) {
+  const quotedPost = app.posts
+    .include({ authorProfile: true, postImagesViaPost: true })
+    .requireIncludes();
+  return app.posts
+    .include({
+      authorProfile: true,
+      postImagesViaPost: true,
+      quotedPost,
+      likesViaSubjectPost: app.likes.where({ actorDid: { eq: ownerDid } }),
+      repostsViaSubjectPost: app.reposts.where({ actorDid: { eq: ownerDid } }),
+    })
+    .requireIncludes();
+}
+
 export function timelineQuery(ownerDid: string) {
+  const post = includedPost(ownerDid);
   return app.timelineEntries
     .where({ ownerDid: { eq: ownerDid }, active: { eq: true } })
-    .orderBy("sortAt", "desc");
+    .orderBy("sortAt", "desc")
+    .include({
+      post,
+      repost: app.reposts.include({ actorProfile: true }).requireIncludes(),
+      threadRoot: app.posts
+        .include({
+          authorProfile: true,
+          postImagesViaPost: true,
+          quotedPost: app.posts
+            .include({ authorProfile: true, postImagesViaPost: true })
+            .requireIncludes(),
+          likesViaSubjectPost: app.likes.where({ actorDid: { eq: ownerDid } }),
+          repostsViaSubjectPost: app.reposts.where({ actorDid: { eq: ownerDid } }),
+          threadEntriesViaRootPost: app.threadEntries
+            .orderBy("sortOrder", "asc")
+            .include({ post })
+            .requireIncludes(),
+        })
+        .requireIncludes(),
+    })
+    .requireIncludes();
 }
 
 type PostRow = s.RowOf<typeof app.posts>;
@@ -12,7 +48,8 @@ type ProfileView = s.RowOf<typeof app.profiles>;
 type RepostRow = s.RowOf<typeof app.reposts>;
 
 export type ThreadPostView = PostRow;
-export type TimelineEntryView = s.RowOf<ReturnType<typeof timelineQuery>>;
+export type TimelineQueryRow = s.RowOf<ReturnType<typeof timelineQuery>>;
+export type TimelineEntryView = s.RowOf<typeof app.timelineEntries>;
 export type IncludedPost = PostRow;
 export type IncludedRepost = RepostRow & { actorProfile?: ProfileView };
 export type ImageView = s.RowOf<typeof app.postImages>;
@@ -34,6 +71,57 @@ const emptyRelations: TimelineRelations = {
   likes: [],
   reposts: [],
 };
+
+function addPostRelations(
+  post: TimelineQueryRow["post"],
+  relations: {
+    posts: Map<string, PostRow>;
+    profiles: Map<string, ProfileView>;
+    images: Map<string, ImageView>;
+    likes: Map<string, s.RowOf<typeof app.likes>>;
+    reposts: Map<string, s.RowOf<typeof app.reposts>>;
+  },
+) {
+  relations.posts.set(post.id, post);
+  relations.profiles.set(post.authorProfile.id, post.authorProfile);
+  for (const image of post.postImagesViaPost) relations.images.set(image.id, image);
+  for (const like of post.likesViaSubjectPost) relations.likes.set(like.id, like);
+  for (const repost of post.repostsViaSubjectPost) relations.reposts.set(repost.id, repost);
+  if (post.quotedPost) {
+    relations.posts.set(post.quotedPost.id, post.quotedPost);
+    relations.profiles.set(post.quotedPost.authorProfile.id, post.quotedPost.authorProfile);
+    for (const image of post.quotedPost.postImagesViaPost) relations.images.set(image.id, image);
+  }
+}
+
+export function timelineRelations(rows: TimelineQueryRow[], viewerDid: string): TimelineRelations {
+  const relations = {
+    posts: new Map<string, PostRow>(),
+    profiles: new Map<string, ProfileView>(),
+    images: new Map<string, ImageView>(),
+    likes: new Map<string, s.RowOf<typeof app.likes>>(),
+    reposts: new Map<string, s.RowOf<typeof app.reposts>>(),
+  };
+  for (const row of rows) {
+    addPostRelations(row.post, relations);
+    addPostRelations(row.threadRoot, relations);
+    for (const entry of row.threadRoot.threadEntriesViaRootPost) {
+      addPostRelations(entry.post, relations);
+    }
+    if (row.repost) {
+      relations.reposts.set(row.repost.id, row.repost);
+      relations.profiles.set(row.repost.actorProfile.id, row.repost.actorProfile);
+    }
+  }
+  return {
+    viewerDid,
+    posts: [...relations.posts.values()],
+    profiles: [...relations.profiles.values()],
+    images: [...relations.images.values()],
+    likes: [...relations.likes.values()],
+    reposts: [...relations.reposts.values()],
+  };
+}
 
 export type DisplayPost = PostRow & {
   authorProfile?: ProfileView;
@@ -68,28 +156,59 @@ export function writableReplyCount(
 
 function toDisplayPost(
   post: PostRow,
-  relations: TimelineRelations,
+  relations: RelationIndex,
   seen = new Set<string>(),
 ): DisplayPost {
   const quote =
     post.quotedPostId && !seen.has(post.quotedPostId)
-      ? relations.posts.find((candidate) => candidate.id === post.quotedPostId)
+      ? relations.posts.get(post.quotedPostId)
       : undefined;
   return {
     ...post,
-    authorProfile: relations.profiles.find((profile) => profile.id === post.authorProfileId),
-    images: relations.images
-      .filter((image) => image.postId === post.id)
-      .sort((a, b) => a.position - b.position),
+    authorProfile: relations.profiles.get(post.authorProfileId),
+    images: relations.images.get(post.id) ?? [],
     quote: quote ? toDisplayPost(quote, relations, new Set(seen).add(post.id)) : undefined,
-    like: relations.likes.find((like) => like.subjectPostId === post.id),
-    repost: relations.reposts.find(
-      (repost) => repost.subjectPostId === post.id && repost.actorDid === relations.viewerDid,
+    like: relations.likes.get(post.id),
+    repost: relations.reposts.get(`${relations.viewerDid}:${post.id}`),
+  };
+}
+
+type RelationIndex = {
+  viewerDid?: string;
+  posts: Map<string, PostRow>;
+  profiles: Map<string, ProfileView>;
+  images: Map<string, ImageView[]>;
+  likes: Map<string, s.RowOf<typeof app.likes>>;
+  reposts: Map<string, s.RowOf<typeof app.reposts>>;
+  repostsById: Map<string, s.RowOf<typeof app.reposts>>;
+};
+
+function indexRelations(relations: TimelineRelations): RelationIndex {
+  const images = new Map<string, ImageView[]>();
+  for (const image of relations.images) {
+    const postImages = images.get(image.postId) ?? [];
+    postImages.push(image);
+    postImages.sort((a, b) => a.position - b.position);
+    images.set(image.postId, postImages);
+  }
+  return {
+    viewerDid: relations.viewerDid,
+    posts: new Map(relations.posts.map((post) => [post.id, post])),
+    profiles: new Map(relations.profiles.map((profile) => [profile.id, profile])),
+    images,
+    likes: new Map(relations.likes.map((like) => [like.subjectPostId, like])),
+    reposts: new Map(
+      relations.reposts.map((repost) => [`${repost.actorDid}:${repost.subjectPostId}`, repost]),
     ),
+    repostsById: new Map(relations.reposts.map((repost) => [repost.id, repost])),
   };
 }
 
 export function buildThread(rootId: string, posts: IncludedPost[], relations = emptyRelations) {
+  return buildThreadFromIndex(rootId, posts, indexRelations(relations));
+}
+
+function buildThreadFromIndex(rootId: string, posts: IncludedPost[], relations: RelationIndex) {
   return buildDisplayThread(
     rootId,
     posts.map((post) => toDisplayPost(post, relations)),
@@ -123,6 +242,7 @@ function buildDisplayThread(rootId: string, posts: DisplayPost[]) {
 }
 
 export function buildTimeline(rows: TimelineEntryView[], relations = emptyRelations) {
+  const index = indexRelations(relations);
   const items: TimelineItem[] = [];
   const seenPostUris = new Set<string>();
   const seenThreads = new Set<string>();
@@ -130,29 +250,27 @@ export function buildTimeline(rows: TimelineEntryView[], relations = emptyRelati
     (a, b) => b.sortAt.localeCompare(a.sortAt) || a.id.localeCompare(b.id),
   );
   for (const row of orderedRows) {
-    const post = relations.posts.find((candidate) => candidate.id === row.postId);
-    const threadRoot = relations.posts.find((candidate) => candidate.id === row.threadRootId);
+    const post = index.posts.get(row.postId);
+    const threadRoot = index.posts.get(row.threadRootId);
     if (!post || !threadRoot || seenPostUris.has(post.uri)) continue;
     seenPostUris.add(post.uri);
     if (!row.repostId && seenThreads.has(row.threadRootId)) continue;
     if (!row.repostId) seenThreads.add(row.threadRootId);
     const repostedReply = Boolean(row.repostId && post.replyParentId);
     const node = repostedReply
-      ? buildThread(post.id, [post], relations)
-      : (buildThread(row.threadRootId, [threadRoot, post], relations) ??
-        buildThread(post.id, [post], relations));
-    const repost = row.repostId
-      ? relations.reposts.find((candidate) => candidate.id === row.repostId)
-      : undefined;
+      ? buildThreadFromIndex(post.id, [post], index)
+      : (buildThreadFromIndex(row.threadRootId, [threadRoot, post], index) ??
+        buildThreadFromIndex(post.id, [post], index));
+    const repost = row.repostId ? index.repostsById.get(row.repostId) : undefined;
     if (node)
       items.push({
         id: row.repostId ? row.id : `thread:${row.threadRootId}`,
         ownerDid: row.ownerDid,
         node,
-        threadRoot: toDisplayPost(threadRoot, relations),
+        threadRoot: toDisplayPost(threadRoot, index),
         repost: repost && {
           ...repost,
-          actorProfile: relations.profiles.find((profile) => profile.id === repost.actorProfileId),
+          actorProfile: index.profiles.get(repost.actorProfileId),
         },
         threadUrl: repostedReply
           ? `https://bsky.app/profile/${post.authorDid}/post/${post.uri.split("/").at(-1)}`
@@ -168,7 +286,8 @@ export function hydrateTimelineThread(
   relations = emptyRelations,
 ) {
   if (item.threadUrl) return item;
-  const posts = threadPosts.map((post) => toDisplayPost(post, relations));
+  const index = indexRelations(relations);
+  const posts = threadPosts.map((post) => toDisplayPost(post, index));
   posts.push(item.threadRoot, item.node.post);
   return {
     ...item,

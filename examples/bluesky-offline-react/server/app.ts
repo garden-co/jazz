@@ -14,7 +14,13 @@ import {
   oauthScope,
   restoreBffSession,
 } from "./auth.js";
-import { projectThread, projectTimelinePage, reconcileOperations } from "./bridge.js";
+import {
+  activateTimeline,
+  deactivateTimeline,
+  projectNextTimelinePage,
+  projectThread,
+  reconcileOperations,
+} from "./bridge.js";
 import { OperationError } from "./bluesky.js";
 
 const configuredWebOrigin = process.env.WEB_ORIGIN ?? "http://127.0.0.1:3001";
@@ -59,13 +65,14 @@ export function createServer({ staticRoot, webOrigin = configuredWebOrigin }: Se
   server.get("/.well-known/jazz-jwks.json", (c) => c.json(jazzJwks));
 
   server.use("/api/session", requireSession);
-  server.use("/api/timeline", requireSession);
+  server.use("/api/timeline/*", requireSession);
   server.use("/api/thread", requireSession);
   server.use("/api/operations", requireSession);
 
   // ATProto establishes identity; Jazz trusts the same DID through this short-lived JWT.
   server.get("/api/session", async (c) => {
-    const { did } = c.var.authentication;
+    const { did, session } = c.var.authentication;
+    activateTimeline(did, session);
     return c.json({ did, token: await createJazzToken(did) });
   });
 
@@ -89,18 +96,15 @@ export function createServer({ staticRoot, webOrigin = configuredWebOrigin }: Se
     const did = sessionId ? await invalidateBffSession(sessionId) : undefined;
     // Local logout must still succeed when remote token revocation is unavailable.
     if (did) await oauth.revoke(did).catch(() => undefined);
+    if (did) deactivateTimeline(did);
     deleteCookie(c, bffSessionCookie, { path: "/", secure: secureCookies });
     return c.json({ ok: true });
   });
 
-  // HTTP triggers source reads and writes; projected data reaches React through Jazz.
-  server.get("/api/timeline", async (c) => {
+  // The browser asks for intent, not AppView cursors or projected rows.
+  server.post("/api/timeline/more", async (c) => {
     const { did, session } = c.var.authentication;
-    const { cursor, hasMore, count } = await projectTimelinePage(
-      did,
-      session,
-      c.req.query("cursor"),
-    );
+    const { cursor, hasMore, count } = await projectNextTimelinePage(did, session);
     return c.json({ cursor, hasMore, count });
   });
 

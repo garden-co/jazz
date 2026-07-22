@@ -7,22 +7,26 @@ import { pwaPlugin } from "./vite/pwa.js";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");
+  // ManagedDevRuntime supports this option, although JazzPluginOptions does
+  // not currently expose it. Keeping it in a named object avoids a cast while
+  // ensuring the local server and BFF share backend authority.
+  const jazzOptions = {
+    appId: jazzAppId,
+    adminSecret: env.JAZZ_ADMIN_SECRET,
+    backendSecret: env.BACKEND_SECRET,
+    inspector: false,
+    server: {
+      port: 4200,
+      jwksUrl: "http://127.0.0.1:3001/.well-known/jazz-jwks.json",
+    },
+  };
   const proxy = {
     "/api": "http://127.0.0.1:3001",
     "/xrpc": "http://127.0.0.1:3001",
   };
   return {
     plugins: [
-      jazzPlugin(({
-	appId: jazzAppId,
-	adminSecret: env.JAZZ_ADMIN_SECRET,
-	backendSecret: env.BACKEND_SECRET,
-	inspector: false,
-	server: {
-		port: 4200,
-		jwksUrl: 'http://127.0.0.1:3001/.well-known/jazz-jwks.json'
-	}
-})),
+      jazzPlugin(jazzOptions),
       react(),
       babel({ presets: [reactCompilerPreset()] }),
       pwaPlugin(),

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   activateTimeline: vi.fn(),
   createJazzToken: vi.fn(),
+  deactivateTimeline: vi.fn(),
   projectNextTimelinePage: vi.fn(),
   projectThread: vi.fn(),
   reconcileOperations: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("../../server/auth.js", () => ({
 
 vi.mock("../../server/bridge.js", () => ({
   activateTimeline: mocks.activateTimeline,
+  deactivateTimeline: mocks.deactivateTimeline,
   projectNextTimelinePage: mocks.projectNextTimelinePage,
   projectThread: mocks.projectThread,
   reconcileOperations: mocks.reconcileOperations,
@@ -78,6 +80,7 @@ describe("BFF routes", () => {
     mocks.projectNextTimelinePage.mockResolvedValue(metadata);
 
     const response = await createServer().request("/api/timeline/more", {
+      method: "POST",
       headers: { cookie: "bff-session=opaque-session-id" },
     });
 
@@ -156,6 +159,7 @@ describe("BFF routes", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     const response = await createServer().request("/api/timeline/more", {
+      method: "POST",
       headers: { cookie: "bff-session=opaque-session-id" },
     });
 
