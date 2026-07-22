@@ -250,6 +250,19 @@ describe("ATProto to Jazz projection", () => {
     await expect(pagination).resolves.toEqual({ cursor: "oldest", hasMore: true, count: 0 });
   });
 
+  it("reuses a recently completed head refresh", async () => {
+    const fetchTimelineFeed = vi.fn(async () => ({ feed: [], cursor: "next" }));
+    const { bridge, writer } = await loadBridge({ api: bluesky({ fetchTimelineFeed }) });
+    const session = { fetchHandler: vi.fn() };
+
+    const first = await bridge.projectTimelinePage("did:plc:viewer", session);
+    const second = await bridge.projectTimelinePage("did:plc:viewer", session);
+
+    expect(second).toEqual(first);
+    expect(fetchTimelineFeed).toHaveBeenCalledOnce();
+    expect(writer.projectTimelinePage).toHaveBeenCalledOnce();
+  });
+
   it("does not report a refresh complete until Jazz has accepted the projection", async () => {
     let releaseProjection!: () => void;
     const projectionComplete = new Promise<void>((resolve) => {
