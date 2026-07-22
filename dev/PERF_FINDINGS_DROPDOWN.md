@@ -25,13 +25,13 @@ Allocator command:
 
 ### Per-Phase Comparison
 
-| Phase | Native | Native us/visible row | Browser target |
-| --- | ---: | ---: | ---: |
-| Server reset / maintained update compute for dominant child | 365-375 ms for 23,867 adds (`drain_ms` 194-198 + `bundle_ms` 171-177) | 15-16 us/row | ~195 us/row |
-| Cold local rehydrate/materialize of full child table | 1,019 ms for 43,065 raw adds (`open_ms` 663 + `bundle_ms` 356) | 24 us/raw row | n/a |
-| Warm reopen maintained subscription open | 4,464 ms for 23,867 adds (`open_ms` 4,293 + `bundle_ms` 171) | 187 us/row | ~260 us/row |
-| Delta apply/delivery for dominant child | 365-375 ms for 23,867 adds | 15-16 us/row | TS apply ~85 us/row |
-| Wire encode/decode/compression, whole warm workload | zstd encode 9.5 ms, decode 3.7 ms; raw payload ~20.2 MB, zstd payload ~506 KB | <1 us/row compression | wasm ingest ~180 us/row |
+| Phase                                                       |                                                                        Native | Native us/visible row |          Browser target |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------: | --------------------: | ----------------------: |
+| Server reset / maintained update compute for dominant child |         365-375 ms for 23,867 adds (`drain_ms` 194-198 + `bundle_ms` 171-177) |          15-16 us/row |             ~195 us/row |
+| Cold local rehydrate/materialize of full child table        |                1,019 ms for 43,065 raw adds (`open_ms` 663 + `bundle_ms` 356) |         24 us/raw row |                     n/a |
+| Warm reopen maintained subscription open                    |                  4,464 ms for 23,867 adds (`open_ms` 4,293 + `bundle_ms` 171) |            187 us/row |             ~260 us/row |
+| Delta apply/delivery for dominant child                     |                                                    365-375 ms for 23,867 adds |          15-16 us/row |     TS apply ~85 us/row |
+| Wire encode/decode/compression, whole warm workload         | zstd encode 9.5 ms, decode 3.7 ms; raw payload ~20.2 MB, zstd payload ~506 KB | <1 us/row compression | wasm ingest ~180 us/row |
 
 Whole-workload receipts:
 
@@ -129,19 +129,19 @@ The storage metric correction matters: Groove records every row visited by a ran
 
 ### Stage split for `res_l_child_3`
 
-| Scenario | open_ms | compile_ms | subscribe_ms | snapshot_recv_ms | snapshot_apply_ms | Rows | Open us/visible row |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Warm-prime/cold-like local open | 684 | 0 | 354 | 0 | 329 | 43,065 raw adds | 15.9 us/raw row |
-| Warm reopen from disk | 4,444 | 1 | 4,240 | 0 | 202 | 23,867 adds | 186.2 us/add |
+| Scenario                        | open_ms | compile_ms | subscribe_ms | snapshot_recv_ms | snapshot_apply_ms |            Rows | Open us/visible row |
+| ------------------------------- | ------: | ---------: | -----------: | ---------------: | ----------------: | --------------: | ------------------: |
+| Warm-prime/cold-like local open |     684 |          0 |          354 |                0 |               329 | 43,065 raw adds |     15.9 us/raw row |
+| Warm reopen from disk           |   4,444 |          1 |        4,240 |                0 |               202 |     23,867 adds |        186.2 us/add |
 
 The four temporary stage timers sum to the traced `open_ms` within rounding. Warm reopen is dominated by `subscribe_lowered_program`, not Jazz query compilation, snapshot receive, or `MaintainedSubscriptionView::apply_multisink_deltas`.
 
 ### Open-read destination buckets
 
-| Scenario | Total reads | Total ranges | `global_current_rows` reads | `global_current_rows` ranges | `register_global_current_rows` reads | `register_global_current_rows` ranges | Other buckets |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Warm-prime/cold-like local open | 172,195 | 18 | 172,195 | 7 | 0 | 11 | all zero |
-| Warm reopen from disk | 190,846 | 60 | 190,846 | 28 | 0 | 32 | all zero |
+| Scenario                        | Total reads | Total ranges | `global_current_rows` reads | `global_current_rows` ranges | `register_global_current_rows` reads | `register_global_current_rows` ranges | Other buckets |
+| ------------------------------- | ----------: | -----------: | --------------------------: | ---------------------------: | -----------------------------------: | ------------------------------------: | ------------- |
+| Warm-prime/cold-like local open |     172,195 |           18 |                     172,195 |                            7 |                                    0 |                                    11 | all zero      |
+| Warm reopen from disk           |     190,846 |           60 |                     190,846 |                           28 |                                    0 |                                    32 | all zero      |
 
 Point-vs-range row split is not cheaply available without changing Groove's metric shape: `reads` includes range-visited rows. The destination buckets are still decisive here: the open path is visiting persisted `global_current_rows`; it is not reading history, changes, transactions, indexes, or other destinations.
 
@@ -179,19 +179,19 @@ Warm reopen target line from the final run:
 
 The most relevant Groove hydration line for the warm-reopen target output had:
 
-| Stage | Calls | Input rows | Output rows | Time |
-| --- | ---: | ---: | ---: | ---: |
-| `snapshot_table_deltas_total` | 1 | 0 | 26,943 | 12.3 ms |
-| `jazz_res_l_child_3_global_current` scan | 1 | 0 | 23,831 | 10.9-11.1 ms |
-| `table_source` | 1 | 23,831 | 23,831 | 0.4 ms |
-| `filter` | 1 | 23,831 | 23,831 | 2.0-2.4 ms |
-| `join_keyed_deltas` | 14 | 200,418 | 200,418 | 25-26 ms |
-| `arrangement_build_index` / `arrangement_apply_update` | 19 | 274,947 | 214,739 | 28 ms |
-| `map_project` exclusive | 16 | 340,298 | 340,298 | 100-112 ms |
-| `anti_join_apply` | 1 | 23,831 | 23,831 | 9 ms |
-| `join_apply` exclusive | 5 | 128,925 | 78,157 | 3,501-3,556 ms |
-| `join_probe_emit` | 15 | 183,321 | 2,399,165 matched/emitted pre-consolidation rows | 1,951-2,067 ms |
-| `join_consolidate_output` | 5 | 78,157 | 78,157 | 1,443-1,501 ms |
+| Stage                                                  | Calls | Input rows |                                      Output rows |           Time |
+| ------------------------------------------------------ | ----: | ---------: | -----------------------------------------------: | -------------: |
+| `snapshot_table_deltas_total`                          |     1 |          0 |                                           26,943 |        12.3 ms |
+| `jazz_res_l_child_3_global_current` scan               |     1 |          0 |                                           23,831 |   10.9-11.1 ms |
+| `table_source`                                         |     1 |     23,831 |                                           23,831 |         0.4 ms |
+| `filter`                                               |     1 |     23,831 |                                           23,831 |     2.0-2.4 ms |
+| `join_keyed_deltas`                                    |    14 |    200,418 |                                          200,418 |       25-26 ms |
+| `arrangement_build_index` / `arrangement_apply_update` |    19 |    274,947 |                                          214,739 |          28 ms |
+| `map_project` exclusive                                |    16 |    340,298 |                                          340,298 |     100-112 ms |
+| `anti_join_apply`                                      |     1 |     23,831 |                                           23,831 |           9 ms |
+| `join_apply` exclusive                                 |     5 |    128,925 |                                           78,157 | 3,501-3,556 ms |
+| `join_probe_emit`                                      |    15 |    183,321 | 2,399,165 matched/emitted pre-consolidation rows | 1,951-2,067 ms |
+| `join_consolidate_output`                              |     5 |     78,157 |                                           78,157 | 1,443-1,501 ms |
 
 The inclusive operator timings double-count child work, so the exclusive counters are the useful ones. The storage snapshot and decode/copy path is not the hotspot: the dominant child rows scan in ~11ms and all snapshot table reads for this output take ~12ms. Key encoding and arrangement rebuild are also not the hotspot, at ~25-28ms each.
 
@@ -227,21 +227,21 @@ Requested change: wrap the inherited-parent policy `parent_current` node in `Row
 
 Compatibility check:
 
-| Check | Result |
-| --- | --- |
-| Can the Distinct key be expressed as the requested parent row id? | Yes. `RowSetExpr::Distinct` accepts `Vec<NormalizedValueRef>`, and `NormalizedValueRef::RowId(RowIdRef::Source(parent_source.clone()))` is the same value used by the join predicate. |
-| Does the inherited-parent join reference parent fields downstream? | No evidence of extra parent payload dependence in this lowering site. The join predicate compares `child.parent_column` to `parent_source` row id, and the result identity remains the child/current row. |
-| Does one-shot compile through the same normalized plan? | Yes. `compile_current_query_program_for_one_shot_read` builds the same `current_query_program_request` before applying one-shot access paths, so adding this node would affect maintained and one-shot together. |
+| Check                                                                        | Result                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Can the Distinct key be expressed as the requested parent row id?            | Yes. `RowSetExpr::Distinct` accepts `Vec<NormalizedValueRef>`, and `NormalizedValueRef::RowId(RowIdRef::Source(parent_source.clone()))` is the same value used by the join predicate.                                                                  |
+| Does the inherited-parent join reference parent fields downstream?           | No evidence of extra parent payload dependence in this lowering site. The join predicate compares `child.parent_column` to `parent_source` row id, and the result identity remains the child/current row.                                              |
+| Does one-shot compile through the same normalized plan?                      | Yes. `compile_current_query_program_for_one_shot_read` builds the same `current_query_program_request` before applying one-shot access paths, so adding this node would affect maintained and one-shot together.                                       |
 | Does query-engine lowering support `RowSetExpr::Distinct` in this placement? | No. The join right side goes through `analyze_relation_input_node` -> `analyze_linear_subplan` -> `analyze_current_node`; `RowSetExpr::Distinct { .. }` currently returns `UnsupportedReason::Operator("distinct row-set nodes are not lowered yet")`. |
 
 Per the stop rule, I did not add the node and did not broaden the change into Distinct lowering support. That would no longer be the requested minimal one-lowering-site change.
 
 Before-bench receipt captured before the stop:
 
-| Scenario | Rows | Target open_ms | Target open us/row | Whole-workload wall_ms | Notes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Cold before | 43,000 positioned / 23,831 visible delivered | 614 | 14.3 per positioned row | 26,889 | `res_l_child_3`, `open_reads=172195`, `open_ranges=18`, `bundle_ms=317`; whole workload `settle_ms=21894`. |
-| Warm reopen before | 23,831 visible | 4,270 | 179.2 | 20,517 | From the immediately preceding same-tree Phase 4 target run after instrumentation was reverted; Phase 5 warm receipt confirmed whole-workload `wall_ms=20517`, `settle_ms=15512`, but the raw target trace line was truncated from the captured output. |
+| Scenario           |                                         Rows | Target open_ms |      Target open us/row | Whole-workload wall_ms | Notes                                                                                                                                                                                                                                                   |
+| ------------------ | -------------------------------------------: | -------------: | ----------------------: | ---------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cold before        | 43,000 positioned / 23,831 visible delivered |            614 | 14.3 per positioned row |                 26,889 | `res_l_child_3`, `open_reads=172195`, `open_ranges=18`, `bundle_ms=317`; whole workload `settle_ms=21894`.                                                                                                                                              |
+| Warm reopen before |                               23,831 visible |          4,270 |                   179.2 |                 20,517 | From the immediately preceding same-tree Phase 4 target run after instrumentation was reverted; Phase 5 warm receipt confirmed whole-workload `wall_ms=20517`, `settle_ms=15512`, but the raw target trace line was truncated from the captured output. |
 
 `join_apply` was not traceable in the Phase 5 bench because the temporary Groove instrumentation from Phase 4 was reverted. Phase 4 attributed the warm target open to ~3.5s in `JoinState::apply`.
 
@@ -249,10 +249,10 @@ Change classification: CLEARLY-GOOD in principle, but BLOCKED as a one-site impl
 
 Gates run in Phase 5:
 
-| Gate | Exit code |
-| --- | ---: |
-| `JAZZ_REHYDRATE_TRACE=1 JAZZ_CUSTOMER_PHASES=cold,warm cargo bench -p jazz-sim --bench customer_cold_start -j 2` before bench | 0 |
-| `cargo check -p jazz -j 2` stop-state sanity check | 0 |
+| Gate                                                                                                                          | Exit code |
+| ----------------------------------------------------------------------------------------------------------------------------- | --------: |
+| `JAZZ_REHYDRATE_TRACE=1 JAZZ_CUSTOMER_PHASES=cold,warm cargo bench -p jazz-sim --bench customer_cold_start -j 2` before bench |         0 |
+| `cargo check -p jazz -j 2` stop-state sanity check                                                                            |         0 |
 
 Tooling-friction: a trace sink that preserves the full `res_l_child_3` line separately from Cargo bench output would have avoided relying on the prior same-tree target trace when terminal output truncated.
 
@@ -272,28 +272,28 @@ The right fix likely needs Semi to preserve bindable route fields without baking
 
 Before/after receipts:
 
-| Scenario | Before | After prototype | Notes |
-| --- | ---: | ---: | --- |
-| Cold `res_l_child_3` open_ms | 614 | 678 | target trace from tee log |
-| Cold whole-workload wall_ms | 26,889 | 13,461 | after receipt: `settle_ms=12296`, `dominant_child_materialized_ms=12765` |
-| Warm `res_l_child_3` open_ms | 4,270 | 404 | after warm trace: `reset=false`, `known_state=Fast`, `open_reads=172195`, `open_ranges=18` |
-| Warm `res_l_child_3` open us/row | 179.2 | 16.95 | 23,831 visible child rows |
-| Warm whole-workload wall_ms | 20,517 | 7,229 | after receipt: `settle_ms=5508`, `dominant_child_materialized_ms=5960` |
-| `join_apply` | ~3.5s before, Phase 4 instrumentation | not traced in Phase 6 | Groove instrumentation was not reintroduced |
+| Scenario                         |                                Before |       After prototype | Notes                                                                                      |
+| -------------------------------- | ------------------------------------: | --------------------: | ------------------------------------------------------------------------------------------ |
+| Cold `res_l_child_3` open_ms     |                                   614 |                   678 | target trace from tee log                                                                  |
+| Cold whole-workload wall_ms      |                                26,889 |                13,461 | after receipt: `settle_ms=12296`, `dominant_child_materialized_ms=12765`                   |
+| Warm `res_l_child_3` open_ms     |                                 4,270 |                   404 | after warm trace: `reset=false`, `known_state=Fast`, `open_reads=172195`, `open_ranges=18` |
+| Warm `res_l_child_3` open us/row |                                 179.2 |                 16.95 | 23,831 visible child rows                                                                  |
+| Warm whole-workload wall_ms      |                                20,517 |                 7,229 | after receipt: `settle_ms=5508`, `dominant_child_materialized_ms=5960`                     |
+| `join_apply`                     | ~3.5s before, Phase 4 instrumentation | not traced in Phase 6 | Groove instrumentation was not reintroduced                                                |
 
 Gate results:
 
-| Gate | Exit code |
-| --- | ---: |
-| `cargo check -p jazz -j 2` | 0 |
-| focused `cargo test -p jazz inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations -j 2` | 0 |
-| `cargo fmt -p jazz --check` | 0 |
-| `cargo test -p jazz --test warm_reopen_differential reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent -j 2 -- --exact` | 0 |
-| `cargo test -p jazz --test shared_coverage_differential forced_shared_coverage_group_matches_per_subscription_observations -j 2 -- --exact` | 0 |
-| `cargo check -p jazz-sim --benches -j 2` | 0 |
-| `cargo check -p jazz -p jazz-sim --lib --tests --examples -j 2` | 0 |
-| after bench `JAZZ_REHYDRATE_TRACE=1 JAZZ_CUSTOMER_PHASES=cold,warm cargo bench -p jazz-sim --bench customer_cold_start -j 2` | 0 |
-| `cargo test -p jazz -j 2` | 101 |
+| Gate                                                                                                                                            | Exit code |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | --------: |
+| `cargo check -p jazz -j 2`                                                                                                                      |         0 |
+| focused `cargo test -p jazz inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations -j 2`                            |         0 |
+| `cargo fmt -p jazz --check`                                                                                                                     |         0 |
+| `cargo test -p jazz --test warm_reopen_differential reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent -j 2 -- --exact` |         0 |
+| `cargo test -p jazz --test shared_coverage_differential forced_shared_coverage_group_matches_per_subscription_observations -j 2 -- --exact`     |         0 |
+| `cargo check -p jazz-sim --benches -j 2`                                                                                                        |         0 |
+| `cargo check -p jazz -p jazz-sim --lib --tests --examples -j 2`                                                                                 |         0 |
+| after bench `JAZZ_REHYDRATE_TRACE=1 JAZZ_CUSTOMER_PHASES=cold,warm cargo bench -p jazz-sim --bench customer_cold_start -j 2`                    |         0 |
+| `cargo test -p jazz -j 2`                                                                                                                       |       101 |
 
 Failed Jazz tests:
 
@@ -320,12 +320,12 @@ projection is gone; its new policy test wrongly asserted no retraction on
 last-edge revoke (asserted maintained/one-shot divergence) — now asserts the
 retraction and the re-grant add.
 
-| Metric | Before | After |
-| --- | ---: | ---: |
+| Metric                              |                            Before |                                   After |
+| ----------------------------------- | --------------------------------: | --------------------------------------: |
 | Warm reopen `res_l_child_3` open_ms | 4,270 (190,846 reads / 60 ranges) | 405 (172,195 range-visited / 18 ranges) |
-| Warm reopen us/visible row | 179.2 | 17.0 |
-| Warm whole-workload wall_ms | 20,517 | 7,155 |
-| Cold whole-workload wall_ms | 26,889 | 12,427 |
+| Warm reopen us/visible row          |                             179.2 |                                    17.0 |
+| Warm whole-workload wall_ms         |                            20,517 |                                   7,155 |
+| Cold whole-workload wall_ms         |                            26,889 |                                  12,427 |
 
 Gates (all exit 0): jazz suite, groove suite, JAZZ_SEED_COUNT=300 oracle,
 3 incremental-delivery canaries, warm-reopen differential (exact),
@@ -335,38 +335,38 @@ cargo fmt jazz+groove. crates/groove source untouched.
 
 ## Phase 8 results (client wasm attribution)
 
-Final real-app receipt directory: `/Users/anselm/boredm-harness-v2/browser-profile-20260721T093651Z`.
-This was captured from the served production BoredM app after temporarily swapping in a profiling `jazz-wasm` build from this worktree. The served `jazz_wasm_bg.wasm` and `jazz_wasm.js` were restored afterward; md5s matched the pre-swap backups:
+Final real-app receipt directory: `/Users/anselm/app-harness-v2/browser-profile-20260721T093651Z`.
+This was captured from the served production the customer app app after temporarily swapping in a profiling `jazz-wasm` build from this worktree. The served `jazz_wasm_bg.wasm` and `jazz_wasm.js` were restored afterward; md5s matched the pre-swap backups:
 
-| Artifact | Restored md5 |
-| --- | --- |
+| Artifact            | Restored md5                       |
+| ------------------- | ---------------------------------- |
 | `jazz_wasm_bg.wasm` | `3673f5012c18891661b2799cfb8dad96` |
-| `jazz_wasm.js` | `79d3b1f69a9770e01777ecc36bc8cf1a` |
+| `jazz_wasm.js`      | `79d3b1f69a9770e01777ecc36bc8cf1a` |
 
 Instrumentation note: the first pass emitted per-node operator spans and made the harness fail with `RangeError: Invalid string length`. The final pass emitted cumulative Groove operator buckets with exclusive operator timing, plus named maintained-open stage spans.
 
 Warm dominant subscription: `dropdown_entry`, 24,081 delivered rows.
 
-| Stage | ms | us/row | Share of 5,437.9ms worker `createExecutedSubscription` |
-| --- | ---: | ---: | ---: |
-| compile | 0.4 | 0.02 | 0.0% |
-| Groove subscribe/hydrate | 517.6 | 21.5 | 9.5% |
-| snapshot recv | 0.0 | 0.0 | 0.0% |
-| wasm maintained-view apply | 383.6 | 15.9 | 7.1% |
-| wasm-core named open total | 901.6 | 37.4 | 16.6% |
-| TS/browser `subscription_apply_chunk` for 24,045 rows | 2,085.8 | 86.7 | 38.4% |
-| Remaining worker request time outside these spans | ~2,450.5 | ~101.8 | 45.1% |
+| Stage                                                 |       ms | us/row | Share of 5,437.9ms worker `createExecutedSubscription` |
+| ----------------------------------------------------- | -------: | -----: | -----------------------------------------------------: |
+| compile                                               |      0.4 |   0.02 |                                                   0.0% |
+| Groove subscribe/hydrate                              |    517.6 |   21.5 |                                                   9.5% |
+| snapshot recv                                         |      0.0 |    0.0 |                                                   0.0% |
+| wasm maintained-view apply                            |    383.6 |   15.9 |                                                   7.1% |
+| wasm-core named open total                            |    901.6 |   37.4 |                                                  16.6% |
+| TS/browser `subscription_apply_chunk` for 24,045 rows |  2,085.8 |   86.7 |                                                  38.4% |
+| Remaining worker request time outside these spans     | ~2,450.5 | ~101.8 |                                                  45.1% |
 
 Warm `dropdown_entry` Groove subscribe/hydrate exclusive operator buckets:
 
-| Operator | Calls | ms | rows_in | rows_out | us/row out |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `map_project` | 25 | 263.7 | 336,810 | 336,810 | 0.8 |
-| `join_apply` | 1 | 122.3 | 48,090 | 24,045 | 5.1 |
-| `semi_join_apply` | 3 | 27.4 | 72,243 | 24,117 | 1.1 |
-| `unwrap_nullable` | 1 | 23.5 | 24,045 | 24,045 | 1.0 |
-| `anti_join_apply` | 2 | 20.6 | 48,090 | 48,090 | 0.4 |
-| `table_source` | 4 | 0.5 | 0 | 24,081 | ~0.0 |
+| Operator          | Calls |    ms | rows_in | rows_out | us/row out |
+| ----------------- | ----: | ----: | ------: | -------: | ---------: |
+| `map_project`     |    25 | 263.7 | 336,810 |  336,810 |        0.8 |
+| `join_apply`      |     1 | 122.3 |  48,090 |   24,045 |        5.1 |
+| `semi_join_apply` |     3 |  27.4 |  72,243 |   24,117 |        1.1 |
+| `unwrap_nullable` |     1 |  23.5 |  24,045 |   24,045 |        1.0 |
+| `anti_join_apply` |     2 |  20.6 |  48,090 |   48,090 |        0.4 |
+| `table_source`    |     4 |   0.5 |       0 |   24,081 |       ~0.0 |
 
 Warm `dropdown_entry` raw snapshot table hydration is not the owner: 10 `snapshot_table_deltas` calls, 96,288 rows emitted, 51.0ms total. OPFS read time for the whole warm run was only 27.3ms. The warm retained bottleneck is therefore not browser IO; it is mostly client-side materialization outside Groove, with a smaller Groove join/project hydrate component.
 
@@ -374,16 +374,16 @@ Policy operators after the Phase 7 derivation-collapse fix are present but no lo
 
 Cold big-tick exclusive operator split, all tables:
 
-| Operator | Calls | ms | rows_in | rows_out | us/row out |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `table_source` | 620,886 | 705.5 | 0 | 78,473 | 9.0 |
-| `map_project` | 488,592 | 366.0 | 369,835 | 369,835 | 1.0 |
-| `persist` | 879,564 | 341.6 | 105,958 | 105,958 | 3.2 |
-| `index_by` | 879,564 | 166.3 | 105,904 | 105,958 | 1.6 |
-| `join_apply` | 16,356 | 159.9 | 52,226 | 26,113 | 6.1 |
-| `semi_join_apply` | 67,860 | 84.5 | 83,914 | 26,982 | 3.1 |
-| `anti_join_apply` | 32,712 | 60.1 | 52,226 | 52,226 | 1.2 |
-| `unwrap_nullable` | 51,156 | 36.2 | 27,541 | 27,527 | 1.3 |
+| Operator          |   Calls |    ms | rows_in | rows_out | us/row out |
+| ----------------- | ------: | ----: | ------: | -------: | ---------: |
+| `table_source`    | 620,886 | 705.5 |       0 |   78,473 |        9.0 |
+| `map_project`     | 488,592 | 366.0 | 369,835 |  369,835 |        1.0 |
+| `persist`         | 879,564 | 341.6 | 105,958 |  105,958 |        3.2 |
+| `index_by`        | 879,564 | 166.3 | 105,904 |  105,958 |        1.6 |
+| `join_apply`      |  16,356 | 159.9 |  52,226 |   26,113 |        6.1 |
+| `semi_join_apply` |  67,860 |  84.5 |  83,914 |   26,982 |        3.1 |
+| `anti_join_apply` |  32,712 |  60.1 |  52,226 |   52,226 |        1.2 |
+| `unwrap_nullable` |  51,156 |  36.2 |  27,541 |   27,527 |        1.3 |
 
 Cold whole-run timing: wall 22,117ms, Jazz path 15,250ms, wire ingest ticks 7,432.1ms, subscription apply chunks 6,924.0ms. The largest tick was 4,337.5ms; the exclusive Groove buckets above explain only about 1.9s of operator body time across all ticks, so the remaining cold tick time is outside the measured operator apply bodies: runtime traversal/memo/arrangement state management, record movement/clone/drop, and persistence/index write plumbing around the operators. OPFS write time was only 30.0ms, so this is CPU/object-work in wasm, not storage latency.
 
@@ -398,20 +398,20 @@ Ranked conclusion:
 
 Gate/build/capture results:
 
-| Step | Exit code |
-| --- | ---: |
-| `cargo check -p jazz -j 2` after initial instrumentation | 0 |
-| `cargo check -p groove -j 2` after initial instrumentation | 0 |
-| first `wasm-pack build --target web --profiling` | 0 |
-| first capture with per-node spans | 1 (`RangeError: Invalid string length`) |
-| reduced cumulative-span `wasm-pack build --target web --profiling` | 0 |
-| cumulative-span capture | 0 (`/Users/anselm/boredm-harness-v2/browser-profile-20260721T093200Z`) |
-| exclusive-timing `cargo check -p jazz -j 2` | 0 |
-| exclusive-timing `wasm-pack build --target web --profiling` | 0 |
-| final exclusive-timing capture | 0 (`/Users/anselm/boredm-harness-v2/browser-profile-20260721T093651Z`) |
-| artifact restore md5 verification | 0 |
-| restored-stack `scripts/demo-stack.sh --skip-build --prod` | 0 |
-| restored-source `cargo check -p jazz -j 2` | 0 |
+| Step                                                               |                                                           Exit code |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------: |
+| `cargo check -p jazz -j 2` after initial instrumentation           |                                                                   0 |
+| `cargo check -p groove -j 2` after initial instrumentation         |                                                                   0 |
+| first `wasm-pack build --target web --profiling`                   |                                                                   0 |
+| first capture with per-node spans                                  |                             1 (`RangeError: Invalid string length`) |
+| reduced cumulative-span `wasm-pack build --target web --profiling` |                                                                   0 |
+| cumulative-span capture                                            | 0 (`/Users/anselm/app-harness-v2/browser-profile-20260721T093200Z`) |
+| exclusive-timing `cargo check -p jazz -j 2`                        |                                                                   0 |
+| exclusive-timing `wasm-pack build --target web --profiling`        |                                                                   0 |
+| final exclusive-timing capture                                     | 0 (`/Users/anselm/app-harness-v2/browser-profile-20260721T093651Z`) |
+| artifact restore md5 verification                                  |                                                                   0 |
+| restored-stack `scripts/demo-stack.sh --skip-build --prod`         |                                                                   0 |
+| restored-source `cargo check -p jazz -j 2`                         |                                                                   0 |
 
 Tooling-friction: a worker-span side channel that writes bounded binary/NDJSON receipts directly, instead of serializing all console messages into one JSON result, would have allowed finer per-operator spans without perturbing or overflowing the harness.
 
@@ -423,7 +423,7 @@ Convergence contract: full-window maintenance uses `consolidate_windows_bounded_
 
 Rescheduling owner: the production `jazz-tools` websocket path calls `ServerShellHandle::tick_take`, which calls `InMemoryServerShell::tick`; if outbound frames are produced, `drain_ws_outbound` calls `notify_activity`, causing another activity-driven tick. The plain server shell owner thread itself blocks on its job queue; there is no autonomous idle tick interval in `crates/jazz-tools/src/server/core_server_shell.rs`.
 
-Verdict from this lane: strict headless repro was negative on the copied store. I copied `/Users/anselm/boredm-harness-v2/store-snapshots/boredm-2026-07-21T114247764Z` to `/tmp/jazz-consolidation-spin.gdnQHW/store`, built `/Users/anselm/jazz_core-perf-dropdown/target/release/jazz-tools` with `--features cli`, and started PID `18513` on port `6299` with app id `019dcd19-a699-7191-b0bc-b8ce08eb7cd6`. With zero clients and no websocket/session activity, sampled CPU stayed at `0.0%` for 60s at elapsed times `01:45`, `01:55`, `02:05`, `02:15`, `02:25`, and `02:35`. Because no idle tick ran, temporary env-gated consolidation logging did not produce cursor evidence for loop-vs-backlog in this strict headless mode.
+Verdict from this lane: strict headless repro was negative on the copied store. I copied `/Users/anselm/app-harness-v2/store-snapshots/customer-app-2026-07-21T114247764Z` to `/tmp/jazz-consolidation-spin.gdnQHW/store`, built `/Users/anselm/jazz_core-perf-dropdown/target/release/jazz-tools` with `--features cli`, and started PID `18513` on port `6299` with app id `019dcd19-a699-7191-b0bc-b8ce08eb7cd6`. With zero clients and no websocket/session activity, sampled CPU stayed at `0.0%` for 60s at elapsed times `01:45`, `01:55`, `02:05`, `02:15`, `02:25`, and `02:35`. Because no idle tick ran, temporary env-gated consolidation logging did not produce cursor evidence for loop-vs-backlog in this strict headless mode.
 
 Failure hypotheses after source read:
 
@@ -443,28 +443,28 @@ Fix: persist an exclusive lower-bound cursor by storing `last_seen_key + 0x00`, 
 
 Evidence:
 
-| Run | CPU trace | Result |
-| --- | --- | --- |
-| Pre-fix public armed scratch, PID `29161` | `12.1%` immediate, then `0.0%` by 5s | Public route quiesced; store compacted from 60M to 15M |
-| Fixed armed scratch, PID `41169` | `13.2%`, `3.3%`, `0.0%`, `0.0%`, `0.0%` | Quiesced by 5s after arming |
-| Fixed second arming, PID `41169` | `7.9%`, `2.1%`, `0.0%`, `0.0%` | Did not restart sustained burn |
-| Fixed write-after-convergence, PID `41169` | `45.0%`, `1.9%`, `0.0%`, `0.0%` | Three public `spell_check` writes synced and quiesced |
-| Fixed diagnostic run, PID `46064` | `0.0%`, `2.8%`, `0.0%`, `0.0%`, `0.0%` | Six diagnostic tick reports, all final no-progress: `windows=0 records=0`; driver stopped |
+| Run                                        | CPU trace                               | Result                                                                                    |
+| ------------------------------------------ | --------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Pre-fix public armed scratch, PID `29161`  | `12.1%` immediate, then `0.0%` by 5s    | Public route quiesced; store compacted from 60M to 15M                                    |
+| Fixed armed scratch, PID `41169`           | `13.2%`, `3.3%`, `0.0%`, `0.0%`, `0.0%` | Quiesced by 5s after arming                                                               |
+| Fixed second arming, PID `41169`           | `7.9%`, `2.1%`, `0.0%`, `0.0%`          | Did not restart sustained burn                                                            |
+| Fixed write-after-convergence, PID `41169` | `45.0%`, `1.9%`, `0.0%`, `0.0%`         | Three public `spell_check` writes synced and quiesced                                     |
+| Fixed diagnostic run, PID `46064`          | `0.0%`, `2.8%`, `0.0%`, `0.0%`, `0.0%`  | Six diagnostic tick reports, all final no-progress: `windows=0 records=0`; driver stopped |
 
 Regression: `full_window_consolidation_cursor_advances_past_encoded_windows` covers budgeted cursor-mode consolidation. It asserts that after several bounded passes, the durable cursor sits past all already encoded windows and a no-work call does not mutate or restart scanning.
 
 Gate results:
 
-| Gate | Result |
-| --- | --- |
-| `cargo fmt --check -p groove -p jazz` | pass |
-| `cargo test -p groove -j 2` | pass |
-| `cargo test -p jazz -j 2` | pass |
-| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact` | pass |
-| `cargo check -p jazz-sim --benches -j 2` | pass |
+| Gate                                                                                                                                    | Result |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `cargo fmt --check -p groove -p jazz`                                                                                                   | pass   |
+| `cargo test -p groove -j 2`                                                                                                             | pass   |
+| `cargo test -p jazz -j 2`                                                                                                               | pass   |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2`                                                | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact`      | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact`                | pass   |
+| `cargo check -p jazz-sim --benches -j 2`                                                                                                | pass   |
 
 ## Consolidation treadmill (partial-tail convergence)
 
@@ -476,25 +476,25 @@ Fix: `groove::db::Database` now keeps an in-memory set of converged windowed his
 
 Evidence:
 
-| Run | Trace | Result |
-| --- | --- | --- |
-| Pre-fix persistent-client scratch, PID `67566` | `98.0%`, `98.4%`, `98.2%`, `99.3%`, `97.4%`, `98.1%`, `99.5%`; CPU time `0:21.02` to `3:16.56` over 180s | Reproduced sustained burn with one idle persistent websocket |
-| First convergence-only attempt, PID `78807` | `71.1%`, `46.5%`, `117.4%`, `114.1%`, `110.8%`, `118.1%`, `116.1%` | Convergence state alone removed scans but exposed websocket tick self-rearm |
-| Temporary diagnostic run, PID `79777` | First call: `windows=0 records=0 scanned=215 skipped=0 marked=215 converged=215`; then repeated `early_out all_converged` | Store convergence worked; remaining CPU was tick scheduling |
-| Final fixed persistent-client scratch, PID `80380` | `0.0%` at every sample over 180s; CPU time flat at `0:01.45` | Persistent idle websocket stayed connected without burn |
-| Final fixed write-past-256 check, PID `80380` | After 260 `spell_check` writes: `0.0%`, `0.0%`, `0.0%`, `0.0%`, `0.0%`; CPU time `0:04.09` to `0:04.10` over 60s | Writes dirtied history, work ran, and server reconverged |
+| Run                                                | Trace                                                                                                                     | Result                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Pre-fix persistent-client scratch, PID `67566`     | `98.0%`, `98.4%`, `98.2%`, `99.3%`, `97.4%`, `98.1%`, `99.5%`; CPU time `0:21.02` to `3:16.56` over 180s                  | Reproduced sustained burn with one idle persistent websocket                |
+| First convergence-only attempt, PID `78807`        | `71.1%`, `46.5%`, `117.4%`, `114.1%`, `110.8%`, `118.1%`, `116.1%`                                                        | Convergence state alone removed scans but exposed websocket tick self-rearm |
+| Temporary diagnostic run, PID `79777`              | First call: `windows=0 records=0 scanned=215 skipped=0 marked=215 converged=215`; then repeated `early_out all_converged` | Store convergence worked; remaining CPU was tick scheduling                 |
+| Final fixed persistent-client scratch, PID `80380` | `0.0%` at every sample over 180s; CPU time flat at `0:01.45`                                                              | Persistent idle websocket stayed connected without burn                     |
+| Final fixed write-past-256 check, PID `80380`      | After 260 `spell_check` writes: `0.0%`, `0.0%`, `0.0%`, `0.0%`, `0.0%`; CPU time `0:04.09` to `0:04.10` over 60s          | Writes dirtied history, work ran, and server reconverged                    |
 
 Regression: `partial_history_tail_is_marked_converged_until_dirtied` uses the public `Database` batch API over a real `jazz_docs_history` table and a scan-counting memory storage wrapper. It asserts that a below-window partial tail is scanned once, skipped on the next maintenance call, dirtied by a later write, consolidated after reaching the test window target, and then skipped again after reconvergence.
 
 Gate results:
 
-| Gate | Result |
-| --- | --- |
-| `cargo test -p groove -j 2` | pass |
-| `cargo test -p jazz -j 2` | pass |
-| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact` | pass |
-| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact` | pass |
-| `cargo fmt --check -p groove -p jazz` | pass |
-| `cargo check -p jazz-sim --benches -j 2` | pass |
+| Gate                                                                                                                                    | Result |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `cargo test -p groove -j 2`                                                                                                             | pass   |
+| `cargo test -p jazz -j 2`                                                                                                               | pass   |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2`                                                | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact` | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary reset_batch_post_reset_single_row_changes_are_scale_independent -- --exact`      | pass   |
+| `cargo test -p jazz --test incremental_delivery_canary mergeable_transaction_write_cost_is_scale_independent -- --exact`                | pass   |
+| `cargo fmt --check -p groove -p jazz`                                                                                                   | pass   |
+| `cargo check -p jazz-sim --benches -j 2`                                                                                                | pass   |

@@ -841,7 +841,7 @@ fn plan_with_default_result_order(
     mut plan: AnalyzedQueryPlan,
     request: &QueryProgramRequest,
 ) -> AnalyzedQueryPlan {
-    if !request.output.app_rows.is_some()
+    if request.output.app_rows.is_none()
         && !request
             .output
             .facts

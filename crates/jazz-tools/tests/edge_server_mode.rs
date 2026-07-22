@@ -162,6 +162,207 @@ async fn default_order_limit_subscription_emits_ordered_window_indices() {
         .await;
 }
 
+fn policied_todo_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::True)
+                        .with_update(None, PolicyExpr::True)
+                        .with_delete(PolicyExpr::True),
+                ),
+        )
+        .build()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_order_limit_subscription_delivers_updates_with_table_policies() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = policied_todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "policied-order-writer"),
+            )
+            .await
+            .expect("connect writer");
+            let reader = JazzClient::connect(
+                server.make_client_context_for_user(schema, "policied-order-reader"),
+            )
+            .await
+            .expect("connect reader");
+
+            wait_for_edge_query_ready(&writer, "todos", Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&reader, "todos", Duration::from_secs(30)).await;
+
+            let id10 = ObjectId::from_uuid(uuid_from_u128(10));
+            let id20 = ObjectId::from_uuid(uuid_from_u128(20));
+            let id30 = ObjectId::from_uuid(uuid_from_u128(30));
+            let id40 = ObjectId::from_uuid(uuid_from_u128(40));
+            for (id, title) in [
+                (id10, "ten"),
+                (id20, "twenty"),
+                (id30, "thirty"),
+                (id40, "forty"),
+            ] {
+                writer
+                    .insert_with_id(
+                        "todos",
+                        Some(*id.uuid()),
+                        row_input!("title" => title, "done" => false),
+                    )
+                    .expect("insert seeded todo");
+            }
+
+            let query = QueryBuilder::new("todos").limit(3).build();
+            wait_for_query(
+                &reader,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "reader sees policied default-ordered limited seed window",
+                |rows| {
+                    (rows.iter().map(|(id, _)| *id).collect::<Vec<_>>() == vec![id10, id20, id30])
+                        .then_some(())
+                },
+            )
+            .await;
+            let mut stream = reader
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe policied limit");
+            let initial = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("initial policied subscription delta")
+                .expect("subscription stream should stay open");
+            assert_eq!(
+                initial
+                    .added
+                    .iter()
+                    .map(|added| (added.id, added.index))
+                    .collect::<Vec<_>>(),
+                vec![(id10, 0), (id20, 1), (id30, 2)]
+            );
+
+            // The stress-app repro: toggle a row inside the window and require
+            // the update to arrive as a subscription delta, not only via
+            // one-shot re-query.
+            let toggle_batch = writer
+                .update(id20, vec![("done".to_string(), Value::Boolean(true))])
+                .expect("toggle done on in-window todo");
+            writer
+                .wait_for_batch(toggle_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("toggle settles at edge");
+
+            let mut delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("toggle update delta")
+                .expect("subscription stream should stay open");
+            while delta.updated.iter().all(|updated| updated.id != id20) {
+                delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                    .await
+                    .expect("toggle update delta")
+                    .expect("subscription stream should stay open");
+            }
+            let updated = delta
+                .updated
+                .iter()
+                .find(|updated| updated.id == id20)
+                .expect("toggle delta contains id20");
+            assert_eq!((updated.old_index, updated.new_index), (1, 1));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn default_order_limit_one_subscription_delivers_value_updates() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(
+                server.make_client_context_for_user(schema.clone(), "limit-one-writer"),
+            )
+            .await
+            .expect("connect writer");
+            let reader = JazzClient::connect(
+                server.make_client_context_for_user(schema, "limit-one-reader"),
+            )
+            .await
+            .expect("connect reader");
+
+            wait_for_edge_query_ready(&writer, "todos", Duration::from_secs(30)).await;
+            wait_for_edge_query_ready(&reader, "todos", Duration::from_secs(30)).await;
+
+            let id10 = ObjectId::from_uuid(uuid_from_u128(10));
+            let id20 = ObjectId::from_uuid(uuid_from_u128(20));
+            for (id, title) in [(id10, "ten"), (id20, "twenty")] {
+                writer
+                    .insert_with_id(
+                        "todos",
+                        Some(*id.uuid()),
+                        row_input!("title" => title, "done" => false),
+                    )
+                    .expect("insert seeded todo");
+            }
+
+            let query = QueryBuilder::new("todos").limit(1).build();
+            wait_for_query(
+                &reader,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "reader sees limit-one winner",
+                |rows| {
+                    (rows.iter().map(|(id, _)| *id).collect::<Vec<_>>() == vec![id10]).then_some(())
+                },
+            )
+            .await;
+            let mut stream = reader
+                .subscribe(query.clone())
+                .await
+                .expect("subscribe limit one");
+            let initial = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("initial limit-one delta")
+                .expect("subscription stream should stay open");
+            assert_eq!(
+                initial
+                    .added
+                    .iter()
+                    .map(|added| (added.id, added.index))
+                    .collect::<Vec<_>>(),
+                vec![(id10, 0)]
+            );
+
+            // Value-only update to the winner must arrive as a delta.
+            let toggle_batch = writer
+                .update(id10, vec![("done".to_string(), Value::Boolean(true))])
+                .expect("toggle winner");
+            writer
+                .wait_for_batch(toggle_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("toggle settles at edge");
+
+            let mut delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("winner update delta")
+                .expect("subscription stream should stay open");
+            while delta.updated.iter().all(|updated| updated.id != id10) {
+                delta = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                    .await
+                    .expect("winner update delta")
+                    .expect("subscription stream should stay open");
+            }
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn default_order_unbounded_subscription_keeps_row_id_order_across_deltas() {
     tokio::task::LocalSet::new()
@@ -183,7 +384,7 @@ async fn default_order_unbounded_subscription_keeps_row_id_order_across_deltas()
             wait_for_edge_query_ready(&writer, "todos", Duration::from_secs(30)).await;
             wait_for_edge_query_ready(&reader, "todos", Duration::from_secs(30)).await;
 
-            let query = QueryBuilder::new("todos").build();
+            let query = QueryBuilder::new("todos").limit(3).build();
             let mut stream = reader
                 .subscribe(query.clone())
                 .await
@@ -291,7 +492,7 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 .connect()
                 .await;
 
-            let query = QueryBuilder::new("todos").build();
+            let query = QueryBuilder::new("todos").limit(3).build();
             let mut stream = client
                 .subscribe(query)
                 .await

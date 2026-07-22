@@ -7785,21 +7785,22 @@ fn arg_by_winner_before_from_deltas(
     deltas: Vec<RecordDelta>,
     direction: ArgByDirection,
 ) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+    // Key the reconstructed before-multiset by (primary key, full record
+    // bytes): the record bytes keep distinct contents that share a primary
+    // key (a passenger-column update) from collapsing into one entry, while
+    // the leading primary key still drives min/max winner selection.
+    let mut records = BTreeMap::<(Vec<u8>, Bytes), i64>::new();
     for (record, weight) in after_records {
         let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        records.insert(key, (record, weight));
+        *records.entry((key, record)).or_default() += weight;
     }
     for delta in deltas {
         let key = encoded_record_key_part(descriptor, delta.raw(), primary_key_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        *records.entry((key, delta.record.clone())).or_default() -= delta.weight;
     }
     let mut positive = records
         .into_iter()
-        .filter_map(|(key, (record, weight))| (weight > 0).then_some((key, record)));
+        .filter_map(|((key, record), weight)| (weight > 0).then_some((key, record)));
     Ok(match direction {
         ArgByDirection::Min => positive.next(),
         ArgByDirection::Max => positive.next_back(),
@@ -7831,26 +7832,20 @@ fn top_by_window_before_from_deltas(
     deltas: Vec<RecordDelta>,
     top_by: &TopByOp,
 ) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+    // Reconstruct the before-window multiset as (after − deltas) keyed by the
+    // FULL record bytes. Keying by sort key here would merge distinct record
+    // contents that share a sort key — exactly what happens when a passenger
+    // column (row payload, content tx) changes while the window keys stay
+    // stable — and the reconstructed "before" would equal "after", erasing
+    // the update from the window's output delta.
+    let mut records = BTreeMap::<Bytes, i64>::new();
     for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
-        records.insert(key, (record, weight));
+        *records.entry(record).or_default() += weight;
     }
     for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), &top_by.sort_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
     }
-    top_by_window_from_records(
-        descriptor,
-        records
-            .into_iter()
-            .map(|(_, (record, weight))| (record, weight))
-            .collect(),
-        top_by,
-    )
+    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
 }
 
 fn top_by_sort_key(

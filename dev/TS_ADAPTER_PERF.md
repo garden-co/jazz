@@ -70,4 +70,4 @@ Slice canary receipt:
 | Before corrected guard |                            7.13ms |          1.42ms total |      0.008ms | This receipt was invalid as a pass-through proof: the fake `db.all()` returned an empty snapshot, so the old dead guard was not caught by row-count assertions.                                        |
 | After corrected guard  |                           24.84ms |          1.78ms total |      0.013ms | Canary now asserts delivered `addedCount` equals source row count. The 24k reset path is really engaged and includes envelope parse, public-frame build, and worker-style `transferableBuffer` checks. |
 
-End-to-end real-app verification note: `/Users/anselm/jazz-private/workspaces/boredm` serves the worker from the main checkout through symlinks. The orchestrator runs that post-merge; this lane records the local adapter gates only.
+End-to-end real-app verification note: `/Users/anselm/jazz-private/workspaces/customer-app` serves the worker from the main checkout through symlinks. The orchestrator runs that post-merge; this lane records the local adapter gates only.
