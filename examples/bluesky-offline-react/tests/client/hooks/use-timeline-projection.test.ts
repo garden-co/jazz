@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  canLoadNextPage,
   fetchingMorePosts,
   nextTimelinePageSource,
-  shouldLoadNextPage,
 } from "../../../src/hooks/use-timeline-projection.js";
 
 describe("timeline pagination", () => {
@@ -42,15 +42,9 @@ describe("timeline pagination", () => {
     expect(fetchingMorePosts({ startCount: null, itemCount: 40, remote: true })).toBe(true);
   });
 
-  it("loads again while the sentinel remains visible once the previous page settles", () => {
-    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: false })).toBe(
-      true,
-    );
-    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: true })).toBe(
-      false,
-    );
-    expect(shouldLoadNextPage({ intersecting: true, canLoad: true, loadingMore: false })).toBe(
-      true,
-    );
+  it("enables explicit pagination only when another page is ready", () => {
+    expect(canLoadNextPage({ source: "local", loadingMore: false })).toBe(true);
+    expect(canLoadNextPage({ source: "remote", loadingMore: true })).toBe(false);
+    expect(canLoadNextPage({ source: undefined, loadingMore: false })).toBe(false);
   });
 });
