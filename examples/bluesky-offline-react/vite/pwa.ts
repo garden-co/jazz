@@ -25,10 +25,10 @@ function serviceWorkerSource(shellAssets: string[]) {
   const revision = revisionFor(shellAssets);
   return `const shellCache = "jazz-bluesky-shell-${revision}";
 const mediaCache = "jazz-bluesky-media-v1";
-const mediaMetadataCache = "jazz-bluesky-media-metadata-v1";
 const mediaLimit = 100;
 const mediaMaxAge = 7 * 24 * 60 * 60 * 1000;
 const shellAssets = ${JSON.stringify(shellAssets)};
+const metadataPath = "/__pwa-media-metadata__";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -49,20 +49,20 @@ self.addEventListener("activate", (event) => {
 });
 
 function metadataRequest(url) {
-  return new Request(self.location.origin + "/__pwa-media-metadata__?url=" + encodeURIComponent(url));
+  return new Request(self.location.origin + metadataPath + "?url=" + encodeURIComponent(url));
 }
 
 async function trimMediaCache() {
-  const media = await caches.open(mediaCache);
-  const metadata = await caches.open(mediaMetadataCache);
+  const cache = await caches.open(mediaCache);
   const now = Date.now();
   const retained = [];
 
-  for (const request of await media.keys()) {
-    const timestampResponse = await metadata.match(metadataRequest(request.url));
+  for (const request of await cache.keys()) {
+    if (new URL(request.url).pathname === metadataPath) continue;
+    const timestampResponse = await cache.match(metadataRequest(request.url));
     const timestamp = Number(timestampResponse ? await timestampResponse.text() : 0);
     if (!timestamp || now - timestamp > mediaMaxAge) {
-      await Promise.all([media.delete(request), metadata.delete(metadataRequest(request.url))]);
+      await Promise.all([cache.delete(request), cache.delete(metadataRequest(request.url))]);
     } else {
       retained.push({ request, timestamp });
     }
@@ -70,27 +70,25 @@ async function trimMediaCache() {
 
   retained.sort((left, right) => left.timestamp - right.timestamp);
   for (const { request } of retained.slice(0, Math.max(0, retained.length - mediaLimit))) {
-    await Promise.all([media.delete(request), metadata.delete(metadataRequest(request.url))]);
+    await Promise.all([cache.delete(request), cache.delete(metadataRequest(request.url))]);
   }
 }
 
 async function updateMedia(request) {
   const response = await fetch(request);
   if (!response.ok && response.type !== "opaque") return response;
-  const [media, metadata] = await Promise.all([
-    caches.open(mediaCache),
-    caches.open(mediaMetadataCache),
-  ]);
+  const cache = await caches.open(mediaCache);
   await Promise.all([
-    media.put(request, response.clone()),
-    metadata.put(metadataRequest(request.url), new Response(String(Date.now()))),
+    cache.put(request, response.clone()),
+    cache.put(metadataRequest(request.url), new Response(String(Date.now()))),
   ]);
   await trimMediaCache();
   return response;
 }
 
 async function mediaResponse(request, event) {
-  const cached = await caches.match(request, { cacheName: mediaCache });
+  const cache = await caches.open(mediaCache);
+  const cached = await cache.match(request);
   const update = updateMedia(request).catch(() => undefined);
   if (cached) {
     event.waitUntil(update);
@@ -157,12 +155,6 @@ export function pwaPlugin(): Plugin {
         if (request.url === "/manifest.webmanifest") {
           response.setHeader("content-type", "application/manifest+json");
           response.end(JSON.stringify(manifest));
-          return;
-        }
-        if (request.url === "/service-worker.js") {
-          response.setHeader("content-type", "text/javascript");
-          response.setHeader("cache-control", "no-cache");
-          response.end(createPwaAssets([]).serviceWorker);
           return;
         }
         next();

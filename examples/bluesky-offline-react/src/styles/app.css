@@ -14,18 +14,9 @@ body {
   margin: auto;
   padding: 44px 0 64px;
 }
-.app-header,
-.brand-lockup,
-.account-card {
+.brand-lockup {
   display: flex;
   align-items: center;
-}
-.app-header {
-  justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 46px;
-}
-.brand-lockup {
   gap: 12px;
 }
 .brand-mark {
@@ -64,16 +55,7 @@ h2 {
   margin-bottom: 10px;
   font-size: clamp(1.45rem, 3vw, 1.85rem);
 }
-.app-header h1 {
-  font-size: clamp(1.85rem, 4vw, 2.25rem);
-}
-.account-card {
-  flex: none;
-  gap: 12px;
-}
 .account-identity {
-  display: grid;
-  justify-items: start;
   gap: 2px;
   min-width: 0;
   overflow: hidden;
@@ -84,7 +66,7 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.account-card > .rt-Button {
+.account-signout {
   margin-left: 4px;
 }
 .account-handle {
@@ -114,17 +96,7 @@ time {
   color: var(--gray-11);
   font-weight: 500;
 }
-.intro {
-  margin-bottom: 18px;
-}
-.intro-heading {
-  margin: 0;
-}
 .intro-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
   width: 100%;
   padding: 0;
   border: 0;
@@ -146,79 +118,23 @@ time {
 }
 .intro-content {
   overflow: hidden;
-  padding-top: 18px;
 }
-.intro-body {
-  margin-bottom: 0;
-}
-.composer {
-  display: grid;
-  gap: 13px;
-  margin-bottom: 38px;
-}
-.composer-heading,
-.composer-actions,
-.sync-banner,
-.section-heading,
-.timeline-title-row,
-.repost-reason,
-.post-header,
-.quoted-post-header,
-.post-actions,
-.reply-composer > div,
-.pagination-status,
-.app-footer {
-  display: flex;
-  align-items: center;
-}
-.composer-heading,
-.sync-banner,
-.section-heading,
-.app-footer {
-  justify-content: space-between;
-}
-.composer-heading {
-  gap: 16px;
-  color: var(--gray-11);
-  font-size: 0.78rem;
-}
-.composer-heading label,
 .reply-composer label {
   color: var(--gray-12);
   font-weight: 800;
 }
-.composer-actions {
-  justify-content: flex-end;
-}
 .sync-banner {
-  gap: 20px;
   margin: -18px 0 36px;
   background: var(--accent-a3);
 }
-.sync-banner div {
-  display: grid;
-  gap: 3px;
-}
 .section-heading {
-  align-items: flex-end;
-  gap: 20px;
   margin-bottom: 17px;
 }
-.timeline-title-row {
-  gap: 10px;
-}
-.timeline-title-row h2 {
-  margin-bottom: 0;
-}
-.feed,
 .thread-node,
 .timeline-thread {
-  display: grid;
-  gap: 11px;
   min-width: 0;
 }
 .repost-reason {
-  gap: 7px;
   min-width: 0;
   padding: 0 15px;
 }
@@ -233,18 +149,6 @@ time {
 .post-card.pending {
   border-color: var(--accent-6);
   background: var(--accent-a2);
-}
-.post-header {
-  gap: 11px;
-}
-.post-header > div {
-  display: grid;
-  min-width: 0;
-}
-.post-header strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .post-card > p {
   margin: 14px 0 0 47px;
@@ -286,12 +190,7 @@ time {
 .quoted-post {
   margin: 14px 0 0 47px;
 }
-.quoted-post-header {
-  gap: 8px;
-  min-width: 0;
-}
-.quoted-post-header time {
-  margin-left: auto;
+.quoted-post time {
   white-space: nowrap;
 }
 .quoted-post > p {
@@ -303,30 +202,15 @@ time {
   margin: 10px 0 0;
 }
 .post-actions {
-  gap: 8px;
   margin: 13px 0 0 47px;
 }
 .reply-composer {
-  display: grid;
-  gap: 8px;
   margin: 10px 0 0 47px;
   padding-top: 10px;
   border-top: 1px solid var(--gray-a6);
 }
-.reply-composer > div {
-  justify-content: flex-end;
-  gap: 8px;
-}
-.mention-link,
-.post-link {
-  color: var(--accent-9);
-  font-weight: 700;
-  text-underline-offset: 2px;
-}
 .thread-replies {
   position: relative;
-  display: grid;
-  gap: 11px;
   margin-left: 30px;
   padding-left: 18px;
 }
@@ -357,7 +241,6 @@ time {
   animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 .empty-state {
-  display: grid;
   justify-items: center;
   padding: 54px 24px;
   border: 1px dashed var(--gray-a7);
@@ -370,18 +253,10 @@ time {
   color: var(--gray-11);
 }
 .pagination-status {
-  justify-content: center;
-  gap: 8px;
   min-height: 32px;
   margin-top: 22px;
 }
-.pagination-status > span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .app-footer {
-  gap: 16px;
   margin-top: 52px;
   padding-top: 20px;
   border-top: 1px solid var(--gray-a6);
@@ -449,16 +324,6 @@ time {
 .error {
   color: var(--red-11);
 }
-.loading-screen {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 15px;
-  min-height: 100vh;
-}
-.loading-copy {
-  display: grid;
-}
 @keyframes post-enter {
   from {
     opacity: 0;
@@ -484,26 +349,15 @@ time {
     width: min(100% - 28px, 760px);
     padding: 24px 0 44px;
   }
-  .app-header {
-    gap: 12px;
-    margin-bottom: 32px;
-  }
   .brand-mark {
     width: 38px;
     height: 38px;
   }
-  .app-header h1 {
-    font-size: 1.55rem;
-    white-space: nowrap;
-  }
   .account-identity {
     max-width: 76px;
   }
-  .account-card > .rt-Button {
+  .account-signout {
     display: none;
-  }
-  .composer {
-    margin-bottom: 32px;
   }
   .post-card > p,
   .post-images,
@@ -518,13 +372,6 @@ time {
   .section-heading > p {
     max-width: 110px;
     text-align: right;
-  }
-  .sync-banner {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .sync-banner .rt-Button {
-    width: 100%;
   }
   .app-footer .rt-Button {
     display: inline-flex;

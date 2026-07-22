@@ -16,7 +16,7 @@ import {
 import { stableObjectId } from "./model/object-id.js";
 import { useConnectivity } from "./hooks/use-connectivity.js";
 import { useTimelineActions } from "./hooks/use-timeline-actions.js";
-import { useTimelineProjection, visibleRootCards } from "./hooks/use-timeline-projection.js";
+import { useTimelineProjection } from "./hooks/use-timeline-projection.js";
 import {
   AppFooter,
   AppHeader,
@@ -77,7 +77,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     reportApiReachable,
   });
   const hasMore = localTimelineWindow.hasMore || localQueryRefreshing || hasMoreRemoteRows;
-  const displayedTimelineItems = visibleRootCards(timelineItems, visibleItemCount);
+  const displayedTimelineItems = timelineItems.slice(0, visibleItemCount);
 
   useEffect(() => {
     setLocalTimelineLimit(initialTimelineLimit);

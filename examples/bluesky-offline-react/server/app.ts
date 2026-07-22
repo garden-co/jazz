@@ -104,8 +104,8 @@ export function createServer({ staticRoot, webOrigin = configuredWebOrigin }: Se
   // The browser asks for intent, not AppView cursors or projected rows.
   server.post("/api/timeline/more", async (c) => {
     const { did, session } = c.var.authentication;
-    const { cursor, hasMore, count } = await projectNextTimelinePage(did, session);
-    return c.json({ cursor, hasMore, count });
+    const { hasMore, count } = await projectNextTimelinePage(did, session);
+    return c.json({ hasMore, count });
   });
 
   server.get("/api/thread", async (c) => {

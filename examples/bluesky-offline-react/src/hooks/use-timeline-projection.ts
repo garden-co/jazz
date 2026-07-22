@@ -8,7 +8,7 @@ type TimelinePayload = {
   count?: number;
 };
 
-export function nextTimelinePageSource({
+function nextTimelinePageSource({
   cachedRowsRemaining,
   localQueryRefreshing,
   remoteRowsRemaining,
@@ -22,7 +22,7 @@ export function nextTimelinePageSource({
   return undefined;
 }
 
-export function needsMoreRootCards({
+function needsMoreRootCards({
   itemCount,
   targetItemCount,
 }: {
@@ -32,15 +32,11 @@ export function needsMoreRootCards({
   return itemCount < targetItemCount;
 }
 
-export function visibleRootCards<Item>(items: Item[], visibleItemCount: number) {
-  return items.slice(0, visibleItemCount);
-}
-
-export function nextVisibleRootCount(itemCount: number, visibleItemCount: number) {
+function nextVisibleRootCount(itemCount: number, visibleItemCount: number) {
   return Math.min(itemCount, visibleItemCount) + rootCardsPerPage;
 }
 
-export function canLoadNextPage({
+function canLoadNextPage({
   source,
   loadingMore,
 }: {
