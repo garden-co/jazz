@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canLoadNextPage,
-  fetchingMorePosts,
+  needsMoreRootCards,
   nextTimelinePageSource,
 } from "../../../src/hooks/use-timeline-projection.js";
 
@@ -36,10 +36,10 @@ describe("timeline pagination", () => {
     ).toBe("remote");
   });
 
-  it("keeps pagination visible until a locally cached page appears", () => {
-    expect(fetchingMorePosts({ startCount: 20, rowCount: 20, remote: false })).toBe(true);
-    expect(fetchingMorePosts({ startCount: 20, rowCount: 40, remote: false })).toBe(false);
-    expect(fetchingMorePosts({ startCount: null, rowCount: 40, remote: true })).toBe(true);
+  it("keeps loading until twenty new root cards appear", () => {
+    expect(needsMoreRootCards({ itemCount: 20, targetItemCount: 40 })).toBe(true);
+    expect(needsMoreRootCards({ itemCount: 39, targetItemCount: 40 })).toBe(true);
+    expect(needsMoreRootCards({ itemCount: 40, targetItemCount: 40 })).toBe(false);
   });
 
   it("enables explicit pagination only when another page is ready", () => {
