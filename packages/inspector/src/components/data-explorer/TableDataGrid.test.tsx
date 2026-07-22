@@ -111,6 +111,7 @@ describe("TableDataGrid", () => {
   });
 
   beforeEach(() => {
+    localStorage.clear();
     currentRows = [
       {
         id: "row-2",
@@ -121,6 +122,10 @@ describe("TableDataGrid", () => {
         owner_id: "owner-a",
         blob: new Uint8Array([1, 2]),
         status: "open",
+        $createdAt: new Date("2026-07-17T08:00:00.000Z"),
+        $createdBy: "seed-user",
+        $updatedAt: new Date("2026-07-17T09:00:00.000Z"),
+        $updatedBy: "editor-user",
       },
       {
         id: "row-1",
@@ -131,6 +136,10 @@ describe("TableDataGrid", () => {
         owner_id: "owner-b",
         blob: new Uint8Array([5, 6]),
         status: "closed",
+        $createdAt: new Date("2026-07-16T08:00:00.000Z"),
+        $createdBy: "import-user",
+        $updatedAt: new Date("2026-07-16T09:00:00.000Z"),
+        $updatedBy: "import-user",
       },
     ];
     currentReferenceRowsByTable = {
@@ -198,16 +207,126 @@ describe("TableDataGrid", () => {
     // The toolbar actions are labelled via aria-label (their hover hint is now a
     // Popover-API tooltip, not a native title attribute).
     expect(screen.getByRole("link", { name: "Schema" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Customize columns" })).not.toBeNull();
     expect(screen.getByRole("button", { name: "Insert row" })).not.toBeNull();
     expect(screen.getByRole("button", { name: "Delete row(s)" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "meta" })).not.toBeNull();
+    // Provenance timestamps are included by default as the last two columns.
+    expect(screen.getByRole("columnheader", { name: "$createdAt" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "$updatedAt" })).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$createdBy" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "$updatedBy" })).toBeNull();
+    const dataColumnHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "")
+      .filter((header) => header.length > 0);
+    expect(dataColumnHeaders.slice(-2)).toEqual(["$createdAt", "$updatedAt"]);
     expect(screen.getByText("row-2")).not.toBeNull();
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
+    expect(screen.getByText("2026-07-17T08:00:00.000Z")).not.toBeNull();
+    expect(screen.getByText("2026-07-17T09:00:00.000Z")).not.toBeNull();
+    expect(screen.queryByText("seed-user")).toBeNull();
+    expect(screen.queryByText("editor-user")).toBeNull();
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
+  });
+
+  it("can show creator and updater columns", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    const createdByCheckbox = screen.getByRole("checkbox", { name: "Show $createdBy" });
+    const updatedByCheckbox = screen.getByRole("checkbox", { name: "Show $updatedBy" });
+    expect((createdByCheckbox as HTMLInputElement).checked).toBe(false);
+    expect((updatedByCheckbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(createdByCheckbox);
+    fireEvent.click(updatedByCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(screen.getByRole("columnheader", { name: "$createdBy" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "$updatedBy" })).not.toBeNull();
+    const dataColumnHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "")
+      .filter((header) => header.length > 0);
+    expect(dataColumnHeaders.slice(-4)).toEqual([
+      "$createdAt",
+      "$createdBy",
+      "$updatedAt",
+      "$updatedBy",
+    ]);
+    expect(screen.getByText("seed-user")).not.toBeNull();
+    expect(screen.getByText("editor-user")).not.toBeNull();
+  });
+
+  it("can hide and show a column", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    expect(screen.getByRole("dialog", { name: "Customize columns" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.queryByRole("columnheader", { name: "done" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
+  });
+
+  it("reorders a column", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move owner_id up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    const headers = screen.getAllByRole("columnheader").map((header) => header.textContent ?? "");
+    expect(headers.indexOf("owner_id")).toBeLessThan(headers.indexOf("meta"));
+  });
+
+  it("restores column choices after remounting", () => {
+    const { unmount } = renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move owner_id up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(localStorage.length).toBe(1);
+    expect(
+      JSON.parse(
+        localStorage.getItem("jazz.inspector.dataExplorer.columnPreferences.todos") ?? "[]",
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "done", visible: false }),
+        expect.objectContaining({ id: "owner_id", visible: true }),
+      ]),
+    );
+
+    unmount();
+    renderGrid();
+
+    expect(screen.queryByRole("columnheader", { name: "done" })).toBeNull();
+    const restoredHeaders = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent ?? "");
+    expect(restoredHeaders.indexOf("owner_id")).toBeLessThan(restoredHeaders.indexOf("meta"));
+  });
+
+  it("discards draft column changes when customization is cancelled", () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Customize columns" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show title" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
   });
 
   it("renders null cell values with a marker", () => {
@@ -244,6 +363,7 @@ describe("TableDataGrid", () => {
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
+      select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
       orderBy: [["id", "asc"]],
       limit: 26,
       offset: 0,
@@ -527,14 +647,15 @@ describe("TableDataGrid", () => {
     expect(screen.getByLabelText("Edit title")).not.toBeNull();
   });
 
-  it("caps data column width so long cell values do not stretch the whole grid", () => {
+  it("uses uncapped flexible widths so visible data columns can fill the grid", () => {
     renderGrid();
 
     const titleMeasuringCell = document.querySelector(
       '[data-measuring-cell-key="title"]',
     ) as HTMLElement | null;
     expect(titleMeasuringCell).not.toBeNull();
-    expect(titleMeasuringCell?.style.maxWidth).toBe("360px");
+    expect(titleMeasuringCell?.style.minWidth).toBe("120px");
+    expect(titleMeasuringCell?.style.maxWidth).toBe("");
   });
 
   it("renders without frozen columns so actions stay last and id scrolls normally", () => {
