@@ -7716,7 +7716,7 @@ fn evaluate_aggregate_expr(
 }
 
 type SourceRecord = (Vec<u8>, Bytes);
-type RankedRecord = (Vec<TopBySortPart>, Bytes);
+type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TopBySortPart {
@@ -7810,19 +7810,42 @@ fn top_by_window_from_records(
     descriptor: RecordDescriptor,
     records: Vec<(Bytes, i64)>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
     let mut ranked = Vec::new();
     for (record, weight) in records {
         if weight > 0 {
-            ranked.push((top_by_sort_key(descriptor, &record, top_by)?, record));
+            ranked.push((
+                top_by_sort_key(descriptor, &record, top_by)?,
+                record,
+                weight,
+            ));
         }
     }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(ranked
-        .into_iter()
-        .skip(top_by.offset)
-        .take(top_by.limit)
-        .collect())
+    // Full record bytes are the final tie-breaker (INV-QUERY-23); the total
+    // order must not depend on arrangement iteration order.
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies m
+    // ordinals, and offset/limit consume copies, not distinct records. The
+    // arithmetic stays in u64 because limit uses usize::MAX as the unbounded
+    // sentinel.
+    let mut window = Vec::new();
+    let mut to_skip = top_by.offset as u64;
+    let mut remaining = top_by.limit as u64;
+    for (_, record, weight) in ranked {
+        if remaining == 0 {
+            break;
+        }
+        let copies = weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = available.min(remaining);
+        if taken > 0 {
+            window.push((record, taken as i64));
+            remaining -= taken;
+        }
+    }
+    Ok(window)
 }
 
 fn top_by_window_before_from_deltas(
@@ -7830,27 +7853,18 @@ fn top_by_window_before_from_deltas(
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    // Reconstruct the pre-tick multiset keyed by record bytes — the same
+    // identity the arrangement consolidates by. Keying by sort key would
+    // collapse distinct records that tie through (order_cols, tie_cols).
+    let mut records = BTreeMap::<Bytes, i64>::new();
     for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
-        records.insert(key, (record, weight));
+        *records.entry(record).or_default() += weight;
     }
     for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), &top_by.sort_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
     }
-    top_by_window_from_records(
-        descriptor,
-        records
-            .into_iter()
-            .map(|(_, (record, weight))| (record, weight))
-            .collect(),
-        top_by,
-    )
+    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
 }
 
 fn top_by_sort_key(
@@ -7871,13 +7885,16 @@ fn top_by_sort_key(
         .collect()
 }
 
-fn diff_record_windows(before: Vec<RankedRecord>, after: Vec<RankedRecord>) -> Vec<RecordDelta> {
+fn diff_record_windows(
+    before: Vec<WindowedRecord>,
+    after: Vec<WindowedRecord>,
+) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (_, record) in before {
-        *weights.entry(record).or_default() -= 1;
+    for (record, copies) in before {
+        *weights.entry(record).or_default() -= copies;
     }
-    for (_, record) in after {
-        *weights.entry(record).or_default() += 1;
+    for (record, copies) in after {
+        *weights.entry(record).or_default() += copies;
     }
     let mut retractions = Vec::new();
     let mut insertions = Vec::new();

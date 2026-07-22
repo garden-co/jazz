@@ -4703,6 +4703,140 @@ fn top_by_uses_stable_tie_field() {
     );
 }
 
+fn union_history_top_by(offset: usize, limit: usize) -> GraphBuilder {
+    GraphBuilder::top_by(
+        GraphBuilder::union([
+            GraphBuilder::table("history"),
+            GraphBuilder::table("history_shadow"),
+        ]),
+        ["row"],
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        offset,
+        limit,
+    )
+}
+
+#[test]
+fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 2))
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 10, 1, "first"), 2)]
+    );
+}
+
+#[test]
+fn top_by_offset_splits_duplicate_copies_across_boundary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match values[1] {
+        Value::U64(stamp) => stamp,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+}
+
+#[test]
+fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match values[1] {
+        Value::U64(stamp) => stamp,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 20, 1, "second"), -1),
+            (history_values(1, 10, 1, "first"), 1),
+        ]
+    );
+}
+
+#[test]
+fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "alpha"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "beta"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 1))
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 10, 1, "alpha"), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "alpha"), -1),
+            (history_values(1, 10, 1, "beta"), 1),
+        ]
+    );
+}
+
 fn metric_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "metrics",
