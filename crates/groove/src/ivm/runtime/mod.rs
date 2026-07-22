@@ -27,7 +27,8 @@ use crate::ivm::{
     IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
     NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp,
 };
 use crate::records::{
     self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
@@ -2075,9 +2076,6 @@ impl IvmRuntime {
                 offset,
                 limit,
             } => {
-                if *limit == 0 {
-                    return Err(IvmRuntimeError::UnsupportedOperator);
-                }
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
@@ -5749,7 +5747,7 @@ where
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
+        if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -7826,23 +7824,29 @@ fn top_by_window_from_records(
     ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
     // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies m
-    // ordinals, and offset/limit consume copies, not distinct records. The
-    // arithmetic stays in u64 because limit uses usize::MAX as the unbounded
-    // sentinel.
+    // ordinals, and offset/limit consume copies, not distinct records.
     let mut window = Vec::new();
-    let mut to_skip = top_by.offset as u64;
-    let mut remaining = top_by.limit as u64;
+    let mut to_skip = top_by.offset;
+    let mut remaining = match top_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
     for (_, record, weight) in ranked {
-        if remaining == 0 {
+        if remaining == Some(0) {
             break;
         }
         let copies = weight as u64;
         let available = copies.saturating_sub(to_skip);
         to_skip = to_skip.saturating_sub(copies);
-        let taken = available.min(remaining);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
         if taken > 0 {
-            window.push((record, taken as i64));
-            remaining -= taken;
+            window.push((
+                record,
+                i64::try_from(taken).expect("taken copies cannot exceed positive record weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
         }
     }
     Ok(window)
@@ -8159,6 +8163,62 @@ mod tests {
             ("src", ColumnType::U64.value_type()),
             ("dst", ColumnType::U64.value_type()),
         ])
+    }
+
+    #[test]
+    fn top_by_distinguishes_finite_max_from_unbounded_limit() {
+        // Direct helper coverage is intentional: constructing more than
+        // u64::MAX derivations through public tables is not feasible, while
+        // synthetic weights exercise the semantic boundary without expanding
+        // multiplicity into individual records.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let records = [1, 2, 3]
+            .into_iter()
+            .map(|id| {
+                (
+                    Bytes::from(descriptor.create(&[Value::U64(id)]).unwrap()),
+                    i64::MAX,
+                )
+            })
+            .collect::<Vec<_>>();
+        let top_by = |limit| TopByOp {
+            group_fields: Vec::new(),
+            group_field_indices: Vec::new(),
+            order_fields: vec![TopByOrderField {
+                field: "id".to_owned(),
+                direction: TopByDirection::Asc,
+            }],
+            tie_fields: Vec::new(),
+            sort_field_indices: vec![0],
+            sort_directions: vec![TopByDirection::Asc],
+            offset: 0,
+            limit,
+        };
+
+        let finite = top_by_window_from_records(
+            descriptor,
+            records.clone(),
+            &top_by(TopByLimit::Finite(u64::MAX)),
+        )
+        .unwrap();
+        assert_eq!(
+            finite
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, 1]
+        );
+
+        let unbounded =
+            top_by_window_from_records(descriptor, records, &top_by(TopByLimit::Unbounded))
+                .unwrap();
+        assert_eq!(
+            unbounded
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, i64::MAX]
+        );
     }
 
     fn recursive_reach_graph() -> GraphBuilder {

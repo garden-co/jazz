@@ -193,9 +193,9 @@ A `TopBy` operator has:
   ordering.
 - `tie_cols`: stable fields appended after `order_cols` to make the total order
   deterministic.
-- `offset` and `limit`: the retained window bounds. `limit` may be finite or may
-  represent an unbounded retained suffix; jazz lowering uses `usize::MAX` for an
-  omitted ordered-query limit.
+- `offset` and `limit`: the retained window bounds. `offset` is a `u64`, and
+  `limit` is represented explicitly as `TopByLimit::Finite(u64)` or
+  `TopByLimit::Unbounded`. A finite zero limit denotes an empty window.
 - `output`: the original input record, optionally with implementation-defined
   rank metadata only when the descriptor declares it.
 
@@ -344,10 +344,11 @@ graph.
 - 🔶 **Weighted duplicates at the jazz boundary.** `TopBy` windows are
   bag-semantic (`INV-QUERY-24`), so a maintained ordered subscription can
   observe a row with multiplicity > 1 when upstream unions or projections
-  produce duplicate records. Decide whether jazz lowering must guarantee
-  duplicate-free `TopBy` inputs (row identity present in the record, as the
-  row-UUID `tie_cols` default already provides) or whether jazz subscription
-  delivery must define rendering for weighted window rows.
+  produce duplicate records. Decide whether jazz lowering must guarantee at
+  most one derivation per logical result identity or whether jazz subscription
+  delivery must define rendering for weighted window rows. Carrying `row_uuid`
+  as a tie field makes ordering deterministic but does not enforce multiplicity
+  one.
 - 🔶 **COUNT aggregation.** Add a terminal count shape with weighted-delta
   maintenance and clear output descriptor semantics.
 - 🔶 **Projection memcpy optimization.** `Project` should avoid unnecessary row

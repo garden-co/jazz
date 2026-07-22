@@ -238,11 +238,11 @@ the comparison key. This makes the chosen row deterministic without claiming an
 application-visible order. Ordered maintained queries lower into groove `TopBy`,
 preserving user order terms and appending `row_uuid` as the stable tie field;
 `offset` is part of the retained window. When the jazz query omits `limit`,
-lowering represents the unbounded ordered suffix with `usize::MAX`, matching ch.
-6's promise that maintained ordered subscriptions can omit a finite limit while
-still preserving ordered membership. Unordered `limit > 1` and unordered nonzero
-`offset` remain unsupported until they either gain explicit order semantics or a
-separate maintained lowering.
+lowering represents the ordered suffix with `TopByLimit::Unbounded`, matching
+ch. 6's promise that maintained ordered subscriptions can omit a finite limit
+while still preserving ordered membership. Unordered `limit > 1` and unordered
+nonzero `offset` remain unsupported until they either gain explicit order
+semantics or a separate maintained lowering.
 
 _Further invariants._ `INV-LOWER-13` — aggregation, ordinary read ordering,
 general pagination, and projection are applied by the node _after_ row

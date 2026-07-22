@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, IvmRuntimeError, LiteralValue, PlanExpr, PredicateExpr,
-    ProjectField, StaticScanSpec, TopByOrder,
+    ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -213,36 +213,36 @@ fn history_arg_min() -> GraphBuilder {
     GraphBuilder::arg_min_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
 }
 
-fn history_top_by_stamp_asc(limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_asc(limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::asc("stamp")],
         ["node"],
         0,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
-fn history_top_by_stamp_desc(limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_desc(limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::desc("stamp")],
         ["node"],
         0,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
-fn history_top_by_stamp_asc_offset(offset: usize, limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_asc_offset(offset: u64, limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::asc("stamp")],
         ["node"],
         offset,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
@@ -4497,6 +4497,27 @@ fn top_by_hydrates_limit_two() {
 }
 
 #[test]
+fn top_by_finite_zero_stays_empty() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let mut database = Database::new(history_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(0))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
+#[test]
 fn top_by_boundary_insert_and_delete_updates_window() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
@@ -4656,7 +4677,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
             [TopByOrder::asc("score")],
             ["id"],
             0,
-            1,
+            TopByLimit::Finite(1),
         ))
         .unwrap();
     assert_eq!(
@@ -4703,7 +4724,7 @@ fn top_by_uses_stable_tie_field() {
     );
 }
 
-fn union_history_top_by(offset: usize, limit: usize) -> GraphBuilder {
+fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::union([
             GraphBuilder::table("history"),
@@ -4713,7 +4734,7 @@ fn union_history_top_by(offset: usize, limit: usize) -> GraphBuilder {
         [TopByOrder::asc("stamp")],
         ["node"],
         offset,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
