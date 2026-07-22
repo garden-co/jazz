@@ -22,5 +22,9 @@ rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = fal
   "lz4",
   "zstd",
 ] }
-slatedb = { version = "0.14.1", default-features = false, features = ["moka", "zstd"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+slatedb = { version = "0.14.1", default-features = false, features = ["moka"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+postgres = "0.19"
+postcard = "1.1.3"
+rusqlite = { version = "0.34", features = ["bundled"] }
+redb = "2"
