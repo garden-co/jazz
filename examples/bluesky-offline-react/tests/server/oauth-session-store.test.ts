@@ -31,9 +31,11 @@ describe("encrypted authentication storage", () => {
       await store.set("alice", { token: "first" });
       await store.set("alice", { token: "second" });
 
-      const row = await database.one(app.oauthSessions.where({
-        sessionKey: { eq: "test:alice" },
-      }));
+      const row = await database.one(
+        app.oauthSessions.where({
+          sessionKey: { eq: "test:alice" },
+        }),
+      );
       expect(row?.sessionJson).not.toContain("second");
       expect(await store.get("alice")).toEqual({ token: "second" });
 

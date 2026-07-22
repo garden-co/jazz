@@ -29,10 +29,12 @@ export class OperationError extends Error {
 }
 
 export async function fetchTimelineFeed(session: SessionFetcher, cursor?: string) {
-  const response = await readFromAppView(() => new Agent(session).getTimeline({
-    limit: timelinePageSize,
-    ...(cursor ? { cursor } : {}),
-  }));
+  const response = await readFromAppView(() =>
+    new Agent(session).getTimeline({
+      limit: timelinePageSize,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
   return response.data;
 }
 
@@ -55,9 +57,7 @@ export async function fetchProfile(actor: string, session: SessionFetcher) {
 
 export function recordKey(uri: string | undefined, did: string, collection: string) {
   const parsed = parseAtRecordUri(uri);
-  return parsed?.repo === did && parsed.collection === collection
-    ? parsed.rkey
-    : undefined;
+  return parsed?.repo === did && parsed.collection === collection ? parsed.rkey : undefined;
 }
 
 function operationError(nsid: string, error: unknown) {

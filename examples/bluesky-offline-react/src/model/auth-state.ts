@@ -5,7 +5,10 @@ export type AuthenticationState =
   | { kind: "signed-in"; session: JazzCredentials }
   | { kind: "unavailable"; message: string };
 
-export function keepMountedSession(current: JazzCredentials | undefined, refreshed: JazzCredentials) {
+export function keepMountedSession(
+  current: JazzCredentials | undefined,
+  refreshed: JazzCredentials,
+) {
   return current?.did === refreshed.did ? current : refreshed;
 }
 
@@ -27,10 +30,7 @@ export async function refreshAuthentication(
   try {
     response = await request();
   } catch {
-    return cachedOrUnavailable(
-      cachedCredentials,
-      "Could not reach the BFF to check your session.",
-    );
+    return cachedOrUnavailable(cachedCredentials, "Could not reach the BFF to check your session.");
   }
 
   if (response.status === 401 || response.status === 403) {
@@ -48,18 +48,17 @@ export async function refreshAuthentication(
   try {
     value = await response.json();
   } catch {
-    return cachedOrUnavailable(
-      cachedCredentials,
-      "The BFF returned invalid Jazz credentials.",
-    );
+    return cachedOrUnavailable(cachedCredentials, "The BFF returned invalid Jazz credentials.");
   }
-  if (typeof value !== "object" || value === null
-    || !("did" in value) || typeof value.did !== "string"
-    || !("token" in value) || typeof value.token !== "string") {
-    return cachedOrUnavailable(
-      cachedCredentials,
-      "The BFF returned invalid Jazz credentials.",
-    );
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("did" in value) ||
+    typeof value.did !== "string" ||
+    !("token" in value) ||
+    typeof value.token !== "string"
+  ) {
+    return cachedOrUnavailable(cachedCredentials, "The BFF returned invalid Jazz credentials.");
   }
   return { kind: "signed-in", session: { did: value.did, token: value.token } };
 }

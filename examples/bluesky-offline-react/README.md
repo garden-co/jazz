@@ -28,26 +28,26 @@ Bluesky PDS <──── Bluesky adapter <──── Jazz bridge <───�
 
 The example keeps the boundary between the authoritative system and Jazz deliberately narrow:
 
-| Component                       | Responsibility                                                                                | Knows about Jazz?           | Knows about Bluesky?                |
-| ------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------- |
-| `server/app.ts`                 | Session guard, HTTP validation, and error mapping                                             | Authentication only         | Only application-level route inputs |
-| `server/auth.ts`                | Compose ATProto OAuth, opaque BFF sessions, and Jazz JWTs                                     | Yes                         | Yes                                 |
-| `server/oauth-session-store.ts` | Encrypt and persist authentication material in a backend-only Jazz table                      | Yes                         | No                                  |
-| `server/signing-keys.ts`        | Persist the stable ES256 key used to sign Jazz JWTs                                           | Through its encrypted store | No                                  |
-| `server/jazz.ts`                | Shared server-side Jazz context                                                               | Yes                         | No                                  |
-| `server/bluesky.ts`             | Read from AppView; write to the PDS                                                           | No                          | Yes                                 |
-| `server/bridge.ts`              | Fetch authoritative reads, apply ordered PDS writes, and hand their results to the projection | Through its projection      | Yes                                 |
-| `server/projection.ts`          | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                         | Yes                                 |
-| `schema.ts`                     | Local relational projection and pending intentions                                            | Yes                         | No protocol calls                   |
-| `permissions.ts`                | Client access to projected rows and locally queued intentions                                  | Yes                         | No                                  |
-| `shared/pending-operations.ts`  | Serialise and validate the offline-write contract                                              | Describes intention rows    | Describes source operations         |
-| `src/Timeline.tsx`              | Compose reactive Jazz data, connectivity, actions, and presentation                           | Through its data and actions | Only calls the thread trigger route |
-| `src/model/timeline-data.ts`    | Define the reactive Jazz query and turn its inferred rows into display threads                | Yes                         | No                                  |
-| `src/hooks/use-timeline-actions.ts` | Apply optimistic posts and reactions to Jazz before asking the outbox to reconcile them    | Yes                         | Through the outbox                  |
-| `src/hooks/use-timeline-projection.ts` | Trigger and paginate ATProto-to-Jazz projection                                        | No                          | Knows only projection metadata      |
-| `src/hooks/use-outbox.ts`       | Serialise retries of queued intentions                                                        | Yes                         | Calls the reconcile route           |
-| `src/components/TimelineView.tsx` | Presentational React components                                                             | No                          | No                                  |
-| `vite/pwa.ts`                   | Generate the install manifest and service worker                                              | No                          | Keeps API traffic network-only      |
+| Component                              | Responsibility                                                                                | Knows about Jazz?            | Knows about Bluesky?                |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------- | ----------------------------------- |
+| `server/app.ts`                        | Session guard, HTTP validation, and error mapping                                             | Authentication only          | Only application-level route inputs |
+| `server/auth.ts`                       | Compose ATProto OAuth, opaque BFF sessions, and Jazz JWTs                                     | Yes                          | Yes                                 |
+| `server/oauth-session-store.ts`        | Encrypt and persist authentication material in a backend-only Jazz table                      | Yes                          | No                                  |
+| `server/signing-keys.ts`               | Persist the stable ES256 key used to sign Jazz JWTs                                           | Through its encrypted store  | No                                  |
+| `server/jazz.ts`                       | Shared server-side Jazz context                                                               | Yes                          | No                                  |
+| `server/bluesky.ts`                    | Read from AppView; write to the PDS                                                           | No                           | Yes                                 |
+| `server/bridge.ts`                     | Fetch authoritative reads, apply ordered PDS writes, and hand their results to the projection | Through its projection       | Yes                                 |
+| `server/projection.ts`                 | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                          | Yes                                 |
+| `schema.ts`                            | Local relational projection and pending intentions                                            | Yes                          | No protocol calls                   |
+| `permissions.ts`                       | Client access to projected rows and locally queued intentions                                 | Yes                          | No                                  |
+| `shared/pending-operations.ts`         | Serialise and validate the offline-write contract                                             | Describes intention rows     | Describes source operations         |
+| `src/Timeline.tsx`                     | Compose reactive Jazz data, connectivity, actions, and presentation                           | Through its data and actions | Only calls the thread trigger route |
+| `src/model/timeline-data.ts`           | Define the reactive Jazz query and turn its inferred rows into display threads                | Yes                          | No                                  |
+| `src/hooks/use-timeline-actions.ts`    | Apply optimistic posts and reactions to Jazz before asking the outbox to reconcile them       | Yes                          | Through the outbox                  |
+| `src/hooks/use-timeline-projection.ts` | Trigger and paginate ATProto-to-Jazz projection                                               | No                           | Knows only projection metadata      |
+| `src/hooks/use-outbox.ts`              | Serialise retries of queued intentions                                                        | Yes                          | Calls the reconcile route           |
+| `src/components/TimelineView.tsx`      | Presentational React components                                                               | No                           | No                                  |
+| `vite/pwa.ts`                          | Generate the install manifest and service worker                                              | No                           | Keeps API traffic network-only      |
 
 Tests live under `tests/`, grouped by the boundary they exercise: `server`, `client`, `shared`, or `tooling`. Client tests mirror the `components`, `model`, and `hooks` source folders, keeping runtime modules uncluttered and making each test's scope visible from its path.
 

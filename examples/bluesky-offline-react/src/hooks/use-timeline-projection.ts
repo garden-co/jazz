@@ -100,7 +100,7 @@ export function useTimelineProjection({
         cursor ? `/api/timeline?cursor=${encodeURIComponent(cursor)}` : "/api/timeline",
       );
       if (!response.ok) throw new Error("Timeline projection failed");
-      const result = await response.json() as TimelinePayload;
+      const result = (await response.json()) as TimelinePayload;
       if (generation !== requestGeneration.current) return;
       reportApiReachable(true);
       if (cursor !== null || !paginationStarted.current) {
@@ -142,7 +142,8 @@ export function useTimelineProjection({
   }, [browserOnline, hasLocalRows, localQueryReady]);
 
   useEffect(() => {
-    if (localStartCount === null || localFetchStartedAt === null || itemCount <= localStartCount) return;
+    if (localStartCount === null || localFetchStartedAt === null || itemCount <= localStartCount)
+      return;
     const remaining = Math.max(0, minimumSpinnerDuration - (Date.now() - localFetchStartedAt));
     const timer = window.setTimeout(() => {
       setLocalStartCount(null);
@@ -161,31 +162,34 @@ export function useTimelineProjection({
   useEffect(() => {
     const sentinel = loadMoreRef.current;
     if (!sentinel) return;
-    const observer = new IntersectionObserver((entries) => {
-      const intersecting = entries.some((entry) => entry.isIntersecting);
-      const source = nextTimelinePageSource({
-        cachedRowsRemaining,
-        localQueryRefreshing,
-        remoteRowsRemaining: Boolean(nextCursor && hasMore),
-      });
-      const loadingMore = fetchingMorePosts({
-        localStartCount,
-        itemCount,
-        remote: remoteLoadingMore,
-      });
-      const nextState = nextInfiniteScrollState({
-        armed: loadMoreArmed.current,
-        intersecting,
-        canLoad: itemCount > 0 && source !== undefined && !loadingMore,
-      });
-      loadMoreArmed.current = nextState.armed;
-      if (!nextState.trigger) return;
-      if (source === "local") {
-        setLocalStartCount(itemCount);
-        setLocalFetchStartedAt(Date.now());
-        revealCachedRows();
-      } else if (source === "remote" && nextCursor) loadPage(nextCursor);
-    }, { rootMargin: "500px" });
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const intersecting = entries.some((entry) => entry.isIntersecting);
+        const source = nextTimelinePageSource({
+          cachedRowsRemaining,
+          localQueryRefreshing,
+          remoteRowsRemaining: Boolean(nextCursor && hasMore),
+        });
+        const loadingMore = fetchingMorePosts({
+          localStartCount,
+          itemCount,
+          remote: remoteLoadingMore,
+        });
+        const nextState = nextInfiniteScrollState({
+          armed: loadMoreArmed.current,
+          intersecting,
+          canLoad: itemCount > 0 && source !== undefined && !loadingMore,
+        });
+        loadMoreArmed.current = nextState.armed;
+        if (!nextState.trigger) return;
+        if (source === "local") {
+          setLocalStartCount(itemCount);
+          setLocalFetchStartedAt(Date.now());
+          revealCachedRows();
+        } else if (source === "remote" && nextCursor) loadPage(nextCursor);
+      },
+      { rootMargin: "500px" },
+    );
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [

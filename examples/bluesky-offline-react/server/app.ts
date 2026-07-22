@@ -14,11 +14,7 @@ import {
   oauthScope,
   restoreBffSession,
 } from "./auth.js";
-import {
-  projectThread,
-  projectTimelinePage,
-  reconcileOperations,
-} from "./bridge.js";
+import { projectThread, projectTimelinePage, reconcileOperations } from "./bridge.js";
 import { OperationError } from "./bluesky.js";
 
 const configuredWebOrigin = process.env.WEB_ORIGIN ?? "http://127.0.0.1:3001";
@@ -35,10 +31,7 @@ type ServerEnvironment = {
   };
 };
 
-export function createServer({
-  staticRoot,
-  webOrigin = configuredWebOrigin,
-}: ServerOptions = {}) {
+export function createServer({ staticRoot, webOrigin = configuredWebOrigin }: ServerOptions = {}) {
   const server = new Hono<ServerEnvironment>();
   const secureCookies = new URL(webOrigin).protocol === "https:";
   const cookieOptions = {
@@ -103,7 +96,11 @@ export function createServer({
   // HTTP triggers source reads and writes; projected data reaches React through Jazz.
   server.get("/api/timeline", async (c) => {
     const { did, session } = c.var.authentication;
-    const { cursor, hasMore, count } = await projectTimelinePage(did, session, c.req.query("cursor"));
+    const { cursor, hasMore, count } = await projectTimelinePage(
+      did,
+      session,
+      c.req.query("cursor"),
+    );
     return c.json({ cursor, hasMore, count });
   });
 
@@ -127,13 +124,11 @@ export function createServer({
 
   if (staticRoot) {
     const isBackendPath = (path: string) =>
-      path === "/api"
-      || path.startsWith("/api/")
-      || path.startsWith("/.well-known/");
+      path === "/api" || path.startsWith("/api/") || path.startsWith("/.well-known/");
     const serveAsset = serveStatic<ServerEnvironment>({ root: staticRoot });
     const serveIndex = serveStatic<ServerEnvironment>({ root: staticRoot, path: "index.html" });
 
-    server.use("*", (c, next) => isBackendPath(c.req.path) ? next() : serveAsset(c, next));
+    server.use("*", (c, next) => (isBackendPath(c.req.path) ? next() : serveAsset(c, next)));
     server.notFound(async (c) => {
       if (c.req.method !== "GET" || isBackendPath(c.req.path)) {
         return c.json({ error: "not found" }, 404);

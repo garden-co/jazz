@@ -18,11 +18,21 @@ vi.mock("@atproto/oauth-client-node", () => ({
 vi.mock("jose", () => ({
   importJWK: vi.fn().mockResolvedValue("private-key"),
   SignJWT: class SignJWT {
-    setProtectedHeader() { return this; }
-    setIssuer() { return this; }
-    setIssuedAt() { return this; }
-    setExpirationTime() { return this; }
-    sign() { return Promise.resolve("signed-token"); }
+    setProtectedHeader() {
+      return this;
+    }
+    setIssuer() {
+      return this;
+    }
+    setIssuedAt() {
+      return this;
+    }
+    setExpirationTime() {
+      return this;
+    }
+    sign() {
+      return Promise.resolve("signed-token");
+    }
   },
 }));
 

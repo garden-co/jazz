@@ -19,9 +19,12 @@ const later = {
 
 describe("outbox delivery", () => {
   it("sends intentions chronologically and stops at the failed operation", async () => {
-    const request = vi.fn()
+    const request = vi
+      .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Invalid post" }), { status: 400 }));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "Invalid post" }), { status: 400 }),
+      );
     const markFailed = vi.fn();
     const reportApiReachable = vi.fn();
 
@@ -40,9 +43,11 @@ describe("outbox delivery", () => {
   });
 
   it("keeps an intention queued when authentication can be refreshed", async () => {
-    const request = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ error: "Session expired" }), { status: 401 }),
-    );
+    const request = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "Session expired" }), { status: 401 }),
+      );
     const markFailed = vi.fn();
     const reportApiReachable = vi.fn();
 

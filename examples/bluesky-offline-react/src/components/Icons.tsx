@@ -20,9 +20,7 @@ export function DisclosureIcon() {
 }
 
 export function LikeIcon({ active }: { active: boolean }) {
-  return active
-    ? <HeartFilledIcon aria-hidden="true" />
-    : <HeartIcon aria-hidden="true" />;
+  return active ? <HeartFilledIcon aria-hidden="true" /> : <HeartIcon aria-hidden="true" />;
 }
 
 export function ReplyIcon() {

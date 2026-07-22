@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import {
-  formatObjectId,
-  objectIdKey,
-  parseAtRecordUri,
-} from "../../shared/identifiers.js";
+import { formatObjectId, objectIdKey, parseAtRecordUri } from "../../shared/identifiers.js";
 import { stableObjectId as serverObjectId } from "../../server/projection.js";
 import { stableObjectId as browserObjectId } from "../../src/model/object-id.js";
 

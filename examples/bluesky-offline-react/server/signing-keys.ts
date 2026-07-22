@@ -17,10 +17,7 @@ const signingKeyNamespace = "jazz-signing-key:";
 const signingKeyName = "es256";
 
 export async function loadOrCreateJazzSigningKeys(database: Db) {
-  const store = createEncryptedValueStore<JazzSigningKeyPair>(
-    database,
-    signingKeyNamespace,
-  );
+  const store = createEncryptedValueStore<JazzSigningKeyPair>(database, signingKeyNamespace);
   const stored = await store.get(signingKeyName);
   if (stored) return stored;
 

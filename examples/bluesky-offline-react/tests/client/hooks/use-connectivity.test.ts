@@ -16,7 +16,9 @@ describe("API connectivity", () => {
   it("reports whether the BFF health endpoint is reachable", async () => {
     await expect(checkApiReachable(vi.fn().mockResolvedValue({ ok: true }))).resolves.toBe(true);
     await expect(checkApiReachable(vi.fn().mockResolvedValue({ ok: false }))).resolves.toBe(false);
-    await expect(checkApiReachable(vi.fn().mockRejectedValue(new Error("offline")))).resolves.toBe(false);
+    await expect(checkApiReachable(vi.fn().mockRejectedValue(new Error("offline")))).resolves.toBe(
+      false,
+    );
   });
 
   it("does not treat the public health endpoint as proof of an authenticated connection", () => {

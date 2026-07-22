@@ -22,27 +22,31 @@ describe("queued operations", () => {
       parent: { uri: "at://did:plc:alice/app.bsky.feed.post/3mparent", cid: "bafyparent" },
     };
 
-    expect(decodeOperation({
-      ...post,
-      payload: JSON.stringify({ text: "Hello", createdAt: post.createdAt, reply }),
-    })).toMatchObject({
+    expect(
+      decodeOperation({
+        ...post,
+        payload: JSON.stringify({ text: "Hello", createdAt: post.createdAt, reply }),
+      }),
+    ).toMatchObject({
       kind: "post",
       payload: { text: "Hello", reply },
     });
   });
 
   it("decodes the final desired state of a reaction", () => {
-    expect(decodeOperation({
-      ...post,
-      kind: "like",
-      payload: JSON.stringify({
-        subjectUri: "at://did:plc:bob/app.bsky.feed.post/3mpost",
-        subjectCid: "bafypost",
-        active: false,
-        syncedActive: true,
-        createdAt: post.createdAt,
+    expect(
+      decodeOperation({
+        ...post,
+        kind: "like",
+        payload: JSON.stringify({
+          subjectUri: "at://did:plc:bob/app.bsky.feed.post/3mpost",
+          subjectCid: "bafypost",
+          active: false,
+          syncedActive: true,
+          createdAt: post.createdAt,
+        }),
       }),
-    })).toMatchObject({
+    ).toMatchObject({
       kind: "like",
       payload: { active: false, syncedActive: true },
     });
@@ -50,7 +54,9 @@ describe("queued operations", () => {
 
   it("rejects malformed or wrongly owned rows before reconciliation", () => {
     expect(() => decodeOperation({ ...post, payload: "{}" })).toThrow("Invalid post operation");
-    expect(() => decodeOperation({ ...post, kind: "delete" })).toThrow("Unsupported operation kind");
+    expect(() => decodeOperation({ ...post, kind: "delete" })).toThrow(
+      "Unsupported operation kind",
+    );
     expect(parseOperationBatch([post], "did:plc:alice")).toHaveLength(1);
     expect(() => parseOperationBatch([post], "did:plc:bob")).toThrow("owner mismatch");
   });

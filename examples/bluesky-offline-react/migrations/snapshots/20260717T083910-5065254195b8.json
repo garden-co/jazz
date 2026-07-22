@@ -178,10 +178,7 @@
         "name": "state",
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "pending",
-            "synced"
-          ]
+          "variants": ["pending", "synced"]
         },
         "nullable": false
       }
@@ -334,11 +331,7 @@
         "name": "state",
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "blocked",
-            "not-found",
-            "post"
-          ]
+          "variants": ["blocked", "not-found", "post"]
         },
         "nullable": false
       },
@@ -459,11 +452,7 @@
         "name": "kind",
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "like",
-            "post",
-            "repost"
-          ]
+          "variants": ["like", "post", "repost"]
         },
         "nullable": false
       },
@@ -485,11 +474,7 @@
         "name": "state",
         "column_type": {
           "type": "Enum",
-          "variants": [
-            "failed",
-            "queued",
-            "sent"
-          ]
+          "variants": ["failed", "queued", "sent"]
         },
         "nullable": false
       },

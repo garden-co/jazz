@@ -3,10 +3,7 @@ import {
   isExpectedSessionError,
   NodeOAuthClient,
 } from "@atproto/oauth-client-node";
-import {
-  importJWK,
-  SignJWT,
-} from "jose";
+import { importJWK, SignJWT } from "jose";
 import { authenticationDb } from "./jazz.js";
 import {
   createBffSessionStore,
@@ -45,12 +42,14 @@ const jwtKeys = await loadOrCreateJazzSigningKeys(authenticationDb);
 const jwtPrivateKey = await importJWK(jwtKeys.privateJwk, jazzJwt.algorithm);
 
 export const jazzJwks = {
-  keys: [{
-    ...jwtKeys.publicJwk,
-    kid: jazzJwt.keyId,
-    alg: jazzJwt.algorithm,
-    use: "sig",
-  }],
+  keys: [
+    {
+      ...jwtKeys.publicJwk,
+      kid: jazzJwt.keyId,
+      alg: jazzJwt.algorithm,
+      use: "sig",
+    },
+  ],
 };
 
 export function createJazzToken(did: string) {

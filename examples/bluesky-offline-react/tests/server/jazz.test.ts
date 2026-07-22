@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const contexts = vi.hoisted(() => {
   const authenticationDb = { role: "authentication" };
   const projectionDb = { role: "projection" };
-  const createJazzContext = vi.fn()
+  const createJazzContext = vi
+    .fn()
     .mockReturnValueOnce({ db: () => authenticationDb })
     .mockReturnValueOnce({ asBackend: () => projectionDb });
   return { authenticationDb, projectionDb, createJazzContext };
@@ -40,18 +41,24 @@ describe("server Jazz contexts", () => {
 
     expect(contexts.createJazzContext).toHaveBeenCalledTimes(2);
     const authenticationConfig = contexts.createJazzContext.mock.calls[0]?.[0];
-    expect(contexts.createJazzContext).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      driver: { type: "persistent", dataPath: "./data/auth.db" },
-    }));
+    expect(contexts.createJazzContext).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        driver: { type: "persistent", dataPath: "./data/auth.db" },
+      }),
+    );
     expect(authenticationConfig).not.toHaveProperty("serverUrl");
     expect(authenticationConfig).not.toHaveProperty("backendSecret");
     expect(authenticationConfig).not.toHaveProperty("adminSecret");
-    expect(contexts.createJazzContext).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      driver: { type: "persistent", dataPath: "./data/projection.db" },
-      serverUrl: "http://127.0.0.1:4200",
-      backendSecret: "backend-secret",
-      adminSecret: "admin-secret",
-    }));
+    expect(contexts.createJazzContext).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        driver: { type: "persistent", dataPath: "./data/projection.db" },
+        serverUrl: "http://127.0.0.1:4200",
+        backendSecret: "backend-secret",
+        adminSecret: "admin-secret",
+      }),
+    );
     expect(jazz.authenticationDb).toBe(contexts.authenticationDb);
     expect(jazz.projectionDb).toBe(contexts.projectionDb);
   });

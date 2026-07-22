@@ -161,8 +161,9 @@ describe("ATProto to Jazz projection", () => {
       indexedAt: "2026-07-16T10:00:01.000Z",
     };
 
-    const { createProjection } =
-      await vi.importActual<typeof import("../../server/projection.js")>("../../server/projection.js");
+    const { createProjection } = await vi.importActual<typeof import("../../server/projection.js")>(
+      "../../server/projection.js",
+    );
     moduleMocks.writer = createProjection(database);
     moduleMocks.api = bluesky({
       fetchProfile: vi.fn(async () => ({
@@ -250,7 +251,8 @@ describe("ATProto to Jazz projection", () => {
   });
 
   it("starts a fresh head read after the AppView response even when Jazz projection is blocked", async () => {
-    const fetchTimelineFeed = vi.fn()
+    const fetchTimelineFeed = vi
+      .fn()
       .mockResolvedValueOnce({ feed: [], cursor: "first" })
       .mockResolvedValueOnce({ feed: [], cursor: "second" });
     const { bridge } = await loadBridge({
@@ -278,12 +280,14 @@ describe("ATProto to Jazz projection", () => {
     });
     const firstFeed = [{ marker: "first" }];
     const latestFeed = [{ marker: "latest" }];
-    const projectTimelinePage = vi.fn()
+    const projectTimelinePage = vi
+      .fn()
       .mockImplementationOnce(() => firstProjection)
       .mockResolvedValue(undefined);
     const { bridge } = await loadBridge({
       api: bluesky({
-        fetchTimelineFeed: vi.fn()
+        fetchTimelineFeed: vi
+          .fn()
           .mockResolvedValueOnce({ feed: firstFeed, cursor: "first" })
           .mockResolvedValueOnce({ feed: latestFeed, cursor: "latest" }),
       }),
@@ -298,11 +302,7 @@ describe("ATProto to Jazz projection", () => {
     expect(projectTimelinePage).toHaveBeenCalledOnce();
     releaseFirstProjection();
     await vi.waitFor(() => expect(projectTimelinePage).toHaveBeenCalledTimes(2));
-    expect(projectTimelinePage).toHaveBeenLastCalledWith(
-      "did:plc:viewer",
-      latestFeed,
-      undefined,
-    );
+    expect(projectTimelinePage).toHaveBeenLastCalledWith("did:plc:viewer", latestFeed, undefined);
   });
 
   it("reports a background projection failure", async () => {

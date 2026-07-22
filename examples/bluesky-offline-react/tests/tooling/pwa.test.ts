@@ -24,7 +24,7 @@ describe("PWA assets", () => {
     expect(serviceWorker).toContain('"/assets/styles.css"');
     expect(serviceWorker).toContain('url.pathname.startsWith("/api/")');
     expect(serviceWorker).toContain('url.pathname.startsWith("/xrpc/")');
-    expect(serviceWorker).toContain('caches.match(request, { cacheName: shellCache })');
+    expect(serviceWorker).toContain("caches.match(request, { cacheName: shellCache })");
     expect(serviceWorker).toContain("const mediaLimit = 100;");
     expect(serviceWorker).toContain("const mediaMaxAge = 7 * 24 * 60 * 60 * 1000;");
   });

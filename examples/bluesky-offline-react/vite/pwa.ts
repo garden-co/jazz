@@ -133,14 +133,16 @@ self.addEventListener("fetch", (event) => {
 }
 
 export function createPwaAssets(bundleFiles: string[]) {
-  const shellAssets = [...new Set([
-    "/",
-    "/index.html",
-    "/manifest.webmanifest",
-    "/icons/icon-192.png",
-    "/icons/icon-512.png",
-    ...bundleFiles.map((file) => `/${file}`),
-  ])].sort();
+  const shellAssets = [
+    ...new Set([
+      "/",
+      "/index.html",
+      "/manifest.webmanifest",
+      "/icons/icon-192.png",
+      "/icons/icon-512.png",
+      ...bundleFiles.map((file) => `/${file}`),
+    ]),
+  ].sort();
   return {
     manifest,
     serviceWorker: serviceWorkerSource(shellAssets),

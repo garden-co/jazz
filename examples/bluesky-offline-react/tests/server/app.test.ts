@@ -98,10 +98,12 @@ describe("BFF routes", () => {
     expect(mocks.reconcileOperations).toHaveBeenCalledWith(
       "did:plc:alice",
       authenticatedSession.session,
-      [expect.objectContaining({
-        kind: "post",
-        payload: { text: "Hello", createdAt: queuedPost.createdAt },
-      })],
+      [
+        expect.objectContaining({
+          kind: "post",
+          payload: { text: "Hello", createdAt: queuedPost.createdAt },
+        }),
+      ],
     );
   });
 
@@ -132,17 +134,17 @@ describe("BFF routes", () => {
     expect(response.status).toBe(400);
   });
 
-  it.each([
-    "at://incomplete",
-    "at://did:plc:alice/app.bsky.feed.like/3mlike",
-  ])("rejects invalid post URI %s", async (uri) => {
-    const response = await createServer().request(`/api/thread?uri=${encodeURIComponent(uri)}`, {
-      headers: { cookie: "bff-session=opaque-session-id" },
-    });
+  it.each(["at://incomplete", "at://did:plc:alice/app.bsky.feed.like/3mlike"])(
+    "rejects invalid post URI %s",
+    async (uri) => {
+      const response = await createServer().request(`/api/thread?uri=${encodeURIComponent(uri)}`, {
+        headers: { cookie: "bff-session=opaque-session-id" },
+      });
 
-    expect(response.status).toBe(400);
-    expect(mocks.projectThread).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(400);
+      expect(mocks.projectThread).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not expose unexpected server errors", async () => {
     mocks.projectTimelinePage.mockRejectedValue(new Error("database password leaked"));

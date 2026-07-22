@@ -26,8 +26,10 @@ export async function deliverOperations<Operation extends DeliverableOperation>(
     reportApiReachable: (reachable: boolean) => void;
   },
 ) {
-  const ordered = [...operations].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const ordered = [...operations].sort(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+  );
 
   // Send one intention at a time so a failure identifies the exact operation
   // and later ATProto repository writes remain ordered behind it.
@@ -38,7 +40,7 @@ export async function deliverOperations<Operation extends DeliverableOperation>(
         headers: { "content-type": "application/json" },
         body: JSON.stringify([operation]),
       });
-      const result = await response.json().catch(() => ({ error: "Sync failed" })) as {
+      const result = (await response.json().catch(() => ({ error: "Sync failed" }))) as {
         error?: string;
       };
       reportApiReachable(true);
@@ -78,10 +80,12 @@ export function useOutbox(
   const db = useDb();
 
   async function runFlush() {
-    const operations = await db.all(app.pendingOperations.where({
-      ownerDid: { eq: ownerDid },
-      state: { eq: "queued" },
-    }));
+    const operations = await db.all(
+      app.pendingOperations.where({
+        ownerDid: { eq: ownerDid },
+        state: { eq: "queued" },
+      }),
+    );
     if (!operations.length || !navigator.onLine) return;
     await deliverOperations(operations, {
       markFailed: (id, failure) => db.update(app.pendingOperations, id, failure),

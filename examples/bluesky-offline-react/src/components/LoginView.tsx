@@ -17,7 +17,7 @@ export function LoginView({ sessionError }: { sessionError?: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ handle }),
       });
-      const result = await response.json() as { url?: string; error?: string };
+      const result = (await response.json()) as { url?: string; error?: string };
       if (!response.ok || !result.url) throw new Error(result.error ?? "Could not start sign-in");
       location.href = result.url;
     } catch (error) {
@@ -32,7 +32,9 @@ export function LoginView({ sessionError }: { sessionError?: string }) {
     <main className="login">
       <section className="login-intro">
         <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">J</div>
+          <div className="brand-mark" aria-hidden="true">
+            J
+          </div>
           <div>
             <p className="eyebrow">Local-first ATProto</p>
             <p className="wordmark">Jazz ❤️ Bluesky</p>
@@ -40,26 +42,32 @@ export function LoginView({ sessionError }: { sessionError?: string }) {
         </div>
         <h1>Keep up, even when your connection can’t.</h1>
         <p>
-          Jazz and Bluesky together: a familiar timeline that loads offline and
-          lets you write whenever inspiration strikes.
+          Jazz and Bluesky together: a familiar timeline that loads offline and lets you write
+          whenever inspiration strikes.
         </p>
         <ul>
           <li>
-            <span><SuccessIcon /></span>
+            <span>
+              <SuccessIcon />
+            </span>
             <div>
               <strong>Read anywhere</strong>
               <p>Your recent timeline is cached on this device.</p>
             </div>
           </li>
           <li>
-            <span><SuccessIcon /></span>
+            <span>
+              <SuccessIcon />
+            </span>
             <div>
               <strong>Write offline</strong>
               <p>Posts and reactions queue locally and publish when you reconnect.</p>
             </div>
           </li>
           <li>
-            <span><SuccessIcon /></span>
+            <span>
+              <SuccessIcon />
+            </span>
             <div>
               <strong>Stay in control</strong>
               <p>Your PDS remains the source of truth.</p>
@@ -84,17 +92,15 @@ export function LoginView({ sessionError }: { sessionError?: string }) {
               autoCorrect="off"
               required
             />
-            <Button
-              type="submit"
-              size="3"
-              disabled={loggingIn || !handle.trim()}
-            >
+            <Button type="submit" size="3" disabled={loggingIn || !handle.trim()}>
               {loggingIn ? (
                 <>
                   <Spinner aria-hidden="true" />
                   Opening ATProto OAuth…
                 </>
-              ) : "Continue with ATProto OAuth"}
+              ) : (
+                "Continue with ATProto OAuth"
+              )}
             </Button>
             {status && (
               <p
@@ -106,9 +112,7 @@ export function LoginView({ sessionError }: { sessionError?: string }) {
               </p>
             )}
           </form>
-          <p className="oauth-note">
-            Jazz ❤️ Bluesky never asks for your Bluesky password.
-          </p>
+          <p className="oauth-note">Jazz ❤️ Bluesky never asks for your Bluesky password.</p>
         </section>
       </Card>
     </main>

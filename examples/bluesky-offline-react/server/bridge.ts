@@ -29,11 +29,7 @@ function timelineJobKey(ownerDid: string, cursor?: string) {
   return `${ownerDid}\n${cursor ?? "head"}`;
 }
 
-function scheduleTimelineProjection(
-  ownerDid: string,
-  response: TimelineResponse,
-  cursor?: string,
-) {
+function scheduleTimelineProjection(ownerDid: string, response: TimelineResponse, cursor?: string) {
   const laneKey = timelineJobKey(ownerDid, cursor);
   const existingLane = projectionLanes.get(laneKey);
   if (existingLane) {

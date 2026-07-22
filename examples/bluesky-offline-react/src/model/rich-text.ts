@@ -17,16 +17,19 @@ function parseLinkFacets(facetsJson: string | null | undefined, byteLength: numb
     if (!Array.isArray(facets)) return [];
 
     return facets
-      .filter(({ byteStart, byteEnd, uri }) =>
-        Number.isInteger(byteStart)
-        && Number.isInteger(byteEnd)
-        && byteStart >= 0
-        && byteEnd > byteStart
-        && byteEnd <= byteLength
-        && /^https?:\/\//.test(uri))
+      .filter(
+        ({ byteStart, byteEnd, uri }) =>
+          Number.isInteger(byteStart) &&
+          Number.isInteger(byteEnd) &&
+          byteStart >= 0 &&
+          byteEnd > byteStart &&
+          byteEnd <= byteLength &&
+          /^https?:\/\//.test(uri),
+      )
       .sort((a, b) => a.byteStart - b.byteStart)
-      .filter((facet, index, sorted) =>
-        index === 0 || facet.byteStart >= sorted[index - 1].byteEnd);
+      .filter(
+        (facet, index, sorted) => index === 0 || facet.byteStart >= sorted[index - 1].byteEnd,
+      );
   } catch {
     return [];
   }

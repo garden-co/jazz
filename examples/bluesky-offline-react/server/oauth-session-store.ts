@@ -1,7 +1,4 @@
-import type {
-  NodeSavedSessionStore,
-  NodeSavedState,
-} from "@atproto/oauth-client-node";
+import type { NodeSavedSessionStore, NodeSavedState } from "@atproto/oauth-client-node";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
@@ -33,10 +30,7 @@ function encryptSession(key: Buffer, sessionKey: string, value: unknown) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   cipher.setAAD(Buffer.from(sessionKey));
-  const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify(value), "utf8"),
-    cipher.final(),
-  ]);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   const envelope: EncryptedSession = {
     v: 1,
     iv: iv.toString("base64url"),
@@ -51,11 +45,7 @@ function decryptSession(key: Buffer, sessionKey: string, stored: string) {
   if (envelope.v !== 1) {
     throw new Error(`Unsupported OAuth session encryption version: ${envelope.v}`);
   }
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    key,
-    Buffer.from(envelope.iv, "base64url"),
-  );
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64url"));
   decipher.setAAD(Buffer.from(sessionKey));
   decipher.setAuthTag(Buffer.from(envelope.tag, "base64url"));
   return JSON.parse(
@@ -91,7 +81,7 @@ export function createEncryptedValueStore<Value>(
       const sessionKey = `${namespace}${key}`;
       const row = await db.one(app.oauthSessions.where({ sessionKey: { eq: sessionKey } }));
       return row
-        ? decryptSession(encryptionKeyBuffer, sessionKey, row.sessionJson) as Value
+        ? (decryptSession(encryptionKeyBuffer, sessionKey, row.sessionJson) as Value)
         : undefined;
     },
     async del(key) {
