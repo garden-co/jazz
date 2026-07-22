@@ -467,11 +467,11 @@ fn dispatch(
                 move || SlateDbStorage::open_bridged(path.clone(), &refs).expect("open slatedb"),
             )
         }
-        "slatedb-localwal" | "slatedb-localwal-sync" => {
+        "slatedb-localwal-sync" => {
             let checkpoint_path = dir.path().join("slatedb-checkpoint");
             let wal_path = dir.path().join("local.wal");
             let root_for_size = dir.path().to_path_buf();
-            let sync_on_commit = adapter == "slatedb-localwal-sync";
+            let sync_on_commit = true;
             let refs = refs.clone();
             benchmark(
                 adapter,
@@ -551,7 +551,7 @@ fn dispatch(
         }
         other => {
             panic!(
-                "unknown storage adapter '{other}' (expected memory|rocksdb|btree|slatedb|slatedb-localwal|slatedb-localwal-sync|sqlite|redb|postgres)"
+                "unknown storage adapter '{other}' (expected memory|rocksdb|btree|slatedb|slatedb-localwal-sync|sqlite|redb|postgres)"
             )
         }
     }
@@ -2739,7 +2739,7 @@ fn parse_args() -> Args {
                     "jazz-ingest-bench — storage ingestion/cold-load benchmark (USDA plants)\n\
                      \n\
                      Two layers on the same dataset and metrics:\n\
-                     \x20 --storage <list>  through the Jazz Db API: memory,rocksdb,btree,slatedb,slatedb-localwal,slatedb-localwal-sync,sqlite,redb,postgres\n\
+                     \x20 --storage <list>  through the Jazz Db API: memory,rocksdb,btree,slatedb,slatedb-localwal-sync,sqlite,redb,postgres\n\
                      \x20 --raw <list>      direct native engine API (no Jazz): rocksdb,slatedb,sqlite,redb,postgres\n\
                      (with neither flag, defaults to --raw rocksdb,slatedb)\n\
                      \n\
