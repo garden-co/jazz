@@ -70,6 +70,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
     initialLoading,
   } = useTimelineProjection({
     did,
+    itemCount: timelineItems.length,
     rowCount: visibleTimelineRows.length,
     hasLocalRows: visibleTimelineRows.length > 0,
     cachedRowsRemaining: localTimelineWindow.hasMore,

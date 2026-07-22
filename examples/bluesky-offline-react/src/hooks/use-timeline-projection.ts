@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 const pollInterval = 15_000;
 const minimumSpinnerDuration = 300;
+const rootCardsPerPage = 20;
 
 type TimelinePayload = {
   cursor?: string;
@@ -23,16 +24,14 @@ export function nextTimelinePageSource({
   return undefined;
 }
 
-export function fetchingMorePosts({
-  startCount,
-  rowCount,
-  remote,
+export function needsMoreRootCards({
+  itemCount,
+  targetItemCount,
 }: {
-  startCount: number | null;
-  rowCount: number;
-  remote: boolean;
+  itemCount: number;
+  targetItemCount: number;
 }) {
-  return remote || (startCount !== null && rowCount <= startCount);
+  return itemCount < targetItemCount;
 }
 
 export function canLoadNextPage({
@@ -47,6 +46,7 @@ export function canLoadNextPage({
 
 export function useTimelineProjection({
   did,
+  itemCount,
   rowCount,
   hasLocalRows,
   cachedRowsRemaining,
@@ -57,6 +57,7 @@ export function useTimelineProjection({
   reportApiReachable,
 }: {
   did: string;
+  itemCount: number;
   rowCount: number;
   hasLocalRows: boolean;
   cachedRowsRemaining: boolean;
@@ -71,6 +72,7 @@ export function useTimelineProjection({
   const [remoteLoadingMore, setRemoteLoadingMore] = useState(false);
   const [pageStartCount, setPageStartCount] = useState<number | null>(null);
   const [pageFetchStartedAt, setPageFetchStartedAt] = useState<number | null>(null);
+  const [targetItemCount, setTargetItemCount] = useState<number | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const refreshInFlight = useRef(false);
   const paginationInFlight = useRef(false);
@@ -137,6 +139,7 @@ export function useTimelineProjection({
     setRemoteLoadingMore(false);
     setPageStartCount(null);
     setPageFetchStartedAt(null);
+    setTargetItemCount(null);
     setInitialLoading(true);
   }, [did]);
 
@@ -168,16 +171,12 @@ export function useTimelineProjection({
     remoteRowsRemaining: Boolean(nextCursor && hasMore),
   });
 
-  const loadingMore = fetchingMorePosts({
-    startCount: pageStartCount,
-    rowCount,
-    remote: remoteLoadingMore,
-  });
+  const loadingMore =
+    targetItemCount !== null && needsMoreRootCards({ itemCount, targetItemCount });
   const canLoadMore = rowCount > 0 && canLoadNextPage({ source, loadingMore });
 
-  async function loadMore() {
-    if (!canLoadMore) return;
-    if (source === "local") {
+  async function loadNextPage(nextSource: "local" | "remote") {
+    if (nextSource === "local") {
       setPageStartCount(rowCount);
       setPageFetchStartedAt(Date.now());
       revealCachedRows();
@@ -185,6 +184,36 @@ export function useTimelineProjection({
       await loadPage(nextCursor);
     }
   }
+
+  async function loadMore() {
+    if (!canLoadMore) return;
+    setTargetItemCount(itemCount + rootCardsPerPage);
+    if (source) await loadNextPage(source);
+  }
+
+  useEffect(() => {
+    if (targetItemCount === null) return;
+    if (!needsMoreRootCards({ itemCount, targetItemCount })) {
+      setTargetItemCount(null);
+      return;
+    }
+    if (pageStartCount !== null || remoteLoadingMore || localQueryRefreshing) return;
+    if (!source) {
+      setTargetItemCount(null);
+      return;
+    }
+    loadNextPage(source);
+  }, [
+    cachedRowsRemaining,
+    hasMore,
+    itemCount,
+    localQueryRefreshing,
+    nextCursor,
+    pageStartCount,
+    remoteLoadingMore,
+    rowCount,
+    targetItemCount,
+  ]);
 
   return { hasMore, canLoadMore, loadMore, loadingMore, initialLoading };
 }
