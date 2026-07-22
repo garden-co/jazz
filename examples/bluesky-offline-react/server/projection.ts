@@ -510,7 +510,7 @@ export function createProjection(database: ProjectionDatabase) {
           });
         }
       }
-      if (intent) await database.delete(app.pendingOperations, intent.id);
+      if (intent?.state === "sent") await database.delete(app.pendingOperations, intent.id);
     }
   }
 
@@ -655,15 +655,20 @@ export function createProjection(database: ProjectionDatabase) {
       await database.delete(app.pendingOperations, operation.id);
       return;
     }
-    await projectRow(database, app.pendingOperations, operation.id, {
-      ownerDid: operation.ownerDid,
-      kind: operation.kind,
-      rkey: operation.rkey,
-      payload: encodeOperationPayload(operation),
-      state: "sent",
-      error: null,
-      createdAt: operation.createdAt,
-    });
+    try {
+      await projectRow(database, app.pendingOperations, operation.id, {
+        ownerDid: operation.ownerDid,
+        kind: operation.kind,
+        rkey: operation.rkey,
+        payload: encodeOperationPayload(operation),
+        state: "sent",
+        error: null,
+        createdAt: operation.createdAt,
+      });
+    } catch (error) {
+      // Cancellation or AppView confirmation may delete the intention while its PDS write is in flight.
+      if (!(error instanceof Error) || !error.message.includes("row already deleted:")) throw error;
+    }
   }
 
   async function projectPostOperation(
