@@ -3,6 +3,7 @@ import {
   canLoadNextPage,
   needsMoreRootCards,
   nextTimelinePageSource,
+  visibleRootCards,
 } from "../../../src/hooks/use-timeline-projection.js";
 
 describe("timeline pagination", () => {
@@ -40,6 +41,10 @@ describe("timeline pagination", () => {
     expect(needsMoreRootCards({ itemCount: 20, targetItemCount: 40 })).toBe(true);
     expect(needsMoreRootCards({ itemCount: 39, targetItemCount: 40 })).toBe(true);
     expect(needsMoreRootCards({ itemCount: 40, targetItemCount: 40 })).toBe(false);
+  });
+
+  it("shows exactly the requested number of root cards after overfetching", () => {
+    expect(visibleRootCards([1, 2, 3, 4, 5], 3)).toEqual([1, 2, 3]);
   });
 
   it("enables explicit pagination only when another page is ready", () => {
