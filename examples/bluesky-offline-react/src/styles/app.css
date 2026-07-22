@@ -344,10 +344,16 @@ time {
 .thread-control {
   justify-self: start;
 }
+.thread-back-control {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-background);
+}
 ::view-transition-group(thread-navigation),
 ::view-transition-old(thread-navigation),
 ::view-transition-new(thread-navigation) {
-  animation-duration: 600ms;
+  animation-duration: 900ms;
   animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
 }
 .empty-state {

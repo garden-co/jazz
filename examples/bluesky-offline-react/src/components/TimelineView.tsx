@@ -6,7 +6,7 @@ import {
   Root as AccordionRoot,
   Trigger as AccordionTrigger,
 } from "@radix-ui/react-accordion";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import {
   BackIcon,
@@ -570,6 +570,7 @@ function TimelineThreadContent({
   postState,
   actions,
 }: TimelineThreadProps & { item: TimelineItem }) {
+  const threadRef = useRef<HTMLDivElement>(null);
   const [focusedId, setFocusedId] = useState(item.node.post.id);
   const [navigationTarget, setNavigationTarget] = useState<"back" | string>();
   const findNode = (node: TimelinePostNode): TimelinePostNode | undefined =>
@@ -582,12 +583,17 @@ function TimelineThreadContent({
         setFocusedId(id);
         setNavigationTarget(target);
       });
+      if (target === "back") {
+        threadRef.current
+          ?.querySelector<HTMLButtonElement>(".thread-back-control")
+          ?.scrollIntoView({ block: "start" });
+      }
     };
     if (
       typeof document.startViewTransition !== "function" ||
       matchMedia("(prefers-reduced-motion: reduce)").matches
     ) {
-      setFocusedId(id);
+      updateFocus();
       return;
     }
     control.style.viewTransitionName = "thread-navigation";
@@ -600,7 +606,7 @@ function TimelineThreadContent({
   const reposterFallback = item.repost?.actorDid ?? "Unknown account";
   const reposterName = profileNameParts(reposter, reposterFallback).name;
   return (
-    <div className="timeline-thread">
+    <div ref={threadRef} className="timeline-thread">
       {item.repost && (
         <div className="repost-reason">
           <RepostIcon />
@@ -618,7 +624,7 @@ function TimelineThreadContent({
       )}
       {focusedId !== item.node.post.id && (
         <Button
-          className="thread-control"
+          className="thread-control thread-back-control"
           variant="ghost"
           size="1"
           style={
