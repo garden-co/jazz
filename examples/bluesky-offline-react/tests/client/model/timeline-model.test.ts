@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTimeline,
+  hydrateTimelineThread,
   writableReplyCount,
   type IncludedPost,
   type TimelineEntryView,
@@ -28,6 +29,33 @@ function post(id: string, replyParentId?: string): IncludedPost {
 }
 
 describe("timeline model", () => {
+  it("hydrates a visible thread separately from its timeline row", () => {
+    const root = post("root");
+    const reply = post("reply", root.id);
+    const [item] = buildTimeline([{
+      id: "entry",
+      ownerDid: "did:plc:viewer",
+      postId: root.id,
+      threadRootId: root.id,
+      repostId: null,
+      sortAt: root.indexedAt,
+      active: true,
+      post: root,
+      threadRoot: root,
+    }]);
+
+    expect(hydrateTimelineThread(item!, [{
+      id: "thread-reply",
+      rootPostId: root.id,
+      postId: reply.id,
+      parentPostId: root.id,
+      state: "post",
+      sortOrder: 1,
+      indexedAt: reply.indexedAt,
+      post: reply,
+    }]).node.replies.map(({ post }) => post.id)).toEqual([reply.id]);
+  });
+
   it("only changes a reply count optimistically when the viewer owns the parent post", () => {
     const parent = post("parent");
 
