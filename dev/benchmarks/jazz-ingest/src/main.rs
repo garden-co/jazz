@@ -784,6 +784,10 @@ fn stable_jitter(mut value: u64) -> u64 {
     value.wrapping_mul(0x2545_f491_4f6c_dd1d)
 }
 
+/// Group-commit granularity: the local WAL is `fsync`ed (and the durable-ack
+/// latency paid) once every this many write batches, rather than per commit.
+const WAL_GROUP_COMMIT: u64 = 8;
+
 pub struct LocalWalSlateDbStorage {
     hot: MemoryStorage,
     checkpoint: Mutex<jazz::groove::storage::SyncBridgeStorage>,
@@ -819,7 +823,7 @@ impl LocalWalSlateDbStorage {
             .append(true)
             .open(&wal_path)
             .map_err(local_wal_error)?;
-        Ok(Self {
+        let storage = Self {
             hot,
             checkpoint: Mutex::new(checkpoint),
             column_families: column_families.iter().map(|cf| (*cf).to_owned()).collect(),
@@ -830,7 +834,127 @@ impl LocalWalSlateDbStorage {
             wal: Mutex::new(wal),
             sync_sequence: Mutex::new(0),
             pending_checkpoint: Mutex::new(Vec::new()),
-        })
+        };
+        // Recover the uncheckpointed tail: replay any WAL records the last
+        // checkpoint did not persist back into the hot tier and the pending
+        // checkpoint. This is what makes the WAL's durability real.
+        storage.replay_wal()?;
+        Ok(storage)
+    }
+
+    /// Replay the local WAL into `hot` and re-buffer it for the next checkpoint.
+    /// The checkpoint truncates the WAL, so the file holds exactly the operations
+    /// committed since the last checkpoint — replaying applies that tail. A
+    /// partially-written record at the end (a torn write before a crash) ends
+    /// replay cleanly. (Sets/Deletes are idempotent; a crash between "checkpoint
+    /// written" and "WAL truncated" could double-apply, which would need
+    /// sequence numbers to be correct for Delta ops — not emitted by this bench.)
+    fn replay_wal(&self) -> Result<(), StorageError> {
+        fn take_u32(buf: &[u8], pos: &mut usize) -> Option<usize> {
+            let end = pos.checked_add(4)?;
+            let slice = buf.get(*pos..end)?;
+            *pos = end;
+            Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize)
+        }
+        fn take_bytes(buf: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+            let len = take_u32(buf, pos)?;
+            let end = pos.checked_add(len)?;
+            let slice = buf.get(*pos..end)?;
+            *pos = end;
+            Some(slice.to_vec())
+        }
+
+        let bytes = match std::fs::read(&self.wal_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(local_wal_error(err)),
+        };
+
+        let mut ops: Vec<jazz::groove::storage::OwnedWriteOperation> = Vec::new();
+        let mut pos = 0usize;
+        while let Some(record_len) = take_u32(&bytes, &mut pos) {
+            let Some(record) = bytes.get(pos..pos.saturating_add(record_len)) else {
+                break; // torn tail record
+            };
+            pos += record_len;
+            if record.len() < 12 || &record[0..8] != b"JZWAL001" {
+                break;
+            }
+            let mut rp = 8;
+            let Some(op_count) = take_u32(record, &mut rp) else {
+                break;
+            };
+            for _ in 0..op_count {
+                let Some(&tag) = record.get(rp) else { break };
+                rp += 1;
+                let op = match tag {
+                    1 => {
+                        let (Some(cf), Some(key), Some(value)) = (
+                            take_bytes(record, &mut rp),
+                            take_bytes(record, &mut rp),
+                            take_bytes(record, &mut rp),
+                        ) else {
+                            break;
+                        };
+                        jazz::groove::storage::OwnedWriteOperation::Set {
+                            cf: String::from_utf8_lossy(&cf).into_owned(),
+                            key,
+                            value,
+                        }
+                    }
+                    2 => {
+                        let (Some(cf), Some(key)) =
+                            (take_bytes(record, &mut rp), take_bytes(record, &mut rp))
+                        else {
+                            break;
+                        };
+                        jazz::groove::storage::OwnedWriteOperation::Delete {
+                            cf: String::from_utf8_lossy(&cf).into_owned(),
+                            key,
+                        }
+                    }
+                    3 => {
+                        let (Some(cf), Some(key)) =
+                            (take_bytes(record, &mut rp), take_bytes(record, &mut rp))
+                        else {
+                            break;
+                        };
+                        if record.get(rp).is_none() {
+                            break;
+                        }
+                        rp += 1; // delta kind byte (only CurrentWinnerV1 today)
+                        let Some(payload) = take_bytes(record, &mut rp) else {
+                            break;
+                        };
+                        jazz::groove::storage::OwnedWriteOperation::Delta {
+                            cf: String::from_utf8_lossy(&cf).into_owned(),
+                            key,
+                            delta: StorageDelta {
+                                kind: StorageDeltaKind::CurrentWinnerV1,
+                                payload,
+                            },
+                        }
+                    }
+                    _ => break,
+                };
+                ops.push(op);
+            }
+        }
+
+        if !ops.is_empty() {
+            {
+                let borrowed = ops
+                    .iter()
+                    .map(jazz::groove::storage::OwnedWriteOperation::as_write_operation)
+                    .collect::<Vec<_>>();
+                self.hot.write_many(&borrowed)?;
+            }
+            self.pending_checkpoint
+                .lock()
+                .map_err(local_wal_error)?
+                .extend(ops);
+        }
+        Ok(())
     }
 
     fn append_wal(&self, operations: &[WriteOperation<'_>]) -> Result<(), StorageError> {
@@ -862,27 +986,36 @@ impl LocalWalSlateDbStorage {
             }
         }
 
+        // Always append. These bytes are process-crash recoverable via replay on
+        // open even before they are fsync'd — only OS/power loss needs the sync.
         {
             let mut wal = self.wal.lock().map_err(local_wal_error)?;
             wal.write_all(&(record.len() as u32).to_le_bytes())
                 .map_err(local_wal_error)?;
             wal.write_all(&record).map_err(local_wal_error)?;
-            if self.sync_on_commit {
-                wal.sync_data().map_err(local_wal_error)?;
-            }
         }
 
+        // Lax (group-commit) fsync: durably sync the WAL and pay the durable-ack
+        // (EBS + safekeeper) latency once every WAL_GROUP_COMMIT batches, not per
+        // commit. This bounds the power-loss window to a group while amortizing
+        // the fsync cost; a process crash still recovers the whole tail via
+        // replay. The final tail is synced by the checkpoint at close.
         if self.sync_on_commit {
             let sequence = {
                 let mut sequence = self.sync_sequence.lock().map_err(local_wal_error)?;
-                let current = *sequence;
                 *sequence = sequence.wrapping_add(1);
-                current
+                *sequence
             };
-            let seed = sequence ^ operations.len() as u64;
-            self.ebs_jitter.sleep_for(seed);
-            self.safekeeper_jitter
-                .sleep_for(seed ^ 0x9e37_79b9_7f4a_7c15);
+            if sequence % WAL_GROUP_COMMIT == 0 {
+                {
+                    let wal = self.wal.lock().map_err(local_wal_error)?;
+                    wal.sync_data().map_err(local_wal_error)?;
+                }
+                let seed = sequence ^ operations.len() as u64;
+                self.ebs_jitter.sleep_for(seed);
+                self.safekeeper_jitter
+                    .sleep_for(seed ^ 0x9e37_79b9_7f4a_7c15);
+            }
         }
         Ok(())
     }
@@ -2837,5 +2970,50 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
             return value;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Simulate a crash before the checkpoint: write, drop WITHOUT close(), then
+    // reopen. The object-store checkpoint was never written, so the data can
+    // only come back if the WAL is replayed on open.
+    #[test]
+    fn localwal_replays_uncheckpointed_writes_after_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = dir.path().join("ckpt");
+        let wal = dir.path().join("local.wal");
+        let cfs = ["records"];
+        let z = SimulatedLatency::default();
+
+        {
+            let store =
+                LocalWalSlateDbStorage::open(checkpoint.clone(), wal.clone(), &cfs, true, z, z)
+                    .unwrap();
+            store.set("records", b"k1", b"v1").unwrap();
+            store
+                .write_many(&[
+                    WriteOperation::set("records", b"k2", b"v2"),
+                    WriteOperation::set("records", b"k3", b"v3"),
+                ])
+                .unwrap();
+            // Deliberately no store.close() — the checkpoint stays empty.
+        }
+
+        let recovered = LocalWalSlateDbStorage::open(checkpoint, wal, &cfs, true, z, z).unwrap();
+        assert_eq!(
+            recovered.get("records", b"k1").unwrap().as_deref(),
+            Some(&b"v1"[..])
+        );
+        assert_eq!(
+            recovered.get("records", b"k2").unwrap().as_deref(),
+            Some(&b"v2"[..])
+        );
+        assert_eq!(
+            recovered.get("records", b"k3").unwrap().as_deref(),
+            Some(&b"v3"[..])
+        );
     }
 }
