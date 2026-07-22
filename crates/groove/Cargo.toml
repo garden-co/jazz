@@ -8,6 +8,7 @@ default = ["rocksdb"]
 rocksdb = ["dep:rocksdb"]
 
 [dependencies]
+tracing = "0.1"
 internment = { version = "0.8.6", features = ["serde"] }
 bytes = "1"
 smallvec = "1.15"

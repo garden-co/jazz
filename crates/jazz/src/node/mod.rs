@@ -1055,6 +1055,7 @@ where
             ),
         );
         let mut stored_versions = Vec::new();
+        let commit_loop_span = tracing::debug_span!("commit_many::per_commit_loop").entered();
         for commit in commits {
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
@@ -1171,7 +1172,12 @@ where
             }
             stored_versions.push(stored);
         }
-        self.database.commit_batch(batch)?;
+        drop(commit_loop_span);
+        {
+            let _span = tracing::debug_span!("commit_many::commit_batch").entered();
+            self.database.commit_batch(batch)?;
+        }
+        let _tail_span = tracing::debug_span!("commit_many::tail").entered();
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx

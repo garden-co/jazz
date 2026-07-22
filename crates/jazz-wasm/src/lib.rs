@@ -1059,6 +1059,26 @@ enum WasmTxKind {
     Exclusive,
 }
 
+/// Diagnostic: install the wasm tracing subscriber and start collecting
+/// span entries (name, duration, fields) for `drainTraceSpans`.
+#[wasm_bindgen(js_name = enableTraceSpans)]
+pub fn enable_trace_spans() {
+    let mut config = wasm_tracing::WasmLayerConfig::new();
+    config.use_console_methods = false;
+    config.color = false;
+    config.show_origin = false;
+    config.max_level = tracing::Level::DEBUG;
+    let _ = wasm_tracing::set_as_global_default_with_config(config);
+    wasm_tracing::set_trace_entry_collection_enabled(true);
+}
+
+/// Diagnostic: drain collected tracing span entries as a JS array.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = drainTraceSpans)]
+pub fn drain_trace_spans() -> JsValue {
+    wasm_tracing::drain_trace_entries()
+}
+
 #[wasm_bindgen]
 impl WasmDb {
     #[wasm_bindgen(js_name = openMemory)]
@@ -1097,6 +1117,31 @@ impl WasmDb {
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(namespace: String) -> Result<(), JsValue> {
         OpfsStorage::destroy(&namespace).await.map_err(to_js_error)
+    }
+
+    /// Diagnostic: total storage reads and range scans since the last reset,
+    /// as `[reads, ranges]`. Bracket a read with `resetStorageReadMetrics` and
+    /// this to attribute its storage load.
+    #[wasm_bindgen(js_name = storageReadMetrics)]
+    pub fn storage_read_metrics(&self) -> Vec<f64> {
+        let metrics = match &self.inner {
+            WasmDbInner::Memory(db) => db.storage_read_metrics(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.storage_read_metrics(),
+            WasmDbInner::Closed => return vec![0.0, 0.0],
+        };
+        vec![metrics.total.reads as f64, metrics.total.ranges as f64]
+    }
+
+    /// Diagnostic: reset the storage read metrics. See `storageReadMetrics`.
+    #[wasm_bindgen(js_name = resetStorageReadMetrics)]
+    pub fn reset_storage_read_metrics(&self) {
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.reset_storage_read_metrics(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.reset_storage_read_metrics(),
+            WasmDbInner::Closed => {}
+        }
     }
 
     #[wasm_bindgen(js_name = prepareQuery)]

@@ -1626,7 +1626,10 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let pending_writes = self.pending_writes_from_batch(batch)?;
+        let pending_writes = {
+            let _span = tracing::debug_span!("groove::pending_from_batch").entered();
+            self.pending_writes_from_batch(batch)?
+        };
         self.commit_pending_writes(pending_writes)
     }
 
@@ -1649,6 +1652,7 @@ where
         &mut self,
         pending_writes: Vec<PendingTableWrite>,
     ) -> Result<(), Error> {
+        let build_stores_span = tracing::debug_span!("groove::build_stores").entered();
         let descriptors = pending_writes
             .iter()
             .map(|write| self.table_descriptor(write.table()))
@@ -1664,25 +1668,34 @@ where
                 record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
-        let table_deltas = compute_table_deltas(&pending_writes, &stores)?;
-        let base_operations = pending_writes
-            .iter()
-            .zip(&stores)
-            .map(|(write, store)| match write {
-                PendingTableWrite::Set { key, record, .. } => store.set(key, record),
-                PendingTableWrite::Delete { key, .. } => store.delete(key),
-            })
-            .collect::<Vec<_>>();
+        drop(build_stores_span);
+        let table_deltas = {
+            let _span = tracing::debug_span!("groove::compute_table_deltas").entered();
+            compute_table_deltas(&pending_writes, &stores)?
+        };
+        let base_operations = {
+            let _span = tracing::debug_span!("groove::base_operations").entered();
+            pending_writes
+                .iter()
+                .zip(&stores)
+                .map(|(write, store)| match write {
+                    PendingTableWrite::Set { key, record, .. } => store.set(key, record),
+                    PendingTableWrite::Delete { key, .. } => store.delete(key),
+                })
+                .collect::<Vec<_>>()
+        };
         let mut staged_operations = base_operations
             .iter()
             .map(|operation| owned_write_operation(operation))
             .collect::<Vec<_>>();
         let tick_start = Instant::now();
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        let tick = self
-            .ivm_runtime
-            .tick_staged(table_deltas, &storage, &mut staged_operations)
-            .map_err(Error::IvmRuntime)?;
+        let tick = {
+            let _span = tracing::debug_span!("groove::tick_staged").entered();
+            self.ivm_runtime
+                .tick_staged(table_deltas, &storage, &mut staged_operations)
+                .map_err(Error::IvmRuntime)?
+        };
         let ivm_tick_time = tick_start.elapsed();
         let operations = staged_operations
             .iter()
@@ -1692,6 +1705,7 @@ where
         let storage_write_count = storage_writes.total.count;
         let storage_write_bytes = storage_writes.total.bytes;
         let storage_start = Instant::now();
+        let _txn_span = tracing::debug_span!("groove::storage_txn").entered();
         let txn = self.storage.begin_txn();
         drop(operations);
         txn.stage_owned_operations(staged_operations);
