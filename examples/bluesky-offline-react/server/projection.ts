@@ -329,16 +329,19 @@ async function projectRow<TRow extends object, TInit extends object>(
   table: ProjectionTable<TRow, TInit>,
   id: string,
   data: Partial<TInit>,
+  durability: "local" | "edge" = "local",
 ) {
   const existing = await database.one(table.where({ id: { eq: id } }));
   if (existing && projectionMatches(existing, data)) return;
-  // Await local acceptance only. Edge delivery continues independently; making
-  // the projection lane wait for the network would block every later refresh.
   if (existing) {
-    await database.update(table, id, data);
+    const write = database.update(table, id, data);
+    if (durability === "edge") await write.wait({ tier: "edge" });
+    else await write;
     return;
   }
-  await database.upsert(table, data, { id });
+  const write = database.upsert(table, data, { id });
+  if (durability === "edge") await write.wait({ tier: "edge" });
+  else await write;
 }
 
 type ProfileProjection = {
@@ -652,19 +655,25 @@ export function createProjection(database: ProjectionDatabase) {
 
   async function completeOperation(operation: Operation) {
     if (operation.kind === "post") {
-      await database.delete(app.pendingOperations, operation.id);
+      await database.delete(app.pendingOperations, operation.id).wait({ tier: "edge" });
       return;
     }
     try {
-      await projectRow(database, app.pendingOperations, operation.id, {
-        ownerDid: operation.ownerDid,
-        kind: operation.kind,
-        rkey: operation.rkey,
-        payload: encodeOperationPayload(operation),
-        state: "sent",
-        error: null,
-        createdAt: operation.createdAt,
-      });
+      await projectRow(
+        database,
+        app.pendingOperations,
+        operation.id,
+        {
+          ownerDid: operation.ownerDid,
+          kind: operation.kind,
+          rkey: operation.rkey,
+          payload: encodeOperationPayload(operation),
+          state: "sent",
+          error: null,
+          createdAt: operation.createdAt,
+        },
+        "edge",
+      );
     } catch (error) {
       // Cancellation or AppView confirmation may delete the intention while its PDS write is in flight.
       if (!(error instanceof Error) || !error.message.includes("row already deleted:")) throw error;
