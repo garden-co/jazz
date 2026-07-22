@@ -2,6 +2,7 @@ import type { AppBskyFeedDefs } from "@atproto/api";
 import { describe, expect, it, vi } from "vitest";
 import { createProjection, stableObjectId } from "../../server/projection.js";
 import { app } from "../../schema.js";
+import { operationRow, type ReactionOperation } from "../../shared/pending-operations.js";
 
 const settledWrite = () => ({ wait: vi.fn(async () => undefined) });
 const testCid = "bafkreie7q3iidccmpvszul7kudcvvuavuo7u6gzlbobczuk5nqk3b4akba";
@@ -24,6 +25,24 @@ function post(uri: string, indexedAt = "2026-07-15T08:00:01.000Z"): AppBskyFeedD
     author: { did: "did:plc:author", handle: "author.test" },
     record: { text: "A post", createdAt: indexedAt },
     indexedAt,
+  };
+}
+
+function likeOperation(): ReactionOperation {
+  const createdAt = "2026-07-16T18:00:00.000Z";
+  return {
+    id: "00000000-0000-0000-0000-000000000001",
+    ownerDid: "did:plc:viewer",
+    kind: "like",
+    rkey: "3mlike",
+    state: "queued",
+    createdAt,
+    payload: {
+      subjectUri: "at://did:plc:author/app.bsky.feed.post/3mpost",
+      subjectCid: testCid,
+      active: true,
+      createdAt,
+    },
   };
 }
 
@@ -106,6 +125,24 @@ describe("post projection", () => {
 });
 
 describe("timeline projection", () => {
+  it("leaves a matching queued reaction for the outbox to complete", async () => {
+    const operation = likeOperation();
+    const db = database();
+    db.all.mockResolvedValueOnce([{ id: operation.id, ...operationRow(operation) }]);
+    const likedPost = {
+      ...post(operation.payload.subjectUri, operation.createdAt),
+      viewer: { like: `at://${operation.ownerDid}/app.bsky.feed.like/${operation.rkey}` },
+    };
+
+    await createProjection(db).projectTimelinePage(
+      operation.ownerDid,
+      [{ post: likedPost }],
+      "next",
+    );
+
+    expect(db.delete).not.toHaveBeenCalledWith(app.pendingOperations, operation.id);
+  });
+
   it("anchors a reply thread to the root post time", async () => {
     const root = post(
       "at://did:plc:author/app.bsky.feed.post/3m12345678920",
@@ -163,6 +200,30 @@ describe("timeline projection", () => {
       .filter(([table]) => table === app.timelineEntries)
       .map(([, , options]) => options.id);
     expect(new Set(timelineIds).size).toBe(2);
+  });
+});
+
+describe("outbox projection", () => {
+  it("treats an already-deleted reaction intention as complete", async () => {
+    const operation = likeOperation();
+    const db = database();
+    db.upsert.mockImplementation((table) => {
+      if (table === app.pendingOperations) {
+        throw new Error(`Upsert failed: WriteError("row already deleted: ${operation.id}")`);
+      }
+      return settledWrite();
+    });
+
+    await expect(
+      createProjection(db).projectReactionOperation(
+        operation,
+        {
+          ...post(operation.payload.subjectUri, operation.createdAt),
+          viewer: { like: `at://${operation.ownerDid}/app.bsky.feed.like/${operation.rkey}` },
+        },
+        { uri: `at://${operation.ownerDid}/app.bsky.feed.like/${operation.rkey}` },
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 
