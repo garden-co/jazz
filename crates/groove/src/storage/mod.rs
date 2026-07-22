@@ -12,6 +12,8 @@
 //! implementation lives in [`rocksdb_storage`]; higher layers decide when a
 //! batch is durable and how storage writes relate to an IVM tick.
 
+#[cfg(feature = "slatedb")]
+mod async_bridge;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
@@ -19,6 +21,9 @@ mod opfs;
 #[cfg(feature = "rocksdb")]
 #[path = "rocksdb.rs"]
 pub mod rocksdb_storage;
+#[cfg(feature = "slatedb")]
+#[path = "slatedb.rs"]
+pub mod slatedb_storage;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -31,6 +36,8 @@ use crate::window_codec::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "slatedb")]
+pub use async_bridge::{AsyncOrderedKvStorage, SyncBridgeStorage};
 pub use memory::MemoryStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
@@ -38,6 +45,8 @@ pub use opfs::OpfsStorage;
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(feature = "rocksdb")]
 pub use rocksdb_storage::{Durability, RocksDbStorage};
+#[cfg(feature = "slatedb")]
+pub use slatedb_storage::SlateDbStorage;
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
@@ -2330,6 +2339,15 @@ pub enum Error {
     #[cfg(feature = "rocksdb")]
     #[error(transparent)]
     RocksDb(#[from] ::rocksdb::Error),
+    #[cfg(feature = "slatedb")]
+    #[error(transparent)]
+    SlateDb(#[from] Box<::slatedb::Error>),
+    #[cfg(feature = "slatedb")]
+    #[error("slatedb storage: {0}")]
+    SlateDbBackend(String),
+    #[cfg(feature = "slatedb")]
+    #[error("async storage bridge: {0}")]
+    AsyncBridge(String),
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
 }
