@@ -250,27 +250,30 @@ describe("ATProto to Jazz projection", () => {
     await expect(pagination).resolves.toEqual({ cursor: "oldest", hasMore: true, count: 0 });
   });
 
-  it("starts a fresh head read after the AppView response even when Jazz projection is blocked", async () => {
-    const fetchTimelineFeed = vi
-      .fn()
-      .mockResolvedValueOnce({ feed: [], cursor: "first" })
-      .mockResolvedValueOnce({ feed: [], cursor: "second" });
+  it("does not report a refresh complete until Jazz has accepted the projection", async () => {
+    let releaseProjection!: () => void;
+    const projectionComplete = new Promise<void>((resolve) => {
+      releaseProjection = resolve;
+    });
     const { bridge } = await loadBridge({
-      api: bluesky({ fetchTimelineFeed }),
+      api: bluesky({
+        fetchTimelineFeed: vi.fn(async () => ({ feed: [], cursor: "next" })),
+      }),
       writer: projectionWriter({
-        projectTimelinePage: vi.fn(() => new Promise(() => undefined)),
+        projectTimelinePage: vi.fn(() => projectionComplete),
       }),
     });
-    const session = { fetchHandler: vi.fn() };
+    let settled = false;
 
-    await expect(bridge.projectTimelinePage("did:plc:viewer", session)).resolves.toMatchObject({
-      cursor: "first",
+    const refresh = bridge.projectTimelinePage("did:plc:viewer", { fetchHandler: vi.fn() });
+    refresh.then(() => {
+      settled = true;
     });
-    await expect(bridge.projectTimelinePage("did:plc:viewer", session)).resolves.toMatchObject({
-      cursor: "second",
-    });
+    await vi.waitFor(() => expect(moduleMocks.writer?.projectTimelinePage).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
 
-    expect(fetchTimelineFeed).toHaveBeenCalledTimes(2);
+    releaseProjection();
+    await expect(refresh).resolves.toEqual({ cursor: "next", hasMore: true, count: 0 });
   });
 
   it("serialises Jazz projection and coalesces repeated head refreshes", async () => {
