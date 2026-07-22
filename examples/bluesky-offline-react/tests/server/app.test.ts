@@ -3,9 +3,10 @@ import { basename, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  activateTimeline: vi.fn(),
   createJazzToken: vi.fn(),
+  projectNextTimelinePage: vi.fn(),
   projectThread: vi.fn(),
-  projectTimelinePage: vi.fn(),
   reconcileOperations: vi.fn(),
   restoreBffSession: vi.fn(),
 }));
@@ -22,8 +23,9 @@ vi.mock("../../server/auth.js", () => ({
 }));
 
 vi.mock("../../server/bridge.js", () => ({
+  activateTimeline: mocks.activateTimeline,
+  projectNextTimelinePage: mocks.projectNextTimelinePage,
   projectThread: mocks.projectThread,
-  projectTimelinePage: mocks.projectTimelinePage,
   reconcileOperations: mocks.reconcileOperations,
 }));
 
@@ -60,18 +62,22 @@ describe("BFF routes", () => {
     expect(await response.json()).toEqual({ did: "did:plc:alice", token: "jazz-jwt" });
     expect(mocks.restoreBffSession).toHaveBeenCalledWith("opaque-session-id");
     expect(mocks.createJazzToken).toHaveBeenCalledWith("did:plc:alice");
+    expect(mocks.activateTimeline).toHaveBeenCalledWith(
+      "did:plc:alice",
+      authenticatedSession.session,
+    );
   });
 
-  it("triggers projection into Jazz without returning timeline rows", async () => {
+  it("asks the BFF for the next page without exposing its AppView cursor", async () => {
     const metadata = {
       cursor: "next-page",
       hasMore: true,
       count: 20,
       projection: { id: "projection-id", state: "accepted" },
     };
-    mocks.projectTimelinePage.mockResolvedValue(metadata);
+    mocks.projectNextTimelinePage.mockResolvedValue(metadata);
 
-    const response = await createServer().request("/api/timeline", {
+    const response = await createServer().request("/api/timeline/more", {
       headers: { cookie: "bff-session=opaque-session-id" },
     });
 
@@ -80,10 +86,9 @@ describe("BFF routes", () => {
       hasMore: true,
       count: 20,
     });
-    expect(mocks.projectTimelinePage).toHaveBeenCalledWith(
+    expect(mocks.projectNextTimelinePage).toHaveBeenCalledWith(
       "did:plc:alice",
       authenticatedSession.session,
-      undefined,
     );
   });
 
@@ -147,10 +152,10 @@ describe("BFF routes", () => {
   );
 
   it("does not expose unexpected server errors", async () => {
-    mocks.projectTimelinePage.mockRejectedValue(new Error("database password leaked"));
+    mocks.projectNextTimelinePage.mockRejectedValue(new Error("database password leaked"));
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    const response = await createServer().request("/api/timeline", {
+    const response = await createServer().request("/api/timeline/more", {
       headers: { cookie: "bff-session=opaque-session-id" },
     });
 

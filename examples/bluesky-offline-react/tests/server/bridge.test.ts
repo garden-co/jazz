@@ -263,6 +263,26 @@ describe("ATProto to Jazz projection", () => {
     expect(writer.projectTimelinePage).toHaveBeenCalledOnce();
   });
 
+  it("keeps the AppView cursor in the BFF when loading the next page", async () => {
+    const fetchTimelineFeed = vi
+      .fn()
+      .mockResolvedValueOnce({ feed: [], cursor: "page-two" })
+      .mockResolvedValueOnce({ feed: [], cursor: "page-three" });
+    const { bridge } = await loadBridge({ api: bluesky({ fetchTimelineFeed }) });
+    const session = { fetchHandler: vi.fn() };
+
+    bridge.activateTimeline("did:plc:viewer", session);
+    await vi.waitFor(() => expect(fetchTimelineFeed).toHaveBeenCalledOnce());
+    await expect(bridge.projectNextTimelinePage("did:plc:viewer", session)).resolves.toEqual({
+      cursor: "page-three",
+      hasMore: true,
+      count: 0,
+    });
+
+    expect(fetchTimelineFeed).toHaveBeenNthCalledWith(1, session, undefined);
+    expect(fetchTimelineFeed).toHaveBeenNthCalledWith(2, session, "page-two");
+  });
+
   it("does not report a refresh complete until Jazz has accepted the projection", async () => {
     let releaseProjection!: () => void;
     const projectionComplete = new Promise<void>((resolve) => {
