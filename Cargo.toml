@@ -20,6 +20,7 @@ members = [
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
   "dev/benchmarks/storage/bench-core",
+  "dev/benchmarks/jazz-ingest",
 ]
 exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
 

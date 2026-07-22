@@ -1,0 +1,26 @@
+[package]
+name = "jazz-ingest-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "End-to-end Jazz ingestion/cold-load storage benchmark over a cherry-picked storage adapter (USDA plants dataset)."
+
+[[bin]]
+name = "jazz-ingest-bench"
+path = "src/main.rs"
+
+[dependencies]
+# Full Jazz stack with every selectable storage adapter compiled in.
+# `testing` matches the jazz-sim benches and exposes encoded_storage_bytes_for_test.
+jazz = { workspace = true, features = ["rocksdb", "slatedb", "testing"] }
+tempfile = "3"
+
+# Direct storage-engine APIs for the `--raw` layer (no Jazz, no groove seam).
+# Versions match crates/groove/Cargo.toml so both layers exercise the same
+# engine builds. rust-rocksdb is redirected by the workspace [patch.crates-io].
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
+slatedb = { version = "0.14.1", default-features = false, features = ["moka"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
