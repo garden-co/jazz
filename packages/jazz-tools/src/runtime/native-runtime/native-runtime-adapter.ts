@@ -932,6 +932,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrierPromise = carrier.ready().then(() => {
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
+      this.pumpSubscriptions();
+      this.refreshOpenedPlainSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {

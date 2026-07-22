@@ -348,9 +348,15 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     void this.connectionReady.catch(ignoreExpectedShutdown);
   }
 
-  disconnect(): void {
+  disconnect(): Promise<void> {
     this.connectionReady = null;
-    this.fireAndForget("disconnect");
+    if (this.closed) return Promise.resolve();
+    return this.opened
+      .then(() => {
+        if (this.closed) return undefined;
+        return this.send("disconnect", []);
+      })
+      .then(() => undefined);
   }
 
   updateAuth(authJson: string): void {
