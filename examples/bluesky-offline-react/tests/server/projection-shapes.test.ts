@@ -1,6 +1,7 @@
 import type { AppBskyFeedDefs } from "@atproto/api";
 import { describe, expect, it, vi } from "vitest";
-import { createProjection, stableObjectId } from "../../server/projection.js";
+import { stableObjectId } from "../../server/projection-input.js";
+import { createProjection } from "../../server/projection.js";
 import { app } from "../../schema.js";
 import { operationRow, type ReactionOperation } from "../../shared/pending-operations.js";
 
