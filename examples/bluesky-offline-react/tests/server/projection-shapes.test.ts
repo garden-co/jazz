@@ -1,6 +1,5 @@
 import type { AppBskyFeedDefs } from "@atproto/api";
 import { describe, expect, it, vi } from "vitest";
-import { stableObjectId } from "../../server/projection-input.js";
 import { createProjection } from "../../server/projection.js";
 import { app } from "../../schema.js";
 import { operationRow, type ReactionOperation } from "../../shared/pending-operations.js";
@@ -50,13 +49,14 @@ function likeOperation(): ReactionOperation {
 describe("post projection", () => {
   it("projects a quoted post alongside its outer post", async () => {
     const quotedUri = "at://did:plc:quoted/app.bsky.feed.post/3m12345678920";
+    const outerUri = "at://did:plc:author/app.bsky.feed.post/3m12345678921";
     const db = database();
     await createProjection(db).projectTimelinePage(
       "did:plc:viewer",
       [
         {
           post: {
-            ...post("at://did:plc:author/app.bsky.feed.post/3m12345678921"),
+            ...post(outerUri),
             record: { text: "Worth reading", createdAt: "2026-07-17T08:00:00.000Z" },
             embed: {
               $type: "app.bsky.embed.record#view",
@@ -75,15 +75,12 @@ describe("post projection", () => {
       "next",
     );
 
-    const projectedPosts = db.upsert.mock.calls
-      .filter(([table]) => table === app.posts)
-      .map(([, row]) => row);
-    expect(projectedPosts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ uri: quotedUri, text: "The quoted post" }),
-        expect.objectContaining({ quotedPostId: stableObjectId("bluesky-post", quotedUri) }),
-      ]),
-    );
+    const projectedPosts = db.upsert.mock.calls.filter(([table]) => table === app.posts);
+    const quotedPost = projectedPosts.find(([, row]) => row.uri === quotedUri);
+    const outerPost = projectedPosts.find(([, row]) => row.uri === outerUri);
+
+    expect(quotedPost?.[1]).toMatchObject({ uri: quotedUri, text: "The quoted post" });
+    expect(outerPost?.[1]).toMatchObject({ quotedPostId: quotedPost?.[2].id });
   });
 
   it("projects images from record-with-media posts", async () => {

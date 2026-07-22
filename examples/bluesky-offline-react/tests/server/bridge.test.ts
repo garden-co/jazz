@@ -7,7 +7,6 @@ import { createJazzContext } from "jazz-tools/backend";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import type { PostOperation, ReactionOperation } from "../../shared/pending-operations.js";
-import { stableObjectId } from "../../server/projection-input.js";
 
 type BlueskyMocks = ReturnType<typeof bluesky>;
 type WriterMocks = ReturnType<typeof projectionWriter>;
@@ -166,16 +165,12 @@ describe("ATProto → Jazz", () => {
       const { projectTimelinePage } = await import("../../server/bridge.js");
       await projectTimelinePage(viewerDid, { fetchHandler: vi.fn() });
 
-      expect(
-        await database.one(
-          app.profiles.where({ id: { eq: stableObjectId("bluesky-profile", authorDid) } }),
-        ),
-      ).toMatchObject({ handle: "author.test" });
-      expect(
-        await database.one(
-          app.posts.where({ id: { eq: stableObjectId("bluesky-post", post.uri) } }),
-        ),
-      ).toMatchObject({ text: "Hello" });
+      expect(await database.one(app.profiles.where({ did: { eq: authorDid } }))).toMatchObject({
+        handle: "author.test",
+      });
+      expect(await database.one(app.posts.where({ uri: { eq: post.uri } }))).toMatchObject({
+        text: "Hello",
+      });
     } finally {
       await context.shutdown();
       rmSync(dataDirectory, { recursive: true, force: true });
