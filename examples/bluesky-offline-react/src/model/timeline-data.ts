@@ -19,6 +19,7 @@ export type ImageView = s.RowOf<typeof app.postImages>;
 export type ReactionView = s.RowOf<typeof app.likes> | s.RowOf<typeof app.reposts>;
 
 export type TimelineRelations = {
+  viewerDid?: string;
   posts: PostRow[];
   profiles: ProfileView[];
   images: ImageView[];
@@ -82,7 +83,9 @@ function toDisplayPost(
       .sort((a, b) => a.position - b.position),
     quote: quote ? toDisplayPost(quote, relations, new Set(seen).add(post.id)) : undefined,
     like: relations.likes.find((like) => like.subjectPostId === post.id),
-    repost: relations.reposts.find((repost) => repost.subjectPostId === post.id),
+    repost: relations.reposts.find(
+      (repost) => repost.subjectPostId === post.id && repost.actorDid === relations.viewerDid,
+    ),
   };
 }
 

@@ -46,7 +46,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const { data: profiles } = useAll(app.profiles.where({}));
   const { data: images } = useAll(app.postImages.where({}));
   const { data: likes } = useAll(app.likes.where({ actorDid: { eq: did } }));
-  const { data: reposts } = useAll(app.reposts.where({ actorDid: { eq: did } }));
+  const { data: reposts } = useAll(app.reposts.where({}));
   const { data: pending } = useAll(app.pendingOperations.where({ ownerDid: { eq: did } }));
   const ownProfile = profiles?.find((profile) => profile.did === did);
   const ownHandle = ownProfile?.handle ?? ownProfile?.displayName ?? did;
@@ -54,6 +54,7 @@ export function Timeline({ did, onSignOut }: { did: string; onSignOut: () => voi
   const localTimelineWindow = windowTimelineRows(availableTimelineRows, localTimelineLimit);
   const visibleTimelineRows = localTimelineWindow.rows;
   const relations: TimelineRelations = {
+    viewerDid: did,
     posts: posts ?? [],
     profiles: profiles ?? [],
     images: images ?? [],

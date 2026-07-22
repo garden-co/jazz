@@ -610,6 +610,7 @@ function TimelineThreadContent({
       {item.repost && (
         <div className="repost-reason">
           <RepostIcon />
+          <span>Reposted by</span>
           {reposter?.avatar && (
             <Avatar
               src={reposter.avatar}
@@ -619,7 +620,6 @@ function TimelineThreadContent({
             />
           )}
           <ProfileName profile={reposter} fallback={reposterFallback} />
-          <span>reposted</span>
         </div>
       )}
       {focusedId !== item.node.post.id && (
