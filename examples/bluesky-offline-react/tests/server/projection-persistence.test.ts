@@ -36,7 +36,7 @@ describe("profile projection", () => {
     expect(database.update).not.toHaveBeenCalled();
   });
 
-  it("waits for edge persistence before considering a projection delivered", async () => {
+  it("uses local acceptance so an unavailable edge cannot block later projections", async () => {
     const wait = vi.fn(async () => undefined);
     const database = {
       all: vi.fn(async () => []),
@@ -52,7 +52,7 @@ describe("profile projection", () => {
       indexedAt: "2026-07-17T08:00:00.000Z",
     });
 
-    expect(wait).toHaveBeenCalledWith({ tier: "edge" });
+    expect(wait).not.toHaveBeenCalled();
   });
 
   it("does not overwrite enrichment with missing fields from a sparse source", async () => {
