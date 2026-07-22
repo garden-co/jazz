@@ -62,10 +62,10 @@ replication.
 
 | run             | write time |    throughput | encoded (Jazz) | physical on disk | amplification vs raw |
 | --------------- | ---------: | ------------: | -------------: | ---------------: | -------------------: |
-| **raw:slatedb** |    0.042 s |  2.2 M rows/s |              — |      **2.9 MiB** |            **0.55×** |
-| **raw:rocksdb** |    0.017 s |  5.4 M rows/s |              — |          4.1 MiB |                0.77× |
-| jazz:slatedb    |      8.5 s | 10.9 k rows/s |        ~87 MiB |         30.4 MiB |                5.74× |
-| jazz:rocksdb    |      2.0 s | 47.4 k rows/s |         87 MiB |         76.0 MiB |                14.4× |
+| **raw:slatedb** |    0.038 s |  2.5 M rows/s |              — |      **2.9 MiB** |            **0.55×** |
+| **raw:rocksdb** |    0.016 s |  5.9 M rows/s |              — |          4.1 MiB |                0.77× |
+| jazz:slatedb    |      8.2 s | 11.4 k rows/s |        ~87 MiB |         30.4 MiB |                5.74× |
+| jazz:rocksdb    |      2.0 s | 47.1 k rows/s |         87 MiB |         76.0 MiB |                14.4× |
 
 Raw input payload = 5.3 MiB. Both native engines compress _below_ the input
 (highly repetitive plant taxonomy text). Jazz's encoded size is ~16× the payload
@@ -75,16 +75,16 @@ before the engine even compresses it.
 
 | query             |    jazz:rocksdb |    jazz:slatedb |              raw:rocksdb |             raw:slatedb |
 | ----------------- | --------------: | --------------: | -----------------------: | ----------------------: |
-| point_by_key      | 242 / 234 / 221 | 502 / 506 / 490 | 0.02 / 0.001 / **0.000** | 0.31 / 0.04 / **0.009** |
-| prefix_scan_AB    | 231 / 214 / 213 | 449 / 451 / 445 |  0.04 / 0.02 / **0.019** | 0.54 / 0.35 / **0.245** |
-| full_scan         | 231 / 231 / 223 | 507 / 490 / 484 |      9.0 / 9.1 / **8.9** |     147 / 151 / **144** |
-| filter_family     | 228 / 231 / 217 | 462 / 458 / 480 |   15.2 / 12.1 / **12.1** |     143 / 141 / **141** |
-| top_100_by_symbol | 302 / 323 / 297 | 538 / 592 / 559 |  0.02 / 0.01 / **0.009** | 0.20 / 0.17 / **0.147** |
+| point_by_key      | 226 / 218 / 213 | 467 / 460 / 459 | 0.01 / 0.001 / **0.000** | 0.30 / 0.02 / **0.009** |
+| prefix_scan_AB    | 216 / 217 / 214 | 467 / 462 / 462 |  0.04 / 0.02 / **0.019** | 0.29 / 0.26 / **0.238** |
+| full_scan         | 211 / 212 / 209 | 465 / 470 / 455 |      9.0 / 9.0 / **8.8** |     138 / 139 / **135** |
+| filter_family     | 211 / 209 / 208 | 456 / 458 / 455 |   15.4 / 12.1 / **11.6** |     140 / 139 / **138** |
+| top_100_by_symbol | 287 / 286 / 285 | 536 / 542 / 531 |  0.01 / 0.01 / **0.009** | 0.16 / 0.15 / **0.144** |
 
 Two clusters per engine: **indexed** queries (point/prefix/top-N) seek on the
 ordered keyspace → microseconds native; **full-value scans** (the filter/count
 queries) walk all 93k rows because there is no secondary index → flat ~12 ms
-(RocksDB) / ~144 ms (SlateDB) regardless of selectivity.
+(RocksDB) / ~138 ms (SlateDB) regardless of selectivity.
 
 ## Root-cause analysis
 
@@ -95,7 +95,7 @@ versioning metadata, giving ~16× amplification (87 MiB encoded from 5.3 MiB
 payload) before storage compression. Writes go through the mergeable-transaction
 path, which is CPU-bound in Jazz, not disk-bound. And `db.read` **materializes
 the whole relation** to answer any query, so every query — even a 1-row point
-lookup — costs ~220 ms (RocksDB) / ~485 ms (SlateDB); `top_100_by_symbol` is the
+lookup — costs ~210 ms (RocksDB) / ~460 ms (SlateDB); `top_100_by_symbol` is the
 worst case because it sorts-then-limits the full relation. These are the price of
 Jazz's semantics (history, merge, policies, IVM), which the raw layer does not
 provide.
@@ -118,6 +118,20 @@ SlateDB is an LSM designed for **object storage (S3)**, where per-op latency is 
 network round-trip that dwarfs this overhead. On a local, warm benchmark that
 overhead is fully exposed.
 
+### jazz:slatedb runs a sync-forced path
+
+The two SlateDB numbers are not the same engine driven two ways. **raw:slatedb**
+drives SlateDB's native async API directly. **jazz:slatedb** reaches it through
+groove's `SlateDbStorage`, which wraps the natively-async engine in
+`SyncBridgeStorage` — a synchronous façade that runs SlateDB on a dedicated
+worker thread and _blocks the caller on every operation_. Each storage call
+becomes a thread round-trip, so the async engine's concurrency is serialized and
+per-op overhead is multiplied. That is why jazz:slatedb (8.2 s ingest, ~460 ms
+queries) is far slower than raw:slatedb (0.04 s, ~138 ms) beyond Jazz's own
+encoding cost — and why it degrades worst under I/O latency: the many small,
+individually-blocking ops each pay the disk latency in series rather than
+overlapping.
+
 ### Compression
 
 SlateDB defaults to `compression_codec: None`. Enabling Zstd (one line in
@@ -125,50 +139,39 @@ groove's `SlateDbStorage`, plus the `zstd` crate feature) cut the footprint:
 raw:slatedb 15.8 → 2.9 MiB (5.4×), jazz:slatedb 124.8 → 30.4 MiB (4.1×). The
 benchmark's raw path and groove's adapter now both enable it.
 
-## Slow-disk experiments (Docker, arm64 Linux)
+## Behavior under an EBS-like disk (Docker, arm64 Linux)
 
-Two mechanisms, because Docker Desktop's kernel lacks `dm-delay`:
+Engine data sits on a loop-backed ext4 volume, rate-limited on **real device
+I/O** by cgroup v2 `io.max` — IOPS + bandwidth caps (gp3 baseline = 3000 IOPS,
+125 MiB/s) — while the page cache serves warm reads for free. This throttles
+actual device I/O the way an EBS volume does, respecting the cache. (Docker
+Desktop's kernel lacks `dm-delay`, so the cgroup throttle is the faithful
+mechanism available.) Verified: an 8 MiB/s cap makes a 64 MiB write+fsync take
+exactly 8 s. See `docker/ebs-run.sh`.
 
-### 1. Per-syscall latency shim (`docker/delay.c`, LD_PRELOAD)
+| metric                        | host (no throttle) | gp3 (3000/125) | constrained (500/30) |
+| ----------------------------- | -----------------: | -------------: | -------------------: |
+| raw:rocksdb · write           |            0.016 s |        0.017 s |              0.019 s |
+| raw:rocksdb · flush           |            0.019 s |        0.023 s |          **0.111 s** |
+| raw:slatedb · full_scan (hot) |             135 ms |         251 ms |               254 ms |
+| jazz:rocksdb · cold reopen    |             0.25 s |         0.34 s |           **1.00 s** |
 
-Adds a fixed delay to `write`/`pwrite`/`writev`/`fsync`/`fdatasync`
-(`WRITE_DELAY_NS`) and `read`/`pread`/`readv`/`preadv` (`READ_DELAY_NS`). At
-2 ms:
-
-- **Writes barely move for RocksDB** (batched WAL, few syscalls): jazz:rocksdb
-  2.19 → 2.52 s. **SlateDB's flush collapses** (many small object writes):
-  raw:slatedb flush 0.11 → 6.13 s. **jazz:slatedb becomes pathological** (the
-  `SyncBridgeStorage` bridge multiplies write syscalls) — did not finish in
-  10 min vs 28 s.
-- **Read delay exposes caching behavior.** RocksDB pays the first cold full scan
-  (5.4 s to read every block off the slow disk) then serves all later scans from
-  its block cache (~6 ms, delay hidden). SlateDB's scans stay ~4× slower even
-  hot (606 vs 144 ms) because they re-read from disk every time (see
-  `cache_blocks: false`).
-
-Caveat: this is **per-syscall**, not per-device-I/O, so it penalizes chatty write
-patterns more than batched ones and delays even page-cache-hit reads. Realistic
-in that more syscalls = more disk exposure, but it overstates buffered-write cost.
-
-### 2. EBS-like throttle (`docker/ebs-run.sh`, cgroup v2 `io.max`)
-
-More faithful: puts the engine data on a loop-backed ext4 volume and rate-limits
-**real device I/O** with IOPS + bandwidth caps (gp3 baseline = 3000 IOPS,
-125 MiB/s), while the page cache serves warm reads for free. Verified: an 8 MiB/s
-cap makes a 64 MiB write+fsync take exactly 8 s.
-
-| metric                      | baseline | gp3 (3000/125) | constrained (500/30) |
-| --------------------------- | -------: | -------------: | -------------------: |
-| raw:rocksdb write           |  0.018 s |        0.019 s |              0.017 s |
-| raw:rocksdb flush           |  0.020 s |        0.022 s |          **0.118 s** |
-| raw:slatedb full_scan (hot) |   144 ms |         251 ms |               253 ms |
-| jazz:rocksdb cold reopen    |   0.26 s |              — |           **0.88 s** |
+Both throttled runs are containerized; the throttle's effect is cleanest in the
+gp3 → constrained delta (host → gp3 also carries container + loop-device
+overhead).
 
 **EBS latency lands on reads and durability barriers, not buffered writes.** Both
 engines use no-sync / deferred-durability writes, so writes hit the page cache
-and writeback is async — on a dataset this size the OS absorbs it. What pays the
-throttle: RocksDB's flush fsync, cold reopen (reading SSTs back), and SlateDB's
-uncached scans (144 → ~255 ms). RocksDB's cached scans (6 ms) are untouched.
+and writeback is async — on a dataset this size the OS absorbs it, and even the
+constrained tier barely moves `write` (0.016 → 0.019 s). What pays the throttle:
+
+- **RocksDB's flush fsync** — 0.02 → 0.11 s at 500 IOPS (~6×), its one true
+  device wait.
+- **jazz:rocksdb cold reopen** — 0.25 → 0.34 → 1.00 s, scaling monotonically with
+  the throttle as it reads SST index/blocks back off the volume.
+- **SlateDB's uncached scans** — 135 → ~254 ms, directly exposed because they
+  re-read from the device every time (the `cache_blocks: false` default), while
+  RocksDB's cached scans (6 ms) are untouched.
 
 Caveat: `io.max` models EBS's throughput/IOPS **ceilings**, not its ~1 ms base
 per-op latency. And the write-path effect is muted only because the dataset is
@@ -205,16 +208,14 @@ cargo run --release -p jazz-ingest-bench -- --storage rocksdb,slatedb --raw rock
 # True cold per query (reopen before each)
 cargo run --release -p jazz-ingest-bench -- --raw rocksdb,slatedb --cold-per-query
 
-# Slow disk (container): 2 ms read+write latency shim
-docker build -f dev/benchmarks/jazz-ingest/docker/Dockerfile -t jazz-ingest-bench .
-docker run --rm -v "$PWD/dev/benchmarks/jazz-ingest/docker/delay.c:/tmp/delay.c" jazz-ingest-bench \
-  'clang -O2 -fPIC -shared -o /tmp/d.so /tmp/delay.c -ldl && \
-   WRITE_DELAY_NS=2000000 READ_DELAY_NS=2000000 LD_PRELOAD=/tmp/d.so \
-   /src/target/release/jazz-ingest-bench --raw rocksdb,slatedb'
-
 # EBS-like throttle (container, gp3 baseline)
+docker build -f dev/benchmarks/jazz-ingest/docker/Dockerfile -t jazz-ingest-bench .
 docker run --rm --privileged -v "$PWD/dev/benchmarks/jazz-ingest/docker/ebs-run.sh:/ebs-run.sh" \
   -e EBS_IOPS=3000 -e EBS_BPS=131072000 jazz-ingest-bench 'sh /ebs-run.sh --raw rocksdb,slatedb'
+
+# Tighter tier (constrained volume)
+docker run --rm --privileged -v "$PWD/dev/benchmarks/jazz-ingest/docker/ebs-run.sh:/ebs-run.sh" \
+  -e EBS_IOPS=500 -e EBS_BPS=31457280 jazz-ingest-bench 'sh /ebs-run.sh --raw rocksdb,slatedb'
 ```
 
 The Docker build caps parallelism (`-j 2`) so the memory-heavy jazz crate fits
