@@ -204,6 +204,26 @@ describe("timeline projection", () => {
 });
 
 describe("outbox projection", () => {
+  it("confirms completed reaction intentions at the Jazz edge before returning", async () => {
+    const operation = likeOperation();
+    const db = database();
+    const completion = settledWrite();
+    db.upsert.mockImplementation((table) =>
+      table === app.pendingOperations ? completion : settledWrite(),
+    );
+
+    await createProjection(db).projectReactionOperation(
+      operation,
+      {
+        ...post(operation.payload.subjectUri, operation.createdAt),
+        viewer: { like: `at://${operation.ownerDid}/app.bsky.feed.like/${operation.rkey}` },
+      },
+      { uri: `at://${operation.ownerDid}/app.bsky.feed.like/${operation.rkey}` },
+    );
+
+    expect(completion.wait).toHaveBeenCalledWith({ tier: "edge" });
+  });
+
   it("treats an already-deleted reaction intention as complete", async () => {
     const operation = likeOperation();
     const db = database();
