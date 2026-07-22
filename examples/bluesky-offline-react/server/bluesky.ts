@@ -22,6 +22,7 @@ async function readFromAppView<T>(request: () => Promise<T>) {
 export class OperationError extends Error {
   constructor(
     message: string,
+    // The outbox only needs two outcomes: 400 stops retrying; 502 stays queued.
     readonly status: 400 | 502,
   ) {
     super(message);

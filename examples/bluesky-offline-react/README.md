@@ -42,7 +42,8 @@ The example keeps the boundary between the authoritative system and Jazz deliber
 | `server/jazz.ts`                       | Shared server-side Jazz context                                                               | Yes                          | No                                  |
 | `server/bluesky.ts`                    | Read from AppView; write to the PDS                                                           | No                           | Yes                                 |
 | `server/bridge.ts`                     | Own head polling and AppView cursors, fetch authoritative reads, and apply ordered PDS writes | Through its projection       | Yes                                 |
-| `server/projection.ts`                 | Turn ATProto views and reconciled intentions into typed, idempotent Jazz writes               | Yes                          | Yes                                 |
+| `server/projection-input.ts`           | Turn ATProto views into deterministic Jazz row shapes                                         | No                           | Yes                                 |
+| `server/projection.ts`                 | Persist mapped rows and reconcile optimistic intentions                                       | Yes                          | Yes                                 |
 | `schema.ts`                            | Local relational projection and pending intentions                                            | Yes                          | No protocol calls                   |
 | `permissions.ts`                       | Client access to projected rows and locally queued intentions                                 | Yes                          | No                                  |
 | `shared/pending-operations.ts`         | Serialise and validate the offline-write contract                                             | Describes intention rows     | Describes source operations         |
@@ -97,7 +98,7 @@ Loopback origins are considered secure for PWA development; a deployed copy must
 
 ## Layering Jazz over another database
 
-For a conventional SQL-backed application, keep the Jazz-facing projection and client pattern. Replace `server/bluesky.ts` with an adapter around the existing service or database, and replace the source-specific mapping in `server/projection.ts` and `server/bridge.ts`:
+For a conventional SQL-backed application, keep the Jazz-facing projection and client pattern. Replace `server/bluesky.ts` with an adapter around the existing service or database, and replace the source-specific mapping in `server/projection-input.ts` and `server/bridge.ts`:
 
 1. Let the server own bounded head polling and the existing database's cursor or primary-key position.
 2. Normalise those records into the projection rows expected by the bridge.
