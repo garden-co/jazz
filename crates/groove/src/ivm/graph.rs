@@ -76,8 +76,8 @@ use super::op_types::*;
 /// ```
 ///
 /// Prepared graph shapes use a named [`GraphBuilder::binding_source`] node. The
-/// source name passed to [`Database::prepare`] must match the binding source in
-/// the graph.
+/// source name passed to [`crate::db::Database::prepare`] must match the binding
+/// source in the graph.
 ///
 /// ```rust
 /// use groove::db::{Database, GraphBuilder};

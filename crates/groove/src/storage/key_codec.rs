@@ -1,8 +1,21 @@
+//! Column-family key namespacing for single-keyspace backends.
+//!
+//! Backends like OPFS have one flat ordered keyspace, not RocksDB-style
+//! column families. This codec folds a `(column family, key)` pair into one
+//! byte string — `version, cf-length, cf-name, key` — so that keys of one CF
+//! stay contiguous and sort by name then key, matching the `OrderedKvStorage`
+//! contract. Multi-column-family backends do not use it.
+
 use super::Error;
 
+/// Format version byte, so the on-disk key layout can evolve.
 const KEY_VERSION: u8 = 1;
+/// Column-family names are length-prefixed with a `u16`, so this is the cap.
 const MAX_COLUMN_FAMILY_LEN: usize = u16::MAX as usize;
 
+/// Folds `(cf, key)` into one namespaced key: `version` byte, big-endian
+/// `u16` CF-name length, the CF name, then the key. Fails when the CF name
+/// exceeds [`MAX_COLUMN_FAMILY_LEN`].
 pub fn encode_column_family_key(cf: &str, key: &[u8]) -> Result<Vec<u8>, Error> {
     let cf_bytes = cf.as_bytes();
     if cf_bytes.len() > MAX_COLUMN_FAMILY_LEN {
@@ -20,6 +33,9 @@ pub fn encode_column_family_key(cf: &str, key: &[u8]) -> Result<Vec<u8>, Error> 
     Ok(encoded)
 }
 
+/// Reverses [`encode_column_family_key`], borrowing the CF name and key back
+/// out of the namespaced bytes. Rejects a wrong version byte or a truncated
+/// key.
 pub fn decode_column_family_key(encoded: &[u8]) -> Result<(&str, &[u8]), Error> {
     if encoded.len() < 3 || encoded[0] != KEY_VERSION {
         return Err(Error::InvalidStorageKey(
@@ -40,6 +56,9 @@ pub fn decode_column_family_key(encoded: &[u8]) -> Result<(&str, &[u8]), Error> 
     Ok((cf, &encoded[key_offset..]))
 }
 
+/// The next byte string after `bytes` in lexicographic order, formed by
+/// incrementing the last non-`0xff` byte and dropping the trailing `0xff`
+/// run. Returns `None` when `bytes` is all `0xff` (no successor exists).
 pub fn increment_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut next = bytes.to_vec();
     for index in (0..next.len()).rev() {
@@ -52,6 +71,8 @@ pub fn increment_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// The smallest key strictly greater than every key starting with `prefix` —
+/// the exclusive upper bound turning a prefix scan into a range scan.
 pub fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     increment_bytes(prefix)
 }

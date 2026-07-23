@@ -4,13 +4,14 @@
 //! Public APIs use logical declaration-order indices. The encoded bytes use an
 //! internal physical order with fixed-width fields first and variable-width
 //! fields second; that physical space is represented only by the private
-//! [`PhysicalFieldIdx`] newtype and folded into the descriptor layout cache.
+//! `PhysicalFieldIdx` newtype and folded into the descriptor layout cache.
 //! Records only store bytes; names and types live in the descriptor.
 //!
 //! This module owns descriptor construction, layout validation, encoding,
 //! decoding, typed field accessors, projection, patching, and owned/borrowed
 //! record wrappers. Logical values and value-type encoding helpers live in
-//! [`values`]; generated typed row wrappers live in [`macros`]. Schemas decide
+//! the private `values` submodule; generated typed row wrappers live in
+//! [`macros`]. Schemas decide
 //! which descriptors to build, and storage only sees encoded bytes.
 //!
 //! Multi-byte scalars and offsets are little-endian. All offsets are `u32`

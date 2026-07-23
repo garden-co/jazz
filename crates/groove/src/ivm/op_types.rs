@@ -415,7 +415,7 @@ pub enum PredicateExpr {
 ///
 /// This mirrors [`Value`] but is `Eq + Hash + Ord`, which node identity and
 /// predicate canonicalization require ([`Value`] itself is not, because of
-/// `f64`). Convert with `From<Value>` and [`LiteralValue::to_value`].
+/// `f64`). Convert with `From<Value>` and `LiteralValue::to_value`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LiteralValue {
     U8(u8),

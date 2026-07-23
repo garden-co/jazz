@@ -19,6 +19,14 @@ use super::{
     plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
+/// The maintained state of one recursive (fixpoint) node.
+///
+/// `accumulated` is the fixpoint's current result — every row derived so far,
+/// each at weight 1 (set semantics, so cycles converge instead of counting
+/// support forever). `step_arrangements_hydrated` records whether the step
+/// graph's join arrangements already hold the full accumulated relation, which
+/// is the precondition for taking the cheap incremental path instead of a full
+/// recompute.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RecursiveState {
     /// Current recursive result as an encoded-record multiset.
@@ -32,14 +40,18 @@ pub(super) struct RecursiveState {
 }
 
 impl RecursiveState {
+    /// `true` when nothing has been derived yet.
     pub(super) fn is_empty(&self) -> bool {
         self.accumulated.is_empty()
     }
 
+    /// Whether the step arrangements hold the full accumulated relation
+    /// (the incremental-path precondition).
     pub(super) fn step_arrangements_hydrated(&self) -> bool {
         self.step_arrangements_hydrated
     }
 
+    /// Number of live accumulated rows (for stats).
     pub(super) fn accumulated_row_count(&self) -> usize {
         self.accumulated
             .values()
@@ -47,14 +59,18 @@ impl RecursiveState {
             .count()
     }
 
+    /// Encoded size of the accumulated relation (for stats).
     pub(super) fn accumulated_encoded_bytes(&self) -> usize {
         self.accumulated.keys().map(|record| record.len()).sum()
     }
 
+    /// Marks the step arrangements as holding the full accumulated relation.
     pub(super) fn mark_step_arrangements_hydrated(&mut self) {
         self.step_arrangements_hydrated = true;
     }
 
+    /// The whole accumulated relation as positive deltas — the "old closure"
+    /// fed to a step when a table delta must probe it.
     pub(super) fn accumulated_deltas(&self) -> Vec<RecordDelta> {
         self.accumulated
             .iter()
@@ -67,6 +83,13 @@ impl RecursiveState {
             .collect()
     }
 
+    /// Folds a frontier of newly derived rows into `accumulated`, returning
+    /// only the rows that were genuinely new (the next frontier).
+    ///
+    /// Rows already present are dropped (set semantics), so a fixpoint over a
+    /// cyclic graph terminates. Any non-positive weight — a retraction — is
+    /// rejected as [`IvmRuntimeError::UnsupportedNonMonotoneRecursion`]: only
+    /// monotone positive recursion is supported.
     pub(super) fn accept_positive(
         &mut self,
         deltas: Vec<RecordDelta>,
@@ -92,6 +115,10 @@ impl RecursiveState {
         Ok(consolidate_deltas(accepted))
     }
 
+    /// Swaps in a freshly recomputed relation and returns the diff from the
+    /// old one (retract vanished rows, insert new ones) so subscribers see
+    /// the net change. Resets the hydration flag, since the step
+    /// arrangements no longer match.
     pub(super) fn replace_with(&mut self, next: HashMap<Bytes, i64>) -> Vec<RecordDelta> {
         let mut deltas = Vec::new();
         for (record, old_weight) in &self.accumulated {
@@ -119,6 +146,20 @@ impl RecursiveState {
     }
 }
 
+/// Computes one tick's change to a fixpoint node.
+///
+/// * `recursive_state` — the node's maintained relation and hydration flag.
+/// * `runtime` — borrowed evaluator state for running the seed/step graphs.
+/// * `node` / `recursive` — the recursive node and its descriptor.
+/// * `output_desc` — the fixpoint's row layout.
+/// * `seed` / `step` — the seed and step input nodes.
+///
+/// Takes one of two paths. When something forces it — a retraction, a binding
+/// removal, empty state, or un-hydrated step arrangements — it does a full
+/// [`recompute_recursive`] and diffs the result. Otherwise it runs the
+/// incremental loop: evaluate the seed's delta, then repeatedly run the step
+/// over the growing frontier ([`RecursiveState::accept_positive`]) until no
+/// new rows appear or `max_iters` is hit.
 pub(super) fn recursive_delta<S>(
     recursive_state: &mut RecursiveState,
     mut runtime: GraphRuntimeView<'_, S>,
@@ -271,6 +312,8 @@ where
     Ok(consolidate_deltas(emitted))
 }
 
+/// `true` when this tick changed any table the fixpoint reads (using the
+/// table list cached on the descriptor).
 fn has_table_delta_for_cached_tables<S>(
     runtime: &GraphRuntimeView<'_, S>,
     recursive: &RecursiveOp,
@@ -284,6 +327,10 @@ where
         .any(|table_delta| recursive.read_tables.contains(&table_delta.table))
 }
 
+/// `true` when a table change forces a full recompute rather than an
+/// incremental step: any retraction on a table the fixpoint reads, or *any*
+/// change to a table on the right side of an anti join (where a new row can
+/// remove existing results — non-monotone).
 fn has_recompute_table_delta_for_recursion<S>(
     runtime: &GraphRuntimeView<'_, S>,
     seed: NodeId,
@@ -308,6 +355,9 @@ where
         }))
 }
 
+/// `true` when a binding retraction touches a binding source the fixpoint
+/// reads — removing a binding can drop rows, which the incremental path
+/// cannot express, so a recompute is forced.
 fn has_recompute_binding_delta_for_recursion<S>(
     runtime: &GraphRuntimeView<'_, S>,
     seed: NodeId,
@@ -326,6 +376,13 @@ where
         .any(|binding_delta| binding_delta.deltas.iter().any(|delta| delta.weight <= 0)))
 }
 
+/// Primes the step graph's join arrangements with the full accumulated
+/// relation, so later incremental ticks can probe the "old closure".
+///
+/// It runs the step once over a snapshot of its base tables plus the whole
+/// accumulated frontier and throws the output away — the point is the side
+/// effect of populating shared arrangements — then clears the scope's
+/// per-iteration operator state.
 pub(super) fn hydrate_recursive_arrangements<S>(
     runtime: &mut GraphRuntimeView<'_, S>,
     recursive: &RecursiveOp,
@@ -368,6 +425,11 @@ where
     Ok(())
 }
 
+/// Reads every base table reachable from `root` in full and returns each as
+/// an all-`+1` [`TableDelta`] — i.e. the current stored contents presented as
+/// if freshly inserted. This is how hydration turns "read the whole table"
+/// into the same delta-driven path a tick uses. Static scans on a source
+/// restrict what is read.
 pub(super) fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
@@ -411,12 +473,16 @@ pub(super) fn snapshot_table_deltas(
         .collect()
 }
 
+/// One base table to snapshot, distinguished by its scan restriction so two
+/// sources of the same table with different scans are read separately.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TableSnapshotSource {
     table: String,
     scan: Option<StaticScanSpec>,
 }
 
+/// Walks the graph below `node` collecting every distinct table source to
+/// snapshot, with its output layout.
 fn collect_table_sources(
     graph: &IvmGraph,
     node: NodeId,
@@ -439,6 +505,9 @@ fn collect_table_sources(
     Ok(())
 }
 
+/// The sorted set of table names the seed and step graphs read, cached on the
+/// [`RecursiveOp`] so per-tick "did a relevant table change?" checks don't
+/// re-walk the graph.
 pub(super) fn recursive_read_tables(
     graph: &IvmGraph,
     seed: NodeId,
@@ -452,6 +521,8 @@ pub(super) fn recursive_read_tables(
     Ok(tables)
 }
 
+/// Collects the names of every table read below `node` (via table *or* index
+/// sources), with each table's output layout.
 fn collect_table_source_names(
     graph: &IvmGraph,
     node: NodeId,
@@ -475,6 +546,7 @@ fn collect_table_source_names(
     Ok(())
 }
 
+/// Collects the shape names of every binding source read below `node`.
 fn collect_binding_sources(
     graph: &IvmGraph,
     node: NodeId,
@@ -494,6 +566,9 @@ fn collect_binding_sources(
     Ok(())
 }
 
+/// Collects the tables feeding the *right* side of any anti join below
+/// `node`. A change to one of these can retract existing results, so it forces
+/// a recompute (see [`has_recompute_table_delta_for_recursion`]).
 fn collect_anti_join_right_table_sources(
     graph: &IvmGraph,
     node: NodeId,
@@ -516,6 +591,13 @@ fn collect_anti_join_right_table_sources(
     Ok(())
 }
 
+/// Computes a fixpoint from scratch against stored data (the recompute path).
+///
+/// Starts from the seed evaluated over full table snapshots, then repeatedly
+/// runs the step over the newly accepted frontier — using the
+/// [`HydrationEvaluator`], which reads tables in full instead of consuming
+/// deltas — until no new rows appear or `max_iters` is hit. Returns the whole
+/// accumulated relation.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn recompute_recursive(
     schema: &crate::schema::DatabaseSchema,
@@ -578,6 +660,9 @@ pub(super) fn recompute_recursive(
     Ok(accumulated)
 }
 
+/// The recompute-path analogue of [`RecursiveState::accept_positive`]: folds
+/// new rows into a plain accumulator set and returns only the genuinely new
+/// ones, rejecting any retraction.
 fn accept_positive_into_set(
     multiset: &mut HashMap<Bytes, i64>,
     deltas: Vec<RecordDelta>,
@@ -602,6 +687,9 @@ fn accept_positive_into_set(
     Ok(consolidate_deltas(accepted))
 }
 
+/// Guards the monotone-recursion contract: any zero or negative weight in a
+/// frontier is rejected before consolidation (so `+1` and `-1` on one row
+/// cannot silently cancel into an accepted empty change).
 fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), IvmRuntimeError> {
     if deltas.iter().any(|delta| delta.weight <= 0) {
         return Err(IvmRuntimeError::UnsupportedNonMonotoneRecursion);
@@ -610,6 +698,12 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 }
 
 /// Full-snapshot evaluator used by recursive recompute fallback.
+///
+/// A cut-down cousin of [`super::TickEvaluator`] that reads base tables in
+/// full (rather than consuming deltas) and carries no memo or arrangement
+/// state — exactly what the recompute path needs. It only implements the
+/// operators a recursive graph can legally contain; the rest return
+/// [`IvmRuntimeError::UnsupportedOperator`].
 struct HydrationEvaluator<'a, S> {
     schema: &'a crate::schema::DatabaseSchema,
     graph: &'a IvmGraph,
@@ -622,6 +716,7 @@ impl<S> HydrationEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    /// Recursively evaluates one node to its full snapshot output.
     fn eval_node(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
         let graph_node = self
             .graph
@@ -874,6 +969,7 @@ where
         }
     }
 
+    /// Reads a whole base table as all-`+1` deltas.
     fn eval_table_source(
         &self,
         table: &TableSourceOp,
@@ -898,6 +994,7 @@ where
         })
     }
 
+    /// Evaluates the single input of a one-input node.
     fn eval_unary_input(
         &mut self,
         graph_node: &crate::ivm::GraphNode,

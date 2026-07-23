@@ -17,12 +17,32 @@ use super::{
     IvmRuntimeError, RecordDeltas, encode_key_part, encode_ordered_bytes, index_record_descriptor,
 };
 
+/// The running net effect on one durable key while consolidating a tick.
+///
+/// `weight` sums the incoming deltas for the key; `positive_record` remembers
+/// the most recent inserted row so a net-positive key knows which bytes to
+/// write. A net weight of zero with a positive record means "-old, +new" for
+/// the same key — an in-place update that must leave the entry present.
 #[derive(Default)]
 struct PendingPersistKey {
     weight: i64,
     positive_record: Option<Vec<u8>>,
 }
 
+/// Write-through for a `Persist` node: turns this tick's record deltas into
+/// durable key writes.
+///
+/// * `storage` — the backing store.
+/// * `durable_storage` — the column family and key prefix to write under.
+/// * `key_fields` — output field indices forming the durable key.
+/// * `unique` — when set, a second distinct row on an existing key is a
+///   [`IvmRuntimeError::UniqueIndexViolation`].
+/// * `delta` — this tick's weighted record changes.
+///
+/// Deltas are consolidated per key first (so `-old, +new` on one key nets to
+/// a single write regardless of order), then applied as one batch. Index
+/// entries (the `(key, value)` shape) take the specialized
+/// [`apply_index_persist_delta`] path.
 pub(super) fn apply_persist_delta(
     storage: &impl OrderedKvStorage,
     durable_storage: &DurableStorage,
@@ -113,6 +133,10 @@ pub(super) fn apply_persist_delta(
     Ok(store.write_many(&operations)?)
 }
 
+/// [`apply_persist_delta`] specialized for index entries, whose key is
+/// already the encoded index key in field 0. Same consolidate-then-batch
+/// logic, but the durable key comes from wrapping the entry's logical key in
+/// the storage prefix rather than re-encoding record fields.
 fn apply_index_persist_delta(
     storage: &impl OrderedKvStorage,
     durable_storage: &DurableStorage,
@@ -190,6 +214,8 @@ fn apply_index_persist_delta(
     Ok(store.write_many(&operations)?)
 }
 
+/// Builds the full storage key for one index entry: the node's key prefix, a
+/// `7` bytes-type tag, then the NUL-escaped logical index key.
 fn persisted_index_record_key(durable_storage: &DurableStorage, logical_key: &[u8]) -> Vec<u8> {
     let mut key = durable_storage.key_prefix.clone();
     key.push(7);
@@ -197,12 +223,20 @@ fn persisted_index_record_key(durable_storage: &DurableStorage, logical_key: &[u
     key
 }
 
+/// A human-readable `table.index` name derived from the key prefix, for
+/// unique-violation error messages.
 fn durable_storage_name(durable_storage: &DurableStorage) -> String {
     String::from_utf8_lossy(&durable_storage.key_prefix)
         .trim_end_matches('\0')
         .replace('\0', ".")
 }
 
+/// Builds the durable storage key(s) for one persisted record.
+///
+/// Usually one key (the prefix followed by the encoded key fields). An
+/// array-valued key field fans out to one key per element, so a row can be
+/// indexed under several keys. An empty key set means the row contributes no
+/// key and is skipped.
 fn persist_record_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
@@ -245,6 +279,9 @@ fn persist_record_keys(
     Ok(keys)
 }
 
+/// Splits a key-field value into the individual key parts it contributes: an
+/// array yields one part per element (nested nullability preserved), a scalar
+/// yields itself. This is what makes array-valued index keys fan out.
 fn arrangement_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
     match value {
         crate::records::Value::Array(values) => values,

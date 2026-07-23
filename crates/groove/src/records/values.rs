@@ -261,15 +261,15 @@ pub enum ValueType {
     /// Variable-width members are deliberately rejected at schema construction.
     ///
     /// Tuples double as ordered keys, so members use the order-preserving
-    /// layout described on [`encode_tuple_member`] (big-endian integers,
+    /// layout described on `encode_tuple_member` (big-endian integers,
     /// sign-flipped `I64`). `F64` cannot appear inside a tuple: it has no
     /// order-preserving encoding here.
     Tuple(Vec<ValueType>),
-    /// Variable-length list of one element type; see [`encode_array`] for the
+    /// Variable-length list of one element type; see `encode_array` for the
     /// layout.
     Array(Box<ValueType>),
     /// A value that may be NULL, encoded as a 1-byte present/absent flag
-    /// followed by the payload; see [`encode_nullable`].
+    /// followed by the payload; see `encode_nullable`.
     Nullable(Box<ValueType>),
     /// Signed 64-bit integer; 8 bytes.
     I64,

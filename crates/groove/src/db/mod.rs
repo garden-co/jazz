@@ -39,14 +39,29 @@ pub use crate::ivm::{
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
+///
+/// This is the public entry point: it encodes user rows against the schema,
+/// keeps primary and secondary storage entries up to date, and ticks the
+/// [`IvmRuntime`] once per committed batch so subscriptions and one-shot
+/// queries see a consistent view. Storage sits below through
+/// [`LayoutStorage`]; planning and execution sit beside through
+/// [`crate::ivm`].
 pub struct Database<S> {
+    /// The layout-mapped backing store.
     storage: LayoutStorage<S>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
+    /// Metrics from the most recent commit, if any.
     last_commit_metrics: Option<CommitMetrics>,
+    /// Metrics from the most recent IVM tick, if any.
     last_tick_metrics: Option<TickMetrics>,
+    /// Storage read counters accumulated since the last reset.
     storage_read_metrics: RefCell<StorageReadMetrics>,
+    /// History-window stores already known to be fully consolidated, so
+    /// repeated consolidation passes can skip them.
     converged_history_window_stores: RefCell<HashSet<String>>,
+    /// Set when a commit failed partway; further use is refused rather than
+    /// risking a torn view.
     poisoned: bool,
 }
 
@@ -89,6 +104,9 @@ where
         Self::new_with_storage_layout(schema, storage, StorageLayout::Identity)
     }
 
+    /// Like [`Self::new`], but with an explicit physical storage layout (see
+    /// [`StorageLayout`]) instead of the default one-CF-per-table identity
+    /// layout.
     pub fn new_with_storage_layout(
         schema: DatabaseSchema,
         storage: S,
@@ -112,14 +130,19 @@ where
         Ok(self.storage.approximate_class_bytes(cf)?)
     }
 
+    /// Consumes the database and returns the underlying storage.
     pub fn into_storage(self) -> S {
         self.storage.into_inner()
     }
 
+    /// Flushes and closes the backing storage (see
+    /// [`OrderedKvStorage::close`]).
     pub fn close(&self) -> Result<(), Error> {
         Ok(self.storage.close()?)
     }
 
+    /// Toggles the auto-direct-family subscription rewrite; see
+    /// [`IvmRuntime::subscribe_one_sink`].
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }
@@ -137,6 +160,8 @@ where
         self.ivm_runtime.stats()
     }
 
+    /// A record-store handle over the shared durable `"indices"` column
+    /// family, for reading persisted secondary indices.
     fn durable_indices_store_with_storage<'a, T>(
         &'a self,
         storage: &'a T,
@@ -148,6 +173,8 @@ where
         RecordStore::new(storage, "indices", descriptor)
     }
 
+    /// Opens an empty batch to accumulate inserts/updates/deletes, applied
+    /// atomically by [`Self::commit_batch`].
     pub fn open_batch(&self) -> DatabaseBatch {
         DatabaseBatch::default()
     }
@@ -827,6 +854,9 @@ where
     ///
     /// The read observes all committed batches. Reads while the caller still
     /// holds an uncommitted [`DatabaseBatch`] observe the pre-batch state.
+    /// Returns decoded rows whose primary key starts with `prefix`, in
+    /// primary-key order. A full-length prefix reads exactly one row; a
+    /// shorter one reads a range. Observes committed batches only.
     pub fn primary_key_scan(
         &self,
         table: &str,
@@ -836,6 +866,8 @@ where
         self.primary_key_scan_with_storage(&storage, table, prefix)
     }
 
+    /// The storage-parameterized body of the primary-key scans, so committed
+    /// reads and staged read-your-writes reads share one implementation.
     fn primary_key_scan_with_storage<'a, T>(
         &'a self,
         storage: &T,
@@ -1577,22 +1609,27 @@ where
         Ok(())
     }
 
+    /// Metrics from the most recent commit, or `None` before any commit.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.last_commit_metrics.as_ref()
     }
 
+    /// Metrics from the most recent IVM tick (commit or [`Self::flush`]).
     pub fn last_tick_metrics(&self) -> Option<&TickMetrics> {
         self.last_tick_metrics.as_ref()
     }
 
+    /// Storage read counters accumulated since the last reset.
     pub fn storage_read_metrics(&self) -> StorageReadMetrics {
         *self.storage_read_metrics.borrow()
     }
 
+    /// Zeroes the storage read counters.
     pub fn reset_storage_read_metrics(&self) {
         *self.storage_read_metrics.borrow_mut() = StorageReadMetrics::default();
     }
 
+    /// Returns the storage read counters and zeroes them in one step.
     pub fn take_storage_read_metrics(&self) -> StorageReadMetrics {
         let metrics = self.storage_read_metrics();
         self.reset_storage_read_metrics();
@@ -1630,6 +1667,8 @@ where
         self.commit_pending_writes(pending_writes)
     }
 
+    /// Commits a single raw update (pre-computed key, pre-encoded record) and
+    /// ticks — a one-write shortcut over a full [`DatabaseBatch`].
     pub fn update_raw(
         &mut self,
         table: &str,
@@ -1957,14 +1996,18 @@ where
         &self.name
     }
 
+    /// The key record layout.
     pub fn key_descriptor(&self) -> &RecordDescriptor {
         &self.key
     }
 
+    /// The value record layout.
     pub fn value_descriptor(&self) -> &RecordDescriptor {
         &self.value
     }
 
+    /// Writes one entry, encoding the key and value against the store's
+    /// descriptors.
     pub fn set(&self, key: &[Value], value: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         let record = self.value.create(value)?;
@@ -1973,6 +2016,7 @@ where
             .map_err(Error::from)
     }
 
+    /// Reads one entry by its full key; `None` when absent.
     pub fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
         let key = self.key_bytes(key)?;
         Ok(self
@@ -1981,6 +2025,7 @@ where
             .map(|record| self.value.bind_owned(record)))
     }
 
+    /// Removes one entry by its full key.
     pub fn delete(&self, key: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         self.storage
@@ -1988,6 +2033,8 @@ where
             .map_err(Error::from)
     }
 
+    /// Returns the values in the `start..end` key range, in key order.
+    /// `start`/`end` may be key prefixes (fewer fields than the full key).
     pub fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
@@ -1998,6 +2045,8 @@ where
             .collect()
     }
 
+    /// Like [`Self::range`], but returns decoded key/value entries rather than
+    /// values only.
     pub fn range_entries(
         &self,
         start: &[Value],
@@ -2017,6 +2066,7 @@ where
             .collect()
     }
 
+    /// Returns the values whose key starts with `prefix`, in key order.
     pub fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
         self.record_store()
@@ -2026,6 +2076,7 @@ where
             .collect()
     }
 
+    /// Like [`Self::prefix`], but returns decoded key/value entries.
     pub fn prefix_entries(
         &self,
         prefix: &[Value],
@@ -2043,6 +2094,7 @@ where
             .collect()
     }
 
+    /// Applies several sets/deletes to this store atomically.
     pub fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
         let mut encoded = Vec::with_capacity(operations.len());
         for operation in operations {
@@ -2069,6 +2121,7 @@ where
         self.storage.write_many(&borrowed).map_err(Error::from)
     }
 
+    /// Encodes a *full* key (arity must match the key descriptor exactly).
     fn key_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
         if values.len() != self.key.fields().len() {
             return Err(records::Error::ArityMismatch {
@@ -2080,6 +2133,8 @@ where
         self.key_prefix_bytes(values)
     }
 
+    /// Encodes a key *prefix* (a leading subset of the key fields), for range
+    /// and prefix scans.
     fn key_prefix_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
         if values.len() > self.key.fields().len() {
             return Err(records::Error::ArityMismatch {
@@ -2103,6 +2158,8 @@ where
         Ok(bytes)
     }
 
+    /// The typed record-store handle for this direct store's column family
+    /// (window-aware for history tables).
     fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
         if is_windowed_history_table(&self.name) {
             RecordStore::new_windowed(self.storage, &self.name, self.key, &self.value)
@@ -2111,6 +2168,7 @@ where
         }
     }
 
+    /// Decodes a stored key back into its typed values.
     fn decode_key(&self, key: &[u8]) -> Result<Vec<Value>, Error> {
         let mut remaining = key;
         let mut values = Vec::with_capacity(self.key.fields().len());
@@ -2124,14 +2182,18 @@ where
     }
 }
 
+/// A decoded key/value pair returned by the `*_entries` scans.
 pub struct DirectRecordStoreEntry<'a> {
     pub key: Vec<Value>,
     pub value: Record<'a>,
 }
 
+/// One operation for [`DirectRecordStore::write_many`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum DirectRecordStoreWrite {
+    /// Insert or overwrite `key` with `value`.
     Set { key: Vec<Value>, value: Vec<Value> },
+    /// Remove `key`.
     Delete { key: Vec<Value> },
 }
 
@@ -2144,14 +2206,18 @@ pub struct PreparedShape {
 }
 
 impl PreparedShape {
+    /// The runtime id used to bind concrete parameters (see
+    /// [`Database::bind`]).
     pub fn id(&self) -> PreparedShapeId {
         self.id
     }
 
+    /// The query's parameters, in binding order.
     pub fn parameters(&self) -> &[QueryParameter] {
         &self.parameters
     }
 
+    /// The row layout each bound subscription produces.
     pub fn output(&self) -> &RecordDescriptor {
         &self.output
     }
@@ -2160,15 +2226,25 @@ impl PreparedShape {
 /// Timing and write-size split for the most recent committed batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitMetrics {
+    /// Wall time spent writing to storage.
     pub storage_write_time: Duration,
+    /// Wall time spent in the IVM tick.
     pub ivm_tick_time: Duration,
+    /// Number of storage write operations.
     pub storage_write_count: usize,
+    /// Total encoded bytes written.
     pub storage_write_bytes: usize,
+    /// Write counts/bytes bucketed by logical destination.
     pub storage_writes: StorageWriteMetrics,
+    /// Metrics from the tick this commit drove.
     pub tick: TickMetrics,
 }
 
 /// Durable storage-write counts split by stable Jazz logical destinations.
+///
+/// Each field is a [`StorageWriteBucket`] for one destination class (history
+/// rows/indexes, current rows/indexes, ...) plus a `total`, so a commit's
+/// write cost can be attributed without knowing physical column families.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageWriteMetrics {
     pub total: StorageWriteBucket,
@@ -2185,6 +2261,7 @@ pub struct StorageWriteMetrics {
 }
 
 impl StorageWriteMetrics {
+    /// Buckets a batch of write operations by destination.
     fn from_operations(operations: &[crate::storage::WriteOperation<'_>]) -> Self {
         let mut metrics = Self::default();
         for operation in operations {
@@ -2220,11 +2297,14 @@ impl StorageWriteMetrics {
 /// Count and encoded key/value bytes for one storage-write bucket.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageWriteBucket {
+    /// Number of writes in this bucket.
     pub count: usize,
+    /// Total encoded bytes in this bucket.
     pub bytes: usize,
 }
 
 impl StorageWriteBucket {
+    /// Records one write of `bytes` bytes.
     fn record(&mut self, bytes: usize) {
         self.count += 1;
         self.bytes += bytes;
@@ -2232,6 +2312,10 @@ impl StorageWriteBucket {
 }
 
 /// Durable storage-read counts split by stable Jazz logical destinations.
+///
+/// The read-side mirror of [`StorageWriteMetrics`]: each field buckets point
+/// reads and range scans by destination class, so a workload's read cost can
+/// be attributed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageReadMetrics {
     pub total: StorageReadBucket,
@@ -2299,23 +2383,30 @@ impl StorageReadMetrics {
 /// Count of logical storage records read and logical key ranges touched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageReadBucket {
+    /// Individual records read.
     pub reads: usize,
+    /// Range/prefix scans started.
     pub ranges: usize,
 }
 
 impl StorageReadBucket {
+    /// Records `reads` record reads and `ranges` scans.
     fn record(&mut self, reads: usize, ranges: usize) {
         self.reads += reads;
         self.ranges += ranges;
     }
 }
 
+/// A storage wrapper that counts reads into [`StorageReadMetrics`] before
+/// delegating to the inner store. Reads done during queries and ticks go
+/// through this so their cost is attributable; writes pass straight through.
 pub(crate) struct MeteredStorage<'a, S> {
     storage: &'a S,
     metrics: &'a RefCell<StorageReadMetrics>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
+    /// Wraps `storage`, recording read metrics into `metrics`.
     pub(crate) fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
         Self { storage, metrics }
     }
@@ -2438,6 +2529,7 @@ pub struct EncodedKeyValue<'a> {
 }
 
 impl<'a> EncodedKeyValue<'a> {
+    /// Pairs a raw key and value with the descriptor that decodes the value.
     pub fn new(key: Vec<u8>, value: Vec<u8>, descriptor: &'a RecordDescriptor) -> Self {
         Self {
             key,
@@ -2446,27 +2538,33 @@ impl<'a> EncodedKeyValue<'a> {
         }
     }
 
+    /// The raw storage key bytes.
     pub fn key(&self) -> &[u8] {
         &self.key
     }
 
+    /// The raw encoded value bytes.
     pub fn raw(&self) -> &[u8] {
         &self.value
     }
 
+    /// Consumes the entry into its `(key, value)` byte vectors.
     pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
         (self.key, self.value)
     }
 
+    /// A borrowed typed view over the value.
     pub fn record(&self) -> BorrowedRecord<'_> {
         BorrowedRecord::new(&self.value, self.descriptor)
     }
 
+    /// Consumes the entry into an owned typed record.
     pub fn owned_record(self) -> OwnedRecord {
         OwnedRecord::new(self.value, *self.descriptor)
     }
 }
 
+/// Encoded byte size charged to a write operation's metrics bucket.
 fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usize {
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
@@ -2475,6 +2573,8 @@ fn write_operation_bytes(operation: &crate::storage::WriteOperation<'_>) -> usiz
     }
 }
 
+/// The logical destination class a write is attributed to in
+/// [`StorageWriteMetrics`], inferred from its column family and key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StorageWriteDestination {
     HistoryRows,
@@ -2628,6 +2728,10 @@ fn owned_write_operation(operation: &crate::storage::WriteOperation<'_>) -> Owne
     }
 }
 
+/// One resolved base-table write, ready to become a [`TableDelta`]. Inserts
+/// and updates both lower to `Set`; the difference (whether a duplicate key
+/// is an error, and whether the old row is retracted) is decided when the
+/// delta is computed against current storage.
 enum PendingTableWrite {
     /// Insert and update share the same storage operation after validation.
     /// Delta computation decides whether an old record must be retracted first.
@@ -2643,26 +2747,35 @@ enum PendingTableWrite {
     },
 }
 
+/// How a `Set` write treats an existing row at the same key.
 #[derive(Clone, Copy)]
 enum WriteMode {
+    /// Insert: a pre-existing row is a [`Error::DuplicatePrimaryKey`].
     Insert,
+    /// Insert asserting the key is new: skip the storage read entirely.
     InsertFresh,
+    /// Update: replace the existing row, retracting the old one.
     Update,
 }
 
 impl PendingTableWrite {
+    /// The target table.
     fn table(&self) -> &str {
         match self {
             Self::Set { table, .. } | Self::Delete { table, .. } => table,
         }
     }
 
+    /// The target primary key bytes.
     fn key(&self) -> &[u8] {
         match self {
             Self::Set { key, .. } | Self::Delete { key, .. } => key,
         }
     }
 
+    /// Turns this write plus the current stored row into a weighted table
+    /// delta: retract the old row (if any) and, for a `Set`, insert the new
+    /// one.
     fn delta_from_current(
         &self,
         descriptor: RecordDescriptor,
@@ -2700,6 +2813,12 @@ impl PendingTableWrite {
     }
 }
 
+/// Turns a batch's pending writes into consolidated table deltas.
+///
+/// Each write is diffed against the current row — read through a same-batch
+/// overlay so earlier writes to the same key are seen — enforcing insert
+/// uniqueness along the way. The per-table deltas are then consolidated so a
+/// key touched several times in one batch emits one net change.
 fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
@@ -2779,6 +2898,9 @@ fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
     }))
 }
 
+/// Merges per-table deltas so equal rows' weights sum and zero-weight rows
+/// drop — the same Z-set consolidation the runtime does, applied to the
+/// commit's inputs.
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
     let mut by_table = HashMap::<String, (RecordDescriptor, HashMap<bytes::Bytes, i64>)>::new();
     for table_delta in table_deltas {
@@ -2822,34 +2944,43 @@ impl<S> StagedDatabaseBatch<'_, S>
 where
     S: OrderedKvStorage,
 {
+    /// Reserves capacity for `additional` more operations.
     pub fn reserve(&mut self, additional: usize) {
         self.batch.reserve(additional);
     }
 
+    /// Stages an insert (fails at commit on a duplicate key).
     pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
         self.batch.insert(table, values);
     }
 
+    /// Stages a raw pre-encoded insert.
     pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
         self.batch.insert_raw(table, key, record);
     }
 
+    /// Stages an update (replaces the existing row).
     pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
         self.batch.update(table, values);
     }
 
+    /// Stages a raw pre-encoded update.
     pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
         self.batch.update_raw(table, key, record);
     }
 
+    /// Stages a delete by primary key.
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
         self.batch.delete(table, key);
     }
 
+    /// `true` when nothing is staged.
     pub fn is_empty(&self) -> bool {
         self.batch.is_empty()
     }
 
+    /// Reads rows by primary-key prefix, observing this stage's own pending
+    /// writes (read-your-writes) — the point of a staged batch.
     pub fn primary_key_scan(
         &self,
         table: &str,
@@ -2862,6 +2993,7 @@ where
             .primary_key_scan_with_storage(&storage, table, prefix)
     }
 
+    /// Raw-bytes [`Self::primary_key_scan`].
     pub fn primary_key_scan_raw(
         &self,
         table: &str,
@@ -2874,6 +3006,7 @@ where
             .primary_key_scan_raw_with_storage(&storage, table, prefix)
     }
 
+    /// The last raw row under a primary-key prefix, observing pending writes.
     pub fn primary_key_last_raw(
         &self,
         table: &str,
@@ -2886,6 +3019,8 @@ where
             .primary_key_last_raw_with_storage(&storage, table, prefix)
     }
 
+    /// Commits the stage through the ordinary [`Database::commit_batch`] path
+    /// (one tick, one atomic storage write).
     pub fn commit(self) -> Result<(), Error> {
         self.database.commit_batch(self.batch)
     }
@@ -2894,8 +3029,11 @@ where
 /// Mutable collection of table writes committed atomically at storage level.
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
+    /// The staged operations, in order.
     operations: Vec<BatchOperation>,
+    /// Encoded staged writes for read-your-writes reads (staged batches).
     txn_operations: RefCell<StagedWriteState>,
+    /// How many operations already have their staged encoding built.
     txn_indexed_operations: Cell<usize>,
 }
 
@@ -2906,10 +3044,13 @@ impl PartialEq for DatabaseBatch {
 }
 
 impl DatabaseBatch {
+    /// Reserves capacity for `additional` more operations.
     pub fn reserve(&mut self, additional: usize) {
         self.operations.reserve(additional);
     }
 
+    /// Stages an insert from logical values; a duplicate primary key fails at
+    /// commit.
     pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
         self.push_operation(BatchOperation::Insert {
             table: table.into(),
@@ -2917,6 +3058,7 @@ impl DatabaseBatch {
         });
     }
 
+    /// Stages an insert from a pre-computed key and pre-encoded record.
     pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
         self.push_operation(BatchOperation::InsertRaw {
             table: table.into(),
@@ -2943,6 +3085,7 @@ impl DatabaseBatch {
         });
     }
 
+    /// Stages an update from logical values (replaces the existing row).
     pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
         self.push_operation(BatchOperation::Update {
             table: table.into(),
@@ -2950,6 +3093,7 @@ impl DatabaseBatch {
         });
     }
 
+    /// Stages an update from a pre-computed key and pre-encoded record.
     pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
         self.push_operation(BatchOperation::UpdateRaw {
             table: table.into(),
@@ -2958,6 +3102,7 @@ impl DatabaseBatch {
         });
     }
 
+    /// Stages a delete by primary key.
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
         self.push_operation(BatchOperation::Delete {
             table: table.into(),
@@ -2965,15 +3110,20 @@ impl DatabaseBatch {
         });
     }
 
+    /// `true` when nothing is staged.
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
     }
 
+    /// Appends one operation to the batch.
     fn push_operation(&mut self, operation: BatchOperation) {
         self.operations.push(operation);
     }
 }
 
+/// One staged operation in a [`DatabaseBatch`]. The `*Raw` variants carry a
+/// pre-computed key and pre-encoded record for callers that already have
+/// them; the plain variants encode from logical values at commit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchOperation {
     Insert {
@@ -3005,6 +3155,8 @@ pub enum BatchOperation {
     },
 }
 
+/// A primary-key value passed to the raw batch and lookup APIs. `Composite`
+/// holds a multi-column key, its parts concatenated in declaration order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimaryKeyValue {
     U8(u8),
@@ -3019,6 +3171,7 @@ pub enum PrimaryKeyValue {
 }
 
 impl PrimaryKeyValue {
+    /// Encodes the key into its order-preserving storage-key bytes.
     fn into_bytes(self) -> Vec<u8> {
         let mut bytes = Vec::new();
         match self {
@@ -3040,6 +3193,9 @@ impl PrimaryKeyValue {
     }
 }
 
+/// Encodes a row given in SQL declaration order into the descriptor's
+/// storage layout — reordering to the descriptor's field order (fixed-width
+/// fields first) before positional encoding.
 fn encode_record(
     table: &TableSchema,
     descriptor: RecordDescriptor,
@@ -3079,6 +3235,8 @@ fn encode_record(
     Ok(descriptor.create(&values_by_descriptor_order)?)
 }
 
+/// Extracts a row's primary-key storage bytes from its encoded record, by
+/// reading and key-encoding the primary-key columns.
 fn primary_key_bytes(
     table: &TableSchema,
     record_schema: RecordDescriptor,
@@ -3257,6 +3415,9 @@ fn ensure_primary_key_value_type(
     }
 }
 
+/// Appends one primary-key value to `key` in order-preserving encoding: a
+/// type tag byte plus a payload chosen so byte order matches value order.
+/// This is what makes primary-key range scans work over encoded keys.
 fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) {
     match value {
         Value::U8(value) => {
@@ -3326,6 +3487,8 @@ fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
 }
 
+/// Reverses [`encode_primary_key_part`] for one key part, advancing `bytes`
+/// past it — the reader behind [`DirectRecordStore`] key decoding.
 fn decode_primary_key_part(
     bytes: &mut &[u8],
     value_type: &records::ValueType,
@@ -3621,6 +3784,10 @@ fn index_record_descriptor() -> RecordDescriptor {
     })
 }
 
+/// Encodes one index-key column into `key`, handling the cases plain key
+/// encoding cannot: string-named enum variants become their discriminant, and
+/// nullable values get the present/absent framing. Used to build index scan
+/// prefixes.
 fn encode_index_prefix_part(
     key: &mut Vec<u8>,
     value: &Value,
@@ -3653,6 +3820,10 @@ fn encode_index_prefix_part(
     }
 }
 
+/// Everything the database facade can fail with: schema/key/constraint
+/// violations at the facade level, plus passed-through planner, runtime,
+/// record, and storage errors. Each `#[error]` string names the specific
+/// condition.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database instance is poisoned after a failed atomic commit")]

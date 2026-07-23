@@ -11,21 +11,31 @@ use super::{
     WriteOperation, apply_storage_delta, key_codec,
 };
 
+/// On-disk format version for exported snapshots.
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
 
+/// The whole store: each column family is an ordered key → value map.
 type ColumnFamilies = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
+/// Shared, interior-mutable handle so clones of [`MemoryStorage`] share one
+/// backing store.
 type SharedColumnFamilies = Rc<RefCell<ColumnFamilies>>;
 
+/// Failures when exporting or importing a [`MemoryStorage`] snapshot.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStorageSnapshotError {
+    /// Serialization failed.
     #[error("failed to encode memory storage snapshot: {0}")]
     Encode(postcard::Error),
+    /// Deserialization failed.
     #[error("failed to decode memory storage snapshot: {0}")]
     Decode(postcard::Error),
+    /// The snapshot's version byte is not one this build understands.
     #[error("unsupported memory storage snapshot version {found}; expected {expected}")]
     UnsupportedVersion { found: u16, expected: u16 },
 }
 
+/// The serialized form of a whole store: a version tag plus its column
+/// families.
 #[derive(Serialize, Deserialize)]
 struct MemoryStorageSnapshot {
     version: u16,
@@ -50,6 +60,7 @@ impl MemoryStorage {
         storage
     }
 
+    /// Creates any of the named column families that do not exist yet.
     fn ensure_column_families(&self, column_families: &[&str]) {
         let mut inner = self.inner.borrow_mut();
         for cf in column_families {
@@ -57,6 +68,9 @@ impl MemoryStorage {
         }
     }
 
+    /// Runs `f` over one column family's map, or fails with
+    /// [`Error::ColumnFamilyNotFound`] — the shared read path for the
+    /// scan/get methods.
     fn with_cf<T>(
         &self,
         cf: &ColumnFamilyName,

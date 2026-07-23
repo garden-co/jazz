@@ -49,10 +49,16 @@ pub enum Durability {
 
 /// RocksDB implementation of the ordered KV storage trait.
 pub struct RocksDbStorage {
+    /// The on-disk directory, kept so [`super::ReopenableStorage::reopen`]
+    /// can reopen with more column families.
     path: PathBuf,
+    /// The durability tier writes use.
     durability: Durability,
+    /// The column families currently open.
     column_families: BTreeSet<String>,
+    /// The open database handle.
     db: DB,
+    /// Write options derived from `durability` (WAL/sync flags).
     write_options: WriteOptions,
 }
 
@@ -68,6 +74,12 @@ impl RocksDbStorage {
         Self::open_with_durability(path, column_families, Durability::WalNoSync)
     }
 
+    /// Opens (creating if missing) the store at `path` with the given
+    /// `column_families` and durability tier.
+    ///
+    /// Any column families already on disk are opened too, so reopening an
+    /// existing store never hides data. Each family is tuned by its storage
+    /// class profile (see the private `rocksdb_class_profile`).
     pub fn open_with_durability(
         path: impl AsRef<Path>,
         column_families: &[&str],
@@ -124,6 +136,8 @@ impl RocksDbStorage {
         })
     }
 
+    /// Looks up the open handle for a column family, failing with
+    /// [`Error::ColumnFamilyNotFound`] when it is not open.
     fn cf_handle(&self, cf: &ColumnFamilyName) -> Result<&rocksdb::ColumnFamily, Error> {
         self.db
             .cf_handle(cf)
@@ -131,6 +145,7 @@ impl RocksDbStorage {
     }
 }
 
+/// Database-wide options, using the default storage-class profile.
 fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManager) -> Options {
     rocksdb_options_for_profile(
         RocksDbClassProfile::Default,
@@ -139,6 +154,7 @@ fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManage
     )
 }
 
+/// Per-column-family options, using the profile inferred from the CF name.
 fn rocksdb_options_for_cf(
     cf: &str,
     block_cache: &Cache,
@@ -147,15 +163,26 @@ fn rocksdb_options_for_cf(
     rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
 }
 
+/// A storage-physics profile for a column family: how it is accessed decides
+/// its block size, compression, compaction style, and whether bloom filters
+/// are worth building.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RocksDbClassProfile {
+    /// General-purpose defaults for ordinary tables.
     Default,
+    /// Append-and-range-scan classes (history, register, changes): large
+    /// blocks, zstd, universal compaction, no point-probe blooms.
     AppendRange,
+    /// Overwrite-heavy hot classes (current/index): small blocks, lz4, blooms.
     OverwriteHot,
+    /// Large-value content classes: large blocks, zstd, blooms.
     Content,
+    /// Metadata class: default physics with blooms.
     Meta,
 }
 
+/// Maps a class column-family name to its access profile (ordinary tables get
+/// [`RocksDbClassProfile::Default`]).
 fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
     match cf {
         CLASS_HISTORY_CF | CLASS_REGISTER_CF | CLASS_CHANGES_CF => RocksDbClassProfile::AppendRange,
@@ -168,6 +195,9 @@ fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
     }
 }
 
+/// Builds the RocksDB `Options` for a profile: table factory, shared cache
+/// and write-buffer budget, file sizing, compression, the `groove_delta`
+/// merge operator, and universal compaction for append-range classes.
 fn rocksdb_options_for_profile(
     profile: RocksDbClassProfile,
     block_cache: &Cache,
@@ -204,6 +234,8 @@ fn rocksdb_options_for_profile(
 }
 
 impl RocksDbClassProfile {
+    /// Whether to build point-lookup bloom filters — worthwhile only for
+    /// classes with real point probes, not pure scan classes.
     fn uses_blooms(self) -> bool {
         match self {
             // History/register/changes are consumed as prefix/range/latest scans.
@@ -213,6 +245,8 @@ impl RocksDbClassProfile {
         }
     }
 
+    /// Table block size: larger for scan/large-value classes, smaller for
+    /// point-lookup classes.
     fn block_size(self) -> usize {
         match self {
             Self::AppendRange | Self::Content => ROCKSDB_LARGE_BLOCK_BYTES,
@@ -220,6 +254,7 @@ impl RocksDbClassProfile {
         }
     }
 
+    /// Target SST file size: larger for append/content classes.
     fn target_file_size(self) -> u64 {
         match self {
             Self::AppendRange | Self::Content => ROCKSDB_APPEND_TARGET_FILE_BYTES,
@@ -227,6 +262,7 @@ impl RocksDbClassProfile {
         }
     }
 
+    /// Live-tier compression: zstd for bulk classes, lz4 for hot ones.
     fn compression(self) -> DBCompressionType {
         match self {
             Self::AppendRange | Self::Content => DBCompressionType::Zstd,
@@ -234,6 +270,8 @@ impl RocksDbClassProfile {
         }
     }
 
+    /// Bottommost-tier compression: always zstd, since cold data compresses
+    /// best and is read rarely.
     fn bottommost_compression(self) -> DBCompressionType {
         DBCompressionType::Zstd
     }
@@ -445,6 +483,9 @@ impl OrderedKvStorage for RocksDbStorage {
     }
 }
 
+/// RocksDB full-merge callback: folds every buffered delta operand into the
+/// existing value in order (see [`super::apply_storage_delta`]). This is how
+/// `WriteOperation::Delta` writes are resolved without a read-modify-write.
 fn rocksdb_full_merge_delta(
     _key: &[u8],
     old_value: Option<&[u8]>,
@@ -453,6 +494,9 @@ fn rocksdb_full_merge_delta(
     apply_merge_operands(old_value, operands).ok()
 }
 
+/// RocksDB partial-merge callback: collapses several delta operands (with no
+/// base value yet) into one equivalent operand, re-tagged for the merged
+/// record so a later full merge stays correct.
 fn rocksdb_partial_merge_delta(
     _key: &[u8],
     left_operand: Option<&[u8]>,
@@ -469,6 +513,8 @@ fn rocksdb_partial_merge_delta(
     compact_storage_delta_operand(template, value?).ok()
 }
 
+/// Folds a sequence of delta operands onto an optional starting value,
+/// returning the final merged bytes.
 fn apply_merge_operands(
     initial: Option<&[u8]>,
     operands: &MergeOperands,
@@ -480,6 +526,10 @@ fn apply_merge_operands(
     value.ok_or_else(|| Error::InvalidStorageDelta("merge operator received no value".to_owned()))
 }
 
+/// Turns `prefix` into an exclusive upper bound for a prefix scan by
+/// incrementing its last non-`0xff` byte in place. Returns `false` when the
+/// prefix is all `0xff` and has no finite upper bound (the caller then scans
+/// to the end and stops on the first non-matching key).
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
     for byte in prefix.iter_mut().rev() {
         if *byte != u8::MAX {
