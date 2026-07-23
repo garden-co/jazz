@@ -223,8 +223,19 @@ pub struct TopByOp {
     pub sort_field_indices: Vec<usize>,
     /// Direction for each `sort_field_indices` entry.
     pub sort_directions: Vec<TopByDirection>,
-    pub offset: usize,
-    pub limit: usize,
+    /// Number of leading ordinals excluded from the retained window.
+    pub offset: u64,
+    /// Finite retained length or an explicitly unbounded suffix.
+    pub limit: TopByLimit,
+}
+
+/// Retained-length bound for a [`TopByOp`] window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TopByLimit {
+    /// Retain at most this many ordinals after the offset.
+    Finite(u64),
+    /// Retain every ordinal after the offset.
+    Unbounded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

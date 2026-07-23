@@ -2,7 +2,7 @@ use super::*;
 use groove::ivm::{
     AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
     LiteralValue, PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind,
-    ProjectField, TopByOrder,
+    ProjectField, TopByLimit, TopByOrder,
 };
 use groove::records::ValueType;
 
@@ -2084,8 +2084,6 @@ fn add_required_app_field(requirements: &mut SourceRequirements, field: String) 
     }
 }
 
-const UNBOUNDED_ORDERED_WINDOW_LIMIT: usize = usize::MAX;
-
 fn lower_plan_steps(
     graph: GraphBuilder,
     plan: &AnalyzedQueryPlan,
@@ -4013,6 +4011,10 @@ fn lower_window(
             .map(|value| lower_field_ref(value, plan, source, request, "slice tie-breaker"))
             .collect::<Result<Vec<_>, _>>()?
     };
+    let top_by_limit = match limit {
+        Some(limit) => TopByLimit::Finite(u64::from(limit)),
+        None => TopByLimit::Unbounded,
+    };
 
     if order.is_empty() {
         if offset == 0 && limit == Some(1) {
@@ -4026,10 +4028,8 @@ fn lower_window(
             group_cols,
             Vec::new(),
             tie_cols,
-            offset as usize,
-            limit
-                .map(|limit| limit as usize)
-                .unwrap_or(UNBOUNDED_ORDERED_WINDOW_LIMIT),
+            u64::from(offset),
+            top_by_limit,
         ));
     }
 
@@ -4042,10 +4042,8 @@ fn lower_window(
         group_cols,
         order_cols,
         tie_cols,
-        offset as usize,
-        limit
-            .map(|limit| limit as usize)
-            .unwrap_or(UNBOUNDED_ORDERED_WINDOW_LIMIT),
+        u64::from(offset),
+        top_by_limit,
     ))
 }
 

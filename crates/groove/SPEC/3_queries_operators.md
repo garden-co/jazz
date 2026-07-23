@@ -32,6 +32,10 @@ Invariant digest:
 - `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
 - `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
 - `INV-QUERY-22`: OpType::SemiJoin, OpType::Distinct, OpType::Negate, and OpType::Aggregate MUST NOT be advertised as executable query operators until runtime support exists.
+- `INV-QUERY-23`: TopBy MUST order each partition's positive-multiplicity records by order_cols with declared directions, then tie_cols ascending, then encoded full-record bytes ascending; the total order MUST NOT depend on arrival or iteration order.
+- `INV-QUERY-24`: TopBy window occupancy is bag-semantic: a record with positive multiplicity m occupies m consecutive ordinals, the retained window is the ordinal range [offset, offset + limit), and non-positive-multiplicity records are absent.
+- `INV-QUERY-25`: A record straddling a window boundary MUST contribute exactly its in-window copies, as one output record whose weight is the in-window copy count.
+- `INV-QUERY-26`: Per touched partition TopBy MUST emit the minimal consolidated weighted diff of retained windows; unchanged in-window copy counts MUST NOT emit, including rank-only moves, unless rank metadata is declared.
 
 ## Details
 
@@ -189,31 +193,44 @@ A `TopBy` operator has:
   ordering.
 - `tie_cols`: stable fields appended after `order_cols` to make the total order
   deterministic.
-- `offset` and `limit`: the retained window bounds. `limit` may be finite or may
-  represent an unbounded retained suffix; jazz lowering uses `usize::MAX` for an
-  omitted ordered-query limit.
+- `offset` and `limit`: the retained window bounds. `offset` is a `u64`, and
+  `limit` is represented explicitly as `TopByLimit::Finite(u64)` or
+  `TopByLimit::Unbounded`. A finite zero limit denotes an empty window.
 - `output`: the original input record, optionally with implementation-defined
   rank metadata only when the descriptor declares it.
 
 For each partition, `TopBy` maintains the weighted multiset of input records
 plus an ordered index over `(order_cols, tie_cols, full-record bytes)`. The
-operator's denotation is the records whose positive multiplicity falls in the
-half-open ordinal range `[offset, offset + limit)`, or all records at ordinals
-`>= offset` when the limit is unbounded. Duplicate equal records keep bag
-semantics: multiplicity affects how many copies occupy the ordered stream. If
-two distinct rows compare equal on `order_cols`, `tie_cols` MUST decide their
-relative order. If `tie_cols` are not enough to distinguish rows, the encoded
-full record bytes are the final deterministic tie-breaker. A planner should
-prefer a primary-key or otherwise stable identity field in `tie_cols`; relying
-on full-record bytes is correct but can be expensive.
+ordered stream is the partition's positive-multiplicity records sorted by
+`order_cols` under their declared directions, then `tie_cols` ascending, then
+encoded full-record bytes ascending; this total order MUST NOT depend on
+arrival or storage iteration order (`INV-QUERY-23`). A planner should prefer a
+primary-key or otherwise stable identity field in `tie_cols`; relying on
+full-record bytes is correct but can be expensive.
+
+Window occupancy is bag-semantic (`INV-QUERY-24`): a record with positive
+multiplicity `m` occupies `m` consecutive ordinals of the ordered stream, and
+the retained window is the half-open ordinal range `[offset, offset + limit)`,
+or all ordinals `>= offset` when the limit is unbounded. Records with
+non-positive multiplicity are absent. The output is the weighted multiset of
+in-window copies: a record whose copies straddle a window boundary contributes
+exactly the copies whose ordinals fall inside the window, as a single output
+record whose weight is its in-window copy count (`INV-QUERY-25`). Worked
+example: records `a×2, b×1, c×3` ordered `a < b < c` with `offset 1, limit 3`
+give the ordinal stream `a a b c c c` and the window `{a×1, b×1, c×1}` — the
+offset consumes one of `a`'s two copies. Inserting one more copy of `b` shifts
+the stream to `a a b b c c c` and the window to `{a×1, b×2}`; the emitted diff
+is `-c, +b`.
 
 Input deltas follow the ordinary weighted rule. Inserts add copies, deletes
 remove copies, and updates arrive as `-old, +new` (§4.1). For every touched
 partition, `TopBy` compares the pre-tick and post-tick retained windows and
-emits the minimal consolidated weighted diff of output records. Rows that move
-within the retained window without entering or leaving do not emit unless rank
-metadata is part of the output descriptor. Rows outside the retained range can
-still cause deltas if they cross a boundary and displace retained rows.
+emits the minimal consolidated weighted diff of output records
+(`INV-QUERY-26`); output delta weights are in-window copy-count changes and may
+exceed ±1. Records whose in-window copy count is unchanged MUST NOT emit —
+including rows that only move rank inside the window — unless rank metadata is
+part of the output descriptor. Rows outside the retained range can still cause
+deltas if they cross a boundary and displace retained copies.
 
 Hydration evaluates the same denotation from the current input snapshot. A
 commit/binding tick updates only partitions touched by input deltas; maintaining
@@ -324,6 +341,14 @@ graph.
 - 🔶 **JOIN plus ordered top-k.** Define when an ordered index on one side of a
   join can drive the plan without losing rows that only become eligible after
   join or policy filtering.
+- 🔶 **Weighted duplicates at the jazz boundary.** `TopBy` windows are
+  bag-semantic (`INV-QUERY-24`), so a maintained ordered subscription can
+  observe a row with multiplicity > 1 when upstream unions or projections
+  produce duplicate records. Decide whether jazz lowering must guarantee at
+  most one derivation per logical result identity or whether jazz subscription
+  delivery must define rendering for weighted window rows. Carrying `row_uuid`
+  as a tie field makes ordering deterministic but does not enforce multiplicity
+  one.
 - 🔶 **COUNT aggregation.** Add a terminal count shape with weighted-delta
   maintenance and clear output descriptor semantics.
 - 🔶 **Projection memcpy optimization.** `Project` should avoid unnecessary row
