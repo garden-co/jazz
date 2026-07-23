@@ -115,7 +115,7 @@ export type TypedColumnBuilder<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
-> = Omit<ColumnBuilder, "optional" | "default"> & {
+> = Omit<ColumnBuilder, "optional" | "default" | "merge" | "transform"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;

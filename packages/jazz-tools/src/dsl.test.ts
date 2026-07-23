@@ -244,15 +244,18 @@ describe("column merge strategy DSL", () => {
   });
 
   it("rejects counter merge strategy on non-integer columns", () => {
-    expect(() => col.string().merge("counter")).toThrow(
+    expect(() => col.string().merge("counter" as never)).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER columns.",
     );
   });
 
   it("rejects counter merge strategy on nullable integer columns in either chaining order", () => {
-    expect(() => col.int().optional().merge("counter")).toThrow(
-      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
-    );
+    expect(() =>
+      col
+        .int()
+        .optional()
+        .merge("counter" as never),
+    ).toThrow("Counter merge strategy is only supported on non-nullable INTEGER columns.");
     expect(() => col.int().merge("counter").optional()).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER columns.",
     );
@@ -289,15 +292,18 @@ describe("column merge strategy DSL", () => {
   });
 
   it("rejects g-set merge strategy on non-array columns", () => {
-    expect(() => col.string().merge("g-set")).toThrow(
+    expect(() => col.string().merge("g-set" as never)).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
     );
   });
 
   it("rejects g-set merge strategy on nullable array columns in either chaining order", () => {
-    expect(() => col.array(col.string()).optional().merge("g-set")).toThrow(
-      "g-set merge strategy is only supported on non-nullable ARRAY columns.",
-    );
+    expect(() =>
+      col
+        .array(col.string())
+        .optional()
+        .merge("g-set" as never),
+    ).toThrow("g-set merge strategy is only supported on non-nullable ARRAY columns.");
     expect(() => col.array(col.string()).merge("g-set").optional()).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
     );
