@@ -123,3 +123,22 @@ Scaling receipt from the same run:
 
 Tooling-friction: a single in-repo helper for constructing legacy/no-index
 windowed stores would have saved a bit of bespoke regression setup.
+
+## Part 3: local pump value updates
+
+Added a black-box `jazz-tools` regression for same-client local subscriptions:
+insert four `todos`, subscribe to `select(["title", "done"])`, consume the reset,
+then update `done` on an in-window row through the same `Db`. The unbounded
+variant was green; the `limit(3)` variant was red after opening zero-offset
+window subscription lowering, timing out with no delta event.
+
+Finding: the local `Db::subscribe` pump reused the previous snapshot whenever a
+local maintained window subscription drained no membership transition. For a
+value-only update inside a stable zero-offset window, the maintained stream can
+produce no membership delta, but the materialized row bytes still differ. The
+fix recomputes the local snapshot in that local-maintained/no-transition branch
+and lets the existing snapshot diff emit `updated` only when row data changed.
+
+Tooling-friction: a public `jazz-tools` helper that exposes local `ReadOpts`
+for subscription tests would have avoided dropping to the core `Db` API inside
+the integration target.

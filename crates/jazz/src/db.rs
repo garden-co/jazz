@@ -3885,9 +3885,6 @@ where
                                     (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                                 }
                             }
-                        } else if has_maintained_subscription {
-                            let previous = state_ref.snapshot.clone();
-                            (previous.clone(), previous_source)
                         } else {
                             (
                                 node.borrow_mut().subscription_snapshot_for_link(
