@@ -1,0 +1,32 @@
+[package]
+name = "plants-rocksdb-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RocksDB-focused ingestion + point-read benchmark on the USDA plants dataset: raw RocksDB vs Jazz+RocksDB vs Jazz client -> Jazz Server (RocksDB), with a synthetic EBS write delay."
+
+[[bin]]
+name = "plants-rocksdb-bench"
+path = "src/main.rs"
+
+[dependencies]
+# Full Jazz stack (RocksDB storage) and the operational server shell that hosts
+# the loopback WebSocket sync endpoint (also RocksDB-backed).
+jazz = { workspace = true, features = ["rocksdb"] }
+jazz-server = { workspace = true, features = ["rocksdb"] }
+
+# Raw RocksDB, driven directly with no Jazz/groove seam. Version + features
+# match crates/groove/Cargo.toml so every layer exercises the same engine build.
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
+
+# Blocking WebSocket client used by the third topology to sync into the server,
+# and the frame-batch codec the loopback server speaks. Versions match
+# crates/jazz-server/Cargo.toml.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+postcard = { version = "1.1", features = ["alloc"] }
+
+uuid = "1.18.1"
+tempfile = "3"
