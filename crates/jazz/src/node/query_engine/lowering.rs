@@ -869,8 +869,8 @@ fn linear_window_supported(steps: &[LinearStep]) -> bool {
     for step in steps {
         match step {
             LinearStep::OrderBy(_) => has_order = true,
-            LinearStep::Slice { limit, offset, .. } => {
-                if !has_order && (*offset != 0 || !matches!(limit, None | Some(1))) {
+            LinearStep::Slice { offset, .. } => {
+                if !has_order && *offset != 0 {
                     return false;
                 }
             }

@@ -3853,7 +3853,7 @@ mod tests {
     }
 
     #[test]
-    fn maintained_subscription_view_unsupported_limited_variants_error_loudly() {
+    fn maintained_subscription_view_unsupported_offset_without_order_errors_loudly() {
         let (_dir, mut core) = open_node_with_uuid(node(0x90));
         let first_tx = core
             .commit_mergeable(
@@ -3867,13 +3867,12 @@ mod tests {
             .unwrap();
         accept_global(&mut core, first_tx, 1);
         accept_global(&mut core, second_tx, 2);
-        let no_order_limit = Query::from("todos").limit(2).validate(&schema()).unwrap();
         let offset_limit_one = Query::from("todos")
             .limit(1)
             .offset(1)
             .validate(&schema())
             .unwrap();
-        let shapes = [no_order_limit, offset_limit_one];
+        let shapes = [offset_limit_one];
         let mut peer = PeerState::new();
 
         for shape in shapes {

@@ -32,6 +32,149 @@ fn todo_schema() -> Schema {
         .build()
 }
 
+fn core_todo_schema() -> jazz::schema::JazzSchema {
+    use jazz::groove::schema::{ColumnSchema, ColumnType as CoreColumnType};
+    use jazz::schema::{Policy, TableSchema as CoreTableSchema};
+
+    jazz::schema::JazzSchema::new([CoreTableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", CoreColumnType::String),
+            ColumnSchema::new("done", CoreColumnType::Bool),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())])
+}
+
+async fn open_core_todo_db() -> jazz::db::Db<jazz::groove::storage::MemoryStorage> {
+    use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
+    use jazz::groove::storage::MemoryStorage;
+    use jazz::ids::{AuthorId, NodeUuid};
+
+    let schema = core_todo_schema();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    Db::open(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x31; 16]),
+                author: AuthorId::from_bytes([0xa7; 16]),
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(0x600d)),
+    )
+    .await
+    .expect("open local core todo db")
+}
+
+async fn run_core_same_client_value_update_subscription(limited: bool) {
+    use jazz::db::{LocalUpdates, Propagation, ReadOpts, RowCells, SubscriptionEvent};
+    use jazz::groove::records::Value as CoreValue;
+    use jazz::query::Query;
+    use jazz::tx::DurabilityTier as CoreDurabilityTier;
+
+    fn cells(title: &str, done: bool) -> RowCells {
+        RowCells::from([
+            ("title".to_owned(), CoreValue::String(title.to_owned())),
+            ("done".to_owned(), CoreValue::Bool(done)),
+        ])
+    }
+
+    let db = open_core_todo_db().await;
+    let target_id = db
+        .insert("todos", cells("a", false))
+        .expect("insert todo a")
+        .row_uuid();
+    db.insert("todos", cells("b", false))
+        .expect("insert todo b");
+    db.insert("todos", cells("c", false))
+        .expect("insert todo c");
+    db.insert("todos", cells("d", false))
+        .expect("insert todo d");
+
+    let mut query = Query::from("todos").select(["title", "done"]);
+    if limited {
+        query = query.limit(3);
+    }
+    let prepared = db.prepare_query(&query).expect("prepare query");
+    let mut stream = db
+        .subscribe(
+            &prepared,
+            ReadOpts {
+                tier: CoreDurabilityTier::Local,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                include_deleted: false,
+                ..ReadOpts::default()
+            },
+        )
+        .await
+        .expect("subscribe");
+
+    let initial = tokio::time::timeout(Duration::from_secs(5), stream.next_event())
+        .await
+        .expect("initial event timeout")
+        .expect("initial event");
+    let SubscriptionEvent::Delta { reset, added, .. } = initial else {
+        panic!("expected initial delta, got {initial:#?}");
+    };
+    assert!(reset, "initial event should reset");
+    assert_eq!(added.len(), if limited { 3 } else { 4 });
+
+    db.update(
+        "todos",
+        target_id,
+        RowCells::from([("done".to_owned(), CoreValue::Bool(true))]),
+    )
+    .expect("same-client update");
+
+    let changed = tokio::time::timeout(Duration::from_secs(5), stream.next_event())
+        .await
+        .expect("value update event timeout")
+        .expect("value update event");
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        ..
+    } = changed
+    else {
+        panic!("expected value update delta, got {changed:#?}");
+    };
+    let updated_target = updated
+        .iter()
+        .any(|row| row.row_uuid() == target_id && row.cell_at(1) == Some(CoreValue::Bool(true)));
+    let removed_and_added_target = removed.iter().any(|row| row.row_uuid == target_id)
+        && added.iter().any(|row| {
+            row.row_uuid() == target_id && row.cell_at(1) == Some(CoreValue::Bool(true))
+        });
+    assert!(
+        updated_target || removed_and_added_target,
+        "same-client value update should be observable; got added={added:#?} updated={updated:#?} removed={removed:#?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_subscription_limited_window_emits_same_client_value_update() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            run_core_same_client_value_update_subscription(true).await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_subscription_unbounded_emits_same_client_value_update() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            run_core_same_client_value_update_subscription(false).await;
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn edge_tier_public_subscription_opens_and_receives_rows() {
     tokio::task::LocalSet::new()
