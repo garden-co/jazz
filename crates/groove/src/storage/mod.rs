@@ -852,20 +852,20 @@ where
         if !self.windowed {
             return self.storage.range(self.column_family, start, end);
         }
-        self.run_aware_records(
-            |key| key >= start && key < end,
-            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
-        )
+        self.run_aware_bounded_records(start, Some(end), |key| key >= start && key < end)
     }
 
     pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
         if !self.windowed {
             return self.storage.prefix(self.column_family, prefix);
         }
-        self.run_aware_records(
-            |key| key.starts_with(prefix),
-            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
-        )
+        self.run_aware_prefix_records(prefix)
+    }
+
+    pub fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        let mut records = self.range(start, end)?;
+        records.reverse();
+        Ok(records)
     }
 
     pub fn scan_range(
@@ -1219,6 +1219,105 @@ where
             Ok(())
         })?;
         Ok(records.into_iter().collect())
+    }
+
+    fn run_aware_prefix_records(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
+        if let Some(end) = key_codec::prefix_upper_bound(prefix) {
+            self.run_aware_bounded_records(prefix, Some(&end), |key| key.starts_with(prefix))
+        } else {
+            self.run_aware_bounded_records(prefix, None, |key| key.starts_with(prefix))
+        }
+    }
+
+    fn run_aware_bounded_records(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        include: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<KeyValue>, Error> {
+        if !self.window_marker_present()? {
+            return self.scan_plain_bounded_records(start, end, include);
+        }
+        let Some(index) = self.window_range_index()? else {
+            let records = self.run_aware_records(include, |visit| {
+                self.storage.scan_prefix(self.column_family, b"", visit)
+            })?;
+            self.write_window_range_index()?;
+            return Ok(records);
+        };
+
+        let mut physical_records = Vec::<(Vec<u8>, Vec<KeyValue>)>::new();
+        self.scan_raw_bounded(start, end, &mut |raw_key, raw_value| {
+            if is_window_meta_key(raw_key) || decode_window_value(raw_value)?.is_some() {
+                return Ok(());
+            }
+            if include(raw_key) {
+                physical_records.push((
+                    raw_key.to_vec(),
+                    vec![(raw_key.to_vec(), raw_value.to_vec())],
+                ));
+            }
+            Ok(())
+        })?;
+
+        for entry in index.entries.iter().filter(|entry| {
+            entry.max_key.as_slice() >= start
+                && end.is_none_or(|end| entry.window_key.as_slice() < end)
+        }) {
+            let Some(raw_value) = self.storage.get(self.column_family, &entry.window_key)? else {
+                continue;
+            };
+            let Some(window) = decode_window_value(&raw_value)? else {
+                continue;
+            };
+            let records = self
+                .decode_window_records_cached(&entry.window_key, window.codec)?
+                .into_iter()
+                .filter(|(key, _)| include(key))
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                physical_records.push((entry.window_key.clone(), records));
+            }
+        }
+
+        physical_records.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut records = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        for (_, logical_records) in physical_records {
+            for (key, value) in logical_records {
+                records.insert(key, value);
+            }
+        }
+        Ok(records.into_iter().collect())
+    }
+
+    fn scan_plain_bounded_records(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        include: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<KeyValue>, Error> {
+        let mut records = Vec::new();
+        self.scan_raw_bounded(start, end, &mut |key, value| {
+            if !is_window_meta_key(key) && include(key) {
+                records.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(())
+        })?;
+        Ok(records)
+    }
+
+    fn scan_raw_bounded(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        if let Some(end) = end {
+            self.storage
+                .scan_range(self.column_family, start, end, visit)
+        } else {
+            self.storage.scan_prefix(self.column_family, start, visit)
+        }
     }
 
     fn window_marker_present(&self) -> Result<bool, Error> {
@@ -4051,6 +4150,156 @@ mod tests {
             metered_store.get_raw(&absent_after_plain_tail).unwrap(),
             None
         );
+        let indexed_reads = metrics.borrow().history_rows.reads;
+        (legacy_reads, indexed_reads)
+    }
+
+    #[test]
+    fn windowed_run_aware_ranges_use_bounded_plain_and_candidate_window_reads() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let mut expected = Vec::new();
+        expected.extend(seed_window_records_from(&storage, descriptor, 0, 9));
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        expected.extend(seed_window_records_from(
+            &storage, descriptor, 10_000, 5_000,
+        ));
+
+        let cases = [
+            (
+                "plain-only",
+                window_key(1, 10_150, 7),
+                window_key(1, 10_153, 7),
+            ),
+            ("window-only", window_key(1, 103, 7), window_key(1, 106, 7)),
+            ("mixed", window_key(1, 106, 7), window_key(1, 10_002, 7)),
+            ("empty", window_key(1, 9_000, 7), window_key(1, 9_003, 7)),
+        ];
+        for (name, start, end) in cases {
+            let indexed_forward = store.range(&start, &end).unwrap();
+            storage
+                .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+                .unwrap();
+            let legacy_forward = store.range(&start, &end).unwrap();
+            assert_eq!(
+                indexed_forward, legacy_forward,
+                "forward range mismatch for {name}"
+            );
+
+            let indexed_reverse = store.range_reverse(&start, &end).unwrap();
+            storage
+                .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+                .unwrap();
+            let legacy_reverse = store.range_reverse(&start, &end).unwrap();
+            assert_eq!(
+                indexed_reverse, legacy_reverse,
+                "reverse range mismatch for {name}"
+            );
+        }
+
+        let prefix_key = window_key(1, 10_250, 7);
+        let indexed_prefix = store.prefix(&prefix_key).unwrap();
+        storage
+            .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+            .unwrap();
+        let legacy_prefix = store.prefix(&prefix_key).unwrap();
+        assert_eq!(indexed_prefix, legacy_prefix);
+        assert_eq!(
+            indexed_prefix,
+            expected
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix_key))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        let narrow_start = window_key(1, 10_300, 7);
+        let narrow_end = window_key(1, 10_303, 7);
+        let rows = metered_store.range(&narrow_start, &narrow_end).unwrap();
+        assert_eq!(rows.len(), 3);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 8,
+            "narrow range should read only bounded plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let rows = metered_store.prefix(&prefix_key).unwrap();
+        assert_eq!(rows.len(), 1);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 6,
+            "narrow prefix should read only matching plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let rows = metered_store
+            .range_reverse(&narrow_start, &narrow_end)
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 8,
+            "narrow reverse range should read only bounded plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        for tail in [1_000, 5_000, 20_000] {
+            let (legacy_reads, indexed_reads) = reverse_range_reads_for_plain_tail(tail);
+            eprintln!(
+                "windowed_reverse_range_scaling tail={tail} legacy_reads={legacy_reads} indexed_reads={indexed_reads}"
+            );
+            assert!(
+                indexed_reads <= 8,
+                "indexed reverse range should stay bounded; tail={tail}, reads={indexed_reads}"
+            );
+        }
+    }
+
+    fn reverse_range_reads_for_plain_tail(tail: u64) -> (usize, usize) {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        seed_window_records_from(&storage, descriptor, 0, 9);
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        seed_window_records_from(&storage, descriptor, 10_000, tail);
+        let start = window_key(1, 10_300, 7);
+        let end = window_key(1, 10_303, 7);
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        let mut legacy = metered_store
+            .run_aware_records(
+                |key| key >= start.as_slice() && key < end.as_slice(),
+                |visit| metered.scan_prefix("jazz_docs_history", b"", visit),
+            )
+            .unwrap();
+        legacy.reverse();
+        assert_eq!(legacy.len(), 3);
+        let legacy_reads = metrics.borrow().history_rows.reads;
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let indexed = metered_store.range_reverse(&start, &end).unwrap();
+        assert_eq!(indexed, legacy);
         let indexed_reads = metrics.borrow().history_rows.reads;
         (legacy_reads, indexed_reads)
     }
