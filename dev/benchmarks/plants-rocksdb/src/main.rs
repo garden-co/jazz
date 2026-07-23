@@ -13,10 +13,10 @@
 //!    real localhost WebSocket into a RocksDB-backed **Jazz Server**
 //!    (`jazz_server::LoopbackWebSocketServer`). Writes are timed through sync
 //!    settlement; the 500-by-id read runs locally on the client after sync.
-//!    NOTE: the server shell's sync ingestion is slow (~seconds per 1000-row
-//!    batch), so this topology is only practical at a few thousand rows — use
-//!    `--limit`. That per-batch cost is itself a result (the server ingest path,
-//!    not the harness, is the bottleneck).
+//!    NOTE: the server shell's sync ingestion is super-linear in rows already
+//!    stored, so cap this topology at `--limit 25000` (~4.5 min, fully synced);
+//!    the full 93k would take ~40 min. That per-batch cost is itself a result
+//!    (the server ingest path, not the harness, is the bottleneck).
 //!
 //! An optional synthetic **EBS** write delay (`--ebs-delay-ms`) models a
 //! network-attached volume by charging a fixed latency per durable commit batch.
@@ -24,8 +24,8 @@
 //! ```text
 //! dev/benchmarks/plants-rocksdb/scripts/setup.sh                 # download the dataset
 //! cargo run --release -p plants-rocksdb-bench -- --topology raw,jazz          # full 93k, seconds
-//! cargo run --release -p plants-rocksdb-bench -- --topology server --limit 5000
-//! cargo run --release -p plants-rocksdb-bench -- --limit 5000 --ebs-delay-ms 2  # all three
+//! cargo run --release -p plants-rocksdb-bench -- --topology server --limit 25000  # ~4.5 min
+//! cargo run --release -p plants-rocksdb-bench -- --limit 5000 --ebs-delay-ms 2     # all three
 //! ```
 
 use std::collections::{BTreeMap, VecDeque};
@@ -425,7 +425,15 @@ struct WsClientTransport {
     inbox: VecDeque<Vec<u8>>,
     sent: Arc<AtomicU64>,
     recv: Arc<AtomicU64>,
+    /// Set once the server closes the connection or a read errors, so a blocked
+    /// write bails with an error instead of spinning forever.
+    closed: bool,
 }
+
+/// Max wall-clock a single frame's flush may spend under backpressure before we
+/// treat the connection as dead. Very generous, since late batches ingest slowly
+/// (the server's history consolidation is super-linear in rows already stored).
+const FLUSH_DEADLINE: Duration = Duration::from_secs(600);
 
 fn is_would_block(error: &tungstenite::Error) -> bool {
     matches!(error, tungstenite::Error::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
@@ -434,7 +442,8 @@ fn is_would_block(error: &tungstenite::Error) -> bool {
 impl WsClientTransport {
     /// Drain every message currently available on the (non-blocking) socket into
     /// the inbox. Never blocks. Also relieves the server's send buffer, which is
-    /// what lets a blocked write make progress.
+    /// what lets a blocked write make progress. Flags the connection closed on a
+    /// non-would-block error.
     fn pump_reads(&mut self) {
         loop {
             match self.socket.read() {
@@ -449,7 +458,10 @@ impl WsClientTransport {
                 }
                 Ok(_) => {}
                 Err(e) if is_would_block(&e) => break,
-                Err(_) => break,
+                Err(_) => {
+                    self.closed = true;
+                    break;
+                }
             }
         }
     }
@@ -459,22 +471,29 @@ impl WireTransport for WsClientTransport {
     // Non-blocking send that never drops: on write-buffer/would-block pressure it
     // drains inbound frames (relieving the server so it keeps reading us) and
     // retries until the frame is fully flushed. A single-threaded blocking send
-    // would deadlock once both directions' buffers fill mid-burst.
+    // would deadlock once both directions' buffers fill mid-burst. Bails with an
+    // error if the connection closes or a flush stalls past FLUSH_DEADLINE.
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        if self.closed {
+            return Err(TransportError::Failed("ws connection closed".to_owned()));
+        }
         let batch = postcard::to_allocvec(&vec![frame])
             .map_err(|e| TransportError::Failed(format!("encode frame batch: {e}")))?;
+        let deadline = Instant::now();
         let mut pending = Some(Message::Binary(batch.into()));
         while let Some(message) = pending.take() {
             match self.socket.write(message) {
                 Ok(()) => {}
                 Err(tungstenite::Error::WriteBufferFull(returned)) => {
-                    // Buffer full: relieve backpressure and retry the same frame.
                     self.pump_reads();
                     pending = Some(*returned);
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) if is_would_block(&e) => {} // queued; fall through to flush
                 Err(e) => return Err(TransportError::Failed(format!("ws write: {e}"))),
+            }
+            if self.closed || deadline.elapsed() > FLUSH_DEADLINE {
+                return Err(TransportError::Failed("ws write stalled/closed".to_owned()));
             }
         }
         loop {
@@ -486,6 +505,9 @@ impl WireTransport for WsClientTransport {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => return Err(TransportError::Failed(format!("ws flush: {e}"))),
+            }
+            if self.closed || deadline.elapsed() > FLUSH_DEADLINE {
+                return Err(TransportError::Failed("ws flush stalled/closed".to_owned()));
             }
         }
         self.sent.fetch_add(1, Ordering::Relaxed);
@@ -502,10 +524,10 @@ impl WireTransport for WsClientTransport {
 }
 
 fn run_server(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> Metrics {
-    if plants.len() > 10_000 {
+    if plants.len() > 25_000 {
         eprintln!(
-            "  note: the server topology's sync ingestion is slow (~seconds per {batch}-row \
-             batch); {} rows may take several minutes. Use --limit for a quick run.",
+            "  note: the server topology's sync ingestion is super-linear; {} rows will take \
+             far longer than the ~4.5 min for 25k (full 93k ≈ 40 min). Consider --limit 25000.",
             plants.len()
         );
     }
@@ -544,12 +566,26 @@ fn run_server(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> 
         inbox: VecDeque::new(),
         sent: Arc::clone(&sent),
         recv: Arc::clone(&recv),
+        closed: false,
     };
-    // --- Write every plant locally, then connect upstream and ship to the
-    // server. Writes are timed through sync settlement (the server durably
-    // holds every row). ---
+
+    // Connect upstream and let the catalogue handshake settle before writing, so
+    // schema negotiation completes against the empty server first.
+    let _upstream = client.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+    for _ in 0..50 {
+        client.tick().expect("handshake tick");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // --- Write and ship incrementally: commit a batch, then tick to stream it to
+    // the server before the next batch. This paces uploads to the server's ingest
+    // speed (the reliable transport applies backpressure) instead of blasting the
+    // whole dataset in one burst. Timed through final sync settlement so the
+    // server durably holds every row. ---
     let t = Instant::now();
-    for chunk in plants.chunks(batch) {
+    let total_batches = plants.len().div_ceil(batch);
+    let progress = std::env::var("JZ_PROGRESS").is_ok();
+    for (i, chunk) in plants.chunks(batch).enumerate() {
         client
             .transaction(|tx| {
                 for plant in chunk {
@@ -559,9 +595,19 @@ fn run_server(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> 
             })
             .expect("commit batch");
         ebs.charge();
+        client.tick().expect("ship batch");
+        if progress && (i + 1).is_multiple_of(5) {
+            eprintln!(
+                "    write: batch {}/{} shipped  sent={} recv={}  elapsed={:.0}s",
+                i + 1,
+                total_batches,
+                sent.load(Ordering::Relaxed),
+                recv.load(Ordering::Relaxed),
+                t.elapsed().as_secs_f64()
+            );
+        }
     }
-    let _upstream = client.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
-    // Drive sync to quiescence: keep ticking until no frame moves for a while.
+    // Drive remaining sync to quiescence.
     drain_sync(&client, &sent, &recv);
     let write = t.elapsed();
 
@@ -603,8 +649,8 @@ fn drain_sync(client: &Db<RocksDbStorage>, sent: &Arc<AtomicU64>, recv: &Arc<Ato
     // Quiescence: no frame moves for `IDLE_TICKS` ticks. The server-shell sync
     // path is slow (~seconds per 1000-row batch) but keeps acking, so frames
     // move well within this window; the guard below only trips on a real stall.
-    const IDLE_TICKS: u32 = 60;
-    const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+    const IDLE_TICKS: u32 = 150;
+    const STALL_TIMEOUT: Duration = Duration::from_secs(120);
     let mut last = (sent.load(Ordering::Relaxed), recv.load(Ordering::Relaxed));
     let mut idle = 0u32;
     let start = Instant::now();

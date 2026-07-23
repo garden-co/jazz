@@ -21,13 +21,28 @@ membership (`in_list`) read and separately probes the per-id point-lookup cost.
 every row to the server; the run then reopens the server's RocksDB directory and
 reports how many rows durably landed (`synced to server N / M`).
 
-> **Scale ceiling.** The server's WebSocket sync _ingestion_ is slow — roughly a
-> few seconds per 1000-row batch (apparently super-linear), so the full ~93k
-> dataset would take ~10 minutes. Run the `server` topology with a small
-> `--limit` (a few thousand rows); `raw` and `jazz` handle the full dataset in
-> seconds. The per-batch cost is the server ingest path itself, not this harness
-> — it's a genuine finding, not a bug. The write time reported for `server`
-> includes syncing every row through to the server's durable RocksDB.
+> **Scale ceiling — cap the `server` topology at `--limit 25000`.** The server's
+> WebSocket sync _ingestion_ is super-linear in rows already stored (its history
+> consolidation re-runs as the table grows), so per-batch cost keeps climbing:
+>
+> | batch (×1000 rows) | 5   | 10  | 15  | 20   | 25   |
+> | ------------------ | --- | --- | --- | ---- | ---- |
+> | elapsed            | 8s  | 37s | 87s | 163s | 267s |
+>
+> 25k rows takes ~4.5 min and fully syncs (25000/25000); the full ~93k would take
+> ~40 min, so it is not run by default. `raw` and `jazz` handle the full dataset
+> in well under a second. This per-batch cost is the server ingest path itself,
+> not this harness — a genuine finding, not a bug. The `server` write time
+> includes syncing every row through to the server's durable RocksDB (verified by
+> reopening it: `synced N/M`).
+>
+> Reference numbers at `--limit 25000` (Apple silicon, release build):
+>
+> | topology | write all                  | get 500 by id                              |
+> | -------- | -------------------------- | ------------------------------------------ |
+> | `raw`    | 0.01 s                     | 1.2 ms (500 point gets)                    |
+> | `jazz`   | 0.53 s                     | 969 ms cold `in_list` · 55 ms/point-lookup |
+> | `server` | 267 s (25000/25000 synced) | 973 ms warm · 60 ms/point-lookup           |
 
 ## Synthetic EBS delay
 
@@ -43,8 +58,8 @@ dev/benchmarks/plants-rocksdb/scripts/setup.sh
 # Local topologies over the full dataset (seconds).
 cargo run --release -p plants-rocksdb-bench -- --topology raw,jazz
 
-# The server topology at a practical scale (see the scale ceiling above).
-cargo run --release -p plants-rocksdb-bench -- --topology server --limit 5000
+# The server topology at its practical ceiling (~4.5 min; see above).
+cargo run --release -p plants-rocksdb-bench -- --topology server --limit 25000
 
 # All three, with a 2 ms/commit synthetic EBS delay.
 cargo run --release -p plants-rocksdb-bench -- --limit 5000 --ebs-delay-ms 2
