@@ -1,16 +1,15 @@
-//! The USDA plants records: parsing, loading with assigned ids, and id sampling.
+//! The USDA plants records: schema columns, CSV parsing, loading with assigned
+//! ids, id sampling, and on-disk size.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use jazz::groove::records::Value;
 use uuid::Uuid;
 
 pub(crate) const TABLE: &str = "plants";
-// NB: not "id" — that name resolves to Jazz's implicit row-identity (Uuid)
-// column, which would type-mismatch against our String uuid literals.
-pub(crate) const ID_COL: &str = "plant_id";
-pub(crate) const FIELDS: [&str; 5] = [
+/// Schema columns in order: the assigned id plus the five CSV fields. Shared by
+/// the Jazz schema and the row-cell builder so the names live in exactly one place.
+pub(crate) const COLUMNS: [&str; 6] = [
+    "plant_id",
     "symbol",
     "synonym_symbol",
     "scientific_name",
@@ -19,35 +18,31 @@ pub(crate) const FIELDS: [&str; 5] = [
 ];
 pub(crate) const FIELD_SEP: u8 = 0x1f;
 
-/// One record: a stable assigned UUID plus the five CSV fields.
 pub(crate) struct Plant {
     pub(crate) id: String,
-    fields: [String; 5],
+    pub(crate) fields: [String; 5],
 }
 
 impl Plant {
-    /// The row as Jazz cells (`id` + the five columns) for `tx.insert`.
-    pub(crate) fn cells(&self) -> BTreeMap<String, Value> {
-        let mut cells = BTreeMap::new();
-        cells.insert(ID_COL.to_owned(), Value::String(self.id.clone()));
-        for (name, value) in FIELDS.iter().zip(self.fields.iter()) {
-            cells.insert((*name).to_owned(), Value::String(value.clone()));
-        }
-        cells
+    /// Logical payload size: the assigned id plus every field byte.
+    pub(crate) fn logical_len(&self) -> usize {
+        self.id.len() + self.fields.iter().map(String::len).sum::<usize>()
     }
 
-    /// The row encoded for the raw-RocksDB value: fields joined by `FIELD_SEP`.
+    /// Fields joined by `FIELD_SEP`, for the raw-RocksDB value.
     pub(crate) fn raw_value(&self) -> Vec<u8> {
-        self.fields
-            .iter()
-            .map(String::as_bytes)
-            .collect::<Vec<_>>()
-            .join(&[FIELD_SEP][..])
+        let mut out = Vec::with_capacity(self.fields.iter().map(String::len).sum::<usize>() + 4);
+        for (i, field) in self.fields.iter().enumerate() {
+            if i > 0 {
+                out.push(FIELD_SEP);
+            }
+            out.extend_from_slice(field.as_bytes());
+        }
+        out
     }
 }
 
-/// Parse one RFC-4180-ish line: comma-separated, double-quoted fields, `""` a
-/// literal quote. The USDA file quotes every field, one record per line.
+/// Parse one RFC-4180-ish line from the USDA file (every field double-quoted).
 fn parse_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut cur = String::new();
@@ -77,58 +72,61 @@ fn parse_csv_line(line: &str) -> Vec<String> {
     fields
 }
 
-/// Load the dataset and assign each row a stable UUID derived from its index so
-/// every topology and every run sees the exact same id set.
-pub(crate) fn load_dataset(path: &Path, limit: Option<usize>) -> Vec<Plant> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!(
-            "read dataset {}: {e}\nrun dev/benchmarks/plants-rocksdb/scripts/setup.sh first",
-            path.display()
-        )
-    });
-    let mut plants = Vec::new();
+/// Load up to `limit` plant records, assigning each a stable UUID by index.
+pub(crate) fn load_plants(limit: usize) -> Vec<Plant> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/plantlst.txt");
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {path}: {e}\nrun scripts/setup.sh first"));
+    let mut out = Vec::new();
     for line in text.lines().skip(1) {
         if line.is_empty() {
             continue;
         }
         let mut cols = parse_csv_line(line);
+        cols.truncate(5);
         cols.resize(5, String::new());
-        let index = plants.len() as u64;
-        plants.push(Plant {
-            id: Uuid::from_u128(splitmix64(index.wrapping_add(1)) as u128).to_string(),
-            fields: [
-                std::mem::take(&mut cols[0]),
-                std::mem::take(&mut cols[1]),
-                std::mem::take(&mut cols[2]),
-                std::mem::take(&mut cols[3]),
-                std::mem::take(&mut cols[4]),
-            ],
+        out.push(Plant {
+            id: Uuid::from_u128((out.len() + 1) as u128).to_string(),
+            fields: cols.try_into().expect("exactly 5 fields"),
         });
-        if let Some(limit) = limit
-            && plants.len() >= limit
-        {
+        if out.len() >= limit {
             break;
         }
     }
-    plants
+    out
 }
 
-/// Pick `count` distinct plant ids at random (seeded, reproducible).
-pub(crate) fn sample_ids(plants: &[Plant], count: usize, seed: u64) -> Vec<String> {
+/// Pick `count` distinct plant ids (seeded xorshift, reproducible).
+pub(crate) fn sample_ids(plants: &[Plant], count: usize) -> Vec<String> {
     let count = count.min(plants.len());
-    let mut chosen = BTreeSet::new();
-    let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut chosen = std::collections::BTreeSet::new();
+    let mut state = 0x5eed_u64;
     while chosen.len() < count {
-        state = splitmix64(state);
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
         chosen.insert((state as usize) % plants.len());
     }
     chosen.into_iter().map(|i| plants[i].id.clone()).collect()
 }
 
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+pub(crate) fn logical_bytes(plants: &[Plant]) -> u64 {
+    plants.iter().map(|p| p.logical_len() as u64).sum()
+}
+
+/// Recursive on-disk size of a path (directory or single file), in bytes.
+pub(crate) fn dir_size(path: &Path) -> u64 {
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if md.is_dir() {
+        std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| dir_size(&e.path()))
+            .sum()
+    } else {
+        md.len()
+    }
 }
