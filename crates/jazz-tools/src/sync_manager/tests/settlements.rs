@@ -183,6 +183,79 @@ fn delayed_server_row_does_not_override_authoritative_rejection() {
 }
 
 #[test]
+fn server_row_is_retried_after_post_fate_materialisation_failure() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = FailingHistoryPatchStorage::new();
+    io.fail_prepared_row_mutation = true;
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let accepted = BatchFate::AcceptedTransaction {
+        batch_id,
+        confirmed_tier: DurabilityTier::EdgeServer,
+    };
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleTransactional,
+        Some(DurabilityTier::EdgeServer),
+    );
+
+    seed_users_schema(io.inner_mut());
+    io.upsert_authoritative_batch_fate(&accepted).unwrap();
+    sm.add_server_with_storage(server_id, false, &io);
+    sm.take_outbox();
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(accepted),
+        "the simulated row failure must preserve the authoritative accepted fate"
+    );
+    assert!(
+        io.load_history_row_batch("users", "main", row_id, batch_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        sm.inbox.len(),
+        1,
+        "a server row must remain queued when materialisation fails after fate persistence"
+    );
+
+    io.fail_prepared_row_mutation = false;
+    sm.process_inbox(&mut io);
+
+    assert!(sm.inbox.is_empty());
+    assert_eq!(
+        io.load_history_row_batch("users", "main", row_id, batch_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(
+        io.inner
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .len(),
+        1,
+        "retry must materialise the server row exactly once"
+    );
+}
+
+#[test]
 fn client_durability_ack_is_not_authoritative() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mut io = MemoryStorage::new();

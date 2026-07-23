@@ -159,6 +159,81 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
 }
 
 #[test]
+fn rc_restart_reapplies_persisted_accepted_fate_before_retiring_submission() {
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let batch_id = BatchId::new();
+    let row_id = ObjectId::new();
+    let staged_row = staged_user_row(row_id, batch_id, 1_000, "Alice");
+
+    let mut old_runtime = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "transactional-restart-existing-fate-recovery-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+    old_runtime
+        .storage_mut()
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: "users".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .append_history_region_rows("users", std::slice::from_ref(&staged_row))
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
+            batch_id,
+            crate::batch_fate::BatchMode::Transactional,
+            crate::object::BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id: row_id,
+                row_digest: staged_row.content_digest(),
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+    old_runtime
+        .storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        })
+        .unwrap();
+
+    let storage = old_runtime.into_storage();
+    let restarted = create_runtime_with_storage_and_sync_manager(
+        schema,
+        "transactional-restart-existing-fate-recovery-test",
+        storage,
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let visible = restarted
+        .storage()
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("restart recovery should apply the persisted accepted fate");
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(
+        restarted
+            .storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap(),
+        None,
+        "recovery should retire the submission only after applying its fate"
+    );
+}
+
+#[test]
 fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     // alice stages one transactional row while disconnected
     //   reconnect alone is not enough

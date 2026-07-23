@@ -138,6 +138,7 @@ fn persist_visible_row_settlement(
 struct FailingHistoryPatchStorage {
     inner: MemoryStorage,
     fail_history_load: bool,
+    fail_prepared_row_mutation: bool,
     fail_authoritative_fate_scan: bool,
     fail_authoritative_settlement_upsert: bool,
     fail_sealed_submission_upsert: bool,
@@ -148,6 +149,7 @@ impl FailingHistoryPatchStorage {
         Self {
             inner: MemoryStorage::new(),
             fail_history_load: false,
+            fail_prepared_row_mutation: false,
             fail_authoritative_fate_scan: false,
             fail_authoritative_settlement_upsert: false,
             fail_sealed_submission_upsert: false,
@@ -194,6 +196,11 @@ impl Storage for FailingHistoryPatchStorage {
         encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
         index_mutations: &[crate::storage::IndexMutation<'_>],
     ) -> Result<(), crate::storage::StorageError> {
+        if self.fail_prepared_row_mutation {
+            return Err(crate::storage::StorageError::IoError(format!(
+                "simulated prepared row mutation failure for {table}"
+            )));
+        }
         self.inner.apply_prepared_row_mutation(
             table,
             history_rows,

@@ -442,6 +442,111 @@ fn direct_client_settlement_before_row_keeps_sealed_submission_without_server() 
 }
 
 #[test]
+fn rejected_sealed_batch_retains_submission_until_all_members_are_handled() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+    let first_row_id = ObjectId::new();
+    let second_row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let first_row = row_with_batch_state(
+        visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    let second_row = row_with_batch_state(
+        visible_row(second_row_id, "main", Vec::new(), 1_001, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: first_row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: first_row.clone(),
+        },
+    );
+
+    let submission = transactional_sealed_submission(
+        batch_id,
+        "main",
+        vec![
+            SealedBatchMember {
+                object_id: first_row_id,
+                row_digest: first_row.content_digest(),
+            },
+            SealedBatchMember {
+                object_id: second_row_id,
+                row_digest: second_row.content_digest(),
+            },
+        ],
+        Vec::new(),
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: submission.clone(),
+        },
+    );
+
+    let rejected = BatchFate::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
+    };
+    io.upsert_authoritative_batch_fate(&rejected).unwrap();
+
+    assert!(sm.recover_completed_sealed_batches_with_storage(&mut io));
+    assert!(
+        io.load_sealed_batch_submission(batch_id).unwrap().is_some(),
+        "a rejected batch must retain its recovery manifest while a declared member is missing"
+    );
+    assert_eq!(
+        io.load_history_row_batch("users", "main", first_row_id, batch_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::row_histories::RowState::Rejected
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: second_row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: second_row,
+        },
+    );
+    sm.recover_completed_sealed_batches_with_storage(&mut io);
+
+    assert_eq!(
+        io.load_history_row_batch("users", "main", second_row_id, batch_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::row_histories::RowState::Rejected
+    );
+    assert_eq!(io.load_sealed_batch_submission(batch_id).unwrap(), None);
+}
+
+#[test]
 fn seal_batch_to_servers_targets_pending_server_transport() {
     let mut sm = SyncManager::new();
     let server_id = ServerId::new();

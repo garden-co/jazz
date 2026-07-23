@@ -698,8 +698,22 @@ impl SyncManager {
         table: &str,
         row: StoredRowBatch,
     ) -> Option<crate::row_histories::ApplyRowBatchResult> {
-        let context =
-            crate::storage::resolve_history_row_write_context(storage, table, &row).ok()?;
+        let row_id = row.row_id;
+        let batch_id = row.batch_id;
+        let context = match crate::storage::resolve_history_row_write_context(storage, table, &row)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::error!(
+                    ?row_id,
+                    ?batch_id,
+                    table,
+                    %error,
+                    "failed to resolve row write context while applying authoritative batch fate"
+                );
+                return None;
+            }
+        };
         let branch_name = BranchName::new(&row.branch);
         let row_locator = storage
             .load_row_locator(row.row_id)
@@ -710,10 +724,10 @@ impl SyncManager {
                 origin_schema_hash: Some(context.history_row_raw_table_id().schema_hash),
             });
 
-        apply_row_batch_with_context(
+        match apply_row_batch_with_context(
             storage,
             ApplyRowBatchWithContext {
-                object_id: row.row_id,
+                object_id: row_id,
                 branch_name: &branch_name,
                 row,
                 index_mutations: &[],
@@ -723,8 +737,19 @@ impl SyncManager {
                 context,
                 is_known_new_object: false,
             },
-        )
-        .ok()
+        ) {
+            Ok(applied) => Some(applied),
+            Err(error) => {
+                tracing::error!(
+                    ?row_id,
+                    ?batch_id,
+                    table,
+                    ?error,
+                    "failed to apply authoritative batch fate to row"
+                );
+                None
+            }
+        }
     }
 
     fn apply_transactional_batch_fate_to_rows<H: Storage>(
@@ -734,7 +759,8 @@ impl SyncManager {
         origin_server_id: Option<ServerId>,
         fate: &BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
-    ) {
+    ) -> bool {
+        let mut applied_all = true;
         let server_ids: Vec<_> = self
             .servers
             .keys()
@@ -751,6 +777,7 @@ impl SyncManager {
                     direct_row.confirmed_tier = None;
                     let applied =
                         self.apply_row_batch_for_table(storage, table, direct_row.clone());
+                    applied_all &= applied.is_some();
 
                     let metadata = self.metadata_for_batch_row(storage, table, &direct_row);
 
@@ -804,6 +831,7 @@ impl SyncManager {
                     let accepted_row = row.accepted_transaction_output(*confirmed_tier);
                     let applied =
                         self.apply_row_batch_for_table(storage, table, accepted_row.clone());
+                    applied_all &= applied.is_some();
 
                     let metadata = self.metadata_for_batch_row(storage, table, &accepted_row);
 
@@ -856,16 +884,26 @@ impl SyncManager {
                     let branch_name = BranchName::new(&row.branch);
                     let row_batch_id = row.batch_id();
 
-                    let visibility_change = patch_row_batch_state(
+                    let visibility_change = match patch_row_batch_state(
                         storage,
                         row_id,
                         &branch_name,
                         row_batch_id,
                         Some(RowState::Rejected),
                         None,
-                    )
-                    .ok()
-                    .flatten();
+                    ) {
+                        Ok(visibility_change) => visibility_change,
+                        Err(error) => {
+                            tracing::error!(
+                                ?row_id,
+                                ?row_batch_id,
+                                ?error,
+                                "failed to apply authoritative rejection to row"
+                            );
+                            applied_all = false;
+                            continue;
+                        }
+                    };
 
                     if let Some(update) = visibility_change {
                         self.pending_row_visibility_changes.push(update);
@@ -886,11 +924,11 @@ impl SyncManager {
                     }
                 }
             }
-            BatchFate::Missing { .. } => return,
+            BatchFate::Missing { .. } => return false,
         }
 
         if matches!(fate, BatchFate::DurableDirect { .. }) {
-            return;
+            return applied_all;
         }
 
         if let Some(client_id) = origin_client_id {
@@ -899,6 +937,65 @@ impl SyncManager {
                 payload: SyncPayload::BatchFate { fate: fate.clone() },
             });
         }
+
+        applied_all
+    }
+
+    fn apply_batch_fate_and_retire_sealed_submission<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        origin_client_id: Option<ClientId>,
+        origin_server_id: Option<ServerId>,
+        fate: &BatchFate,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> bool {
+        if !self.apply_transactional_batch_fate_to_rows(
+            storage,
+            origin_client_id,
+            origin_server_id,
+            fate,
+            batch_rows,
+        ) {
+            tracing::error!(
+                batch_id = ?fate.batch_id(),
+                "failed to materialize authoritative batch fate; retaining sealed batch submission for recovery"
+            );
+            return false;
+        }
+
+        if matches!(fate, BatchFate::Rejected { .. }) {
+            let submission = match storage.load_sealed_batch_submission(fate.batch_id()) {
+                Ok(Some(submission)) => submission,
+                Ok(None) => return true,
+                Err(error) => {
+                    tracing::error!(
+                        batch_id = ?fate.batch_id(),
+                        %error,
+                        "failed to verify rejected batch membership; retaining sealed batch submission for recovery"
+                    );
+                    return false;
+                }
+            };
+            if !Self::sealed_submission_members_are_complete(&submission, batch_rows) {
+                tracing::error!(
+                    batch_id = ?fate.batch_id(),
+                    "authoritative rejection has not been applied to every declared member; retaining sealed batch submission for recovery"
+                );
+                return false;
+            }
+        }
+
+        if self.batch_fate_is_settled(fate)
+            && let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id())
+        {
+            tracing::warn!(
+                batch_id = ?fate.batch_id(),
+                %error,
+                "failed to delete sealed batch submission"
+            );
+        }
+
+        true
     }
 
     fn apply_authoritative_transaction_fate_for_row<H: Storage>(
@@ -929,7 +1026,7 @@ impl SyncManager {
                 .unwrap_or_default(),
             row.clone(),
         )];
-        self.apply_transactional_batch_fate_to_rows(
+        let _ = self.apply_transactional_batch_fate_to_rows(
             storage,
             None,
             Some(origin_server_id),
@@ -953,14 +1050,7 @@ impl SyncManager {
             Ok((fate, false)) => fate,
             Err(_) => return,
         };
-        if let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id()) {
-            tracing::warn!(
-                batch_id = ?fate.batch_id(),
-                %error,
-                "failed to delete rejected sealed batch submission"
-            );
-        }
-        self.apply_transactional_batch_fate_to_rows(
+        let _ = self.apply_batch_fate_and_retire_sealed_submission(
             storage,
             origin_client_id,
             None,
@@ -983,6 +1073,19 @@ impl SyncManager {
             declared_rows.push(matching_row.clone());
         }
         Some(declared_rows)
+    }
+
+    fn sealed_submission_members_are_complete(
+        submission: &SealedBatchSubmission,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> bool {
+        submission.members.iter().all(|member| {
+            batch_rows.iter().any(|(_, row)| {
+                row.batch_id == submission.batch_id
+                    && row.row_id == member.object_id
+                    && row.branch.as_str() == submission.target_branch_name.as_str()
+            })
+        })
     }
 
     /// True when this authority's tier outranks an existing `DurableDirect`
@@ -1071,11 +1174,6 @@ impl SyncManager {
             }
         };
 
-        if self.batch_fate_is_settled(&fate)
-            && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
-        {
-            tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
-        }
         let rows_to_patch: &[(String, StoredRowBatch)] = match fate {
             BatchFate::DurableDirect { .. } | BatchFate::AcceptedTransaction { .. } => {
                 &declared_rows
@@ -1083,13 +1181,17 @@ impl SyncManager {
             BatchFate::Rejected { .. } => &batch_rows,
             BatchFate::Missing { .. } => &[],
         };
-        self.apply_transactional_batch_fate_to_rows(
-            storage,
-            origin_client_id,
-            None,
-            &fate,
-            rows_to_patch,
-        );
+        if matches!(fate, BatchFate::Missing { .. })
+            || !self.apply_batch_fate_and_retire_sealed_submission(
+                storage,
+                origin_client_id,
+                None,
+                &fate,
+                rows_to_patch,
+            )
+        {
+            return;
+        }
 
         if matches!(fate, BatchFate::DurableDirect { .. }) {
             let mut interested_clients = self.interested_clients_for_batch_fate(&fate);
@@ -1123,6 +1225,27 @@ impl SyncManager {
                     // Continue into seal validation so this authority can promote a
                     // previously local direct fate to its own durability tier.
                 } else {
+                    if matches!(fate, BatchFate::Rejected { .. }) {
+                        let batch_rows = self.transactional_batch_rows(
+                            storage,
+                            batch_id,
+                            Some(&submission.target_branch_name),
+                            &submission
+                                .members
+                                .iter()
+                                .map(|member| member.object_id)
+                                .collect::<Vec<_>>(),
+                        );
+                        let _ = self.apply_batch_fate_and_retire_sealed_submission(
+                            storage,
+                            Some(client_id),
+                            None,
+                            &fate,
+                            &batch_rows,
+                        );
+                        self.queue_batch_fate_to_client_unfiltered(client_id, fate);
+                        return;
+                    }
                     let should_prune_submission = self.batch_fate_is_settled(&fate);
                     let prune_result = if should_prune_submission {
                         storage.delete_sealed_batch_submission(batch_id)
@@ -1232,13 +1355,14 @@ impl SyncManager {
 
         let mut recovered_any = false;
         for submission in submissions {
-            match storage.load_authoritative_batch_fate(submission.batch_id) {
+            let existing_fate = match storage.load_authoritative_batch_fate(submission.batch_id) {
                 Ok(Some(fate)) if self.can_promote_direct_fate(&fate) => {
                     // Continue into validation so this authority can promote a
                     // direct fate that was previously confirmed by a lower tier.
+                    None
                 }
-                Ok(Some(_)) => continue,
-                Ok(None) => {}
+                Ok(Some(fate)) => Some(fate),
+                Ok(None) => None,
                 Err(error) => {
                     tracing::warn!(
                         batch_id = ?submission.batch_id,
@@ -1247,7 +1371,7 @@ impl SyncManager {
                     );
                     continue;
                 }
-            }
+            };
 
             let batch_rows = self.transactional_batch_rows(
                 storage,
@@ -1258,6 +1382,38 @@ impl SyncManager {
                     .map(|member| member.object_id)
                     .collect::<Vec<_>>(),
             );
+            if let Some(fate) = existing_fate {
+                let declared_rows = match fate {
+                    BatchFate::DurableDirect { .. } | BatchFate::AcceptedTransaction { .. } => {
+                        let Some(declared_rows) =
+                            Self::declared_rows_for_submission(&submission, &batch_rows)
+                        else {
+                            tracing::error!(
+                                batch_id = ?submission.batch_id,
+                                "authoritative batch fate exists but its declared rows are incomplete; retaining sealed batch submission for recovery"
+                            );
+                            continue;
+                        };
+                        declared_rows
+                    }
+                    BatchFate::Rejected { .. } => Vec::new(),
+                    BatchFate::Missing { .. } => continue,
+                };
+                let mode = match submission.mode {
+                    BatchMode::Direct => SealedBatchMode::Direct,
+                    BatchMode::Transactional => SealedBatchMode::Transactional,
+                };
+                self.settle_sealed_batch(
+                    storage,
+                    None,
+                    submission,
+                    batch_rows,
+                    declared_rows,
+                    mode,
+                );
+                recovered_any = true;
+                continue;
+            }
             if let Err(rejection) = self.validate_sealed_batch_submission(&submission) {
                 self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
                 recovered_any = true;
@@ -1304,13 +1460,18 @@ impl SyncManager {
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
-        match entry.source {
+        let retry_entry = entry.clone();
+        let processed = match entry.source {
             Source::Server(server_id) => {
                 self.process_from_server(storage, server_id, entry.payload)
             }
             Source::Client(client_id) => {
-                self.process_from_client(storage, client_id, entry.payload)
+                self.process_from_client(storage, client_id, entry.payload);
+                true
             }
+        };
+        if !processed {
+            self.inbox.push(retry_entry);
         }
     }
 
@@ -1320,7 +1481,7 @@ impl SyncManager {
         storage: &mut H,
         server_id: ServerId,
         payload: SyncPayload,
-    ) {
+    ) -> bool {
         let _span = tracing::debug_span!("process_from_server", %server_id, payload = payload.variant_name()).entered();
         match payload {
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -1343,37 +1504,33 @@ impl SyncManager {
                     %branch_name,
                     "server→row-batch payload"
                 );
-                if let Some(applied) = self.apply_row_updated(
+                let Some(applied) = self.apply_row_updated(
                     storage,
                     metadata,
                     row.clone(),
                     AuthoritativeFateRecording::AcceptedByLocalAuthority,
-                ) {
-                    self.apply_authoritative_transaction_fate_for_row(
-                        storage,
-                        server_id,
-                        &applied.row,
+                ) else {
+                    return matches!(
+                        storage.load_authoritative_batch_fate(row.batch_id),
+                        Ok(Some(BatchFate::Rejected { .. }))
                     );
+                };
+                self.apply_authoritative_transaction_fate_for_row(storage, server_id, &applied.row);
 
-                    if let Some(update) = applied.visibility_change {
-                        self.pending_row_visibility_changes.push(update);
-                        self.forward_update_to_clients_with_storage(
-                            storage,
-                            object_id,
-                            branch_name,
-                        );
-                    }
+                if let Some(update) = applied.visibility_change {
+                    self.pending_row_visibility_changes.push(update);
+                    self.forward_update_to_clients_with_storage(storage, object_id, branch_name);
                 }
             }
             SyncPayload::BatchFate { fate } => {
                 let fate = match self.persist_authoritative_batch_fate(storage, &fate) {
                     Ok((fate, _)) => fate,
-                    Err(_) => return,
+                    Err(_) => return true,
                 };
                 self.pending_batch_fates.push(fate.clone());
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
-                    self.apply_transactional_batch_fate_to_rows(
+                    let _ = self.apply_transactional_batch_fate_to_rows(
                         storage,
                         None,
                         Some(server_id),
@@ -1476,6 +1633,7 @@ impl SyncManager {
             | SyncPayload::QueryUnsubscription { .. }
             | SyncPayload::SealBatch { .. } => {}
         }
+        true
     }
 
     /// Process a payload from a client.

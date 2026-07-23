@@ -114,6 +114,75 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
 }
 
 #[test]
+fn rc_rejected_fate_falls_back_from_partial_sealed_membership() {
+    let mut core =
+        create_runtime_with_schema(test_schema(), "rejected-partial-sealed-membership-test");
+    attach_server_and_drain(&mut core);
+    let batch_id = core.begin_batch(crate::batch_fate::BatchMode::Direct);
+    let write_context = WriteContext::default().with_batch_id(batch_id);
+
+    let ((first_row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+    let ((second_row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            Some(&write_context),
+        )
+        .unwrap();
+    core.commit_batch(batch_id).unwrap();
+
+    assert_eq!(
+        core.storage()
+            .load_local_batch_record(batch_id)
+            .unwrap()
+            .expect("unsettled direct batch should retain its local record")
+            .members
+            .len(),
+        2,
+        "the lower-priority local record must retain complete membership"
+    );
+    core.storage_mut()
+        .put_row_locator(second_row_id, None)
+        .unwrap();
+    assert_eq!(
+        core.local_batch_rows(batch_id).len(),
+        2,
+        "partial sealed membership must fall back to the complete local record"
+    );
+
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    for row_id in [first_row_id, second_row_id] {
+        assert_eq!(
+            core.storage()
+                .load_visible_region_row("users", branch_name.as_str(), row_id)
+                .unwrap(),
+            None,
+            "an authoritative rejection must retract every sealed batch member"
+        );
+        assert_eq!(
+            core.storage()
+                .scan_history_row_batches("users", row_id)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.batch_id == batch_id)
+                .expect("batch member history should remain available")
+                .state,
+            crate::row_histories::RowState::Rejected,
+            "an authoritative rejection must mark every sealed batch member rejected"
+        );
+    }
+}
+
+#[test]
 fn rc_direct_update_rejection_restores_previous_visible_row() {
     let mut core = create_runtime_with_schema(test_schema(), "direct-update-reject-restore-test");
 

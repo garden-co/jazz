@@ -48,7 +48,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         submission
             .members
             .into_iter()
-            .filter_map(|sealed_member| {
+            .map(|sealed_member| {
                 let row_locator = self
                     .storage
                     .load_row_locator(sealed_member.object_id)
@@ -69,7 +69,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     row_digest: sealed_member.row_digest,
                 })
             })
-            .collect()
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
     }
 
     fn cached_local_batch_members(&self, batch_id: BatchId) -> Vec<LocalBatchMember> {
@@ -201,10 +202,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut rows = Vec::new();
         for load_members in member_sources {
-            rows = self.local_batch_rows_from_members(batch_id, load_members(self, batch_id));
-            if !rows.is_empty() {
+            let members = load_members(self, batch_id);
+            if members.is_empty() {
+                continue;
+            }
+            let expected_rows = members.len();
+            rows = self.local_batch_rows_from_members(batch_id, members);
+            if rows.len() == expected_rows {
                 break;
             }
+            rows.clear();
         }
         if rows.is_empty() {
             // Last-resort fallback if the batchId->rows index is not found.
