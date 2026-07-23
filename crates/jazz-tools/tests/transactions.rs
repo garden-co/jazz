@@ -549,6 +549,117 @@ async fn multiple_writes_in_one_transaction_settle_as_one_batch() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn subscribed_client_retries_transaction_row_after_transient_storage_failure() {
+    let (server, alice, bob) = start_two_clients(todo_schema()).await;
+    let todo_id = insert_visible_todo(&alice, "before transaction", false).await;
+    wait_for_todos(
+        &bob,
+        Some(DurabilityTier::EdgeServer),
+        "bob sees the row before alice's transaction",
+        |rows| has_todo(rows, todo_id, "before transaction", false),
+    )
+    .await;
+
+    let blocked = server.block_messages_to(bob.client_id().expect("bob client id"));
+    let tx = alice
+        .begin_transaction()
+        .expect("begin transaction through client API");
+    let batch_id = tx
+        .update(
+            todo_id,
+            vec![(
+                "title".to_string(),
+                Value::Text("after transaction".to_string()),
+            )],
+        )
+        .expect("stage transaction update");
+    assert_eq!(tx.commit().expect("commit transaction"), batch_id);
+    alice
+        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("alice's transaction should be accepted");
+
+    blocked
+        .wait_until_buffered(
+            |payload| {
+                matches!(
+                    payload,
+                    SyncPayload::RowBatchCreated { row, .. }
+                        | SyncPayload::RowBatchNeeded { row, .. }
+                        if row.batch_id == batch_id && row.row_id == todo_id
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("server should send the accepted transaction row to bob");
+    blocked
+        .wait_until_buffered(
+            |payload| {
+                matches!(
+                    payload,
+                    SyncPayload::BatchFate { fate } if fate.batch_id() == batch_id
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("server should send the accepted transaction fate to bob");
+    bob.fail_prepared_row_mutation_for_batch_for_test(batch_id)
+        .expect("arm one transient storage failure for the transaction row");
+    blocked
+        .release_matching(|payload| {
+            matches!(
+                payload,
+                SyncPayload::RowBatchCreated { row, .. }
+                    | SyncPayload::RowBatchNeeded { row, .. }
+                    if row.batch_id == batch_id && row.row_id == todo_id
+            )
+        })
+        .expect("release the transaction row into the transient failure");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !bob
+                .prepared_row_mutation_failure_is_armed_for_test()
+                .expect("inspect transient storage failure")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the released transaction row should trigger the storage failure");
+    blocked.discard_matching(|payload| {
+        matches!(
+            payload,
+            SyncPayload::RowBatchCreated { row, .. }
+                | SyncPayload::RowBatchNeeded { row, .. }
+                if row.batch_id == batch_id && row.row_id == todo_id
+        )
+    });
+    blocked
+        .release_matching(
+            |payload| matches!(payload, SyncPayload::BatchFate { fate } if fate.batch_id() == batch_id),
+        )
+        .expect("release the accepted transaction fate after the row failure");
+
+    let rows = wait_for_todos(
+        &bob,
+        None,
+        "bob sees the accepted row after the transient storage failure",
+        |rows| has_todo(rows, todo_id, "after transaction", false),
+    )
+    .await;
+    assert!(has_todo(&rows, todo_id, "after transaction", false));
+    blocked.unblock();
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// Two transactions modify the same object unaware of each other.
 /// The server accepts the first tx and rejects the second.
 #[tokio::test]

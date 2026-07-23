@@ -48,6 +48,8 @@ pub struct MemoryStorage {
     flush_wal_failures: std::cell::RefCell<Option<(StorageError, Option<usize>)>>,
     #[cfg(test)]
     flush_wal_call_count: std::cell::RefCell<usize>,
+    #[cfg(feature = "test-utils")]
+    prepared_row_mutation_failure_batch: Option<BatchId>,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     authoritative_batch_fates: std::cell::RefCell<HashMap<BatchId, BatchFate>>,
@@ -135,6 +137,8 @@ impl Default for MemoryStorage {
             flush_wal_failures: std::cell::RefCell::new(None),
             #[cfg(test)]
             flush_wal_call_count: std::cell::RefCell::new(0),
+            #[cfg(feature = "test-utils")]
+            prepared_row_mutation_failure_batch: None,
             raw_tables: HashMap::new(),
             authoritative_batch_fates: std::cell::RefCell::new(HashMap::new()),
             ensured_raw_table_headers: HashSet::new(),
@@ -148,6 +152,16 @@ impl Default for MemoryStorage {
 impl Storage for MemoryStorage {
     fn storage_cache_namespace(&self) -> usize {
         self.cache_namespace
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn fail_prepared_row_mutation_for_batch_for_test(&mut self, batch_id: BatchId) {
+        self.prepared_row_mutation_failure_batch = Some(batch_id);
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn prepared_row_mutation_failure_is_armed_for_test(&self) -> bool {
+        self.prepared_row_mutation_failure_batch.is_some()
     }
 
     fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
@@ -169,6 +183,16 @@ impl Storage for MemoryStorage {
         encoded_visible_rows: &[OwnedVisibleRowBytes],
         index_mutations: &[IndexMutation<'_>],
     ) -> Result<(), StorageError> {
+        #[cfg(feature = "test-utils")]
+        if self
+            .prepared_row_mutation_failure_batch
+            .is_some_and(|batch_id| history_rows.iter().any(|row| row.batch_id == batch_id))
+        {
+            self.prepared_row_mutation_failure_batch = None;
+            return Err(StorageError::IoError(
+                "simulated prepared row mutation failure".to_string(),
+            ));
+        }
         if history_rows.len() != encoded_history_rows.len() {
             return Err(StorageError::IoError(format!(
                 "prepared history row count mismatch: {} decoded vs {} encoded",

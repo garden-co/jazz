@@ -563,6 +563,18 @@ impl JazzClient {
         self.runtime.transport_client_id()
     }
 
+    pub fn fail_prepared_row_mutation_for_batch_for_test(&self, batch_id: BatchId) -> Result<()> {
+        self.runtime
+            .fail_prepared_row_mutation_for_batch_for_test(batch_id)
+            .map_err(|error| JazzError::Storage(error.to_string()))
+    }
+
+    pub fn prepared_row_mutation_failure_is_armed_for_test(&self) -> Result<bool> {
+        self.runtime
+            .prepared_row_mutation_failure_is_armed_for_test()
+            .map_err(|error| JazzError::Storage(error.to_string()))
+    }
+
     pub async fn test_client(schema: Schema) -> crate::JazzClient {
         let context = crate::AppContext::test(schema);
         crate::JazzClient::connect(context)

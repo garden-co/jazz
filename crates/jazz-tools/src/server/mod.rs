@@ -130,6 +130,19 @@ impl BlockedMessagesToClient {
         }
     }
 
+    pub fn release_matching(
+        &self,
+        predicate: impl Fn(&SyncPayload) -> bool,
+    ) -> Option<SyncPayload> {
+        self.hub
+            .release_message_matching(self.client_id, &predicate)
+    }
+
+    pub fn discard_matching(&self, predicate: impl Fn(&SyncPayload) -> bool) -> usize {
+        self.hub
+            .discard_messages_matching(self.client_id, &predicate)
+    }
+
     pub fn unblock(mut self) {
         if !self.unblocked {
             self.hub.unblock_messages_to(self.client_id);
@@ -345,6 +358,38 @@ impl ConnectionEventHub {
             let prepared = self.prepare_payload(client_id, payload);
             self.dispatch_prepared(prepared);
         }
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn release_message_matching(
+        &self,
+        client_id: ClientId,
+        predicate: &impl Fn(&SyncPayload) -> bool,
+    ) -> Option<SyncPayload> {
+        let payload = {
+            let mut blocked_clients = self.blocked_clients.lock().unwrap();
+            let blocked = blocked_clients.get_mut(&client_id)?;
+            let index = blocked.queue.iter().position(predicate)?;
+            blocked.queue.remove(index)?
+        };
+        let prepared = self.prepare_payload(client_id, payload.clone());
+        self.dispatch_prepared(prepared);
+        Some(payload)
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn discard_messages_matching(
+        &self,
+        client_id: ClientId,
+        predicate: &impl Fn(&SyncPayload) -> bool,
+    ) -> usize {
+        let mut blocked_clients = self.blocked_clients.lock().unwrap();
+        let Some(blocked) = blocked_clients.get_mut(&client_id) else {
+            return 0;
+        };
+        let original_len = blocked.queue.len();
+        blocked.queue.retain(|payload| !predicate(payload));
+        original_len - blocked.queue.len()
     }
 
     #[cfg(feature = "test-utils")]

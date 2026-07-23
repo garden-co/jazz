@@ -798,6 +798,25 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(f(core.storage()))
     }
 
+    #[cfg(feature = "test-utils")]
+    pub fn fail_prepared_row_mutation_for_batch_for_test(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.storage_mut()
+            .fail_prepared_row_mutation_for_batch_for_test(batch_id);
+        Ok(())
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub fn prepared_row_mutation_failure_is_armed_for_test(&self) -> Result<bool, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core
+            .storage()
+            .prepared_row_mutation_failure_is_armed_for_test())
+    }
+
     /// Run a closure with read access to the SyncManager (for testing/inspection).
     #[cfg(test)]
     pub(crate) fn with_sync_manager<R>(

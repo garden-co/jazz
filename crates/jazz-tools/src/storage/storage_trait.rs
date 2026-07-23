@@ -27,6 +27,16 @@ pub trait Storage {
         std::ptr::from_ref(self).cast::<()>() as usize
     }
 
+    #[cfg(feature = "test-utils")]
+    fn fail_prepared_row_mutation_for_batch_for_test(&mut self, _batch_id: BatchId) {
+        panic!("storage does not support prepared-row fault injection");
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn prepared_row_mutation_failure_is_armed_for_test(&self) -> bool {
+        false
+    }
+
     // ================================================================
     // Logical row locator storage (sync - returns immediately with result)
     // ================================================================
@@ -1761,6 +1771,16 @@ pub trait Storage {
 impl<T: Storage + ?Sized> Storage for Box<T> {
     fn storage_cache_namespace(&self) -> usize {
         (**self).storage_cache_namespace()
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn fail_prepared_row_mutation_for_batch_for_test(&mut self, batch_id: BatchId) {
+        (**self).fail_prepared_row_mutation_for_batch_for_test(batch_id);
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn prepared_row_mutation_failure_is_armed_for_test(&self) -> bool {
+        (**self).prepared_row_mutation_failure_is_armed_for_test()
     }
 
     fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
