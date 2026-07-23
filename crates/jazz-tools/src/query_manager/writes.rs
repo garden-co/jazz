@@ -6,8 +6,9 @@ use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_proven
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
-    ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
-    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
+    ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, HistoryScan, QueryRowBatch,
+    RowHistoryError, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch,
+    apply_row_batch_with_context,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -666,6 +667,28 @@ impl QueryManager {
     ) -> Vec<BatchId> {
         if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch, row_id) {
             return entry.branch_frontier;
+        }
+
+        let history_table = crate::storage::history_table_for_row(storage, row_id, table);
+        if let Ok(branch_rows) =
+            storage.scan_history_region(&history_table, branch, HistoryScan::Row { row_id })
+        {
+            let branch_rows = branch_rows
+                .iter()
+                .filter(|row| row.state.is_visible())
+                .collect::<Vec<_>>();
+            let mut non_tips = HashSet::new();
+            for row in &branch_rows {
+                non_tips.extend(row.parents.iter().copied());
+            }
+            let mut tips = branch_rows
+                .into_iter()
+                .filter(|row| !non_tips.contains(&row.batch_id()))
+                .map(StoredRowBatch::batch_id)
+                .collect::<Vec<_>>();
+            tips.sort();
+            tips.dedup();
+            return tips;
         }
 
         storage

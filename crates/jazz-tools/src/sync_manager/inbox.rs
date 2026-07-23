@@ -311,7 +311,8 @@ impl SyncManager {
         table: &str,
         row: &StoredRowBatch,
     ) -> Option<StoredRowBatch> {
-        if row.parents.is_empty() {
+        let row_locator = storage.load_row_locator(row.row_id).ok().flatten();
+        if row.parents.is_empty() && row_locator.is_none() {
             return None;
         }
         // If the row has a single parent, we don't need any conflict resolution
@@ -324,17 +325,42 @@ impl SyncManager {
                 .then_some(parent_row);
         }
 
+        let history_table = row_locator
+            .as_ref()
+            .map(|locator| locator.table.to_string())
+            .unwrap_or_else(|| table.to_string());
         let context =
-            crate::storage::resolve_history_row_write_context(storage, table, row).ok()?;
-        let history_rows = storage.scan_history_row_batches(table, row.row_id).ok()?;
-        let visible_rows = history_rows
+            crate::storage::resolve_history_row_write_context(storage, &history_table, row).ok()?;
+        let visible_rows = storage
+            .scan_history_row_batches(&history_table, row.row_id)
+            .ok()?
             .into_iter()
-            .filter(|candidate| {
-                candidate.branch.as_str() == row.branch.as_str()
-                    && candidate.batch_id != row.batch_id
-                    && candidate.state.is_visible()
-            })
+            .filter(|candidate| candidate.batch_id != row.batch_id && candidate.state.is_visible())
             .collect::<Vec<_>>();
+        let only_incoming_branch = visible_rows
+            .iter()
+            .all(|candidate| candidate.branch.as_str() == row.branch.as_str());
+        let pre_batch_rows =
+            Self::history_rows_visible_before_batch(row, visible_rows, !only_incoming_branch)?;
+
+        crate::row_histories::visible_row_preview_from_history_rows(
+            context.user_descriptor().as_ref(),
+            &pre_batch_rows,
+            None,
+        )
+        .ok()
+        .flatten()
+    }
+
+    fn history_rows_visible_before_batch(
+        row: &StoredRowBatch,
+        visible_rows: Vec<StoredRowBatch>,
+        allow_unresolved_fallback: bool,
+    ) -> Option<Vec<StoredRowBatch>> {
+        if row.parents.is_empty() {
+            return allow_unresolved_fallback.then_some(visible_rows);
+        }
+
         let visible_rows_by_batch = visible_rows
             .iter()
             .cloned()
@@ -352,17 +378,19 @@ impl SyncManager {
             }
         }
 
-        let pre_batch_rows = visible_rows
-            .into_iter()
+        let parent_rows = visible_rows
+            .iter()
             .filter(|candidate| included_batch_ids.contains(&candidate.batch_id()))
+            .cloned()
             .collect::<Vec<_>>();
-        crate::row_histories::visible_row_preview_from_history_rows(
-            context.user_descriptor().as_ref(),
-            &pre_batch_rows,
-            None,
-        )
-        .ok()
-        .flatten()
+
+        if parent_rows.is_empty() {
+            // A migrated branch may not carry parents from the old schema
+            // branch, so its first write must still consider all visible rows.
+            allow_unresolved_fallback.then_some(visible_rows)
+        } else {
+            Some(parent_rows)
+        }
     }
 
     fn apply_row_updated<H: Storage>(

@@ -305,11 +305,7 @@ impl SyncManager {
             .scan_history_row_batches(&table, rejected_delete_row.row_id)
             .ok()?
             .into_iter()
-            .filter(|row| {
-                row.branch == rejected_delete_row.branch
-                    && !matches!(row.state, RowState::Rejected)
-                    && row.delete_kind.is_none()
-            })
+            .filter(|row| !matches!(row.state, RowState::Rejected) && row.delete_kind.is_none())
             .max_by_key(|row| row.updated_at)?;
 
         restored_row.state = RowState::VisibleDirect;

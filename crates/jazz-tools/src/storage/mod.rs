@@ -331,6 +331,21 @@ pub struct RowLocator {
     pub origin_schema_hash: Option<SchemaHash>,
 }
 
+/// Resolve the table that owns a row's history, falling back to the caller's
+/// table when the row has not been located yet.
+pub(crate) fn history_table_for_row<H: Storage + ?Sized>(
+    storage: &H,
+    row_id: ObjectId,
+    fallback_table: &str,
+) -> String {
+    storage
+        .load_row_locator(row_id)
+        .ok()
+        .flatten()
+        .map(|locator| locator.table.to_string())
+        .unwrap_or_else(|| fallback_table.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExactRowTableLocator {
     pub row_raw_table: SharedString,
