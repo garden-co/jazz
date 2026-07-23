@@ -4653,6 +4653,8 @@ enum OperatorState {
     Join(JoinState),
     SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
+    ArgBy(AsOf<ArgByState, SubTick>),
+    TopBy(AsOf<TopByState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
 }
 
@@ -4661,8 +4663,102 @@ fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::Join(_) => OperatorState::Join(JoinState),
         OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
+        OpType::ArgMaxBy(_) | OpType::ArgMinBy(_) => {
+            OperatorState::ArgBy(AsOf::new(ArgByState::default()))
+        }
+        OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByState::default())),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         _ => OperatorState::Stateless,
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ArgByState {
+    groups: BTreeMap<GroupKey, ArgByGroup>,
+}
+
+type GroupKey = Vec<u8>;
+type ArgByRecordKey = (Vec<u8>, Bytes);
+type ArgByGroup = BTreeMap<ArgByRecordKey, i64>;
+
+impl ArgByState {
+    fn winner(&self, group: &[u8], direction: ArgByDirection) -> Option<SourceRecord> {
+        let records = self.groups.get(group)?;
+        match direction {
+            ArgByDirection::Min => records.iter().find_map(|((key, record), weight)| {
+                (*weight > 0).then_some((key.clone(), record.clone()))
+            }),
+            ArgByDirection::Max => records.iter().rev().find_map(|((key, record), weight)| {
+                (*weight > 0).then_some((key.clone(), record.clone()))
+            }),
+        }
+    }
+
+    fn apply_group_delta(
+        &mut self,
+        group: Vec<u8>,
+        primary_key: Vec<u8>,
+        record: Bytes,
+        weight: i64,
+    ) {
+        let records = self.groups.entry(group.clone()).or_default();
+        let entry = records.entry((primary_key, record)).or_default();
+        *entry += weight;
+        if *entry == 0 {
+            records.retain(|_, weight| *weight != 0);
+        }
+        if records.is_empty() {
+            self.groups.remove(&group);
+        }
+    }
+
+    fn clear_for_replace(&mut self) {
+        self.groups.clear();
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TopByState {
+    groups: BTreeMap<GroupKey, TopByGroup>,
+}
+
+type TopByRecordKey = (Vec<TopBySortPart>, Bytes);
+type TopByGroup = BTreeMap<TopByRecordKey, i64>;
+
+impl TopByState {
+    fn window(&self, group: &[u8], offset: usize, limit: usize) -> Vec<RankedRecord> {
+        self.groups
+            .get(group)
+            .into_iter()
+            .flat_map(|records| records.iter())
+            .filter_map(|((sort_key, record), weight)| {
+                (*weight > 0).then_some((sort_key.clone(), record.clone()))
+            })
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+
+    fn apply_group_delta(
+        &mut self,
+        group: Vec<u8>,
+        sort_key: Vec<TopBySortPart>,
+        record: Bytes,
+        weight: i64,
+    ) {
+        let records = self.groups.entry(group.clone()).or_default();
+        let entry = records.entry((sort_key, record)).or_default();
+        *entry += weight;
+        if *entry == 0 {
+            records.retain(|_, weight| *weight != 0);
+        }
+        if records.is_empty() {
+            self.groups.remove(&group);
+        }
+    }
+
+    fn clear_for_replace(&mut self) {
+        self.groups.clear();
     }
 }
 
@@ -5663,6 +5759,7 @@ where
             Arc::from(spec.group_fields.to_vec()),
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
+        let operator_key = self.operator_key(node)?;
         let mut arrangement = self
             .arrangement_states
             .remove(&arrangement_key)
@@ -5698,6 +5795,34 @@ where
                 arrangement.mark_forward_as_of(sub_tick)?;
             }
         }
+        let operator = self
+            .operator_states
+            .entry(operator_key)
+            .or_insert_with(|| OperatorState::ArgBy(AsOf::new(ArgByState::default())));
+        let OperatorState::ArgBy(state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        let should_apply_state = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || state.as_of() != Some(sub_tick);
+        if !should_apply_state {
+            self.arrangement_states.insert(arrangement_key, arrangement);
+            return Ok(RecordDeltas::empty(output_desc));
+        }
+        let replace_within_same_tick = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            && state
+                .as_of()
+                .is_some_and(|current| current.tick == sub_tick.tick);
+        if !replace_within_same_tick && state.as_of().is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", state.as_of().expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
+        }
+        if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+            state.value_mut().clear_for_replace();
+        }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -5710,20 +5835,21 @@ where
 
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
-            let after_records = arrangement.value().records_for_key(&group_prefix);
-            let after = arg_by_winner_from_records(
-                output_desc,
-                spec.primary_key_field_indices,
-                after_records.clone(),
-                spec.direction,
-            )?;
-            let before = arg_by_winner_before_from_deltas(
-                output_desc,
-                spec.primary_key_field_indices,
-                after_records,
-                group_deltas,
-                spec.direction,
-            )?;
+            let before = state.value().winner(&group_prefix, spec.direction);
+            for delta in group_deltas {
+                let primary_key = encoded_record_key_part(
+                    output_desc,
+                    delta.raw(),
+                    spec.primary_key_field_indices,
+                )?;
+                state.value_mut().apply_group_delta(
+                    group_prefix.clone(),
+                    primary_key,
+                    delta.record,
+                    delta.weight,
+                );
+            }
+            let after = state.value().winner(&group_prefix, spec.direction);
             if before == after {
                 continue;
             }
@@ -5733,6 +5859,11 @@ where
             if let Some((_, record)) = after {
                 output.push(RecordDelta { record, weight: 1 });
             }
+        }
+        if replace_within_same_tick {
+            state.replace_as_of_at_least(sub_tick);
+        } else {
+            state.mark_forward_as_of(sub_tick)?;
         }
         self.arrangement_states.insert(arrangement_key, arrangement);
 
@@ -5768,6 +5899,7 @@ where
             Arc::from(top_by.group_fields.clone()),
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
+        let operator_key = self.operator_key(node)?;
         let mut arrangement = self
             .arrangement_states
             .remove(&arrangement_key)
@@ -5803,6 +5935,34 @@ where
                 arrangement.mark_forward_as_of(sub_tick)?;
             }
         }
+        let operator = self
+            .operator_states
+            .entry(operator_key)
+            .or_insert_with(|| operator_state_for(&OpType::TopBy(top_by.clone())));
+        let OperatorState::TopBy(state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        let should_apply_state = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || state.as_of() != Some(sub_tick);
+        if !should_apply_state {
+            self.arrangement_states.insert(arrangement_key, arrangement);
+            return Ok(RecordDeltas::empty(output_desc));
+        }
+        let replace_within_same_tick = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            && state
+                .as_of()
+                .is_some_and(|current| current.tick == sub_tick.tick);
+        if !replace_within_same_tick && state.as_of().is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", state.as_of().expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
+        }
+        if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+            state.value_mut().clear_for_replace();
+        }
 
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
@@ -5816,11 +5976,27 @@ where
 
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
-            let after_records = arrangement.value().records_for_key(&group_prefix);
-            let after = top_by_window_from_records(output_desc, after_records.clone(), top_by)?;
-            let before =
-                top_by_window_before_from_deltas(output_desc, after_records, group_deltas, top_by)?;
+            let before = state
+                .value()
+                .window(&group_prefix, top_by.offset, top_by.limit);
+            for delta in group_deltas {
+                let sort_key = top_by_sort_key(output_desc, delta.raw(), top_by)?;
+                state.value_mut().apply_group_delta(
+                    group_prefix.clone(),
+                    sort_key,
+                    delta.record,
+                    delta.weight,
+                );
+            }
+            let after = state
+                .value()
+                .window(&group_prefix, top_by.offset, top_by.limit);
             output.extend(diff_record_windows(before, after));
+        }
+        if replace_within_same_tick {
+            state.replace_as_of_at_least(sub_tick);
+        } else {
+            state.mark_forward_as_of(sub_tick)?;
         }
         self.arrangement_states.insert(arrangement_key, arrangement);
 
@@ -7750,107 +7926,6 @@ struct ArgBySpec<'a> {
     group_field_indices: &'a [usize],
     primary_key_field_indices: &'a [usize],
     direction: ArgByDirection,
-}
-
-fn arg_by_winner_from_records(
-    descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
-    records: Vec<(Bytes, i64)>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut winner = None;
-    for (record, weight) in records {
-        if weight <= 0 {
-            continue;
-        }
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        let replaces =
-            winner
-                .as_ref()
-                .is_none_or(|(winner_key, _): &SourceRecord| match direction {
-                    ArgByDirection::Min => key < *winner_key,
-                    ArgByDirection::Max => key > *winner_key,
-                });
-        if replaces {
-            winner = Some((key, record));
-        }
-    }
-    Ok(winner)
-}
-
-fn arg_by_winner_before_from_deltas(
-    descriptor: RecordDescriptor,
-    primary_key_field_indices: &[usize],
-    after_records: Vec<(Bytes, i64)>,
-    deltas: Vec<RecordDelta>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
-    for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
-        records.insert(key, (record, weight));
-    }
-    for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), primary_key_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
-    }
-    let mut positive = records
-        .into_iter()
-        .filter_map(|(key, (record, weight))| (weight > 0).then_some((key, record)));
-    Ok(match direction {
-        ArgByDirection::Min => positive.next(),
-        ArgByDirection::Max => positive.next_back(),
-    })
-}
-
-fn top_by_window_from_records(
-    descriptor: RecordDescriptor,
-    records: Vec<(Bytes, i64)>,
-    top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut ranked = Vec::new();
-    for (record, weight) in records {
-        if weight > 0 {
-            ranked.push((top_by_sort_key(descriptor, &record, top_by)?, record));
-        }
-    }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(ranked
-        .into_iter()
-        .skip(top_by.offset)
-        .take(top_by.limit)
-        .collect())
-}
-
-fn top_by_window_before_from_deltas(
-    descriptor: RecordDescriptor,
-    after_records: Vec<(Bytes, i64)>,
-    deltas: Vec<RecordDelta>,
-    top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
-    for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
-        records.insert(key, (record, weight));
-    }
-    for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), &top_by.sort_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
-    }
-    top_by_window_from_records(
-        descriptor,
-        records
-            .into_iter()
-            .map(|(_, (record, weight))| (record, weight))
-            .collect(),
-        top_by,
-    )
 }
 
 fn top_by_sort_key(

@@ -8,6 +8,8 @@ description = "WebAssembly bindings for the Jazz database engine"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+jazz-wasm-tracing = { path = "../wasm-tracing" }
+tracing = "0.1"
 base64 = "0.22"
 console_error_panic_hook = { version = "0.1", optional = true }
 ed25519-dalek = "2"

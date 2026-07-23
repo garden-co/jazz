@@ -258,6 +258,18 @@ where
     }
 }
 
+impl<F> super::ReopenableStorage for BtreeStorage<F>
+where
+    F: SyncFile,
+{
+    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
+        self.column_families
+            .borrow_mut()
+            .extend(column_families.iter().map(|cf| (*cf).to_owned()));
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,17 +365,5 @@ mod tests {
     fn native_btree_reopen_adds_column_families_without_losing_data() {
         let storage = native_storage(&["records"]);
         super::super::conformance::reopen_preserves_data_and_adds_families(storage);
-    }
-}
-
-impl<F> super::ReopenableStorage for BtreeStorage<F>
-where
-    F: SyncFile,
-{
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        self.column_families
-            .borrow_mut()
-            .extend(column_families.iter().map(|cf| (*cf).to_owned()));
-        Ok(self)
     }
 }

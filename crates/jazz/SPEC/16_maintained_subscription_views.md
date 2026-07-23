@@ -212,9 +212,13 @@ Maintained-lowering gaps:
 
 Window limitations:
 
-- unordered `limit > 1` and unordered nonzero `offset` remain unsupported in
-  Jazz maintained subscriptions; callers must provide explicit ordering for a
-  window or ordered suffix to lower through `TopBy`.
+- root `limit`/`offset` windows without explicit `order_by` are supported by
+  injecting ch. 6 default ascending row-id ordering during lowering and routing
+  through `TopBy`;
+- unbounded default-ordered root result maintenance and relation payload windows
+  from `array_subqueries`/nested relation subtrees remain staged until their
+  maintained graph fragments can carry injected order without perturbing
+  recursive/policy maintenance.
 
 Maintained error debt after a supported maintained path fails:
 

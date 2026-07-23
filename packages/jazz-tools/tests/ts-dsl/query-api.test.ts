@@ -105,11 +105,7 @@ describe("TS Query API", () => {
       expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
 
-    // Order-sensitive assertion over unordered default results; default
-    // ordering (ascending id) is specced in crates/jazz/SPEC/6_queries.md
-    // (2026-07-18) with implementation scheduled — unskip and assert ordered
-    // equality once it lands.
-    it.skip("filters with explicit undefined values are no-ops", async () => {
+    it("filters with explicit undefined values are no-ops", async () => {
       const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",
         ownerId: null,
@@ -120,7 +116,12 @@ describe("TS Query API", () => {
       });
 
       const results = await db.all(app.todos.where({ ownerId: undefined }));
-      expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+      // Default ordering is ascending row id (SPEC 6.4.1). uuidv7 ids minted in
+      // the same millisecond sort by their random bits, so sort the expected
+      // pair rather than assuming insertion order.
+      expect(results.map((todo) => todo.id)).toEqual(
+        [todoWithoutOwner.id, todoWithOwner.id].sort(),
+      );
     });
 
     describe("in operator", () => {
@@ -703,11 +704,7 @@ describe("TS Query API", () => {
         expect(aliceFriend.friends.map((f) => f.id)).toEqual([alice.id]);
       });
 
-      // Order-sensitive over unordered default results (deterministically red since
-      // the policy-union lowering fix changed evaluation order); default ordering
-      // (ascending id) is specced in crates/jazz/SPEC/6_queries.md — unskip with
-      // ordered assertions when the implementation lands.
-      it.skip("rows skipped by requireIncludes affect limit-offset pagination", async () => {
+      it("rows skipped by requireIncludes affect limit-offset pagination", async () => {
         const alice = insertUser(db);
         const bob = insertUser(db);
         const deletedUser = insertUser(db);
@@ -715,15 +712,23 @@ describe("TS Query API", () => {
         makeFriends(db, alice, bob);
         makeFriends(db, bob, deletedUser);
 
+        // The suite's persistent store accumulates rows across tests; scope
+        // the windowed query to this test's own rows so the offset is
+        // deterministic under default ascending-id ordering.
+        const ourUsers = { id: { in: [alice.id, bob.id, deletedUser.id] } };
+        // alice and bob both pass requireIncludes (deletedUser has no friends);
+        // offset(1) selects the id-order-larger of the two (same-millisecond
+        // uuidv7 ids sort by random bits, not insertion order).
+        const survivors = [alice.id, bob.id].sort();
         const results = await db.all(
-          app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
+          app.users.where(ourUsers).include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
-        expect(results.map((u) => u.id)).toEqual([bob.id]);
+        expect(results.map((u) => u.id)).toEqual([survivors[1]]);
 
         await db.delete(app.users, deletedUser.id);
 
         const results2 = await db.all(
-          app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
+          app.users.where(ourUsers).include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
         expect(results2).toHaveLength(0);
       });

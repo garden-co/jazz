@@ -9318,6 +9318,56 @@ fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite(
 }
 
 #[test]
+#[ignore = "receipt-only timing for maintained TopBy window hydration"]
+fn maintained_top_by_one_group_60k_in_256_record_batches_receipt() {
+    const ROWS: u64 = 60_000;
+    const BATCH: u64 = 256;
+    const LIMIT: usize = 100;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(LIMIT))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let start = Instant::now();
+    let mut delivered = 0usize;
+    for batch_start in (0..ROWS).step_by(BATCH as usize) {
+        let mut batch = database.open_batch();
+        for stamp in batch_start..std::cmp::min(batch_start + BATCH, ROWS) {
+            batch.insert(
+                "history",
+                history_values(1, stamp, 0, &format!("row-{stamp}")),
+            );
+        }
+        database.commit_batch(batch).unwrap();
+        if let Ok(delta) = subscription.try_recv() {
+            delivered += delta.deltas.len();
+        }
+    }
+    let elapsed = start.elapsed();
+
+    let mut rows = database
+        .query_graph(history_top_by_stamp_asc(LIMIT))
+        .unwrap()
+        .to_values()
+        .unwrap();
+    rows.sort_by_key(|(values, _)| match values[1] {
+        Value::U64(stamp) => stamp,
+        _ => unreachable!(),
+    });
+    assert_eq!(rows.len(), LIMIT);
+    assert_eq!(rows[0], (history_values(1, 0, 0, "row-0"), 1));
+    assert_eq!(rows[LIMIT - 1], (history_values(1, 99, 0, "row-99"), 1));
+
+    println!(
+        "maintained_top_by_one_group_60k_in_256_record_batches rows={ROWS} batch={BATCH} limit={LIMIT} elapsed_ms={:.3} delivered_delta_records={delivered}",
+        elapsed.as_secs_f64() * 1000.0
+    );
+}
+
+#[test]
 fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "indices"]).unwrap();

@@ -18,8 +18,15 @@ export function TodoList() {
   }
 
   const db = useDb();
+  if (import.meta.env.DEV) {
+    // Dev-only probe surface: lets headless harnesses drive one-shot reads
+    // and raw subscriptions against the live client (see probe scripts).
+    (window as any).__db = db;
+    (window as any).__app = app;
+  }
   // #region reading-reactive-hooks-react
-  const { data: todos = [] } = useAll(todosQuery);
+  const { data: todos = [], error: todosError, isLoading: todosLoading } = useAll(todosQuery);
+  if (todosError) console.error("[stress-todo] useAll error:", todosError);
   // #endregion reading-reactive-hooks-react
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
@@ -38,6 +45,8 @@ export function TodoList() {
 
   return (
     <>
+      {todosError ? <p style={{ color: "red" }}>useAll error: {String(todosError)}</p> : null}
+      {todosLoading ? <p>loading todos…</p> : null}
       <form onSubmit={handleSubmit}>
         <input
           type="text"

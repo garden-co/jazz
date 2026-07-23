@@ -685,6 +685,19 @@ where
             .await
     }
 
+    /// Cumulative storage read metrics for this Db's underlying store.
+    /// Diagnostic surface: bracket an operation with
+    /// [`Db::reset_storage_read_metrics`] and this to attribute its read load.
+    pub fn storage_read_metrics(&self) -> crate::groove::db::StorageReadMetrics {
+        self.node.node.borrow().storage_read_metrics()
+    }
+
+    /// Reset the cumulative storage read metrics. See
+    /// [`Db::storage_read_metrics`].
+    pub fn reset_storage_read_metrics(&self) {
+        self.node.node.borrow().reset_storage_read_metrics();
+    }
+
     /// Tier-gated one-shot read evaluated as `author`.
     pub async fn all_for_identity(
         &self,
@@ -3872,9 +3885,6 @@ where
                                     (remote_snapshot, SubscriptionSnapshotSource::LinkSnapshot)
                                 }
                             }
-                        } else if has_maintained_subscription {
-                            let previous = state_ref.snapshot.clone();
-                            (previous.clone(), previous_source)
                         } else {
                             (
                                 node.borrow_mut().subscription_snapshot_for_link(
@@ -6442,35 +6452,45 @@ where
 
     /// Commit all staged writes as one mergeable transaction.
     pub fn commit(self) -> Result<TxId, Error> {
-        let writes = self
-            .writes
-            .into_iter()
-            .map(|write| {
-                let mut commit = MergeableCommit::new(
-                    write.table,
-                    write.row_uuid,
-                    write.now_ms.unwrap_or_else(|| self.db.next_now_ms()),
-                )
-                .made_by(self.author)
-                .parents(write.parents)
-                .cells(write.cells);
-                if let Some(subject) = self.permission_subject {
-                    commit = commit.permission_subject(subject);
-                }
-                if let Some(deletion) = write.deletion {
-                    commit = commit.deletion(deletion);
-                }
-                commit
-            })
-            .collect();
-        let tx_id = self
-            .db
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many(writes)?;
-        self.db.finalize_local_commit(tx_id)?;
-        self.db.refresh_subscriptions()?;
+        let writes = {
+            let _span = tracing::debug_span!("MergeableTx::build_commits").entered();
+            self.writes
+                .into_iter()
+                .map(|write| {
+                    let mut commit = MergeableCommit::new(
+                        write.table,
+                        write.row_uuid,
+                        write.now_ms.unwrap_or_else(|| self.db.next_now_ms()),
+                    )
+                    .made_by(self.author)
+                    .parents(write.parents)
+                    .cells(write.cells);
+                    if let Some(subject) = self.permission_subject {
+                        commit = commit.permission_subject(subject);
+                    }
+                    if let Some(deletion) = write.deletion {
+                        commit = commit.deletion(deletion);
+                    }
+                    commit
+                })
+                .collect()
+        };
+        let tx_id = {
+            let _span = tracing::debug_span!("Node::commit_mergeable_many").entered();
+            self.db
+                .node
+                .node
+                .borrow_mut()
+                .commit_mergeable_many(writes)?
+        };
+        {
+            let _span = tracing::debug_span!("Db::finalize_local_commit").entered();
+            self.db.finalize_local_commit(tx_id)?;
+        }
+        {
+            let _span = tracing::debug_span!("Db::refresh_subscriptions").entered();
+            self.db.refresh_subscriptions()?;
+        }
         Ok(tx_id)
     }
 

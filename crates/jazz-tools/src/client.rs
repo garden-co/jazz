@@ -1218,7 +1218,7 @@ impl ClientDbInner {
             (inner.db.clone(), prepared)
         };
         let stream = db
-            .subscribe(&prepared, opts)
+            .subscribe(&prepared, opts.clone())
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
         let inner = Rc::clone(inner);
@@ -1233,23 +1233,23 @@ impl ClientDbInner {
                 ..
             }) = stream.next_event().await
             {
-                let previous_rows: Vec<ObjectId> = current_rows
+                let previous_rows = current_rows.clone();
+                let previous_row_ids: Vec<ObjectId> = previous_rows
                     .iter()
                     .map(|row| ObjectId::from_uuid(row.row_uuid().0))
                     .collect();
-                JazzClient::apply_core_subscription_rows(
-                    &mut current_rows,
-                    reset,
-                    &added,
-                    &updated,
-                    &removed,
-                );
+                let next_rows = db.all(&prepared, opts.clone()).await;
+                let Ok(next_rows) = next_rows else {
+                    break;
+                };
+                current_rows = next_rows;
                 inner.borrow_mut().remember_rows(&table, &current_rows);
                 let delta = if reset {
-                    JazzClient::core_subscription_reset_delta(&db, &previous_rows, &current_rows)
+                    JazzClient::core_subscription_reset_delta(&db, &previous_row_ids, &current_rows)
                 } else {
                     JazzClient::core_subscription_change_delta(
                         &db,
+                        &previous_rows,
                         &current_rows,
                         &added,
                         &updated,
@@ -1937,50 +1937,22 @@ impl JazzClient {
         Ok(delta)
     }
 
-    fn apply_core_subscription_rows(
-        current_rows: &mut Vec<jazz::node::CurrentRow>,
-        reset: bool,
-        added_rows: &[jazz::node::CurrentRow],
-        updated_rows: &[jazz::node::CurrentRow],
-        removed_rows: &[jazz::db::RemovedRow],
-    ) {
-        if reset {
-            current_rows.clear();
-        }
-        current_rows.retain(|row| {
-            !removed_rows
-                .iter()
-                .any(|removed| row.row_uuid() == removed.row_uuid)
-        });
-        for row in updated_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
-            {
-                current_rows[position] = row.clone();
-            }
-        }
-        for row in added_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.row_uuid() == row.row_uuid())
-            {
-                current_rows[position] = row.clone();
-            } else {
-                current_rows.push(row.clone());
-            }
-        }
-    }
-
     fn core_subscription_change_delta(
         db: &Backend,
+        previous_rows: &[jazz::node::CurrentRow],
         current_rows: &[jazz::node::CurrentRow],
         added_rows: &[jazz::node::CurrentRow],
         updated_rows: &[jazz::node::CurrentRow],
         removed_rows: &[jazz::db::RemovedRow],
     ) -> Result<OrderedRowDelta> {
-        let index_of = |id: ObjectId| {
+        let current_index_of = |id: ObjectId| {
             current_rows
+                .iter()
+                .position(|row| ObjectId::from_uuid(row.row_uuid().0) == id)
+                .unwrap_or(0)
+        };
+        let previous_index_of = |id: ObjectId| {
+            previous_rows
                 .iter()
                 .position(|row| ObjectId::from_uuid(row.row_uuid().0) == id)
                 .unwrap_or(0)
@@ -1991,7 +1963,7 @@ impl JazzClient {
                 let public = Self::core_subscription_row_to_public(db, row)?;
                 Ok(OrderedAdded {
                     id: public.id,
-                    index: index_of(public.id),
+                    index: current_index_of(public.id),
                     row: public,
                 })
             })
@@ -2000,21 +1972,22 @@ impl JazzClient {
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
-                let index = index_of(public.id);
                 Ok(OrderedUpdated {
                     id: public.id,
-                    old_index: index,
-                    new_index: index,
+                    old_index: previous_index_of(public.id),
+                    new_index: current_index_of(public.id),
                     row: Some(public),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         let removed = removed_rows
             .iter()
-            .enumerate()
-            .map(|(index, row)| OrderedRemoved {
-                id: ObjectId::from_uuid(row.row_uuid.0),
-                index,
+            .map(|row| {
+                let id = ObjectId::from_uuid(row.row_uuid.0);
+                OrderedRemoved {
+                    id,
+                    index: previous_index_of(id),
+                }
             })
             .collect();
         Ok(OrderedRowDelta {
