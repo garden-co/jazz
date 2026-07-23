@@ -24,28 +24,46 @@ use crate::schema::IndexSchema;
 /// Source node for base table deltas.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TableSourceOp {
+    /// The base table this source reads.
     pub table: String,
+    /// Optional key restriction: only stored rows inside this scan feed the
+    /// graph (hydration reads less, and irrelevant deltas are dropped early).
     pub scan: Option<StaticScanSpec>,
 }
 
 /// Source node for a schema-declared durable index arrangement.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IndexSourceOp {
+    /// The indexed base table.
     pub table: String,
+    /// The schema index name, for example `"albums_by_title"`.
     pub index: String,
+    /// Resolved row field indices that form the index key, in key order.
     pub key_fields: Vec<usize>,
+    /// Resolved row field indices carried as the index value.
     pub value_fields: Vec<usize>,
+    /// `true` for a UNIQUE index: one live row per key.
     pub unique: bool,
+    /// For non-unique indices, the value is appended to the storage key so
+    /// equal-keyed rows still get distinct storage entries.
     pub append_value_to_key: bool,
+    /// Whether the value bytes are stored in the entry's value slot (they
+    /// are redundant when already appended to the key).
     pub store_value: bool,
+    /// Optional key restriction, as on [`TableSourceOp`].
     pub scan: Option<StaticScanSpec>,
 }
 
 /// Static ordered-key scan supplied at graph construction.
+///
+/// The literal values are key parts, compared in the storage key encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum StaticScanSpec {
+    /// Exactly one key: every key part is pinned.
     Point(Vec<LiteralValue>),
+    /// Every key starting with these leading parts.
     Prefix(Vec<LiteralValue>),
+    /// Keys in `start..end` (end exclusive).
     Range {
         start: Vec<LiteralValue>,
         end: Vec<LiteralValue>,
@@ -55,18 +73,26 @@ pub enum StaticScanSpec {
 /// Source node for snapshot-only in-memory records.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InlineRecordsOp {
+    /// The encoded rows themselves; they never change after construction.
     pub records: Vec<Vec<u8>>,
 }
 
 /// Source node for a scoped evaluation input, such as a recursive frontier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrontierSourceOp {
+    /// Which bound input to read; matched against the enclosing
+    /// [`RecursiveOp::frontier`].
     pub binding: FrontierName,
 }
 
 /// Source node for a runtime-maintained subscription-shape parameter set.
+///
+/// This is the "bindings as data" door of prepared shapes: the rows flowing
+/// out of this source are the currently bound parameter tuples, so binding
+/// or unbinding a subscription is just a delta on this input.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BindingSourceOp {
+    /// The prepared shape this binding set belongs to.
     pub shape: String,
 }
 
@@ -77,18 +103,26 @@ pub struct FrontierName(pub String);
 // Stateless transformations.
 
 /// Durable write-through operator descriptor.
+///
+/// A `Persist` node forwards its input unchanged while also writing every
+/// delta to storage; this is how secondary indices stay durable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PersistOp {
+    /// Name of the persisted state, for example the index name.
     pub name: String,
+    /// Which storage column family the deltas are written to.
     pub storage: DurableStorage,
     /// Resolved output field indices used to build storage keys.
     pub key_fields: Vec<usize>,
+    /// When `true`, two live rows with the same key are rejected as a
+    /// uniqueness violation.
     pub unique: bool,
 }
 
 /// Predicate filter operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FilterOp {
+    /// Rows pass through when this evaluates to true; weights are untouched.
     pub predicate: PredicateExpr,
 }
 
@@ -106,7 +140,9 @@ pub struct MapProjectOp {
 /// One projected expression and optional output name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectionExpr {
+    /// What the output field holds (a copied field, a literal, ...).
     pub expression: PlanExpr,
+    /// The output field's name; `None` keeps the source field's name.
     pub output_name: Option<String>,
 }
 
@@ -140,10 +176,16 @@ pub struct IndexByOp {
     pub explicit_index: Option<IndexSchema>,
     /// Resolved input field indices used by the runtime.
     pub key_fields: Vec<usize>,
+    /// Resolved input field indices carried as the index value.
     pub value_fields: Vec<usize>,
+    /// `true` for a UNIQUE index: one live row per key.
     pub unique: bool,
+    /// For non-unique indices, the value is appended to the storage key so
+    /// equal-keyed rows still get distinct entries.
     pub append_value_to_key: bool,
+    /// Whether the value bytes are also stored in the entry's value slot.
     pub store_value: bool,
+    /// Optional key restriction, as on [`TableSourceOp`].
     pub scan: Option<StaticScanSpec>,
 }
 
@@ -152,19 +194,34 @@ pub struct IndexByOp {
 /// Binary join operator descriptor.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct JoinOp {
+    /// Which rows the join keeps; see [`JoinOpKind`].
     pub kind: JoinOpKind,
+    /// Join-key expressions on the left input; matched position by position
+    /// against `right_key` (`left_key[i] = right_key[i]`).
     pub left_key: Vec<PlanExpr>,
+    /// Join-key expressions on the right input.
     pub right_key: Vec<PlanExpr>,
+    /// Row layout of the left input.
     pub left_descriptor: RecordDescriptor,
+    /// Row layout of the right input.
     pub right_descriptor: RecordDescriptor,
+    /// Extra predicate evaluated on each joined row, for conditions that are
+    /// not plain key equality (for example `a.x < b.y`).
     pub residual_predicate: Option<PlanExpr>,
 }
 
+/// Which rows a lowered join keeps. (Semi and anti joins are separate graph
+/// node kinds that reuse the [`JoinOp`] descriptor, so they do not appear
+/// here.)
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum JoinOpKind {
+    /// Only matching left/right pairs.
     Inner,
+    /// Every left row; unmatched ones get NULL right columns.
     Left,
+    /// Every right row; unmatched ones get NULL left columns.
     Right,
+    /// Every row from both sides.
     Full,
 }
 
@@ -238,73 +295,127 @@ pub enum TopByLimit {
     Unbounded,
 }
 
+/// One `ORDER BY` entry of a [`TopByOp`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TopByOrderField {
+    /// The field to order by.
     pub field: String,
+    /// Ascending or descending.
     pub direction: TopByDirection,
 }
 
+/// Sort direction of one [`TopByOp`] sort field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TopByDirection {
+    /// Smallest first.
     Asc,
+    /// Largest first.
     Desc,
 }
 
 /// Placeholder aggregate descriptor for future lowering/execution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AggregateOp {
+    /// The `GROUP BY` key expressions.
     pub group_key: Vec<PlanExpr>,
+    /// Resolved logical field indices behind `group_key`.
     pub group_field_indices: Vec<usize>,
+    /// The aggregate outputs, one per result column.
     pub aggregates: Vec<AggregateExpr>,
 }
 
 /// One aggregate output expression.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AggregateExpr {
+    /// Which aggregate to compute.
     pub function: AggregateFunction,
+    /// The aggregated expression; `None` for `count(*)`.
     pub expression: Option<PlanExpr>,
+    /// `true` for `count(DISTINCT x)`-style calls.
     pub distinct: bool,
+    /// The output column's name, if aliased.
     pub output_name: Option<String>,
 }
 
+/// The supported aggregate functions.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AggregateFunction {
+    /// `count(...)`
     Count,
+    /// `sum(...)`
     Sum,
+    /// `avg(...)`
     Avg,
+    /// `min(...)`
     Min,
+    /// `max(...)`
     Max,
 }
 
+/// A lowered (plan-side) expression: what one output field or key part is
+/// computed from. Far smaller than the query AST's `Expr` — by this point the
+/// planner has reduced everything to these forms.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PlanExpr {
     /// Field references are deliberately structural; Debug strings are not part
     /// of canonical node identity.
     Field(String),
+    /// A constant value.
     Literal(LiteralValue),
+    /// A typed NULL constant (the type says how to encode it).
     Null(ValueType),
+    /// The named field wrapped as a *present* nullable — used when a
+    /// non-nullable input feeds a nullable output column (for example the
+    /// inner side of a left join).
     Nullable(String),
+    /// Like `Nullable`, but the field is copied unchanged when it is already
+    /// nullable instead of being double-wrapped.
     NullableFlat(String),
 }
 
+/// A lowered filter predicate, evaluated per row by `Filter` nodes.
+///
+/// Comparisons follow SQL NULL semantics: a NULL operand makes the
+/// comparison false (never true), and only `IsNull` / `IsNotNull` test NULL
+/// itself.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PredicateExpr {
+    /// `field = value`.
     Eq { field: String, value: LiteralValue },
+    /// `field <> value`.
     Neq { field: String, value: LiteralValue },
+    /// `field` contains `value`: substring match for strings, element
+    /// membership for arrays.
     Contains { field: String, value: LiteralValue },
+    /// `field = value_field` (two fields of the same row).
     EqField { field: String, value_field: String },
+    /// `field` contains the value of `needle_field` (same row).
     ContainsField { field: String, needle_field: String },
+    /// `field <> value_field` (two fields of the same row).
     NeqField { field: String, value_field: String },
+    /// `field > value`.
     Gt { field: String, value: LiteralValue },
+    /// `field >= value`.
     GtEq { field: String, value: LiteralValue },
+    /// `field < value`.
     Lt { field: String, value: LiteralValue },
+    /// `field <= value`.
     LtEq { field: String, value: LiteralValue },
+    /// `field IS NULL`.
     IsNull { field: String },
+    /// `field IS NOT NULL`.
     IsNotNull { field: String },
+    /// Every sub-predicate must hold.
     And(Vec<PredicateExpr>),
+    /// At least one sub-predicate must hold.
     Or(Vec<PredicateExpr>),
 }
 
+/// A plan-side constant.
+///
+/// This mirrors [`Value`] but is `Eq + Hash + Ord`, which node identity and
+/// predicate canonicalization require ([`Value`] itself is not, because of
+/// `f64`). Convert with `From<Value>` and [`LiteralValue::to_value`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LiteralValue {
     U8(u8),
@@ -315,12 +426,14 @@ pub enum LiteralValue {
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
     F64(u64),
     Bool(bool),
+    /// An enum discriminant byte.
     Enum(u8),
     String(String),
     Bytes(Vec<u8>),
     Uuid(uuid::Uuid),
     Tuple(Vec<LiteralValue>),
     Array(Vec<LiteralValue>),
+    /// `None` is the NULL literal.
     Nullable(Option<Box<LiteralValue>>),
 }
 
@@ -346,6 +459,9 @@ impl From<Value> for LiteralValue {
 }
 
 impl LiteralValue {
+    /// Infers the [`ValueType`] this literal would encode as, when it can be
+    /// known from the value alone. Empty arrays and bare NULLs return `None`
+    /// — nothing in them says what the element/inner type is.
     pub(crate) fn value_type(&self) -> Option<ValueType> {
         match self {
             Self::U8(_) => Some(ValueType::U8),
@@ -375,6 +491,7 @@ impl LiteralValue {
         }
     }
 
+    /// Converts back to a runtime [`Value`] (the reverse of `From<Value>`).
     pub(crate) fn to_value(&self) -> Value {
         match self {
             Self::U8(value) => Value::U8(*value),
@@ -398,6 +515,12 @@ impl LiteralValue {
 }
 
 impl PredicateExpr {
+    /// Rewrites the predicate into a canonical shape: nested `And`s/`Or`s
+    /// are flattened and their operands sorted.
+    ///
+    /// Two logically identical predicates written in different orders (`a
+    /// AND b` vs `b AND a`) then compare equal, so the graph can deduplicate
+    /// the filter nodes built from them.
     pub fn canonicalize(self) -> Self {
         match self {
             Self::And(predicates) => {
@@ -426,6 +549,7 @@ impl PredicateExpr {
         }
     }
 
+    /// Shorthand for `field = value`.
     pub fn eq(field: impl Into<String>, value: Value) -> Self {
         Self::Eq {
             field: field.into(),
@@ -433,6 +557,7 @@ impl PredicateExpr {
         }
     }
 
+    /// Shorthand for `field > value`.
     pub fn gt(field: impl Into<String>, value: Value) -> Self {
         Self::Gt {
             field: field.into(),
@@ -440,18 +565,23 @@ impl PredicateExpr {
         }
     }
 
+    /// Shorthand for `field IS NULL`.
     pub fn is_null(field: impl Into<String>) -> Self {
         Self::IsNull {
             field: field.into(),
         }
     }
 
+    /// Shorthand for `field IS NOT NULL`.
     pub fn is_not_null(field: impl Into<String>) -> Self {
         Self::IsNotNull {
             field: field.into(),
         }
     }
 
+    /// Builds the field-vs-literal comparison selected by `kind`, so callers
+    /// can construct comparisons generically instead of matching on six
+    /// variants.
     pub fn from_field_literal(
         kind: PredicateKind,
         field: impl Into<String>,
@@ -469,17 +599,26 @@ impl PredicateExpr {
     }
 }
 
+/// A comparison operator by itself, without its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PredicateKind {
+    /// `=`
     Eq,
+    /// `<>`
     Neq,
+    /// `>`
     Gt,
+    /// `>=`
     GtEq,
+    /// `<`
     Lt,
+    /// `<=`
     LtEq,
 }
 
 impl PredicateKind {
+    /// The operator with its operands swapped: `a < b` is `b > a`. Used to
+    /// normalize literal-on-the-left comparisons into field-first form.
     pub fn reversed(self) -> Self {
         match self {
             Self::Eq => Self::Eq,
@@ -493,22 +632,27 @@ impl PredicateKind {
 }
 
 impl PlanExpr {
+    /// Shorthand for [`PlanExpr::Field`].
     pub fn field(name: impl Into<String>) -> Self {
         Self::Field(name.into())
     }
 
+    /// Shorthand for [`PlanExpr::Literal`].
     pub fn literal(value: impl Into<LiteralValue>) -> Self {
         Self::Literal(value.into())
     }
 
+    /// Shorthand for [`PlanExpr::Null`].
     pub fn null(value_type: ValueType) -> Self {
         Self::Null(value_type)
     }
 
+    /// Shorthand for [`PlanExpr::Nullable`].
     pub fn nullable(name: impl Into<String>) -> Self {
         Self::Nullable(name.into())
     }
 
+    /// Shorthand for [`PlanExpr::NullableFlat`].
     pub fn nullable_flat(name: impl Into<String>) -> Self {
         Self::NullableFlat(name.into())
     }

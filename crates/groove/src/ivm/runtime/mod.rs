@@ -61,14 +61,28 @@ const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
 // standard hasher; this alias is intentionally scoped to the IVM runtime.
 
 /// Stateful executor for deduplicated IVM graphs and subscriptions.
+///
+/// This is the engine below `db::Database`: it owns the shared graph and all
+/// maintained state, and advances everything one synchronous [`Self::tick`]
+/// at a time. Callers hand it base-table deltas; it pushes them through the
+/// graph and delivers output deltas to every affected subscription.
 #[derive(Clone, Debug)]
 pub struct IvmRuntime {
+    /// The database schema; tables, indices, and types are resolved here.
     schema: DatabaseSchema,
+    /// Cached row layout per table, derived from `schema` once.
     table_descriptors: HashMap<String, RecordDescriptor>,
+    /// The shared, deduplicated operator graph.
     graph: IvmGraph,
+    /// Live subscriptions by id: their output nodes and delivery channels.
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
+    /// Installed prepared shapes by id.
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
+    /// Auto-created shape families: maps a canonical literal-filter graph to
+    /// the shape that serves all subscriptions of that family.
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
+    /// Per shape name: the binding row layout and the refcounted set of
+    /// currently bound parameter rows.
     binding_sources: HashMap<String, BindingSourceState>,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
@@ -84,9 +98,15 @@ pub struct IvmRuntime {
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    /// Per-table change counter, bumped when a tick carries deltas for the
+    /// table; memo entries record the counters they were computed at.
     table_frontiers: HashMap<String, u64>,
+    /// Per-shape change counter for binding rows, same role as
+    /// `table_frontiers`.
     binding_frontiers: HashMap<String, u64>,
+    /// Monotonic "clock" for memo LRU ordering.
     memo_use_clock: u64,
+    /// Total payload bytes currently held by `eval_memo`.
     eval_memo_bytes: usize,
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
@@ -94,15 +114,24 @@ pub struct IvmRuntime {
     /// Retainers and GC age live outside operator state so stateless leaf nodes
     /// can be retained without allocating fake operator state.
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    /// The logical clock; advanced exactly once per public tick.
     current_tick: u64,
     next_subscription_id: u64,
     next_shape_id: u64,
+    /// How many builder nodes callers asked for, before deduplication —
+    /// the numerator of [`RuntimeStats::dedupe_ratio`].
     logical_nodes_requested: u64,
+    /// Whether [`Self::subscribe_one_sink`] may rewrite literal-filter
+    /// subscriptions into shared auto-direct shape families.
     auto_direct_family_enabled: bool,
+    /// Whether ticks compute full (walk-the-state) stats or cheap ones.
     collect_tick_runtime_stats: bool,
 }
 
 impl IvmRuntime {
+    /// Builds a runtime for `schema` and installs one durable
+    /// `TableSource → IndexBy → Persist` chain per declared schema index, so
+    /// indices are maintained from the very first tick.
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
         let table_descriptors = schema
             .tables
@@ -140,30 +169,39 @@ impl IvmRuntime {
         Ok(runtime)
     }
 
+    /// Chooses between full runtime stats (walks arrangements and recursive
+    /// state — accurate but not free) and cheap counters on every tick.
     pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
         self.collect_tick_runtime_stats = enabled;
     }
 
+    /// The shared deduplicated graph (read-only view).
     pub fn graph(&self) -> &IvmGraph {
         &self.graph
     }
 
+    /// Enables/disables the auto-direct-family rewrite; see
+    /// [`Self::subscribe_one_sink`].
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
     }
 
+    /// The schema this runtime was built with.
     pub fn schema(&self) -> &DatabaseSchema {
         &self.schema
     }
 
+    /// Looks a table's schema up by name.
     pub fn table(&self, table: &str) -> Option<&TableSchema> {
         self.schema.table(table)
     }
 
+    /// The cached row layout of a table.
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
     }
 
+    /// Looks a schema index up by table and index name.
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {
         self.table(table)?
             .indices
@@ -171,6 +209,7 @@ impl IvmRuntime {
             .find(|index| index.name == index_name)
     }
 
+    /// Looks a direct record store up by name.
     pub fn direct_record_store(
         &self,
         store: &str,
@@ -178,6 +217,16 @@ impl IvmRuntime {
         self.schema.direct_record_store(store)
     }
 
+    /// Runs a graph once against current stored data (a one-shot query).
+    ///
+    /// * `graph` — the query graph; it must not contain a binding source
+    ///   (parameterized graphs go through [`Self::prepare`]).
+    /// * `storage` — where base rows and persisted indices are read from.
+    ///
+    /// The graph is inserted, hydrated to a full snapshot (all weights
+    /// `+1`), then garbage-collected again — nothing keeps being
+    /// maintained after the call. Shared fragments still profit from and
+    /// feed the hydration memo.
     pub fn query_snapshot<S>(
         &mut self,
         graph: GraphBuilder,
@@ -207,6 +256,14 @@ impl IvmRuntime {
         Ok(records)
     }
 
+    /// One-shot query over several named graphs at once.
+    ///
+    /// * `sinks` — `(sink name, graph)` pairs; names must be unique and the
+    ///   graphs binding-source-free.
+    /// * `storage` — as in [`Self::query_snapshot`].
+    ///
+    /// All sinks are evaluated against the same stored state, and shared
+    /// fragments across the sinks are computed once.
     pub fn query_snapshots<I, K, S>(
         &mut self,
         sinks: I,
@@ -250,6 +307,13 @@ impl IvmRuntime {
         snapshots
     }
 
+    /// Runs one public tick: pushes a committed batch's table deltas through
+    /// the graph and notifies every affected subscription.
+    ///
+    /// * `table_deltas` — the batch's weighted row changes, one entry per
+    ///   changed table.
+    /// * `storage` — read for arrangements/hydration and written by durable
+    ///   `Persist` nodes.
     pub fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -276,6 +340,10 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// Like [`Self::tick`], but durable writes go into `staged_writes`
+    /// instead of storage directly, and reads see those staged writes
+    /// overlaid on `storage`. The database facade uses this to commit the
+    /// tick's index writes atomically with the batch itself.
     pub(crate) fn tick_staged<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -292,6 +360,19 @@ impl IvmRuntime {
         tick
     }
 
+    /// The full tick narrative — every public tick funnels through here.
+    ///
+    /// * `table_deltas` — the batch's table changes.
+    /// * `binding_deltas` — prepared-shape binding changes (bind/unbind);
+    ///   queued binding retractions from earlier unsubscribes are prepended.
+    /// * `storage` — as in [`Self::tick`].
+    ///
+    /// In order: advance the tick clock, bump input frontiers, evaluate all
+    /// durable nodes (`INV-TICK-1`: before any subscription sees anything),
+    /// evaluate each subscription's outputs and queue non-empty deltas,
+    /// evaluate retained-but-unsubscribed roots so shared state stays
+    /// current, drop subscriptions whose receivers went away, clear
+    /// tick-scoped state, and record metrics.
     fn tick_with_params<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -399,6 +480,10 @@ impl IvmRuntime {
         Ok(metrics)
     }
 
+    /// Advances the per-table/per-shape change counters for every input that
+    /// carries deltas this tick, and bumps the `input_generation` of every
+    /// node reading a changed input — which is what invalidates that node's
+    /// memoized results.
     fn bump_input_frontiers(
         &mut self,
         table_deltas: &[TableDelta],
@@ -445,6 +530,9 @@ impl IvmRuntime {
         }
     }
 
+    /// Ends-of-tick memo maintenance: drops all tick-scoped entries (their
+    /// deltas are only meaningful within the tick that produced them), then
+    /// LRU-evicts hydration entries down to the entry/byte budgets.
     fn evict_eval_memo(&mut self) {
         if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
             let mut retained_bytes = 0usize;
@@ -513,6 +601,13 @@ impl IvmRuntime {
         QueuedMultisinkDeltas::new(deltas)
     }
 
+    /// Computes the full current output of one node by replaying stored rows
+    /// through the graph in `Replace`/`Hydrate` mode.
+    ///
+    /// * `output_node` — the sink node to hydrate.
+    /// * `storage` — the source of stored base rows and persisted indices.
+    ///
+    /// The result is a snapshot: every live row with weight `+1`.
     fn hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
@@ -557,6 +652,7 @@ impl IvmRuntime {
         records
     }
 
+    /// [`Self::hydration_snapshot`] over several named sinks.
     fn hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -576,6 +672,10 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
+    /// Like [`Self::hydration_snapshot`], but for a graph that will keep
+    /// being maintained: when the output depends on an aggregate, hydration
+    /// also seeds the aggregate's input arrangements so later ticks can
+    /// update incrementally instead of starting from empty state.
     fn subscription_hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
@@ -619,6 +719,7 @@ impl IvmRuntime {
         records
     }
 
+    /// [`Self::subscription_hydration_snapshot`] over several named sinks.
     fn subscription_hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -638,6 +739,9 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
+    /// Picks the right hydration flavor for a new subscription: the
+    /// arrangement-seeding variant when any sink depends on an aggregate,
+    /// the plain one otherwise.
     fn hydration_snapshots_for_subscription<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -655,6 +759,7 @@ impl IvmRuntime {
         }
     }
 
+    /// `true` when any ancestor of `output_node` is an Aggregate node.
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(output_node, &mut ancestors);
@@ -670,6 +775,9 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    /// Evaluates every retained durable node with this tick's deltas, so
+    /// persisted indices are written before any subscription output is
+    /// computed (`INV-TICK-1`).
     fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
@@ -713,6 +821,18 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// Subscribes to one graph: returns a [`Subscription`] whose first
+    /// message is the full current snapshot and whose later messages are the
+    /// per-tick deltas.
+    ///
+    /// * `graph` — the query graph, binding-source-free.
+    /// * `storage` — read to hydrate the initial snapshot.
+    ///
+    /// When the auto-direct-family rewrite is enabled and the graph contains
+    /// a literal equality filter (`id = 7`), the literal is lifted into a
+    /// binding and the subscription joins a shared prepared-shape family —
+    /// so a thousand `id = <n>` subscriptions share one maintained graph
+    /// instead of building a thousand.
     pub fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
@@ -751,6 +871,12 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// Subscribes to several named graphs delivered together: each tick's
+    /// message carries every sink's deltas at the same logical time.
+    ///
+    /// * `sinks` — `(sink name, graph)` pairs; unique names, no binding
+    ///   sources.
+    /// * `storage` — read to hydrate the initial snapshot message.
     pub fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
@@ -824,6 +950,22 @@ impl IvmRuntime {
         })
     }
 
+    /// Installs a prepared shape: one maintained graph that many bindings
+    /// subscribe through.
+    ///
+    /// * `terminals` — the shape's sinks; each terminal's graph reads the
+    ///   shared binding source, and its `route_fields` say which output
+    ///   columns carry the binding values (used to route rows back to the
+    ///   right subscriber).
+    /// * `binding_source_shape` — the binding source name used inside the
+    ///   terminal graphs; several shapes may share one binding source as
+    ///   long as they agree on `binding_descriptor`.
+    /// * `binding_descriptor` — the layout of one binding row (one field per
+    ///   parameter).
+    /// * `storage` — used to flush pending binding retractions first.
+    ///
+    /// Nothing produces output yet: rows only start flowing when a binding
+    /// is added with [`Self::bind_shape`].
     pub fn prepare<I, S>(
         &mut self,
         terminals: I,
@@ -905,6 +1047,18 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
+    /// Binds concrete parameter values to a prepared shape, returning a
+    /// subscription that sees exactly the rows matching this binding.
+    ///
+    /// * `shape_id` — which prepared shape to bind.
+    /// * `binding_values` — one value per binding-descriptor field, in
+    ///   order.
+    /// * `storage` — read to hydrate the initial snapshot.
+    ///
+    /// Under the hood the binding row is inserted into the shape's binding
+    /// source (a data change — this is "bindings as data"), a tick
+    /// propagates it, and the subscription's per-sink graphs filter the
+    /// shared shape output down to this binding's rows.
     pub fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -917,6 +1071,9 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
     }
 
+    /// [`Self::bind_shape`] with per-sink overrides of which output columns
+    /// the subscriber sees (`public_fields`); empty map keeps each
+    /// terminal's defaults.
     fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1001,6 +1158,15 @@ impl IvmRuntime {
         })
     }
 
+    /// One-sink [`Self::prepare`]: installs a shape with a single default
+    /// terminal.
+    ///
+    /// * `graph` — the shape's graph, reading `binding_source_shape`.
+    /// * `binding_source_shape` / `binding_descriptor` — as in
+    ///   [`Self::prepare`].
+    /// * `output_key_fields` — the output columns carrying the binding
+    ///   values (become the terminal's route fields).
+    /// * `storage` — as in [`Self::prepare`].
     pub fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
@@ -1036,6 +1202,11 @@ impl IvmRuntime {
         )
     }
 
+    /// One-sink [`Self::prepare`] where the maintained graph
+    /// (`routing_graph`, which carries the route columns) and the public
+    /// output shape (`output_graph`, what subscribers see) are described
+    /// separately. `routing_key_fields` name route columns of the routing
+    /// graph; the public columns must all exist on it too.
     pub fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
@@ -1074,6 +1245,7 @@ impl IvmRuntime {
         )
     }
 
+    /// One-sink [`Self::bind_shape`], returning a plain [`Subscription`].
     pub fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1087,6 +1259,9 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// One-sink bind with an explicit public output layout: the subscriber
+    /// sees exactly `public_output`'s columns (validated against the
+    /// terminal's output) instead of the terminal's defaults.
     pub(crate) fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1114,6 +1289,10 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// Removes a subscription and garbage-collects graph nodes nothing else
+    /// retains. For a shape binding, the binding retraction cannot tick here
+    /// (no storage handle), so it is queued and drained at the start of the
+    /// next tick. Returns whether anything was removed.
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
@@ -1133,6 +1312,9 @@ impl IvmRuntime {
         false
     }
 
+    /// Like [`Self::unsubscribe`], but with storage at hand the binding
+    /// retraction is ticked through the graph immediately instead of being
+    /// queued.
     pub fn unsubscribe_with_storage<S>(
         &mut self,
         subscription_id: SubscriptionId,
@@ -1159,6 +1341,8 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    /// (Re-)installs the durable maintenance chain of every schema-declared
+    /// index; already-present nodes deduplicate to no-ops.
     pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
         for table in self.schema.tables.clone() {
             for index in &table.indices {
@@ -1168,6 +1352,8 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// The output node of a single-sink subscription (`None` for unknown
+    /// ids or multi-sink subscriptions).
     pub fn subscription_output_node(&self, subscription_id: SubscriptionId) -> Option<NodeId> {
         let subscription = self.multisink_subscriptions.get(&subscription_id)?;
         if subscription.outputs.len() != 1 {
@@ -1180,6 +1366,7 @@ impl IvmRuntime {
             .map(|output| output.node)
     }
 
+    /// The output row layout of a single-sink subscription.
     pub fn subscription_output(
         &self,
         subscription_id: SubscriptionId,
@@ -1195,6 +1382,8 @@ impl IvmRuntime {
             .map(|output| &output.output)
     }
 
+    /// Wraps a one-output multisink subscription as a plain
+    /// [`Subscription`] pinned to `sink`.
     fn single_sink_subscription(
         &self,
         inner: MultisinkSubscription,
@@ -1211,6 +1400,15 @@ impl IvmRuntime {
         })
     }
 
+    /// Tries to rewrite a direct subscription into a shared shape family.
+    ///
+    /// When the graph contains a liftable `field = literal` filter (see
+    /// [`lift_literal_filter`]), the literal becomes a binding value and the
+    /// filter becomes a join against a hidden binding source; the rewritten
+    /// graph (with the literal removed) is the family key, so every
+    /// subscription differing only in the literal maps to the same shape.
+    /// Returns `None` when the graph has no such filter (or is recursive),
+    /// in which case the caller subscribes directly.
     fn plan_auto_direct_family(
         &self,
         graph: &GraphBuilder,
@@ -1259,6 +1457,8 @@ impl IvmRuntime {
         }))
     }
 
+    /// Computes the output row layout a builder graph would produce,
+    /// without inserting anything into the runtime graph.
     fn infer_builder_output(
         &self,
         graph: &GraphBuilder,
@@ -1267,6 +1467,8 @@ impl IvmRuntime {
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
+    /// [`Self::infer_builder_output`] memoized by builder-node address, so
+    /// shared subtrees are inferred once per call tree.
     fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
@@ -1281,6 +1483,10 @@ impl IvmRuntime {
         Ok(output)
     }
 
+    /// One level of output inference: sources read their declared/schemxa
+    /// layouts, pass-through operators inherit their input, and the
+    /// shape-changing operators (project, join, unnest, aggregate, ...)
+    /// derive theirs through the descriptor helpers below.
     fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,

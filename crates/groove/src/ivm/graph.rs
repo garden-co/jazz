@@ -133,89 +133,119 @@ use super::op_types::*;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {
+    /// Read a base table's rows and, once maintained, its future deltas.
     Table {
         table: String,
+        /// Optional key restriction; see [`StaticScanSpec`].
         scan: Option<StaticScanSpec>,
     },
+    /// A fixed in-memory set of encoded rows (snapshot-only test/data input).
     InlineRecords {
         output: RecordDescriptor,
         records: Vec<Vec<u8>>,
     },
+    /// Read a schema-declared secondary index of a table.
     Index {
         table: String,
         index: String,
+        /// Optional restriction over the *index* key.
         scan: Option<StaticScanSpec>,
     },
+    /// Read the frontier of the enclosing [`GraphBuilder::Recursive`] node —
+    /// the rows produced by the previous iteration of the fixpoint.
     FrontierSource {
         binding: FrontierName,
         output: RecordDescriptor,
     },
+    /// Read the bound parameter rows of a prepared shape (see the second
+    /// example above).
     BindingSource {
         shape: String,
         output: RecordDescriptor,
     },
+    /// Fixpoint: start from `seed`, then repeatedly run `step` (which reads
+    /// the previous iteration through a matching `FrontierSource`) until
+    /// nothing changes or `max_iters` is hit.
     Recursive {
         seed: Box<GraphBuilder>,
         step: Box<GraphBuilder>,
         frontier: FrontierName,
         max_iters: usize,
     },
+    /// Keep only rows matching `predicate`.
     Filter {
         input: Box<GraphBuilder>,
         predicate: PredicateExpr,
     },
+    /// Unwrap one `Nullable(T)` field to `T`, dropping rows where it is NULL.
     UnwrapNullable {
         input: Box<GraphBuilder>,
         field: FieldRef,
     },
+    /// Expand an array field into one output row per element.
     Unnest {
         input: Box<GraphBuilder>,
         array_field: FieldRef,
+        /// Name of the output field that carries the current element.
         element_field: String,
     },
+    /// Pick, rename, wrap, or synthesize output fields.
     Project {
         input: Box<GraphBuilder>,
         fields: Vec<ProjectField>,
     },
-    Union {
-        inputs: Vec<GraphBuilder>,
-    },
+    /// Add up the inputs' weighted record sets (SQL `UNION ALL`). All inputs
+    /// must share one row layout.
+    Union { inputs: Vec<GraphBuilder> },
+    /// Inner equi-join: `left_on[i] = right_on[i]` for every `i`. Output
+    /// fields are addressed as `left.<name>` / `right.<name>`.
     Join {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
     },
+    /// Semi join: left rows that have at least one match on the right; the
+    /// output layout is the left layout (right columns are not produced).
     SemiJoin {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
     },
+    /// Anti join: left rows with *no* match on the right; output layout is
+    /// the left layout.
     AntiJoin {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
     },
+    /// Per group, keep the row that is largest by `order_cols`.
     ArgMaxBy {
         input: Box<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
+    /// Per group, keep the row that is smallest by `order_cols`.
     ArgMinBy {
         input: Box<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<FieldRef>,
     },
+    /// Per group, keep an ordered window of rows (SQL `LIMIT`/`OFFSET` per
+    /// partition).
     TopBy {
         input: Box<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         order_cols: Vec<TopByOrder>,
+        /// Extra fields appended to the sort key so equal-ordered rows have
+        /// a stable, deterministic order.
         tie_cols: Vec<FieldRef>,
         offset: u64,
         limit: TopByLimit,
     },
+    /// Grouped aggregates (`count` / `sum` / ...), one output row per group.
     Aggregate {
         input: Box<GraphBuilder>,
         group_cols: Vec<FieldRef>,
@@ -229,19 +259,25 @@ pub enum GraphBuilder {
 /// once and emit `Resolved` references directly.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FieldRef {
+    /// A field named as declared, resolved against the input layout later.
     Name(String),
+    /// An already-resolved logical field index.
     Resolved(usize),
 }
 
 impl FieldRef {
+    /// A by-name reference.
     pub fn name(name: impl Into<String>) -> Self {
         Self::Name(name.into())
     }
 
+    /// A by-index reference.
     pub fn resolved(index: usize) -> Self {
         Self::Resolved(index)
     }
 
+    /// Human-readable form for error messages: the name itself, or `#idx`
+    /// for resolved references.
     pub fn display_name(&self) -> String {
         match self {
             Self::Name(name) => name.clone(),
@@ -251,6 +287,7 @@ impl FieldRef {
 }
 
 impl GraphBuilder {
+    /// Starts a graph from a base table (all rows, no scan restriction).
     pub fn table(table: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
@@ -258,6 +295,7 @@ impl GraphBuilder {
         }
     }
 
+    /// Starts a graph from the part of a base table selected by `scan`.
     pub fn table_scan(table: impl Into<String>, scan: StaticScanSpec) -> Self {
         Self::Table {
             table: table.into(),
@@ -265,6 +303,11 @@ impl GraphBuilder {
         }
     }
 
+    /// Starts a graph from already-encoded rows.
+    ///
+    /// * `output` — the rows' layout.
+    /// * `records` — the encoded rows; prefer [`Self::values`] when starting
+    ///   from logical values.
     pub fn inline_records(
         output: RecordDescriptor,
         records: impl IntoIterator<Item = Vec<u8>>,
@@ -275,6 +318,10 @@ impl GraphBuilder {
         }
     }
 
+    /// Starts a graph from logical rows, encoding each against `output`.
+    ///
+    /// * `output` — the rows' layout.
+    /// * `rows` — one `[Value]` slice per row, in `output` field order.
     pub fn values(
         output: RecordDescriptor,
         rows: impl IntoIterator<Item = impl AsRef<[Value]>>,
@@ -286,6 +333,7 @@ impl GraphBuilder {
         Ok(Self::inline_records(output, records))
     }
 
+    /// Starts a graph from a schema-declared secondary index.
     pub fn index(table: impl Into<String>, index: impl Into<String>) -> Self {
         Self::Index {
             table: table.into(),
@@ -294,6 +342,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Starts a graph from the part of an index selected by `scan` (the scan
+    /// values are index-key parts).
     pub fn index_scan(
         table: impl Into<String>,
         index: impl Into<String>,
@@ -306,6 +356,8 @@ impl GraphBuilder {
         }
     }
 
+    /// The frontier input of a recursive step graph; `binding` must match
+    /// the enclosing [`Self::recursive`] call's `frontier` name.
     pub fn frontier_source(binding: impl Into<String>, output: RecordDescriptor) -> Self {
         Self::FrontierSource {
             binding: FrontierName(binding.into()),
@@ -313,6 +365,8 @@ impl GraphBuilder {
         }
     }
 
+    /// The parameter input of a prepared shape; `shape` must match the
+    /// source name later passed to `Database::prepare`.
     pub fn binding_source(shape: impl Into<String>, output: RecordDescriptor) -> Self {
         Self::BindingSource {
             shape: shape.into(),
@@ -320,6 +374,14 @@ impl GraphBuilder {
         }
     }
 
+    /// Builds a fixpoint node.
+    ///
+    /// * `seed` — the initial rows (iteration 0).
+    /// * `step` — the graph run each iteration; it reads the previous
+    ///   iteration's rows through a [`Self::frontier_source`] named
+    ///   `frontier`.
+    /// * `frontier` — the name tying `step`'s frontier source to this node.
+    /// * `max_iters` — hard stop for fixpoints that never settle.
     pub fn recursive(
         seed: GraphBuilder,
         step: GraphBuilder,
@@ -334,12 +396,23 @@ impl GraphBuilder {
         }
     }
 
+    /// Adds up the inputs' rows (`UNION ALL`); all inputs must share one
+    /// layout.
     pub fn union(inputs: impl IntoIterator<Item = GraphBuilder>) -> Self {
         Self::Union {
             inputs: inputs.into_iter().collect(),
         }
     }
 
+    /// Inner equi-join of two graphs.
+    ///
+    /// * `left` / `right` — the two inputs.
+    /// * `left_on` / `right_on` — field names matched position by position:
+    ///   `join(albums, artists, ["artist_id"], ["id"])` keeps pairs where
+    ///   `albums.artist_id = artists.id`.
+    ///
+    /// Downstream projections address the output as `left.<field>` /
+    /// `right.<field>`.
     pub fn join(
         left: GraphBuilder,
         right: GraphBuilder,
@@ -354,6 +427,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Semi join: keeps left rows that have at least one right match; the
+    /// output layout stays the left layout. Arguments as in [`Self::join`].
     pub fn semi_join(
         left: GraphBuilder,
         right: GraphBuilder,
@@ -368,6 +443,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Anti join: keeps left rows with *no* right match; the output layout
+    /// stays the left layout. Arguments as in [`Self::join`].
     pub fn anti_join(
         left: GraphBuilder,
         right: GraphBuilder,
@@ -382,6 +459,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Per group of `group_cols`, keeps the row that is largest by
+    /// `order_cols`.
     pub fn arg_max_by(
         input: GraphBuilder,
         group_cols: impl IntoIterator<Item = impl Into<String>>,
@@ -394,6 +473,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Per group of `group_cols`, keeps the row that is smallest by
+    /// `order_cols`.
     pub fn arg_min_by(
         input: GraphBuilder,
         group_cols: impl IntoIterator<Item = impl Into<String>>,
@@ -406,6 +487,12 @@ impl GraphBuilder {
         }
     }
 
+    /// Per group of `group_cols`, keeps an ordered window of rows.
+    ///
+    /// * `order_cols` — the sort order, each entry with its own direction.
+    /// * `tie_cols` — appended to the sort key to break ties
+    ///   deterministically.
+    /// * `offset` / `limit` — the window: skip `offset` rows, keep `limit`.
     pub fn top_by(
         input: GraphBuilder,
         group_cols: impl IntoIterator<Item = impl Into<String>>,
@@ -424,6 +511,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Grouped aggregates: one output row per `group_cols` group, holding
+    /// the group key plus each aggregate in `aggregates`.
     pub fn aggregate(
         input: GraphBuilder,
         group_cols: impl IntoIterator<Item = impl Into<String>>,
@@ -436,6 +525,7 @@ impl GraphBuilder {
         }
     }
 
+    /// Keeps only rows matching `predicate` (chained form).
     pub fn filter(self, predicate: PredicateExpr) -> Self {
         Self::Filter {
             input: Box::new(self),
@@ -443,6 +533,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Unwraps a `Nullable(T)` field to `T`, dropping rows where it is NULL
+    /// (chained form).
     pub fn unwrap_nullable(self, field: impl Into<String>) -> Self {
         Self::UnwrapNullable {
             input: Box::new(self),
@@ -450,6 +542,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Expands `array_field` into one row per element; the element lands in
+    /// a new `element_field` column (chained form).
     pub fn unnest(self, array_field: impl Into<String>, element_field: impl Into<String>) -> Self {
         Self::Unnest {
             input: Box::new(self),
@@ -458,6 +552,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Keeps the named fields, unrenamed (chained form). Use
+    /// [`Self::project_fields`] for renames, literals, and nullable wraps.
     pub fn project(self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::Project {
             input: Box::new(self),
@@ -465,6 +561,8 @@ impl GraphBuilder {
         }
     }
 
+    /// Full projection control: one [`ProjectField`] per output field
+    /// (chained form).
     pub fn project_fields(self, fields: impl IntoIterator<Item = ProjectField>) -> Self {
         Self::Project {
             input: Box::new(self),
@@ -476,11 +574,14 @@ impl GraphBuilder {
 /// Field selected by a Project builder, optionally renamed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectField {
+    /// What the output field holds; see [`ProjectExpr`].
     pub expression: ProjectExpr,
+    /// The output field's name.
     pub output_name: String,
 }
 
 impl ProjectField {
+    /// Copies a field, keeping its name.
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -489,6 +590,8 @@ impl ProjectField {
         }
     }
 
+    /// Copies `source_name` under a new name — for example
+    /// `ProjectField::renamed("left.title", "album")` after a join.
     pub fn renamed(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
         Self {
             expression: ProjectExpr::Field(FieldRef::name(source_name)),
@@ -496,6 +599,7 @@ impl ProjectField {
         }
     }
 
+    /// Like [`Self::renamed`], with the source given as a resolved index.
     pub fn renamed_resolved(source_idx: usize, output_name: impl Into<String>) -> Self {
         Self {
             expression: ProjectExpr::Field(FieldRef::resolved(source_idx)),
@@ -503,6 +607,7 @@ impl ProjectField {
         }
     }
 
+    /// A constant output field.
     pub fn literal(output_name: impl Into<String>, value: impl Into<LiteralValue>) -> Self {
         Self {
             expression: ProjectExpr::Literal(value.into()),
@@ -516,6 +621,7 @@ impl ProjectField {
         Self::null_typed(output_name, ValueType::Nullable(Box::new(ValueType::Bytes)))
     }
 
+    /// A NULL constant output field of the given type.
     pub fn null_typed(output_name: impl Into<String>, value_type: ValueType) -> Self {
         Self {
             expression: ProjectExpr::Null(value_type),
@@ -523,6 +629,8 @@ impl ProjectField {
         }
     }
 
+    /// Copies `source_name` wrapped as a *present* nullable, for feeding a
+    /// non-nullable field into a nullable output column.
     pub fn nullable(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
         Self {
             expression: ProjectExpr::Nullable(FieldRef::name(source_name)),
@@ -530,6 +638,7 @@ impl ProjectField {
         }
     }
 
+    /// Like [`Self::nullable`], with the source given as a resolved index.
     pub fn nullable_resolved(source_idx: usize, output_name: impl Into<String>) -> Self {
         Self {
             expression: ProjectExpr::Nullable(FieldRef::resolved(source_idx)),
@@ -537,6 +646,8 @@ impl ProjectField {
         }
     }
 
+    /// Like [`Self::nullable`], but copies the field unchanged when it is
+    /// already nullable instead of double-wrapping it.
     pub fn nullable_flat(source_name: impl Into<String>, output_name: impl Into<String>) -> Self {
         Self {
             expression: ProjectExpr::NullableFlat(FieldRef::name(source_name)),
@@ -544,6 +655,8 @@ impl ProjectField {
         }
     }
 
+    /// The input field this projection reads, when it reads one (`None` for
+    /// literals and NULLs).
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
@@ -554,22 +667,33 @@ impl ProjectField {
     }
 }
 
+/// Builder-side form of one projected output field; the planner lowers this
+/// into [`PlanExpr`] with names resolved.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProjectExpr {
+    /// Copy an input field.
     Field(FieldRef),
+    /// A constant.
     Literal(LiteralValue),
+    /// A typed NULL constant.
     Null(ValueType),
+    /// An input field wrapped as a present nullable.
     Nullable(FieldRef),
+    /// Like `Nullable`, but copied unchanged when already nullable.
     NullableFlat(FieldRef),
 }
 
+/// One `ORDER BY` entry of a [`GraphBuilder::TopBy`] builder.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TopByOrder {
+    /// The field to order by.
     pub field: FieldRef,
+    /// Ascending or descending.
     pub direction: TopByDirection,
 }
 
 impl TopByOrder {
+    /// Ascending order on `field`.
     pub fn asc(field: impl Into<String>) -> Self {
         Self {
             field: FieldRef::name(field),
@@ -577,6 +701,7 @@ impl TopByOrder {
         }
     }
 
+    /// Descending order on `field`.
     pub fn desc(field: impl Into<String>) -> Self {
         Self {
             field: FieldRef::name(field),
@@ -594,10 +719,22 @@ pub struct IvmGraph {
 }
 
 impl IvmGraph {
+    /// An empty graph.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Inserts a node, or returns the existing one when an identical
+    /// descriptor is already present — this is where graph sharing happens:
+    /// two queries lowering to the same operator get one node, one state.
+    ///
+    /// * `descriptor` — the node spec; validated against its inputs' output
+    ///   layouts (inputs must already be in the graph).
+    /// * `durability` — whether the node maintains storage-backed state and
+    ///   must outlive its subscribers.
+    ///
+    /// Panics on an invalid descriptor and on the (loudly checked) case of
+    /// two different descriptors hashing to one [`NodeId`].
     pub fn dedup_node(&mut self, descriptor: NodeDescriptor, durability: NodeDurability) -> NodeId {
         let input_outputs = descriptor
             .inputs
@@ -628,18 +765,25 @@ impl IvmGraph {
         id
     }
 
+    /// Looks a node up by id.
     pub fn node(&self, id: NodeId) -> Option<&GraphNode> {
         self.nodes.get(&id)
     }
 
+    /// Mutable node lookup.
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
         self.nodes.get_mut(&id)
     }
 
+    /// All nodes, keyed by id.
     pub fn nodes(&self) -> &HashMap<NodeId, GraphNode> {
         &self.nodes
     }
 
+    /// Adds `id` and everything it (transitively) reads to `retained`.
+    ///
+    /// Garbage collection calls this for every live sink; nodes not marked
+    /// by any sink can then be removed.
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
     where
         S: BuildHasher,
@@ -655,6 +799,8 @@ impl IvmGraph {
         }
     }
 
+    /// Removes a node and detaches it from its inputs' reverse edges.
+    /// Removing an id that is not present is a no-op.
     pub fn remove_node(&mut self, id: NodeId) {
         let Some(node) = self.nodes.remove(&id) else {
             return;
@@ -691,6 +837,8 @@ impl GraphNode {
         }
     }
 
+    /// `true` when the node maintains storage-backed state (see
+    /// [`NodeDurability`]).
     pub fn is_durable(&self) -> bool {
         matches!(self.durability, NodeDurability::Durable { .. })
     }
@@ -710,6 +858,12 @@ pub struct NodeDescriptor {
 }
 
 impl NodeDescriptor {
+    /// Assembles a descriptor from its three identity parts.
+    ///
+    /// * `operator` — the operator payload.
+    /// * `inputs` — ids of the nodes this one reads, in operator order (for
+    ///   a join: left then right).
+    /// * `output` — the layout of the rows this node produces.
     pub fn new(
         operator: OpType,
         inputs: impl IntoIterator<Item = NodeId>,
@@ -722,6 +876,8 @@ impl NodeDescriptor {
         }
     }
 
+    /// The node's identity: a deterministic hash of the whole descriptor.
+    /// Stable across runs, so persisted references stay valid.
     pub fn node_id(&self) -> NodeId {
         // Keep node ids deterministic across runs. They are still guarded by a
         // descriptor equality check on deduplication, so collisions fail loudly.
@@ -730,6 +886,15 @@ impl NodeDescriptor {
         NodeId(hasher.finish())
     }
 
+    /// Checks the descriptor's internal consistency against its inputs.
+    ///
+    /// * `input_outputs` — the output layout of each input node, in the same
+    ///   order as `self.inputs`.
+    ///
+    /// Per operator this enforces the input count, that pass-through
+    /// operators (filter, distinct, persist, ...) declare the same output
+    /// layout as their input, that resolved field indices are in bounds, and
+    /// that join descriptors and key arities line up.
     pub fn validate(&self, input_outputs: &[RecordDescriptor]) -> Result<(), GraphValidationError> {
         if self.inputs.len() != input_outputs.len() {
             return Err(GraphValidationError::InputDescriptorArityMismatch {
@@ -915,6 +1080,7 @@ impl NodeDescriptor {
     }
 }
 
+/// Checks that a node has exactly `expected` inputs.
 fn expect_arity(inputs: &[NodeId], expected: usize) -> Result<(), GraphValidationError> {
     if inputs.len() == expected {
         Ok(())
@@ -926,6 +1092,8 @@ fn expect_arity(inputs: &[NodeId], expected: usize) -> Result<(), GraphValidatio
     }
 }
 
+/// Checks that a pass-through node's declared output layout matches its
+/// input's.
 fn expect_same_output(
     expected: &RecordDescriptor,
     actual: &RecordDescriptor,
@@ -937,6 +1105,8 @@ fn expect_same_output(
     }
 }
 
+/// Ways a [`NodeDescriptor`] can fail [`NodeDescriptor::validate`]; each
+/// variant's `#[error]` string states the violated rule.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GraphValidationError {
     #[error("field index {index} out of bounds for {len} fields")]
@@ -955,29 +1125,55 @@ pub enum GraphValidationError {
     OutputFieldCountMismatch { expected: usize, actual: usize },
 }
 
+/// The operator of one validated graph node. Most variants carry a payload
+/// struct from [`super::op_types`]; the payload-free ones are described
+/// here.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpType {
+    /// Base table deltas; see [`TableSourceOp`].
     TableSource(TableSourceOp),
+    /// Durable schema index; see [`IndexSourceOp`].
     IndexSource(IndexSourceOp),
+    /// Fixed in-memory rows; see [`InlineRecordsOp`].
     InlineRecords(InlineRecordsOp),
+    /// Recursive frontier input; see [`FrontierSourceOp`].
     FrontierSource(FrontierSourceOp),
+    /// Prepared-shape parameter input; see [`BindingSourceOp`].
     BindingSource(BindingSourceOp),
+    /// Per-group maximum row; see [`ArgMaxByOp`].
     ArgMaxBy(ArgMaxByOp),
+    /// Per-group minimum row; see [`ArgMinByOp`].
     ArgMinBy(ArgMinByOp),
+    /// Per-group ordered window; see [`TopByOp`].
     TopBy(TopByOp),
+    /// Fixpoint; see [`RecursiveOp`].
     Recursive(RecursiveOp),
+    /// Durable write-through; see [`PersistOp`].
     Persist(PersistOp),
+    /// Predicate filter; see [`FilterOp`].
     Filter(FilterOp),
+    /// Projection; see [`MapProjectOp`].
     MapProject(MapProjectOp),
+    /// Nullable unwrap; see [`UnwrapNullableOp`].
     UnwrapNullable(UnwrapNullableOp),
+    /// Array expansion; see [`UnnestOp`].
     Unnest(UnnestOp),
+    /// Keyed arrangement construction; see [`IndexByOp`].
     IndexBy(IndexByOp),
+    /// Inner join; see [`JoinOp`].
     Join(JoinOp),
+    /// Semi join (left rows with a match), reusing the [`JoinOp`] payload.
     SemiJoin(JoinOp),
+    /// Anti join (left rows without a match), reusing the [`JoinOp`] payload.
     AntiJoin(JoinOp),
+    /// Adds up all inputs' weighted record sets (`UNION ALL`); no payload.
     Union,
+    /// Negates every weight (`+n` becomes `-n`); the subtraction half of
+    /// set-difference shapes.
     Negate,
+    /// Collapses every positive multiplicity to weight 1.
     Distinct,
+    /// Grouped aggregates; see [`AggregateOp`].
     Aggregate(AggregateOp),
 }
 
@@ -985,7 +1181,9 @@ pub enum OpType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u64);
 
-/// Tiny deterministic hasher for in-memory node ids.
+/// Tiny deterministic hasher for in-memory node ids (FNV-1a). The std
+/// `DefaultHasher` is randomly seeded per process, which would make node
+/// ids differ between runs.
 #[derive(Clone, Debug)]
 struct StableNodeHasher {
     hash: u64,
@@ -1012,23 +1210,36 @@ impl Hasher for StableNodeHasher {
     }
 }
 
+/// Whether a node's state lives only in memory or is backed by storage.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NodeDurability {
+    /// In-memory only; the node can be dropped when nothing subscribes
+    /// through it anymore.
     Ephemeral,
+    /// Backed by storage (for example a persisted index); retained even with
+    /// no subscribers, because the stored state must stay maintained.
     Durable { storage: DurableStorage },
 }
 
 /// Durable node storage location and key namespace.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DurableStorage {
+    /// Which storage column family holds the entries.
     pub column_family: String,
+    /// Byte prefix in front of every key, so several durable nodes can
+    /// share one column family without colliding.
     pub key_prefix: Vec<u8>,
 }
 
+/// Why a graph node is being kept alive. Retainers deliberately do *not*
+/// participate in node identity — the same node can serve many retainers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Retainer {
+    /// A live subscription reads through the node.
     Subscription(String),
+    /// A prepared shape's graph contains the node.
     PreparedShape(String),
+    /// A schema object (for example a declared index) requires the node.
     DurableSchemaObject(String),
 }
 
