@@ -329,20 +329,17 @@ fn run_raw(plants: &[Plant], ids: &[String], logical: u64) -> Row {
     let write = t.elapsed();
 
     let t = Instant::now();
-    let mut found = 0;
     for id in ids {
-        if db.get(id.as_bytes()).expect("get").is_some() {
-            found += 1;
-        }
+        let _ = db.get(id.as_bytes()).expect("get");
     }
-    let read = t.elapsed();
+    let per = t.elapsed() / ids.len().max(1) as u32;
     let physical = dir_size(dir.path());
 
     Row {
         topology: "raw RocksDB",
         write,
         rows: plants.len(),
-        get_by_id: format!("{:.1} ms ({found} point gets)", read.as_secs_f64() * 1e3),
+        get_by_id: fmt_lookup(per),
         size: size_cell(physical, logical),
         synced: "—".to_string(),
     }
@@ -368,7 +365,7 @@ async fn run_local(plants: &[Plant], ids: &[String], logical: u64) -> Row {
         topology: "Jazz + RocksDB (local)",
         write,
         rows: plants.len(),
-        get_by_id: format!("{:.0} ms/lookup (Local)", per.as_secs_f64() * 1e3),
+        get_by_id: fmt_lookup(per),
         size: size_cell(physical, logical),
         synced: "—".to_string(),
     }
@@ -408,7 +405,7 @@ async fn run_server(plants: &[Plant], ids: &[String], logical: u64) -> Row {
         topology: "Jazz → Jazz Server (RocksDB)",
         write,
         rows: plants.len(),
-        get_by_id: format!("{:.0} ms/lookup (EdgeServer)", per.as_secs_f64() * 1e3),
+        get_by_id: fmt_lookup(per),
         size: size_cell(physical, logical),
         synced: format!(
             "{synced} / {} {}",
@@ -430,6 +427,15 @@ async fn server_row_count(client: &JazzClient) -> usize {
 // ---------------------------------------------------------------------------
 // Table rendering
 // ---------------------------------------------------------------------------
+
+fn fmt_lookup(per: Duration) -> String {
+    let us = per.as_secs_f64() * 1e6;
+    if us < 1000.0 {
+        format!("{us:.1} µs/lookup")
+    } else {
+        format!("{:.0} ms/lookup", us / 1000.0)
+    }
+}
 
 fn fmt_write(d: Duration) -> String {
     let s = d.as_secs_f64();
@@ -456,7 +462,7 @@ fn render(rows: &[Row]) {
         "topology",
         "write all",
         "throughput",
-        "get 500 by id",
+        "get by id",
         "size",
         "synced",
     ];
