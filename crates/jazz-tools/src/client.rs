@@ -74,6 +74,18 @@ fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     timeout.checked_mul(multiplier).unwrap_or(timeout)
 }
 
+/// Deadline for a single [`JazzClient::wait_for_batch`] call. Defaults to 25s;
+/// override with `JAZZ_TOOLS_WAIT_FOR_BATCH_TIMEOUT_SECS` (e.g. `300` for 5min)
+/// when waiting on large batches whose server-side settlement is slow.
+fn wait_for_batch_timeout() -> Duration {
+    let secs = std::env::var("JAZZ_TOOLS_WAIT_FOR_BATCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(25);
+    Duration::from_secs(secs)
+}
+
 enum StorageBundle {
     Memory(CoreMemoryStorage),
     #[cfg(feature = "rocksdb")]
@@ -1271,7 +1283,7 @@ impl ClientDbInner {
         tier: DurabilityTier,
     ) -> Result<()> {
         let desired = core_tier(tier);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let deadline = tokio::time::Instant::now() + wait_for_batch_timeout();
         loop {
             let tx_id = {
                 let borrowed = inner.borrow();
