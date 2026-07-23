@@ -15,6 +15,32 @@ in the `jazz-private` repo.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz-tools/TESTING_GUIDELINES.md` in full and follow it.
 
+**Documentation:** every data structure and every method we add or change must
+be documented, written for a newcomer who has never seen the code. The reference
+for the target quality is the `crates/groove` crate — match that bar. Concretely:
+
+- **Docs are part of the change — always update them.** Touch code, update its
+  Rustdoc in the same edit. Change a signature, parameter, field, return, error
+  case, or behavior → the doc must change to match. Stale or missing docs are an
+  incomplete change — treat it like a failing test.
+- **Doc comments, always.** `///` on every public and non-trivial private item
+  (types, fields, enum variants, functions, methods); `//!` at the top of each
+  module saying what lives there and what deliberately does not.
+- **Types and fields:** one line on what the type represents, and one line on
+  what each field or variant holds.
+- **Functions and methods:** say what it does, then give one bullet per
+  parameter (`* \`name\` — what it is and what it is for`), and note the return
+value plus the notable error / `None` / panic cases.
+- **Simple, human, and concise.** Plain English, and as short as it can be while
+  still clear — fewer words means fewer tokens. Define load-bearing jargon,
+  explain the "why", cut filler. A small example beats a long paragraph.
+- **Examples wherever they help.** Prefer a runnable ` ```rust ` doctest;
+  a `text` diagram is fine for byte layouts, encodings, and data flow. Builder
+  APIs, encoders, and anything with a non-obvious shape should show one.
+- **Keep docs clean.** Public docs must not link to private items (drop the
+  `[ ]` intra-doc link, keep the name in backticks). `cargo doc -p <crate>
+--no-deps` must build with zero warnings, and any doctests must pass.
+
 **Builds:** `pnpm build:core` (all the packages), `pnpm test` (everything), via turbo.
 
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
