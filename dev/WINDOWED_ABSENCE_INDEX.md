@@ -68,3 +68,58 @@ Scaling receipt from the same run:
 
 Tooling-friction: a prebuilt or cached RocksDB test artifact would have saved
 about 18 minutes on the first focused `groove` test compile.
+
+## Part 2: run-aware range scans
+
+Implemented bounded run-aware range collection for windowed `RecordStore`
+`range`, `prefix`, `scan_range`, and the new `range_reverse` helper. Indexed
+stores now scan plain physical records only inside the requested bounds and use
+`\xffGWIN2-RANGE-INDEX` to load only windows whose `[window_key, max_key]`
+intersects those bounds.
+
+### Change Classification
+
+- CLEARLY-GOOD: `range(start, end)` no longer full-scans the history column
+  family when a window range index is present. It range-scans plain rows in
+  `[start, end)` and point-reads only candidate windows with
+  `window_key < end && max_key >= start`.
+- CLEARLY-GOOD: `prefix(prefix)` uses the minimal finite prefix upper bound
+  when one exists, so narrow exact-key/prefix probes avoid unrelated plain tail
+  records. Prefixes without a finite upper bound retain prefix-scan semantics.
+- CLEARLY-GOOD: merge ordering is explicit. Bounded plain rows and candidate
+  windows are sorted by physical key and inserted into a `BTreeMap`, matching
+  the legacy full-scan overwrite behavior before returning logical key order.
+  `range_reverse` reverses that final logical ordering.
+- CLEARLY-GOOD: legacy stores without `\xffGWIN2-RANGE-INDEX` still take the
+  previous full-scan path for result compatibility, then lazily write the index
+  for later calls.
+- SPECULATIVE: reverse range is now exposed as a `RecordStore` helper because
+  this checkout did not have a pre-existing public `range_reverse` method on
+  `RecordStore`; existing reverse prefix behavior continues to reverse
+  `prefix()` output.
+
+### Receipts
+
+Focused regression:
+
+```text
+cargo test -p groove windowed_run_aware_ranges_use_bounded_plain_and_candidate_window_reads -j 2 -- --nocapture
+test storage::tests::windowed_run_aware_ranges_use_bounded_plain_and_candidate_window_reads ... ok
+```
+
+The regression builds three consolidated windows plus a 5k plain tail. It
+asserts bounded `range`, `prefix`, and `range_reverse` reads through
+`StorageReadMetrics`, and compares indexed vs no-index legacy paths for
+plain-only, window-only, mixed, and empty ranges in both forward and reverse
+order.
+
+Scaling receipt from the same run:
+
+| Plain tail records | Legacy narrow range_reverse history-row reads | Indexed narrow range_reverse history-row reads |
+| -----------------: | --------------------------------------------: | ---------------------------------------------: |
+|              1,000 |                                         1,005 |                                              5 |
+|              5,000 |                                         5,005 |                                              5 |
+|             20,000 |                                        20,005 |                                              5 |
+
+Tooling-friction: a single in-repo helper for constructing legacy/no-index
+windowed stores would have saved a bit of bespoke regression setup.
