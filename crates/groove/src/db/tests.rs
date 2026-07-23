@@ -4858,6 +4858,144 @@ fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
     );
 }
 
+#[test]
+fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    // Row-1 partition starts as first×2, second×1, third×1; the offset-1,
+    // limit-2 window over the ordinal stream `f f s t` retains one copy of
+    // first (straddling the offset) plus second.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    batch.insert("history", history_values(1, 30, 1, "third"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match (&values[0], &values[1]) {
+        (Value::U64(row), Value::U64(stamp)) => (*row, *stamp),
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    // A second partition gets its own window; row-1 must stay silent.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(2, 5, 1, "r2a"));
+    batch.insert("history", history_values(2, 6, 1, "r2b"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(2, 6, 1, "r2b"), 1)]
+    );
+
+    // A duplicate copy of second lands on the window's outer edge: the stream
+    // becomes `f f s s t` but the retained ordinals [1, 3) still hold one
+    // first and one second, so nothing may emit.
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    // Dropping one copy of first shifts the straddle: `f s s t` retains
+    // second twice, so first leaves and second gains a copy.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "first"), -1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    // A third partition with two distinct records tied on (stamp, node):
+    // record bytes order alpha before beta, so [1, 3) retains beta and gamma.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(3, 10, 1, "alpha"));
+    batch.insert("history_shadow", history_values(3, 10, 1, "beta"));
+    batch.insert("history", history_values(3, 20, 1, "gamma"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(3, 10, 1, "beta"), 1),
+            (history_values(3, 20, 1, "gamma"), 1),
+        ]
+    );
+
+    // Deleting alpha rebuilds the tie group's before-window from records that
+    // share its sort key; beta slides into the offset and leaves the window.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(3, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(3, 10, 1, "beta"), -1)]
+    );
+
+    // Deleting first's last copy resurrects it in the before-window from the
+    // delta alone; second drops to one retained copy and third re-enters.
+    let mut batch = database.open_batch();
+    batch.delete("history_shadow", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 20, 1, "second"), -1),
+            (history_values(1, 30, 1, "third"), 1),
+        ]
+    );
+
+    // Shrinking below offset + limit: `s s` retains one second only.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 30, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 30, 1, "third"), -1)]
+    );
+
+    // Removing both copies of second in one tick empties the partition.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 20, 1));
+    batch.delete("history_shadow", history_key(1, 20, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 20, 1, "second"), -1)]
+    );
+
+    // The maintained end state must equal a fresh hydration of the same graph.
+    let rehydrated = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut rehydrated_initial = rehydrated.recv().unwrap().to_values().unwrap();
+    rehydrated_initial.sort_by_key(|(values, _)| match &values[0] {
+        Value::U64(row) => *row,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        rehydrated_initial,
+        [
+            (history_values(2, 6, 1, "r2b"), 1),
+            (history_values(3, 20, 1, "gamma"), 1),
+        ]
+    );
+}
+
 fn metric_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "metrics",
