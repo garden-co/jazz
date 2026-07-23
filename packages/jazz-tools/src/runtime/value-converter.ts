@@ -8,6 +8,9 @@
 import type { WasmSchema, ColumnType, Value as WasmValue, InsertValues } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 
+const INTEGER_MIN = -2_147_483_648;
+const INTEGER_MAX = 2_147_483_647;
+
 function toTimestampMs(value: unknown): number {
   const numeric = value instanceof Date ? value.getTime() : Number(value);
   if (!Number.isFinite(numeric)) {
@@ -35,6 +38,16 @@ function normalizeByteaValue(value: unknown): Uint8Array {
   throw new Error("Expected Uint8Array or byte array for Bytea column type");
 }
 
+function toIntegerValue(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < INTEGER_MIN || numeric > INTEGER_MAX) {
+    throw new Error(
+      `Integer values must be signed 32-bit integers between ${INTEGER_MIN} and ${INTEGER_MAX}; received ${String(value)}`,
+    );
+  }
+  return numeric;
+}
+
 /**
  * Convert a JS value to WasmValue based on column type.
  */
@@ -49,7 +62,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Boolean":
       return { type: "Boolean", value: Boolean(value) };
     case "Integer":
-      return { type: "Integer", value: Number(value) };
+      return { type: "Integer", value: toIntegerValue(value) };
     case "BigInt":
       return { type: "BigInt", value: Number(value) };
     case "Double":
