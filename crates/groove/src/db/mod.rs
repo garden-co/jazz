@@ -2324,13 +2324,13 @@ impl StorageReadBucket {
     }
 }
 
-struct MeteredStorage<'a, S> {
+pub(crate) struct MeteredStorage<'a, S> {
     storage: &'a S,
     metrics: &'a RefCell<StorageReadMetrics>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
-    fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
+    pub(crate) fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
         Self { storage, metrics }
     }
 }
