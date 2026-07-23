@@ -44,11 +44,6 @@ reports how many rows durably landed (`synced to server N / M`).
 > | `jazz`   | 0.53 s                     | 969 ms cold `in_list` · 55 ms/point-lookup |
 > | `server` | 267 s (25000/25000 synced) | 973 ms warm · 60 ms/point-lookup           |
 
-## Synthetic EBS delay
-
-`--ebs-delay-ms N` charges a fixed latency per durable commit batch, modelling a
-network-attached volume. Applied identically to every topology's write loop.
-
 ## Usage
 
 ```sh
@@ -61,9 +56,6 @@ cargo run --release -p plants-rocksdb-bench -- --topology raw,jazz
 # The server topology at its practical ceiling (~4.5 min; see above).
 cargo run --release -p plants-rocksdb-bench -- --topology server --limit 25000
 
-# All three, with a 2 ms/commit synthetic EBS delay.
-cargo run --release -p plants-rocksdb-bench -- --limit 5000 --ebs-delay-ms 2
-
 # Watch server-sync progress on the slow topology.
 JZ_PROGRESS=1 cargo run --release -p plants-rocksdb-bench -- --topology server --limit 5000
 ```
@@ -73,12 +65,11 @@ stage will take minutes, so prefer the split commands above.
 
 ### Options
 
-| flag             | default                     | meaning                                   |
-| ---------------- | --------------------------- | ----------------------------------------- |
-| `--limit <n>`    | all rows                    | ingest only the first `n` plants          |
-| `--batch <n>`    | 1000                        | rows per commit batch                     |
-| `--ebs-delay-ms` | 0                           | synthetic per-batch durable-write latency |
-| `--sample <n>`   | 500                         | random ids to fetch back                  |
-| `--seed <n>`     | `0x5eed`                    | RNG seed for the id sample                |
-| `--topology`     | `raw,jazz,server`           | comma-separated subset                    |
-| `--data <path>`  | `<crate>/data/plantlst.txt` | dataset path                              |
+| flag            | default                     | meaning                          |
+| --------------- | --------------------------- | -------------------------------- |
+| `--limit <n>`   | all rows                    | ingest only the first `n` plants |
+| `--batch <n>`   | 1000                        | rows per commit batch            |
+| `--sample <n>`  | 500                         | random ids to fetch back         |
+| `--seed <n>`    | `0x5eed`                    | RNG seed for the id sample       |
+| `--topology`    | `raw,jazz,server`           | comma-separated subset           |
+| `--data <path>` | `<crate>/data/plantlst.txt` | dataset path                     |

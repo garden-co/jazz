@@ -1,5 +1,5 @@
 //! Shared benchmark plumbing: schema, RocksDB-backed `Db` construction, the
-//! by-id read, the synthetic EBS delay, and the metrics report.
+//! by-id read, and the metrics report.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -76,26 +76,6 @@ pub(crate) fn jazz_read_by_id(
     }
     let per_lookup = t.elapsed() / probe_n.max(1) as u32;
     (bulk, rows.len(), per_lookup)
-}
-
-/// Fixed latency charged once per durable commit batch, modelling a
-/// network-attached volume. Applied identically to every topology's write loop.
-#[derive(Clone, Copy)]
-pub(crate) struct EbsDelay {
-    per_batch: Duration,
-}
-
-impl EbsDelay {
-    pub(crate) fn new(ms: u64) -> Self {
-        Self {
-            per_batch: Duration::from_millis(ms),
-        }
-    }
-    pub(crate) fn charge(self) {
-        if !self.per_batch.is_zero() {
-            std::thread::sleep(self.per_batch);
-        }
-    }
 }
 
 pub(crate) struct Metrics {

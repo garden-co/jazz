@@ -3,7 +3,7 @@ name = "plants-rocksdb-bench"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RocksDB-focused ingestion + point-read benchmark on the USDA plants dataset: raw RocksDB vs Jazz+RocksDB vs Jazz client -> Jazz Server (RocksDB), with a synthetic EBS write delay."
+description = "RocksDB-focused ingestion + point-read benchmark on the USDA plants dataset: raw RocksDB vs Jazz+RocksDB vs Jazz client -> Jazz Server (RocksDB)."
 
 [[bin]]
 name = "plants-rocksdb-bench"

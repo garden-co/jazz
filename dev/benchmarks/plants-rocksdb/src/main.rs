@@ -15,14 +15,10 @@
 //!    `--limit 25000` (~4.5 min); the full 93k would take ~40 min because the
 //!    server ingest path is super-linear.
 //!
-//! An optional synthetic **EBS** write delay (`--ebs-delay-ms`) models a
-//! network-attached volume by charging a fixed latency per durable commit batch.
-//!
 //! ```text
 //! dev/benchmarks/plants-rocksdb/scripts/setup.sh                 # download the dataset
 //! cargo run --release -p plants-rocksdb-bench -- --topology raw,jazz          # full 93k, seconds
 //! cargo run --release -p plants-rocksdb-bench -- --topology server --limit 25000  # ~4.5 min
-//! cargo run --release -p plants-rocksdb-bench -- --limit 5000 --ebs-delay-ms 2     # all three
 //! ```
 
 mod bench;
@@ -34,7 +30,6 @@ mod ws_transport;
 
 use std::path::PathBuf;
 
-use crate::bench::EbsDelay;
 use crate::dataset::{load_dataset, sample_ids};
 use crate::jazz::run_jazz;
 use crate::raw::run_raw;
@@ -43,7 +38,6 @@ use crate::server::run_server;
 fn main() {
     let mut limit: Option<usize> = None;
     let mut batch = 1000usize;
-    let mut ebs_ms = 0u64;
     let mut sample = 500usize;
     let mut seed = 0x5eedu64;
     let mut topologies = vec!["raw".to_owned(), "jazz".to_owned(), "server".to_owned()];
@@ -55,7 +49,6 @@ fn main() {
         match arg.as_str() {
             "--limit" => limit = Some(parse_next(&mut args, "--limit")),
             "--batch" => batch = parse_next(&mut args, "--batch"),
-            "--ebs-delay-ms" => ebs_ms = parse_next(&mut args, "--ebs-delay-ms"),
             "--sample" => sample = parse_next(&mut args, "--sample"),
             "--seed" => seed = parse_next(&mut args, "--seed"),
             "--data" => {
@@ -76,21 +69,19 @@ fn main() {
     let plants = load_dataset(&data, limit);
     assert!(!plants.is_empty(), "dataset is empty: {}", data.display());
     let ids = sample_ids(&plants, sample, seed);
-    let ebs = EbsDelay::new(ebs_ms);
 
     println!(
-        "dataset {} rows | batch {} | sample {} | ebs-delay {} ms/batch\n",
+        "dataset {} rows | batch {} | sample {}\n",
         plants.len(),
         batch,
-        ids.len(),
-        ebs_ms
+        ids.len()
     );
 
     for topology in &topologies {
         let metrics = match topology.as_str() {
-            "raw" => run_raw(&plants, &ids, batch, ebs),
-            "jazz" => run_jazz(&plants, &ids, batch, ebs),
-            "server" => run_server(&plants, &ids, batch, ebs),
+            "raw" => run_raw(&plants, &ids, batch),
+            "jazz" => run_jazz(&plants, &ids, batch),
+            "server" => run_server(&plants, &ids, batch),
             other => panic!("unknown topology: {other} (expected raw|jazz|server)"),
         };
         metrics.print();
@@ -115,7 +106,6 @@ fn print_help() {
          Options:\n\
          \x20 --limit <n>          only ingest the first n plants\n\
          \x20 --batch <n>          rows per commit batch (default 1000)\n\
-         \x20 --ebs-delay-ms <n>   synthetic per-batch durable-write latency (default 0)\n\
          \x20 --sample <n>         number of random ids to fetch back (default 500)\n\
          \x20 --seed <n>           RNG seed for the id sample (default 0x5eed)\n\
          \x20 --topology <list>    comma-separated: raw,jazz,server (default all)\n\

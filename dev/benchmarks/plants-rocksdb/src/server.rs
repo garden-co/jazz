@@ -19,11 +19,11 @@ use jazz::query::Query;
 use jazz_server::loopback_websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 use tungstenite::stream::MaybeTlsStream;
 
-use crate::bench::{EbsDelay, Metrics, jazz_read_by_id, open_rocks_db, open_rocks_db_as, schema};
+use crate::bench::{Metrics, jazz_read_by_id, open_rocks_db, open_rocks_db_as, schema};
 use crate::dataset::{Plant, TABLE};
 use crate::ws_transport::WsClientTransport;
 
-pub(crate) fn run_server(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> Metrics {
+pub(crate) fn run_server(plants: &[Plant], ids: &[String], batch: usize) -> Metrics {
     if plants.len() > 25_000 {
         eprintln!(
             "  note: the server topology's sync ingestion is super-linear; {} rows will take \
@@ -94,7 +94,6 @@ pub(crate) fn run_server(plants: &[Plant], ids: &[String], batch: usize, ebs: Eb
                 Ok(())
             })
             .expect("commit batch");
-        ebs.charge();
         client.tick().expect("ship batch");
         if progress && (i + 1).is_multiple_of(5) {
             eprintln!(

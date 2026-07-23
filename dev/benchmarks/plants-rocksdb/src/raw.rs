@@ -5,10 +5,10 @@ use std::time::Instant;
 
 use rocksdb::{DB as RawDb, DBCompressionType, Options as RawOptions, WriteBatch};
 
-use crate::bench::{EbsDelay, Metrics};
+use crate::bench::Metrics;
 use crate::dataset::Plant;
 
-pub(crate) fn run_raw(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> Metrics {
+pub(crate) fn run_raw(plants: &[Plant], ids: &[String], batch: usize) -> Metrics {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut opts = RawOptions::default();
     opts.create_if_missing(true);
@@ -22,7 +22,6 @@ pub(crate) fn run_raw(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDe
             wb.put(plant.id.as_bytes(), plant.raw_value());
         }
         db.write(&wb).expect("write batch");
-        ebs.charge();
     }
     let write = t.elapsed();
 

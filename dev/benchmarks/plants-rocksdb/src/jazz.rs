@@ -3,10 +3,10 @@
 
 use std::time::Instant;
 
-use crate::bench::{EbsDelay, Metrics, jazz_read_by_id, open_rocks_db, schema};
+use crate::bench::{Metrics, jazz_read_by_id, open_rocks_db, schema};
 use crate::dataset::{Plant, TABLE};
 
-pub(crate) fn run_jazz(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsDelay) -> Metrics {
+pub(crate) fn run_jazz(plants: &[Plant], ids: &[String], batch: usize) -> Metrics {
     let schema = schema();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().to_path_buf();
@@ -21,7 +21,6 @@ pub(crate) fn run_jazz(plants: &[Plant], ids: &[String], batch: usize, ebs: EbsD
             Ok(())
         })
         .expect("commit batch");
-        ebs.charge();
     }
     let write = t.elapsed();
 
