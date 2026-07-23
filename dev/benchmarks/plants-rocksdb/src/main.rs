@@ -175,7 +175,6 @@ struct Row {
     rows: usize,
     get_by_id: String,
     size: String,
-    synced: String,
 }
 
 fn size_cell(physical: u64, logical: u64) -> String {
@@ -341,7 +340,6 @@ fn run_raw(plants: &[Plant], ids: &[String], logical: u64) -> Row {
         rows: plants.len(),
         get_by_id: fmt_lookup(per),
         size: size_cell(physical, logical),
-        synced: "—".to_string(),
     }
 }
 
@@ -365,9 +363,8 @@ async fn run_local(plants: &[Plant], ids: &[String], logical: u64) -> Row {
         topology: "Jazz + RocksDB (local)",
         write,
         rows: plants.len(),
-        get_by_id: fmt_lookup(per),
+        get_by_id: format!("{} · Local", fmt_lookup(per)),
         size: size_cell(physical, logical),
-        synced: "—".to_string(),
     }
 }
 
@@ -398,6 +395,12 @@ async fn run_server(plants: &[Plant], ids: &[String], logical: u64) -> Row {
 
     // Confirm the server durably holds every row.
     let synced = server_row_count(&client).await;
+    assert_eq!(
+        synced,
+        plants.len(),
+        "server persisted {synced}/{} rows — sync did not fully settle",
+        plants.len()
+    );
     let physical = dir_size(server.data_dir());
     server.shutdown().await;
 
@@ -405,13 +408,8 @@ async fn run_server(plants: &[Plant], ids: &[String], logical: u64) -> Row {
         topology: "Jazz → Jazz Server (RocksDB)",
         write,
         rows: plants.len(),
-        get_by_id: fmt_lookup(per),
+        get_by_id: format!("{} · EdgeServer", fmt_lookup(per)),
         size: size_cell(physical, logical),
-        synced: format!(
-            "{synced} / {} {}",
-            plants.len(),
-            if synced == plants.len() { "✓" } else { "✗" }
-        ),
     }
 }
 
@@ -458,15 +456,8 @@ fn fmt_throughput(rows: usize, d: Duration) -> String {
 }
 
 fn render(rows: &[Row]) {
-    let headers = [
-        "topology",
-        "write all",
-        "throughput",
-        "get by id",
-        "size",
-        "synced",
-    ];
-    let cells: Vec<[String; 6]> = rows
+    let headers = ["topology", "write all", "throughput", "get by id", "size"];
+    let cells: Vec<[String; 5]> = rows
         .iter()
         .map(|r| {
             [
@@ -475,13 +466,12 @@ fn render(rows: &[Row]) {
                 fmt_throughput(r.rows, r.write),
                 r.get_by_id.clone(),
                 r.size.clone(),
-                r.synced.clone(),
             ]
         })
         .collect();
 
     let ncol = headers.len();
-    let mut w = [0usize; 6];
+    let mut w = [0usize; 5];
     for (wi, h) in w.iter_mut().zip(headers.iter()) {
         *wi = h.chars().count();
     }
