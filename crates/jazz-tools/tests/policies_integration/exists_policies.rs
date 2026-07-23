@@ -127,6 +127,81 @@ async fn rebac_exists_clause_denies_non_matching_insert() {
     server.shutdown().await;
 }
 
+/// Verifies that an INSERT policy composed with `anyOf` accepts a write locally when
+/// one of its two EXISTS branches matches alice, even though the other does not.
+///
+/// Regression test: https://github.com/garden-co/jazz/issues/1104
+///
+/// backend ──seed gate_a(alice)──► server
+///    │
+///    └──for_session(alice)──► protected insert──► server──► bob
+///                               └──anyOf(EXISTS gate_a, EXISTS gate_b)──► accept
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn rebac_local_insert_allowed_when_only_one_any_of_exists_branch_matches() {
+    let protected_policies = permissions(|p| {
+        p.allow_read().always();
+        p.allow_insert().where_(pe::any_of([
+            pe::exists(pe::table("gate_a").where_(pe::eq("user_id", pe::session("user_id")))),
+            pe::exists(pe::table("gate_b").where_(pe::eq("user_id", pe::session("user_id")))),
+        ]));
+    });
+    let gate_table = |name| {
+        TableSchema::builder(name)
+            .column("user_id", ColumnType::Text)
+            .policies(permissions(|p| {
+                p.allow_read().always();
+                p.allow_insert().always();
+            }))
+    };
+    let schema = SchemaBuilder::new()
+        .table(gate_table("gate_a"))
+        .table(gate_table("gate_b"))
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .policies(protected_policies),
+        )
+        .build();
+
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let backend = JazzClient::connect(server.make_client_context_for_backend(schema.clone()))
+        .await
+        .expect("connect backend");
+    let bob = JazzClient::connect(server.make_client_context_for_user(schema, "bob"))
+        .await
+        .expect("connect bob");
+
+    let (_, _, gate_batch_id) = backend
+        .insert("gate_a", crate::row_input!("user_id" => "alice"))
+        .expect("seed alice's gate_a row");
+    backend
+        .wait_for_batch(gate_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("gate_a seed should reach the server");
+
+    let alice = backend.for_session(Session::new("alice"));
+    let (protected_id, _, protected_batch_id) = alice
+        .insert(
+            "protected",
+            crate::row_input!("data" => "allowed by gate_a"),
+        )
+        .expect("one matching EXISTS branch should satisfy alice's local anyOf insert policy");
+    alice
+        .wait_for_batch(protected_batch_id, DurabilityTier::EdgeServer)
+        .await
+        .expect("one matching EXISTS branch should satisfy the anyOf insert policy");
+    wait_for_protected_row(
+        &bob,
+        protected_id,
+        "allowed by gate_a",
+        "bob sees alice's insert accepted through the matching anyOf branch",
+    )
+    .await;
+
+    server.shutdown().await;
+}
+
 /// Verifies that UPDATE USING policies with EXISTS are enforced on sync, and
 /// that a rejected optimistic update rolls back to server-authoritative state.
 #[cfg(feature = "test-utils")]

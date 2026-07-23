@@ -446,19 +446,34 @@ impl JazzServer {
         }
     }
 
-    pub fn make_client_context_for_user(
-        &self,
-        schema: Schema,
-        user_id: impl AsRef<str>,
-    ) -> AppContext {
-        self.require_built_in_jwt_helpers();
-
+    fn make_base_client_context(&self, schema: Schema) -> AppContext {
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
             .lock()
             .expect("lock test client data dirs")
             .push(client_data_dir);
+
+        AppContext {
+            app_id: self.app_id,
+            client_id: None,
+            schema,
+            server_url: self.base_url(),
+            data_dir,
+            storage: crate::ClientStorage::Memory,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+            sync_tracer: None,
+        }
+    }
+
+    pub fn make_client_context_for_user(
+        &self,
+        schema: Schema,
+        user_id: impl AsRef<str>,
+    ) -> AppContext {
+        self.require_built_in_jwt_helpers();
 
         let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
         let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
@@ -467,18 +482,20 @@ impl JazzServer {
             TestJwtOptions::default(),
             now,
         );
-        AppContext {
-            app_id: self.app_id,
-            client_id: None,
-            schema,
-            server_url: self.base_url(),
-            data_dir,
-            storage: crate::ClientStorage::Memory,
-            jwt_token: Some(jwt_token),
-            backend_secret: Some(self.backend_secret().to_string()),
-            admin_secret: None,
-            sync_tracer: None,
-        }
+        let mut context = self.make_base_client_context(schema);
+        context.jwt_token = Some(jwt_token);
+        context.backend_secret = Some(self.backend_secret().to_string());
+        context
+    }
+
+    /// Creates a client context authenticated only with the backend secret.
+    ///
+    /// Use this context with [`crate::JazzClient::for_session`] when a test
+    /// needs to perform an operation on behalf of a specific user.
+    pub fn make_client_context_for_backend(&self, schema: Schema) -> AppContext {
+        let mut context = self.make_base_client_context(schema);
+        context.backend_secret = Some(self.backend_secret().to_string());
+        context
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -686,6 +703,23 @@ mod tests {
         let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
 
         assert!(context.jwt_token.is_some());
+        assert!(context.admin_secret.is_none());
+
+        server.shutdown().await;
+    }
+
+    /// The backend helper must not attach a JWT, because a JWT would make the
+    /// server authenticate the connection as that user instead of as a backend.
+    #[tokio::test]
+    async fn backend_client_context_uses_backend_secret_without_jwt() {
+        let server = JazzServer::start().await;
+        let context = server.make_client_context_for_backend(Schema::new());
+
+        assert!(context.jwt_token.is_none());
+        assert_eq!(
+            context.backend_secret.as_deref(),
+            Some(server.backend_secret())
+        );
         assert!(context.admin_secret.is_none());
 
         server.shutdown().await;
