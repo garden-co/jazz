@@ -25,11 +25,11 @@ import {
   NodeShell,
   NodeSubtitle,
   NodeTitle,
+  PhoneChrome,
   type Point,
   roundedPath,
   useDiagramTraces,
 } from "./diagram";
-import { PhoneChrome } from "./diagram/phone-chrome";
 import { INITIAL_COLOR, pickNextColor } from "./colour";
 
 type Tier = "local" | "edge" | "global";
