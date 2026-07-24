@@ -264,6 +264,9 @@ fn signed_i64_inputs_are_supported() {
     );
 }
 
+// Integer SUM overflow is currently a legitimate error. Accepted trade-off:
+// SUM preserves the input column's integer type, so the result cannot exceed
+// that type's representable range.
 #[test]
 fn aggregate_subscription_recovers_after_sum_overflow() {
     let storage = MemoryStorage::new(&["metrics"]);
@@ -362,6 +365,8 @@ fn aggregate_single_row_update_allocations_are_scale_independent() {
     let large = measure_single_row_aggregate_update(20_000);
     let ratio = large as f64 / small.max(1) as f64;
 
+    // Keep the same 3x noise allowance as the incremental-delivery canaries:
+    // it tolerates allocator/runtime noise while catching full-state rebuilds.
     assert!(
         ratio <= 3.0,
         "one-row aggregate update allocation scaled with maintained state: \
