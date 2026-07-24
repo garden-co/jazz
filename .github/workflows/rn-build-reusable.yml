@@ -15,6 +15,10 @@ name: Build jazz-rn (React Native)
         type: boolean
         default: false
         description: Skip iOS build job
+      checkoutRef:
+        type: string
+        default: ""
+        description: Git ref to check out.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency }}
@@ -37,6 +41,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.checkoutRef || github.sha }}
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
@@ -98,6 +104,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.checkoutRef || github.sha }}
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/

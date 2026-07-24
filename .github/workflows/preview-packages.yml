@@ -1,0 +1,438 @@
+name: Preview packages
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: preview-packages-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+
+jobs:
+  build-cli-linux:
+    name: Build CLI Linux (${{ matrix.arch }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: contains(github.event.pull_request.labels.*.name, 'preview-build')
+    env:
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x64
+            output: jazz-tools-linux-x64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+            output: jazz-tools-linux-arm64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.14.0
+          cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build CLI binary
+        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  build-cli-macos:
+    name: Build CLI macOS (${{ matrix.arch }})
+    runs-on: blacksmith-6vcpu-macos-15
+    if: contains(github.event.pull_request.labels.*.name, 'preview-build')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+            output: jazz-tools-darwin-arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+            output: jazz-tools-darwin-x64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+      - name: Build CLI binary
+        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  build-wasm:
+    name: Build jazz-wasm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: contains(github.event.pull_request.labels.*.name, 'preview-build')
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+        with:
+          key: preview-wasm-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Build jazz-wasm npm package
+        run: pnpm --filter jazz-wasm build
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          if-no-files-found: error
+
+  build-napi:
+    name: Build jazz-napi (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    if: contains(github.event.pull_request.labels.*.name, 'preview-build')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            use_sccache: true
+          - os: blacksmith-6vcpu-macos-15
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+            use_sccache: false
+          - os: blacksmith-6vcpu-macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            use_sccache: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+          cache-bin: false
+          key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+      - if: ${{ matrix.use_sccache }}
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: sccache
+
+      - if: ${{ matrix.use_sccache }}
+        name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+        with:
+          key: preview-napi-sccache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.platform }}-v1
+          path: /home/runner/.cache/sccache
+
+      - name: Build jazz-napi binding (Linux)
+        if: ${{ matrix.use_sccache }}
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_DIR: /home/runner/.cache/sccache
+          SCCACHE_CACHE_SIZE: 8G
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build jazz-napi binding (macOS)
+        if: runner.os == 'macOS'
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-napi-binding-${{ matrix.platform }}
+          path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.platform == 'linux-x64-gnu'
+        with:
+          name: jazz-napi-loader
+          path: |
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+          if-no-files-found: error
+
+  build-rn:
+    name: Build jazz-rn
+    uses: ./.github/workflows/rn-build-reusable.yml
+    if: contains(github.event.pull_request.labels.*.name, 'preview-build')
+    with:
+      concurrency: preview-build-rn
+      checkoutRef: ${{ github.event.pull_request.head.sha }}
+
+  publish-preview:
+    name: Publish preview packages
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - build-cli-linux
+      - build-cli-macos
+      - build-wasm
+      - build-napi
+      - build-rn
+    if: >-
+      always() &&
+      contains(github.event.pull_request.labels.*.name, 'preview-build') &&
+      needs.build-cli-linux.result == 'success' &&
+      needs.build-cli-macos.result == 'success' &&
+      needs.build-wasm.result == 'success' &&
+      needs.build-napi.result == 'success' &&
+      needs.build-rn.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-napi-loader
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-napi-binding-*
+          path: crates/jazz-napi/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-ios
+          path: dist/rn-ios
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-android
+          path: dist/rn-android
+
+      - name: Stage jazz-rn native payload into package sources
+        run: |
+          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
+          rm -rf crates/jazz-rn/android/src/main/jniLibs
+          rm -rf crates/jazz-rn/cpp/generated
+          mkdir -p crates/jazz-rn/android/src/main
+          mkdir -p crates/jazz-rn/cpp
+          cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-ios/cpp/generated crates/jazz-rn/cpp/generated
+          cp -R dist/rn-android/android/src/main/jniLibs crates/jazz-rn/android/src/main/
+
+      - name: Stage jazz-napi platform package artifacts
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts -d artifacts --npm-dir npm
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+          rm -rf npm/win32-*
+
+      - name: Build TypeScript packages
+        run: |
+          pnpm --filter jazz-tools build
+          pnpm --filter create-jazz build
+
+      - name: Stage CLI binaries into jazz-tools
+        run: |
+          mkdir -p packages/jazz-tools/bin/native
+          for bin in \
+            jazz-tools-darwin-arm64 \
+            jazz-tools-darwin-x64 \
+            jazz-tools-linux-arm64 \
+            jazz-tools-linux-x64; do
+            test -f "dist/${bin}"
+            cp "dist/${bin}" packages/jazz-tools/bin/native/
+          done
+          chmod 755 packages/jazz-tools/bin/native/*
+
+      - name: Verify preview package payloads
+        run: |
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
+          test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
+          test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
+          test -d crates/jazz-rn/JazzRnFramework.xcframework
+          test -d crates/jazz-rn/android/src/main/jniLibs
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/create-jazz/dist/index.js
+          test -f packages/jazz-tools/bin/native/jazz-tools-linux-x64
+
+      - name: Publish pkg.pr.new preview packages
+        run: |
+          pnpm dlx pkg-pr-new publish --json output.json --comment=off \
+            "./crates/jazz-napi/npm/*" \
+            "./crates/jazz-napi" \
+            "./crates/jazz-wasm" \
+            "./crates/jazz-rn" \
+            "./packages/jazz-tools" \
+            "./packages/create-jazz"
+
+      - name: Post or update preview comment
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("node:fs");
+            const marker = "<!-- jazz-preview-build -->";
+            const output = JSON.parse(fs.readFileSync("output.json", "utf8"));
+            const packages = Object.fromEntries(output.packages.map((pkg) => [pkg.name, pkg.url]));
+            const packageJson = JSON.stringify(packages, null, 2);
+            const webInstall = [
+              packages["jazz-tools"] && `jazz-tools@${packages["jazz-tools"]}`,
+              packages["jazz-wasm"] && `jazz-wasm@${packages["jazz-wasm"]}`,
+              packages["jazz-napi"] && `jazz-napi@${packages["jazz-napi"]}`,
+            ].filter(Boolean).join(" ");
+            const rnInstall = [
+              packages["jazz-tools"] && `jazz-tools@${packages["jazz-tools"]}`,
+              packages["jazz-rn"] && `jazz-rn@${packages["jazz-rn"]}`,
+            ].filter(Boolean).join(" ");
+            const commitUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${process.env.HEAD_SHA}`;
+            const body = [
+              marker,
+              "## Jazz preview build",
+              "",
+              `Published preview packages for [${process.env.HEAD_SHA.slice(0, 7)}](${commitUrl}).`,
+              "",
+              "```json",
+              packageJson,
+              "```",
+              "",
+              "Web/Node:",
+              "",
+              "```sh",
+              `pnpm add ${webInstall}`,
+              "```",
+              "",
+              "React Native:",
+              "",
+              "```sh",
+              `pnpm add ${rnInstall}`,
+              "```",
+            ].join("\n");
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              per_page: 100,
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: Number(process.env.PR_NUMBER),
+                body,
+              });
+            }
