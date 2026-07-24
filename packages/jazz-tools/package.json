@@ -110,6 +110,10 @@
       "types": "./dist/passkey-backup.d.ts",
       "default": "./dist/passkey-backup.js"
     },
+    "./reconcile-array": {
+      "types": "./dist/reconcile-array.d.ts",
+      "default": "./dist/reconcile-array.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
