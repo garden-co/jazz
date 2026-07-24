@@ -1,4 +1,4 @@
 {
   "title": "Writing Data",
-  "pages": ["writing-data", "files-and-blobs"]
+  "pages": ["writing-data", "transactions-and-batches", "files-and-blobs"]
 }
