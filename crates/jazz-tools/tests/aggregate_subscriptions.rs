@@ -95,7 +95,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             wait_for_values(
                 &client,
                 count_query.clone(),
-                Vec::new(),
+                vec![vec![Value::Timestamp(0)]],
                 "initial empty count",
             )
             .await;
@@ -217,7 +217,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 .await
                 .expect("subscribe spy aggregate");
 
-            wait_for_values(&spy, count_query.clone(), Vec::new(), "spy initial count").await;
+            wait_for_values(
+                &spy,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "spy initial count",
+            )
+            .await;
 
             let (admin_row, _, batch) = admin
                 .insert(
@@ -232,7 +238,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             wait_for_values(
                 &spy,
                 count_query.clone(),
-                Vec::new(),
+                vec![vec![Value::Timestamp(0)]],
                 "spy count ignores admin row",
             )
             .await;
@@ -245,8 +251,8 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             wait_for_values(
                 &spy,
                 count_query,
-                Vec::new(),
-                "spy count remains empty after invisible delete",
+                vec![vec![Value::Timestamp(0)]],
+                "spy count remains zero after invisible delete",
             )
             .await;
         })
