@@ -29,7 +29,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       );
     }
     let cancelled = false;
-    authClient.token().then(({ data, error }) => {
+    authClient.$fetch<{ token: string }>("/token", { method: "GET" }).then(({ data, error }) => {
       if (cancelled || error || !data?.token) return;
       setConfig({ appId: APP_ID, serverUrl: SERVER_URL, jwtToken: data.token });
     });
@@ -57,9 +57,11 @@ function JwtRefresh() {
     () =>
       db.onAuthChanged((state) => {
         if (state.error !== "expired") return;
-        authClient.token().then(({ data, error }) => {
-          if (!error && data?.token) db.updateAuthToken(data.token);
-        });
+        authClient
+          .$fetch<{ token: string }>("/token", { method: "GET" })
+          .then(({ data, error }) => {
+            if (!error && data?.token) db.updateAuthToken(data.token);
+          });
       }),
     [db],
   );

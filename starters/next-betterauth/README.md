@@ -60,7 +60,7 @@ session on `/dashboard/*`, the provider is only mounted when the user is
 authenticated — there's no anonymous fallback path to reason about.
 
 `components/jazz-provider.tsx` mounts a `JwtRefresh` component inside the
-provider that re-mints the JWT via `authClient.token()` whenever
+provider that re-mints the JWT via `authClient.$fetch("/token")` whenever
 `db.onAuthChanged` reports the token as expired, so long-lived sessions
 won't silently drop to unauthenticated.
 

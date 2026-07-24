@@ -24,7 +24,9 @@ async function buildLocalFirstConfig(): Promise<DbConfig> {
 }
 
 async function buildJwtConfig(): Promise<DbConfig | null> {
-  const { data, error } = await authClient.token();
+  const { data, error } = await authClient.$fetch<{ token: string }>("/token", {
+    method: "GET",
+  });
   if (error || !data?.token) return null;
   return { ...baseConfig(), jwtToken: data.token };
 }
@@ -63,7 +65,7 @@ async function boot() {
   // from BetterAuth and hand it back.
   db.onAuthChanged((state) => {
     if (state.error !== "expired") return;
-    authClient.token().then(({ data, error }) => {
+    authClient.$fetch<{ token: string }>("/token", { method: "GET" }).then(({ data, error }) => {
       if (!error && data?.token) db.updateAuthToken(data.token);
     });
   });
