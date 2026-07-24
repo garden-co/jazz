@@ -671,6 +671,9 @@ pub struct PendingQuerySubscription {
     pub required_tier: Option<DurabilityTier>,
     pub propagation: QueryPropagation,
     pub policy_context_tables: Vec<String>,
+    /// The client unsubscribed within the same inbox drain (a one-shot
+    /// query): serve it once but never install it.
+    pub one_shot: bool,
 }
 
 /// A pending query unsubscription that needs cleanup.

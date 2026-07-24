@@ -119,6 +119,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
+            one_shot: false,
         });
     sm.pending_query_subscriptions
         .push(PendingQuerySubscription {
@@ -129,6 +130,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
+            one_shot: false,
         });
 
     sm.remove_client(alice);
@@ -213,4 +215,79 @@ fn initial_query_scope_sends_one_settlement_per_batch() {
             confirmed_tier: DurabilityTier::GlobalServer,
         } if *settled_batch_id == batch_id
     ));
+}
+
+/// A coalesced subscribe/unsubscribe pair marks the subscription one-shot
+/// and still enqueues the unsubscription for an already-installed
+/// subscription from a reconnect replay.
+#[test]
+fn coalesced_subscribe_unsubscribe_marks_one_shot_and_keeps_unsubscription() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    add_client(&mut sm, &io, client_id);
+
+    let query = QueryBuilder::new("messages").branch("main").build();
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(1),
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    let subscriptions = sm.take_pending_query_subscriptions();
+    assert_eq!(subscriptions.len(), 1);
+    assert!(subscriptions[0].one_shot);
+    let unsubscriptions = sm.take_pending_query_unsubscriptions();
+    assert_eq!(unsubscriptions.len(), 1);
+    assert_eq!(unsubscriptions[0].client_id, client_id);
+    assert_eq!(unsubscriptions[0].query_id, QueryId(1));
+}
+
+/// The unsubscribe-then-resubscribe replay pattern must keep the
+/// resubscription installed: only a pending subscription that precedes the
+/// unsubscription is a coalesced one-shot pair.
+#[test]
+fn unsubscribe_then_resubscribe_keeps_the_resubscription() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    add_client(&mut sm, &io, client_id);
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(1),
+        },
+    });
+    let query = QueryBuilder::new("messages").branch("main").build();
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    let subscriptions = sm.take_pending_query_subscriptions();
+    assert_eq!(subscriptions.len(), 1);
+    assert!(!subscriptions[0].one_shot);
+    assert_eq!(sm.take_pending_query_unsubscriptions().len(), 1);
 }

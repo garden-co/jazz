@@ -1785,6 +1785,7 @@ impl SyncManager {
                         required_tier: *required_tier,
                         propagation: *propagation,
                         policy_context_tables: policy_context_tables.clone(),
+                        one_shot: false,
                     });
             }
             // Handle query unsubscription
@@ -1802,6 +1803,21 @@ impl SyncManager {
                         self.query_origin.remove(query_id);
                     }
                 }
+                // A matching pending subscription means the client
+                // subscribed and unsubscribed within one drain (a one-shot
+                // query served locally). Mark it one-shot instead of
+                // dropping the pair: unsubscriptions are processed before
+                // subscriptions, so plain enqueueing would install the
+                // subscription afterwards and leak it.
+                for subscription in &mut self.pending_query_subscriptions {
+                    if subscription.client_id == client_id && subscription.query_id == *query_id {
+                        subscription.one_shot = true;
+                    }
+                }
+                // Still enqueue the unsubscription: the marked
+                // subscription can be an active-query replay after a
+                // reconnect, and only the processed unsubscription removes
+                // an already-installed server subscription.
                 self.pending_query_unsubscriptions
                     .push(PendingQueryUnsubscription {
                         client_id,

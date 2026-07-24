@@ -1143,8 +1143,10 @@ impl QueryManager {
             }
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
-            // This allows hub servers to know about the query and push matching data
-            if sub.propagation == crate::sync_manager::QueryPropagation::Full {
+            // This allows hub servers to know about the query and push matching data.
+            // One-shot subscriptions are served from this server's storage and
+            // never installed, so there is nothing upstream to keep updated.
+            if !sub.one_shot && sub.propagation == crate::sync_manager::QueryPropagation::Full {
                 tracing::trace!(
                     %sub.client_id,
                     query_id = sub.query_id.0,
@@ -1161,26 +1163,29 @@ impl QueryManager {
                 );
             }
 
-            // Store the server subscription for reactive updates
-            self.server_subscriptions.insert(
-                (sub.client_id, sub.query_id),
-                ServerQuerySubscription {
-                    query: sub.query,
-                    graph,
-                    schema_context: subscription_context,
-                    session: session_for_policy,
-                    branches,
-                    policy_context_tables: sub.policy_context_tables,
-                    required_tier: sub.required_tier,
-                    sent_below_required_settled,
-                    last_emitted_settled_tier,
-                    last_scope: scope.unwrap_or_default(),
-                    needs_recompile: false,
-                    settled_once,
-                    propagation: sub.propagation,
-                    reported_schema_warnings,
-                },
-            );
+            // A one-shot subscription was already served above and must not
+            // stay installed.
+            if !sub.one_shot {
+                self.server_subscriptions.insert(
+                    (sub.client_id, sub.query_id),
+                    ServerQuerySubscription {
+                        query: sub.query,
+                        graph,
+                        schema_context: subscription_context,
+                        session: session_for_policy,
+                        branches,
+                        policy_context_tables: sub.policy_context_tables,
+                        required_tier: sub.required_tier,
+                        sent_below_required_settled,
+                        last_emitted_settled_tier,
+                        last_scope: scope.unwrap_or_default(),
+                        needs_recompile: false,
+                        settled_once,
+                        propagation: sub.propagation,
+                        reported_schema_warnings,
+                    },
+                );
+            }
 
             if self.sync_manager.outbox().len() >= MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS {
                 for remaining_key in pending_keys.iter().skip(key_index + 1) {

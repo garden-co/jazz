@@ -960,3 +960,72 @@ fn server_does_not_push_non_matching() {
         "Should NOT send RowBatchNeeded for non-matching user"
     );
 }
+
+/// A subscribe/unsubscribe pair coalesced into one inbox drain (a one-shot
+/// query) is served once but the subscription must not stay installed.
+#[test]
+fn coalesced_one_shot_subscription_is_served_once_and_not_installed() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(1),
+        },
+    });
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let settled = outbox.iter().find_map(|entry| match entry {
+        crate::sync_manager::OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::QuerySettled {
+                    query_id: QueryId(1),
+                    scope,
+                    ..
+                },
+        } if *id == client_id => Some(scope.len()),
+        _ => None,
+    });
+    assert_eq!(
+        settled,
+        Some(1),
+        "the one-shot subscription must be served once with its full scope"
+    );
+    assert!(
+        !server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(1))),
+        "the one-shot subscription must not stay installed"
+    );
+}
