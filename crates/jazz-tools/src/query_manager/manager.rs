@@ -361,11 +361,6 @@ pub(super) struct WriteTableCacheEntry {
     pub(super) indexed_columns: Option<Arc<Vec<ColumnName>>>,
     pub(super) row_layout: Arc<crate::row_format::CompiledRowLayout>,
     pub(super) row_locator: RowLocator,
-    pub(super) insert_policy: Option<Arc<PolicyExpr>>,
-    pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
-    pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
-    pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
-    pub(super) select_policy: Option<Arc<PolicyExpr>>,
 }
 
 /// Server-side query subscription state.
@@ -572,8 +567,8 @@ pub struct QueryManager {
     /// Application id for catalogue schema persistence, when available.
     pub(super) catalogue_app_id: Option<String>,
 
-    /// Per-schema, per-table write metadata cached to avoid cloning policy
-    /// trees and descriptors on every hot write.
+    /// Per-schema, per-table write metadata cached to avoid cloning descriptors
+    /// on every hot write.
     pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
 }
 

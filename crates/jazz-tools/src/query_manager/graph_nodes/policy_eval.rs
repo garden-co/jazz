@@ -399,12 +399,18 @@ impl<'a> PolicyContextEvaluator<'a> {
         let parent_table_name = *parent_table;
         let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
-            None => return false,
+            None => {
+                visited.remove(&parent_id);
+                return false;
+            }
         };
 
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
-            None => return false,
+            None => {
+                visited.remove(&parent_id);
+                return false;
+            }
         };
 
         let parent_policy = match operation {
@@ -414,29 +420,30 @@ impl<'a> PolicyContextEvaluator<'a> {
             Operation::Delete => parent_schema.policies.effective_delete_using(),
         };
 
-        let parent_policy = match parent_policy {
-            Some(p) => p,
-            None => return false,
+        let result = match parent_policy {
+            Some(parent_policy) => {
+                let parent_row = Row::new(
+                    parent_id,
+                    parent_row.data,
+                    parent_row.batch_id,
+                    parent_row.row_provenance,
+                );
+                self.evaluate_expr_with_context(
+                    parent_policy,
+                    operation,
+                    &parent_row,
+                    &parent_schema.columns,
+                    parent_table_name.as_str(),
+                    io,
+                    row_loader,
+                    depth + 1,
+                    visited,
+                    visited_referencing,
+                )
+            }
+            None => !self.row_policy_mode.denies_missing_explicit_policy(),
         };
-
-        let parent_row = Row::new(
-            parent_id,
-            parent_row.data,
-            parent_row.batch_id,
-            parent_row.row_provenance,
-        );
-        let result = self.evaluate_expr_with_context(
-            parent_policy,
-            operation,
-            &parent_row,
-            &parent_schema.columns,
-            parent_table_name.as_str(),
-            io,
-            row_loader,
-            depth + 1,
-            visited,
-            visited_referencing,
-        );
+        visited.remove(&parent_id);
         if let Some(cache_key) = cache_key
             && let Some(cache) = self.settlement_eval_cache.as_mut()
         {
