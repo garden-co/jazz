@@ -300,6 +300,30 @@ fn aggregate_descriptor(
     RecordDescriptor::new(fields)
 }
 
+async fn wait_for_one_shot_values(
+    client: &JazzClient,
+    query: jazz::tools::Query,
+    expected: Vec<Vec<Value>>,
+    label: &str,
+) {
+    wait_for_query(
+        client,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        label,
+        |rows| {
+            let mut actual = rows
+                .iter()
+                .map(|(_, values)| values.clone())
+                .collect::<Vec<_>>();
+            actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+            (actual == expected).then_some(())
+        },
+    )
+    .await;
+}
+
 async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
     let (_, _, batch) = client
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
@@ -424,6 +448,13 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             count_stream
                 .wait_for_values(Vec::new(), "initial empty count")
                 .await;
+            wait_for_one_shot_values(
+                &client,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot initial empty count",
+            )
+            .await;
 
             let (a1, _, batch) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
@@ -1115,6 +1146,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             spy_stream
                 .wait_for_values(Vec::new(), "spy initial count")
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy initial count",
+            )
+            .await;
 
             let (admin_row, _, batch) = admin
                 .insert(
@@ -1133,6 +1171,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     "spy count ignores admin row",
                 )
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query.clone(),
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy count ignores admin row",
+            )
+            .await;
 
             let batch = admin.delete(admin_row).expect("delete admin row");
             admin
@@ -1146,6 +1191,13 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     "spy count remains empty after invisible delete",
                 )
                 .await;
+            wait_for_one_shot_values(
+                &spy,
+                count_query,
+                vec![vec![Value::Timestamp(0)]],
+                "one-shot spy count remains zero after invisible delete",
+            )
+            .await;
         })
         .await;
 }
