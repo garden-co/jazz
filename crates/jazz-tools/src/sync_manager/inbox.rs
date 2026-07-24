@@ -1366,21 +1366,24 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFate { fate } => {
-                let fate = match self.persist_authoritative_batch_fate(storage, &fate) {
-                    Ok((fate, _)) => fate,
+                let (fate, changed) = match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok(result) => result,
                     Err(_) => return,
                 };
-                self.pending_batch_fates.push(fate.clone());
-                if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
-                    let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
-                    self.apply_transactional_batch_fate_to_rows(
-                        storage,
-                        None,
-                        Some(server_id),
-                        &fate,
-                        &rows,
-                    );
+                if changed {
+                    self.pending_batch_fates.push(fate.clone());
+                    if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
+                        let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
+                        self.apply_transactional_batch_fate_to_rows(
+                            storage,
+                            None,
+                            Some(server_id),
+                            &fate,
+                            &rows,
+                        );
+                    }
                 }
+                // Keep forwarding downstream: another connected client may not know it.
                 let interested = self.interested_clients_for_batch_fate(&fate);
                 for cid in interested {
                     if let Some(fate) = self.batch_fate_for_client(cid, &fate) {
