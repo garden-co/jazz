@@ -758,33 +758,36 @@ impl QueryManager {
                 }
             }
         }
-        let context_table_names: HashSet<&str> =
-            context_tables.iter().map(|table| table.as_str()).collect();
-        if !context_table_names.is_empty()
-            && let Ok(objects) = storage.scan_row_locators()
-        {
+        if !context_tables.is_empty() {
+            // Iterate the context tables' own id indexes; a full
+            // scan_row_locators pass costs the whole store per settle.
             let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-            for (object_id, row_locator) in objects {
-                let table_name = row_locator.table.as_str();
-                if !context_table_names.contains(table_name) {
-                    continue;
-                }
+            for table in &context_tables {
+                let table_name = table.as_str();
                 for branch_name in &branch_names {
-                    if scope.contains(&(object_id, *branch_name)) {
-                        continue;
-                    }
-                    let authorized = self.provenance_row_matches_current_select_policy(
-                        storage,
-                        settlement_eval_cache,
-                        object_id,
-                        *branch_name,
-                        session,
-                        &auth_schema,
-                        &auth_context,
-                        source_branch_schema_map,
-                    );
-                    if authorized {
-                        scope.insert((object_id, *branch_name));
+                    // Soft-deleted rows live in _id_deleted; their tombstones
+                    // must sync so clients drop stale context rows.
+                    for index in ["_id", "_id_deleted"] {
+                        for object_id in
+                            storage.index_scan_all(table_name, index, branch_name.as_str())
+                        {
+                            if scope.contains(&(object_id, *branch_name)) {
+                                continue;
+                            }
+                            let authorized = self.provenance_row_matches_current_select_policy(
+                                storage,
+                                settlement_eval_cache,
+                                object_id,
+                                *branch_name,
+                                session,
+                                &auth_schema,
+                                &auth_context,
+                                source_branch_schema_map,
+                            );
+                            if authorized {
+                                scope.insert((object_id, *branch_name));
+                            }
+                        }
                     }
                 }
             }
@@ -904,29 +907,28 @@ impl QueryManager {
             return scope;
         }
 
+        // Iterate the context tables' own id indexes; a full
+        // scan_row_locators pass costs the whole store per subscription.
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        let Ok(objects) = storage.scan_row_locators() else {
-            return scope;
-        };
-        for (object_id, row_locator) in objects {
-            let table_name = row_locator.table.as_str();
-            if !policy_tables
-                .iter()
-                .any(|table| table.as_str() == table_name)
-            {
-                continue;
-            }
-
+        for table in policy_tables {
+            let table_name = table.as_str();
             for branch_name in &branch_names {
-                let Some(row) = storage
-                    .load_visible_region_row(table_name, branch_name.as_str(), object_id)
-                    .ok()
-                    .flatten()
-                else {
-                    continue;
-                };
-                if !row.is_hard_deleted() {
-                    scope.insert((object_id, *branch_name));
+                // Soft-deleted rows live in _id_deleted; their tombstones
+                // must sync so clients drop stale context rows.
+                for index in ["_id", "_id_deleted"] {
+                    for object_id in storage.index_scan_all(table_name, index, branch_name.as_str())
+                    {
+                        let Some(row) = storage
+                            .load_visible_region_row(table_name, branch_name.as_str(), object_id)
+                            .ok()
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        if !row.is_hard_deleted() {
+                            scope.insert((object_id, *branch_name));
+                        }
+                    }
                 }
             }
         }
@@ -1237,7 +1239,11 @@ impl QueryManager {
             }
 
             // A one-shot subscription was already served above and must not
-            // stay installed.
+            // stay installed; drop its scope entry too.
+            if sub.one_shot {
+                self.sync_manager
+                    .drop_client_query_subscription(sub.client_id, sub.query_id);
+            }
             if !sub.one_shot {
                 self.server_subscriptions.insert(
                     (sub.client_id, sub.query_id),
@@ -1295,6 +1301,18 @@ impl QueryManager {
                 .remove(&(unsub.client_id, unsub.query_id))
                 .map(|sub| sub.propagation)
                 .unwrap_or(crate::sync_manager::QueryPropagation::Full);
+
+            // Drop the per-client query scope and sent-row tracking so
+            // unsubscribed queries stop growing the forwarding scope.
+            // A pending same-drain resubscription keeps its state: its
+            // arrival already registered the query origin.
+            if !self
+                .sync_manager
+                .has_pending_query_subscription(unsub.client_id, unsub.query_id)
+            {
+                self.sync_manager
+                    .drop_client_query_subscription(unsub.client_id, unsub.query_id);
+            }
 
             if propagation == crate::sync_manager::QueryPropagation::Full {
                 // Forward unsubscription to upstream servers

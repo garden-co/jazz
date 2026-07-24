@@ -1028,4 +1028,139 @@ fn coalesced_one_shot_subscription_is_served_once_and_not_installed() {
             .contains_key(&(client_id, QueryId(1))),
         "the one-shot subscription must not stay installed"
     );
+    assert!(
+        server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .is_none_or(|client| client.queries.is_empty()),
+        "the one-shot subscription must not leave a client scope entry"
+    );
+}
+
+/// A processed unsubscription drops the client's query scope entry.
+#[test]
+fn unsubscription_drops_the_client_query_scope() {
+    use crate::sync_manager::{ClientId, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+    server_qm.process(&mut storage);
+    assert!(
+        server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .is_some_and(|client| !client.queries.is_empty()),
+        "the installed subscription must have a scope entry"
+    );
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(1),
+        },
+    });
+    server_qm.process(&mut storage);
+    assert!(
+        server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .is_some_and(|client| client.queries.is_empty()),
+        "the unsubscription must drop the scope entry"
+    );
+}
+
+/// A same-drain unsubscribe/resubscribe pair keeps the resubscription's
+/// query origin and scope.
+#[test]
+fn same_drain_resubscription_keeps_origin_and_scope() {
+    use crate::sync_manager::{ClientId, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm.query("users").build();
+    let subscription_payload = SyncPayload::QuerySubscription {
+        query_id: QueryId(1),
+        query: Box::new(query),
+        session: None,
+        required_tier: None,
+        propagation: crate::sync_manager::QueryPropagation::Full,
+        policy_context_tables: vec![],
+    };
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: subscription_payload.clone(),
+    });
+    server_qm.process(&mut storage);
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(1),
+        },
+    });
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: subscription_payload,
+    });
+    server_qm.process(&mut storage);
+
+    assert!(
+        server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(1))),
+        "the resubscription must be installed"
+    );
+    assert!(
+        server_qm
+            .sync_manager()
+            .query_origin_contains(QueryId(1), client_id),
+        "the resubscription must keep its query origin"
+    );
+    assert!(
+        server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .is_some_and(|client| !client.queries.is_empty()),
+        "the resubscription must keep a scope entry"
+    );
 }

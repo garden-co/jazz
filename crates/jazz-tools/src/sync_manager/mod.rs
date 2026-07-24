@@ -748,6 +748,23 @@ impl SyncManager {
     /// Take pending query unsubscriptions for QueryManager to process.
     ///
     /// QueryManager will remove server-side QueryGraphs and forward upstream.
+    /// Whether the given client is registered as an origin for the query.
+    pub fn query_origin_contains(&self, query_id: QueryId, client_id: ClientId) -> bool {
+        self.query_origin
+            .get(&query_id)
+            .is_some_and(|clients| clients.contains(&client_id))
+    }
+
+    /// Whether a non-one-shot subscription for this client and query is
+    /// still queued for processing (a same-drain resubscription).
+    pub fn has_pending_query_subscription(&self, client_id: ClientId, query_id: QueryId) -> bool {
+        self.pending_query_subscriptions.iter().any(|subscription| {
+            subscription.client_id == client_id
+                && subscription.query_id == query_id
+                && !subscription.one_shot
+        })
+    }
+
     pub fn take_pending_query_unsubscriptions(&mut self) -> Vec<PendingQueryUnsubscription> {
         std::mem::take(&mut self.pending_query_unsubscriptions)
     }
