@@ -36,6 +36,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   type DeleteOptions,
+  type AuthConfig,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -954,6 +955,7 @@ export class Db {
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
   private nextActiveQuerySubscriptionTraceId = 1;
+  private isTransportDisconnected = false;
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -1089,19 +1091,23 @@ export class Db {
         },
       });
 
-      if (this.config.serverUrl) {
-        client.connectTransport(this.config.serverUrl, {
-          jwt_token: this.config.jwtToken,
-          admin_secret: this.config.adminSecret,
-          backend_secret: this.config.backendSecret,
-          backend_session: this.config.cookieSession,
-        });
+      if (this.config.serverUrl && !this.isTransportDisconnected) {
+        client.connectTransport(this.config.serverUrl, this.transportAuthConfig());
       }
       this.clients.set(key, client);
       this.clientSchemas.set(key, runtimeSchema);
     }
 
     return this.clients.get(key)!;
+  }
+
+  private transportAuthConfig(): AuthConfig {
+    return {
+      jwt_token: this.config.jwtToken,
+      admin_secret: this.config.adminSecret,
+      backend_secret: this.config.backendSecret,
+      backend_session: this.config.cookieSession,
+    };
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -1183,6 +1189,41 @@ export class Db {
 
   setDevMode(enabled: boolean): void {
     this.config.devMode = enabled;
+  }
+
+  /**
+   * Temporarily disconnect this Db from its configured Jazz sync server.
+   *
+   * Local reads and writes can continue while disconnected. Call
+   * {@link reconnect} to resume sync using the same Db instance.
+   */
+  async disconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot disconnect a Db that is shutting down.");
+    }
+
+    this.isTransportDisconnected = true;
+    await Promise.all(Array.from(this.clients.values(), (client) => client.disconnectTransport()));
+  }
+
+  /**
+   * Reconnect this Db to its configured Jazz sync server after
+   * {@link disconnect}.
+   */
+  async reconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot reconnect a Db that is shutting down.");
+    }
+
+    this.isTransportDisconnected = false;
+    if (!this.config.serverUrl) {
+      return;
+    }
+
+    const auth = this.transportAuthConfig();
+    for (const client of this.clients.values()) {
+      client.connectTransport(this.config.serverUrl, auth);
+    }
   }
 
   /**
