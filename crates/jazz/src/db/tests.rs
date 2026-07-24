@@ -7760,6 +7760,37 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
 }
 
 #[test]
+fn repeated_identical_session_claims_emit_once_before_subscribe() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+
+    client.set_identity_claims(client_author, claims.clone());
+    client.set_identity_claims(client_author, claims);
+    let _upstream = client.connect_upstream(client_transport);
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::SessionClaims { .. })
+    ));
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::RegisterShape { .. })
+    ));
+    assert!(matches!(
+        upstream_transport.try_recv(),
+        Some(SyncMessage::Subscribe(_))
+    ));
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+#[test]
 fn global_subscription_registers_array_subquery_upstream_coverage() {
     let schema = relation_schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);

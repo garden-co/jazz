@@ -1875,10 +1875,14 @@ where
 
     /// Attach process-local auth claims for `identity`.
     pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
-        self.node
+        let changed = self
+            .node
             .node
             .borrow_mut()
             .set_session_claims(identity, claims.clone());
+        if !changed {
+            return;
+        }
         self.node
             .upstream_subscriptions
             .borrow_mut()

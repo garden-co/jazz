@@ -684,10 +684,14 @@ where
         &mut self,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) {
+    ) -> bool {
+        if self.session_claims.get(&identity) == Some(&claims) {
+            return false;
+        }
         self.session_claims.insert(identity, claims);
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        true
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
