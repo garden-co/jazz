@@ -120,28 +120,51 @@ impl DecodedWindowCache {
 
 /// Typed storage delta appended through backends that can durably merge without
 /// first reading the existing value.
+///
+/// Instead of read-modify-write, the caller writes a delta and the backend
+/// merges it against whatever is stored (see [`apply_storage_delta`]). The
+/// `kind` selects the merge rule; `payload` is its serialized operand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageDelta {
+    /// Which merge rule to apply.
     pub kind: StorageDeltaKind,
+    /// The rule's serialized operand.
     pub payload: Vec<u8>,
 }
 
+/// The available storage-delta merge rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageDeltaKind {
+    /// "Keep the causally-latest writer" merge; see [`CurrentWinnerDelta`].
     CurrentWinnerV1,
 }
 
+/// Operand of a `CurrentWinnerV1` merge: a candidate record tagged with its
+/// writer's `(tx_time, tx_node_uuid)`.
+///
+/// On merge the candidate wins if it is a causal descendant of the stored
+/// winner (`parents` lists known predecessors) or has a strictly greater
+/// `(tx_time, tx_node_uuid)` key. The `*_offset` fields say where those key
+/// bytes live inside `record`, so the winner can be recomputed after
+/// compaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentWinnerDelta {
+    /// The writer's transaction time.
     pub tx_time: u64,
+    /// The writer's node UUID (ties tx_time).
     pub tx_node_uuid: [u8; 16],
+    /// Known predecessor keys; the candidate wins over any of them.
     pub parents: Vec<(u64, [u8; 16])>,
+    /// Byte offset of `tx_time` inside `record`.
     pub tx_time_offset: u32,
+    /// Byte offset of `tx_node_uuid` inside `record`.
     pub tx_node_uuid_offset: u32,
+    /// The candidate record itself.
     pub record: Vec<u8>,
 }
 
 impl StorageDelta {
+    /// Builds a `CurrentWinnerV1` delta from its operand.
     pub fn current_winner(delta: CurrentWinnerDelta) -> Result<Self, Error> {
         Ok(Self {
             kind: StorageDeltaKind::CurrentWinnerV1,
@@ -150,11 +173,13 @@ impl StorageDelta {
         })
     }
 
+    /// Serializes the delta (kind + payload) for storage as an operand.
     pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
         postcard::to_allocvec(&(self.kind, &self.payload))
             .map_err(|error| Error::InvalidStorageDelta(error.to_string()))
     }
 
+    /// Reverses [`Self::encode`].
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, payload): (StorageDeltaKind, Vec<u8>) = postcard::from_bytes(bytes)
             .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
@@ -162,6 +187,9 @@ impl StorageDelta {
     }
 }
 
+/// Rebuilds a delta operand after compaction: takes the already-merged
+/// record and re-derives its winner key from the template's offsets, so the
+/// stored operand stays self-describing without carrying stale parent lists.
 pub(crate) fn compact_storage_delta_operand(
     template_operand: &[u8],
     merged_record: Vec<u8>,
@@ -189,6 +217,9 @@ pub(crate) fn compact_storage_delta_operand(
     }
 }
 
+/// The merge function backends call to fold one delta into a stored value:
+/// decodes the delta and applies its rule to `existing` (`None` when the key
+/// is new), returning the new stored bytes.
 pub fn apply_storage_delta(
     existing: Option<&[u8]>,
     encoded_delta: &[u8],
@@ -203,6 +234,10 @@ pub fn apply_storage_delta(
     }
 }
 
+/// The `CurrentWinnerV1` merge rule: the candidate replaces the stored record
+/// when the store is empty, when the candidate lists the stored winner as a
+/// parent, or when its `(tx_time, tx_node_uuid)` key is greater; otherwise the
+/// stored record stays.
 fn apply_current_winner_delta(
     existing: Option<&[u8]>,
     candidate: &CurrentWinnerDelta,
@@ -223,6 +258,8 @@ fn apply_current_winner_delta(
     }
 }
 
+/// Reads the `(tx_time, tx_node_uuid)` winner key out of a record at the
+/// given byte offsets.
 fn current_winner_key(
     record: &[u8],
     tx_time_offset: usize,
@@ -270,8 +307,11 @@ pub trait OrderedKvStorage {
         StorageTransaction::new(self)
     }
 
+    /// Point read of one key in a column family; `None` when absent.
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
+    /// Writes (inserts or overwrites) one key/value.
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
+    /// Removes one key; a no-op when it is absent.
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
     /// Flush and close any backend resources that require an explicit clean
     /// shutdown boundary. Backends without close-time work may keep the default.
@@ -295,6 +335,8 @@ pub trait OrderedKvStorage {
     fn approximate_class_bytes(&self, _cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
         Ok(None)
     }
+    /// Visits every key/value with `start <= key < end`, in ascending key
+    /// order, calling `visit` per entry (which may abort with an error).
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -302,12 +344,16 @@ pub trait OrderedKvStorage {
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error>;
+    /// Visits every key/value whose key starts with `prefix`, ascending.
     fn scan_prefix(
         &self,
         cf: &ColumnFamilyName,
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error>;
+    /// Like [`Self::scan_prefix`] but descending. The default buffers the
+    /// prefix and reverses; backends with native reverse iteration should
+    /// override it.
     fn scan_prefix_reverse(
         &self,
         cf: &ColumnFamilyName,
@@ -324,6 +370,7 @@ pub trait OrderedKvStorage {
         }
         Ok(())
     }
+    /// The greatest key/value under `prefix`, or `None` when none exist.
     fn last_with_prefix(
         &self,
         cf: &ColumnFamilyName,
@@ -336,6 +383,8 @@ pub trait OrderedKvStorage {
         })?;
         Ok(last)
     }
+    /// The greatest key/value under `prefix` that is `<= upper` — a
+    /// point-in-time "current value at or before" lookup over versioned keys.
     fn last_with_prefix_before_or_at(
         &self,
         cf: &ColumnFamilyName,
@@ -351,6 +400,9 @@ pub trait OrderedKvStorage {
         })?;
         Ok(last)
     }
+    /// Applies a batch of writes atomically: either all take effect or none
+    /// do. This is the batch-atomicity guarantee the tick/commit boundary
+    /// above relies on.
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error>;
 
     /// Return known column-family names when the backend can enumerate them.
@@ -362,6 +414,8 @@ pub trait OrderedKvStorage {
         None
     }
 
+    /// Collects [`Self::scan_range`] into an owned vector — convenient when
+    /// the range is small and callback streaming is not worth it.
     fn range(&self, cf: &ColumnFamilyName, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
         let mut values = Vec::new();
         self.scan_range(cf, start, end, &mut |key, value| {
@@ -371,6 +425,7 @@ pub trait OrderedKvStorage {
         Ok(values)
     }
 
+    /// Collects [`Self::scan_prefix`] into an owned vector.
     fn prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
         let mut values = Vec::new();
         self.scan_prefix(cf, prefix, &mut |key, value| {
@@ -399,20 +454,29 @@ const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
 /// class CFs while prefixing keys with a length-framed logical table name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum StorageLayout {
+    /// One logical table per physical column family (the historical
+    /// mapping).
     #[default]
     Identity,
+    /// Jazz "class" layout: several logical tables share one physical class
+    /// CF, with each key prefixed by its length-framed logical table name.
     JazzClassV1 {
+        /// The logical CFs actually mapped into shared class CFs; empty means
+        /// "map every eligible table".
         mapped_logical_cfs: BTreeSet<String>,
     },
 }
 
 impl StorageLayout {
+    /// The class layout mapping every eligible logical table.
     pub fn jazz_class_v1() -> Self {
         Self::JazzClassV1 {
             mapped_logical_cfs: BTreeSet::new(),
         }
     }
 
+    /// The class layout restricted to the eligible tables among
+    /// `logical_column_families` (others stay one-CF-each).
     pub fn jazz_class_v1_for<'a>(
         logical_column_families: impl IntoIterator<Item = &'a str>,
     ) -> Self {
@@ -424,6 +488,9 @@ impl StorageLayout {
         Self::JazzClassV1 { mapped_logical_cfs }
     }
 
+    /// The distinct physical CFs a set of logical tables maps to under this
+    /// layout — what the backend must actually open (plus the class meta CF
+    /// for class layouts).
     pub fn physical_column_families<'a>(
         &self,
         logical_column_families: impl IntoIterator<Item = &'a str>,
@@ -438,6 +505,8 @@ impl StorageLayout {
         names.into_iter().collect()
     }
 
+    /// Resolves a logical CF name to its physical CF plus the optional
+    /// logical-table key prefix used inside a shared class CF.
     fn map_cf<'a>(&'a self, logical_cf: &'a str) -> PhysicalCf<'a> {
         match self {
             Self::Identity => PhysicalCf {
@@ -477,11 +546,16 @@ impl StorageLayout {
     }
 }
 
+/// Where one logical CF physically lives: the physical CF name, and the
+/// logical-table prefix to stamp on keys when several tables share it
+/// (`None` for one-CF-each).
 struct PhysicalCf<'a> {
     physical_cf: &'a str,
     logical_prefix: Option<&'a str>,
 }
 
+/// `true` for Jazz windowed-history tables (`jazz_*_history`), whose values
+/// are consolidated windows read through [`WindowConsolidation`].
 pub(crate) fn is_windowed_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
@@ -511,6 +585,8 @@ fn is_jazz_content_store(name: &str) -> bool {
     )
 }
 
+/// The shared class CF a Jazz logical table maps to under `JazzClassV1`, or
+/// `None` for tables that keep their own CF.
 fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
     if is_windowed_history_table(logical_cf) {
         Some(CLASS_HISTORY_CF)
@@ -538,6 +614,11 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
 
 /// Storage view that keeps logical CF names at the database boundary while
 /// reading and writing a physical class-CF layout below it.
+///
+/// It wraps any [`OrderedKvStorage`] and rewrites `(cf, key)` pairs through a
+/// [`StorageLayout`] on the way down (prefixing keys inside shared class CFs)
+/// and strips the prefix back off on the way up, so callers above never see
+/// the physical layout.
 pub struct LayoutStorage<S> {
     inner: S,
     layout: StorageLayout,
@@ -547,16 +628,23 @@ impl<S> LayoutStorage<S>
 where
     S: OrderedKvStorage,
 {
+    /// Wraps `inner` with `layout`, validating (or writing) the layout marker
+    /// so an existing store is never silently reinterpreted under a different
+    /// physical layout.
     pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
         storage.ensure_layout_marker()?;
         Ok(storage)
     }
 
+    /// Unwraps back to the underlying storage.
     pub fn into_inner(self) -> S {
         self.inner
     }
 
+    /// Checks the on-disk layout marker for class layouts: it must be present
+    /// and correct on a non-empty store, and is written on a fresh one — this
+    /// is the guard against opening an old-layout store as if it were empty.
     fn ensure_layout_marker(&self) -> Result<(), Error> {
         if !self.layout.validates_marker() {
             return Ok(());
@@ -607,6 +695,9 @@ where
         Ok(false)
     }
 
+    /// Maps a logical `(cf, key)` to its physical `(cf, key)`: inside a shared
+    /// class CF the key gets a `u32` length-framed logical-table prefix so
+    /// different tables never collide.
     fn physical_key(&self, cf: &ColumnFamilyName, key: &Key) -> (String, Vec<u8>) {
         let mapping = self.layout.map_cf(cf);
         let Some(logical_prefix) = mapping.logical_prefix else {
@@ -619,6 +710,8 @@ where
         (mapping.physical_cf.to_owned(), physical_key)
     }
 
+    /// Like [`Self::physical_key`], for scan prefixes; also returns how many
+    /// leading bytes to strip from physical keys to recover logical ones.
     fn physical_prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> (String, Vec<u8>, usize) {
         let mapping = self.layout.map_cf(cf);
         let Some(logical_prefix) = mapping.logical_prefix else {
@@ -632,6 +725,8 @@ where
         (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
     }
 
+    /// Removes the `strip_len`-byte logical prefix from a physical key,
+    /// recovering the logical key returned to callers.
     fn strip_key<'a>(&self, key: &'a [u8], strip_len: usize) -> Result<&'a [u8], Error> {
         key.get(strip_len..).ok_or_else(|| {
             Error::InvalidStorageKey("physical layout key shorter than logical prefix".to_owned())
@@ -779,10 +874,17 @@ where
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
 pub trait ReopenableStorage: OrderedKvStorage + Sized {
+    /// Reopens the store so it also has the given column families, keeping
+    /// existing data. Used when the schema gains tables/indices.
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
 }
 
 /// Typed view over one storage column family.
+///
+/// Wraps an [`OrderedKvStorage`] plus the record descriptor for one table (or
+/// index) column family, so callers read and write typed rows instead of raw
+/// bytes. Windowed history tables are handled transparently via the window
+/// codec.
 pub struct RecordStore<'a, S> {
     storage: &'a S,
     /// One table or durable index column family.
@@ -793,9 +895,12 @@ pub struct RecordStore<'a, S> {
     windowed: bool,
 }
 
+/// Counts produced when consolidating windowed-history records into windows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WindowConsolidation {
+    /// Number of window values written.
     pub windows: usize,
+    /// Number of individual records folded into those windows.
     pub records: usize,
 }
 
@@ -803,6 +908,11 @@ impl<'a, S> RecordStore<'a, S>
 where
     S: OrderedKvStorage,
 {
+    /// A typed store over one plain column family.
+    ///
+    /// * `storage` — the backing store.
+    /// * `column_family` — the CF this store reads/writes.
+    /// * `descriptor` — the row layout stored there.
     pub fn new(storage: &'a S, column_family: &'a str, descriptor: &'a RecordDescriptor) -> Self {
         Self {
             storage,
@@ -813,6 +923,9 @@ where
         }
     }
 
+    /// A typed store over a windowed history CF, where reads and writes go
+    /// through the window codec. `key_descriptor` describes the per-record
+    /// key used inside a window.
     pub fn new_windowed(
         storage: &'a S,
         column_family: &'a str,
@@ -828,14 +941,17 @@ where
         }
     }
 
+    /// The row layout of this store.
     pub fn descriptor(&self) -> &RecordDescriptor {
         self.descriptor
     }
 
+    /// The column family this store targets.
     pub fn column_family(&self) -> &str {
         self.column_family
     }
 
+    /// Reads one row's raw encoded bytes (window-aware for history stores).
     pub fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
         if !self.windowed {
             return self.storage.get(self.column_family, key);
@@ -843,11 +959,13 @@ where
         self.get_raw_run_aware(key)
     }
 
+    /// Reads one row as a typed [`Record`] bound to this store's descriptor.
     pub fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
         self.get_raw(key)
             .map(|record| record.map(|record| self.descriptor.bind_owned(record)))
     }
 
+    /// Collects the `start..end` key range (window-aware for history stores).
     pub fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
         if !self.windowed {
             return self.storage.range(self.column_family, start, end);
@@ -855,6 +973,7 @@ where
         self.run_aware_bounded_records(start, Some(end), |key| key >= start && key < end)
     }
 
+    /// Collects every row whose key starts with `prefix` (window-aware).
     pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
         if !self.windowed {
             return self.storage.prefix(self.column_family, prefix);
@@ -868,6 +987,7 @@ where
         Ok(records)
     }
 
+    /// Streams the `start..end` key range through `visit` (window-aware).
     pub fn scan_range(
         &self,
         start: &Key,
@@ -885,6 +1005,7 @@ where
         Ok(())
     }
 
+    /// Streams every row whose key starts with `prefix` through `visit`.
     pub fn scan_prefix(&self, prefix: &Key, visit: &mut ScanVisitor<'_>) -> Result<(), Error> {
         if !self.windowed {
             return self.storage.scan_prefix(self.column_family, prefix, visit);
@@ -895,6 +1016,7 @@ where
         Ok(())
     }
 
+    /// [`Self::scan_prefix`] in descending key order.
     pub fn scan_prefix_reverse(
         &self,
         prefix: &Key,
@@ -911,6 +1033,7 @@ where
         Ok(())
     }
 
+    /// The greatest row under `prefix`, or `None`.
     pub fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
         if !self.windowed {
             return self.storage.last_with_prefix(self.column_family, prefix);
@@ -918,6 +1041,8 @@ where
         self.last_logical_with_prefix(prefix)
     }
 
+    /// The greatest row under `prefix` with key `<= upper` — a
+    /// point-in-time "current at or before" read over versioned keys.
     pub fn last_with_prefix_before_or_at(
         &self,
         prefix: &Key,
@@ -934,26 +1059,36 @@ where
             .rfind(|(key, _)| key.as_slice() <= upper))
     }
 
+    /// Builds a set/insert operation for this store's CF (apply via
+    /// [`Self::write_many`]).
     pub fn set<'op>(&'op self, key: &'op Key, record: &'op [u8]) -> WriteOperation<'op> {
         WriteOperation::set(self.column_family, key, record)
     }
 
+    /// Builds a delete operation for this store's CF.
     pub fn delete<'op>(&'op self, key: &'op Key) -> WriteOperation<'op> {
         WriteOperation::delete(self.column_family, key)
     }
 
+    /// Builds a merge-delta operation for this store's CF (see
+    /// [`StorageDelta`]).
     pub fn delta<'op>(&'op self, key: &'op Key, delta: &'op StorageDelta) -> WriteOperation<'op> {
         WriteOperation::delta(self.column_family, key, delta)
     }
 
+    /// Applies a batch of operations atomically through the backend.
     pub fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         self.storage.write_many(operations)
     }
 
+    /// Folds up to `max_records` loose history records into consolidated
+    /// window values (unbounded window count).
     pub fn consolidate_windows(&self, max_records: usize) -> Result<WindowConsolidation, Error> {
         self.consolidate_windows_bounded(max_records, usize::MAX)
     }
 
+    /// [`Self::consolidate_windows`] capped at `max_windows` windows, folding
+    /// the trailing partial window too.
     pub fn consolidate_windows_bounded(
         &self,
         max_records: usize,
@@ -962,6 +1097,8 @@ where
         self.consolidate_windows_bounded_inner(max_records, max_windows, true)
     }
 
+    /// Like [`Self::consolidate_windows_bounded`] but only folds *full*
+    /// windows, leaving the tail records loose for later appends.
     pub fn consolidate_full_windows_bounded(
         &self,
         max_records: usize,
@@ -1869,6 +2006,7 @@ fn take_key_bytes<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], Er
     Ok(head)
 }
 
+/// One entry of a [`OrderedKvStorage::write_many`] batch, borrowing its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteOperation<'a> {
     /// Borrowed operation so callers can build a RocksDB batch without cloning
@@ -1878,10 +2016,9 @@ pub enum WriteOperation<'a> {
         key: &'a Key,
         value: &'a [u8],
     },
-    Delete {
-        cf: &'a str,
-        key: &'a Key,
-    },
+    /// Remove a key.
+    Delete { cf: &'a str, key: &'a Key },
+    /// Merge a [`StorageDelta`] into the key's current value.
     Delta {
         cf: &'a str,
         key: &'a Key,
@@ -1889,17 +2026,19 @@ pub enum WriteOperation<'a> {
     },
 }
 
+/// An owned [`WriteOperation`], for staging writes that must outlive the
+/// borrows they were built from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedWriteOperation {
+    /// Owned form of [`WriteOperation::Set`].
     Set {
         cf: String,
         key: Vec<u8>,
         value: Vec<u8>,
     },
-    Delete {
-        cf: String,
-        key: Vec<u8>,
-    },
+    /// Owned form of [`WriteOperation::Delete`].
+    Delete { cf: String, key: Vec<u8> },
+    /// Owned form of [`WriteOperation::Delta`].
     Delta {
         cf: String,
         key: Vec<u8>,
@@ -1908,6 +2047,7 @@ pub enum OwnedWriteOperation {
 }
 
 impl OwnedWriteOperation {
+    /// Borrows this owned operation as a [`WriteOperation`] for a batch call.
     pub fn as_write_operation(&self) -> WriteOperation<'_> {
         match self {
             Self::Set { cf, key, value } => WriteOperation::set(cf, key, value),
@@ -1916,12 +2056,14 @@ impl OwnedWriteOperation {
         }
     }
 
+    /// The target column family, whatever the variant.
     fn cf(&self) -> &str {
         match self {
             Self::Set { cf, .. } | Self::Delete { cf, .. } | Self::Delta { cf, .. } => cf,
         }
     }
 
+    /// The target key, whatever the variant.
     fn key(&self) -> &[u8] {
         match self {
             Self::Set { key, .. } | Self::Delete { key, .. } | Self::Delta { key, .. } => key,
@@ -1929,11 +2071,18 @@ impl OwnedWriteOperation {
     }
 }
 
+/// A read-your-writes view: reads see `staged_writes` layered on top of
+/// `base`, but the staged writes are not yet committed to the backend. The
+/// tick engine uses this so index writes computed during a tick are visible
+/// to that same tick before they are flushed atomically with the batch.
 pub struct StagedWriteOverlay<'a, S> {
     base: &'a S,
     staged_writes: &'a RefCell<StagedWriteState>,
 }
 
+/// The buffered writes behind a [`StagedWriteOverlay`], in application order,
+/// with a lazily-built per-(cf, key) index so repeated point reads over a
+/// large staging set stay fast.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
     operations: Vec<OwnedWriteOperation>,
@@ -2031,6 +2180,8 @@ impl<'a, S> StorageTransaction<'a, S>
 where
     S: OrderedKvStorage,
 {
+    /// Opens a transaction buffering writes over `base` (see
+    /// [`OrderedKvStorage::begin_txn`]).
     pub fn new(base: &'a S) -> Self {
         Self {
             base,
@@ -2038,6 +2189,9 @@ where
         }
     }
 
+    /// Flushes all buffered writes to the backend in one atomic
+    /// [`OrderedKvStorage::write_many`]. Dropping without committing discards
+    /// them.
     pub fn commit(self) -> Result<(), Error> {
         let operations = self.staged_writes.into_inner().into_operations();
         let borrowed = operations
@@ -2047,10 +2201,12 @@ where
         self.base.write_many(&borrowed)
     }
 
+    /// `true` when nothing has been staged yet.
     pub fn is_empty(&self) -> bool {
         self.staged_writes.borrow().is_empty()
     }
 
+    /// Stages already-owned operations into the transaction.
     pub fn stage_owned_operations(
         &self,
         operations: impl IntoIterator<Item = OwnedWriteOperation>,
@@ -2550,19 +2706,25 @@ fn exclusive_upper_bound(key: &[u8]) -> Vec<u8> {
 }
 
 impl<'a> WriteOperation<'a> {
+    /// A set/insert operation.
     pub fn set(cf: &'a str, key: &'a Key, value: &'a [u8]) -> Self {
         Self::Set { cf, key, value }
     }
 
+    /// A delete operation.
     pub fn delete(cf: &'a str, key: &'a Key) -> Self {
         Self::Delete { cf, key }
     }
 
+    /// A merge-delta operation.
     pub fn delta(cf: &'a str, key: &'a Key, delta: &'a StorageDelta) -> Self {
         Self::Delta { cf, key, delta }
     }
 }
 
+/// Errors from the storage layer: unknown column families, malformed
+/// keys/deltas/windows, and passed-through backend errors (records, window
+/// codec, RocksDB, OPFS).
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("column family not found: {0}")]

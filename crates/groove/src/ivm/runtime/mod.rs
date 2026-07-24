@@ -3,8 +3,9 @@
 //! This module owns executable state for hash-consed graphs: subscriptions,
 //! prepared-shape bindings, durable index nodes, per-operator state, reusable
 //! join arrangements, recursive state, and per-tick memoization. The reading
-//! order is tick-loop first: start at [`IvmRuntime::tick_with_params`], then
-//! follow [`TickEvaluator::update_node`] to operator evaluation. Subscription
+//! order is tick-loop first: start at [`IvmRuntime::tick`] (whose body is the
+//! private `tick_with_params`), then follow the private `TickEvaluator`'s
+//! `update_node` to operator evaluation. Subscription
 //! setup, graph insertion, retainers, and GC live after that narrative. Query
 //! lowering lives in [`crate::ivm::planner`], graph identity in
 //! [`crate::ivm::graph`], and storage mechanics in [`crate::storage`].
@@ -61,14 +62,28 @@ const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
 // standard hasher; this alias is intentionally scoped to the IVM runtime.
 
 /// Stateful executor for deduplicated IVM graphs and subscriptions.
+///
+/// This is the engine below `db::Database`: it owns the shared graph and all
+/// maintained state, and advances everything one synchronous [`Self::tick`]
+/// at a time. Callers hand it base-table deltas; it pushes them through the
+/// graph and delivers output deltas to every affected subscription.
 #[derive(Clone, Debug)]
 pub struct IvmRuntime {
+    /// The database schema; tables, indices, and types are resolved here.
     schema: DatabaseSchema,
+    /// Cached row layout per table, derived from `schema` once.
     table_descriptors: HashMap<String, RecordDescriptor>,
+    /// The shared, deduplicated operator graph.
     graph: IvmGraph,
+    /// Live subscriptions by id: their output nodes and delivery channels.
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
+    /// Installed prepared shapes by id.
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
+    /// Auto-created shape families: maps a canonical literal-filter graph to
+    /// the shape that serves all subscriptions of that family.
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
+    /// Per shape name: the binding row layout and the refcounted set of
+    /// currently bound parameter rows.
     binding_sources: HashMap<String, BindingSourceState>,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
@@ -84,9 +99,15 @@ pub struct IvmRuntime {
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    /// Per-table change counter, bumped when a tick carries deltas for the
+    /// table; memo entries record the counters they were computed at.
     table_frontiers: HashMap<String, u64>,
+    /// Per-shape change counter for binding rows, same role as
+    /// `table_frontiers`.
     binding_frontiers: HashMap<String, u64>,
+    /// Monotonic "clock" for memo LRU ordering.
     memo_use_clock: u64,
+    /// Total payload bytes currently held by `eval_memo`.
     eval_memo_bytes: usize,
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
@@ -94,15 +115,24 @@ pub struct IvmRuntime {
     /// Retainers and GC age live outside operator state so stateless leaf nodes
     /// can be retained without allocating fake operator state.
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
+    /// The logical clock; advanced exactly once per public tick.
     current_tick: u64,
     next_subscription_id: u64,
     next_shape_id: u64,
+    /// How many builder nodes callers asked for, before deduplication —
+    /// the numerator of [`RuntimeStats::dedupe_ratio`].
     logical_nodes_requested: u64,
+    /// Whether [`Self::subscribe_one_sink`] may rewrite literal-filter
+    /// subscriptions into shared auto-direct shape families.
     auto_direct_family_enabled: bool,
+    /// Whether ticks compute full (walk-the-state) stats or cheap ones.
     collect_tick_runtime_stats: bool,
 }
 
 impl IvmRuntime {
+    /// Builds a runtime for `schema` and installs one durable
+    /// `TableSource → IndexBy → Persist` chain per declared schema index, so
+    /// indices are maintained from the very first tick.
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
         let table_descriptors = schema
             .tables
@@ -140,30 +170,39 @@ impl IvmRuntime {
         Ok(runtime)
     }
 
+    /// Chooses between full runtime stats (walks arrangements and recursive
+    /// state — accurate but not free) and cheap counters on every tick.
     pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
         self.collect_tick_runtime_stats = enabled;
     }
 
+    /// The shared deduplicated graph (read-only view).
     pub fn graph(&self) -> &IvmGraph {
         &self.graph
     }
 
+    /// Enables/disables the auto-direct-family rewrite; see
+    /// [`Self::subscribe_one_sink`].
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
     }
 
+    /// The schema this runtime was built with.
     pub fn schema(&self) -> &DatabaseSchema {
         &self.schema
     }
 
+    /// Looks a table's schema up by name.
     pub fn table(&self, table: &str) -> Option<&TableSchema> {
         self.schema.table(table)
     }
 
+    /// The cached row layout of a table.
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
     }
 
+    /// Looks a schema index up by table and index name.
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {
         self.table(table)?
             .indices
@@ -171,6 +210,7 @@ impl IvmRuntime {
             .find(|index| index.name == index_name)
     }
 
+    /// Looks a direct record store up by name.
     pub fn direct_record_store(
         &self,
         store: &str,
@@ -178,6 +218,16 @@ impl IvmRuntime {
         self.schema.direct_record_store(store)
     }
 
+    /// Runs a graph once against current stored data (a one-shot query).
+    ///
+    /// * `graph` — the query graph; it must not contain a binding source
+    ///   (parameterized graphs go through [`Self::prepare`]).
+    /// * `storage` — where base rows and persisted indices are read from.
+    ///
+    /// The graph is inserted, hydrated to a full snapshot (all weights
+    /// `+1`), then garbage-collected again — nothing keeps being
+    /// maintained after the call. Shared fragments still profit from and
+    /// feed the hydration memo.
     pub fn query_snapshot<S>(
         &mut self,
         graph: GraphBuilder,
@@ -207,6 +257,14 @@ impl IvmRuntime {
         Ok(records)
     }
 
+    /// One-shot query over several named graphs at once.
+    ///
+    /// * `sinks` — `(sink name, graph)` pairs; names must be unique and the
+    ///   graphs binding-source-free.
+    /// * `storage` — as in [`Self::query_snapshot`].
+    ///
+    /// All sinks are evaluated against the same stored state, and shared
+    /// fragments across the sinks are computed once.
     pub fn query_snapshots<I, K, S>(
         &mut self,
         sinks: I,
@@ -250,6 +308,13 @@ impl IvmRuntime {
         snapshots
     }
 
+    /// Runs one public tick: pushes a committed batch's table deltas through
+    /// the graph and notifies every affected subscription.
+    ///
+    /// * `table_deltas` — the batch's weighted row changes, one entry per
+    ///   changed table.
+    /// * `storage` — read for arrangements/hydration and written by durable
+    ///   `Persist` nodes.
     pub fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -276,6 +341,10 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// Like [`Self::tick`], but durable writes go into `staged_writes`
+    /// instead of storage directly, and reads see those staged writes
+    /// overlaid on `storage`. The database facade uses this to commit the
+    /// tick's index writes atomically with the batch itself.
     pub(crate) fn tick_staged<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -292,6 +361,19 @@ impl IvmRuntime {
         tick
     }
 
+    /// The full tick narrative — every public tick funnels through here.
+    ///
+    /// * `table_deltas` — the batch's table changes.
+    /// * `binding_deltas` — prepared-shape binding changes (bind/unbind);
+    ///   queued binding retractions from earlier unsubscribes are prepended.
+    /// * `storage` — as in [`Self::tick`].
+    ///
+    /// In order: advance the tick clock, bump input frontiers, evaluate all
+    /// durable nodes (`INV-TICK-1`: before any subscription sees anything),
+    /// evaluate each subscription's outputs and queue non-empty deltas,
+    /// evaluate retained-but-unsubscribed roots so shared state stays
+    /// current, drop subscriptions whose receivers went away, clear
+    /// tick-scoped state, and record metrics.
     fn tick_with_params<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -399,6 +481,10 @@ impl IvmRuntime {
         Ok(metrics)
     }
 
+    /// Advances the per-table/per-shape change counters for every input that
+    /// carries deltas this tick, and bumps the `input_generation` of every
+    /// node reading a changed input — which is what invalidates that node's
+    /// memoized results.
     fn bump_input_frontiers(
         &mut self,
         table_deltas: &[TableDelta],
@@ -445,6 +531,9 @@ impl IvmRuntime {
         }
     }
 
+    /// Ends-of-tick memo maintenance: drops all tick-scoped entries (their
+    /// deltas are only meaningful within the tick that produced them), then
+    /// LRU-evicts hydration entries down to the entry/byte budgets.
     fn evict_eval_memo(&mut self) {
         if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
             let mut retained_bytes = 0usize;
@@ -513,6 +602,13 @@ impl IvmRuntime {
         QueuedMultisinkDeltas::new(deltas)
     }
 
+    /// Computes the full current output of one node by replaying stored rows
+    /// through the graph in `Replace`/`Hydrate` mode.
+    ///
+    /// * `output_node` — the sink node to hydrate.
+    /// * `storage` — the source of stored base rows and persisted indices.
+    ///
+    /// The result is a snapshot: every live row with weight `+1`.
     fn hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
@@ -557,6 +653,7 @@ impl IvmRuntime {
         records
     }
 
+    /// [`Self::hydration_snapshot`] over several named sinks.
     fn hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -576,6 +673,10 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
+    /// Like [`Self::hydration_snapshot`], but for a graph that will keep
+    /// being maintained: when the output depends on an aggregate, hydration
+    /// also seeds the aggregate's input arrangements so later ticks can
+    /// update incrementally instead of starting from empty state.
     fn subscription_hydration_snapshot<S>(
         &mut self,
         output_node: NodeId,
@@ -619,6 +720,7 @@ impl IvmRuntime {
         records
     }
 
+    /// [`Self::subscription_hydration_snapshot`] over several named sinks.
     fn subscription_hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -638,6 +740,9 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
+    /// Picks the right hydration flavor for a new subscription: the
+    /// arrangement-seeding variant when any sink depends on an aggregate,
+    /// the plain one otherwise.
     fn hydration_snapshots_for_subscription<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -655,6 +760,7 @@ impl IvmRuntime {
         }
     }
 
+    /// `true` when any ancestor of `output_node` is an Aggregate node.
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(output_node, &mut ancestors);
@@ -670,6 +776,9 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    /// Evaluates every retained durable node with this tick's deltas, so
+    /// persisted indices are written before any subscription output is
+    /// computed (`INV-TICK-1`).
     fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
@@ -713,6 +822,18 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// Subscribes to one graph: returns a [`Subscription`] whose first
+    /// message is the full current snapshot and whose later messages are the
+    /// per-tick deltas.
+    ///
+    /// * `graph` — the query graph, binding-source-free.
+    /// * `storage` — read to hydrate the initial snapshot.
+    ///
+    /// When the auto-direct-family rewrite is enabled and the graph contains
+    /// a literal equality filter (`id = 7`), the literal is lifted into a
+    /// binding and the subscription joins a shared prepared-shape family —
+    /// so a thousand `id = <n>` subscriptions share one maintained graph
+    /// instead of building a thousand.
     pub fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
@@ -751,6 +872,12 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// Subscribes to several named graphs delivered together: each tick's
+    /// message carries every sink's deltas at the same logical time.
+    ///
+    /// * `sinks` — `(sink name, graph)` pairs; unique names, no binding
+    ///   sources.
+    /// * `storage` — read to hydrate the initial snapshot message.
     pub fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
@@ -824,6 +951,22 @@ impl IvmRuntime {
         })
     }
 
+    /// Installs a prepared shape: one maintained graph that many bindings
+    /// subscribe through.
+    ///
+    /// * `terminals` — the shape's sinks; each terminal's graph reads the
+    ///   shared binding source, and its `route_fields` say which output
+    ///   columns carry the binding values (used to route rows back to the
+    ///   right subscriber).
+    /// * `binding_source_shape` — the binding source name used inside the
+    ///   terminal graphs; several shapes may share one binding source as
+    ///   long as they agree on `binding_descriptor`.
+    /// * `binding_descriptor` — the layout of one binding row (one field per
+    ///   parameter).
+    /// * `storage` — used to flush pending binding retractions first.
+    ///
+    /// Nothing produces output yet: rows only start flowing when a binding
+    /// is added with [`Self::bind_shape`].
     pub fn prepare<I, S>(
         &mut self,
         terminals: I,
@@ -905,6 +1048,18 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
+    /// Binds concrete parameter values to a prepared shape, returning a
+    /// subscription that sees exactly the rows matching this binding.
+    ///
+    /// * `shape_id` — which prepared shape to bind.
+    /// * `binding_values` — one value per binding-descriptor field, in
+    ///   order.
+    /// * `storage` — read to hydrate the initial snapshot.
+    ///
+    /// Under the hood the binding row is inserted into the shape's binding
+    /// source (a data change — this is "bindings as data"), a tick
+    /// propagates it, and the subscription's per-sink graphs filter the
+    /// shared shape output down to this binding's rows.
     pub fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -917,6 +1072,9 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
     }
 
+    /// [`Self::bind_shape`] with per-sink overrides of which output columns
+    /// the subscriber sees (`public_fields`); empty map keeps each
+    /// terminal's defaults.
     fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1001,6 +1159,15 @@ impl IvmRuntime {
         })
     }
 
+    /// One-sink [`Self::prepare`]: installs a shape with a single default
+    /// terminal.
+    ///
+    /// * `graph` — the shape's graph, reading `binding_source_shape`.
+    /// * `binding_source_shape` / `binding_descriptor` — as in
+    ///   [`Self::prepare`].
+    /// * `output_key_fields` — the output columns carrying the binding
+    ///   values (become the terminal's route fields).
+    /// * `storage` — as in [`Self::prepare`].
     pub fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
@@ -1036,6 +1203,11 @@ impl IvmRuntime {
         )
     }
 
+    /// One-sink [`Self::prepare`] where the maintained graph
+    /// (`routing_graph`, which carries the route columns) and the public
+    /// output shape (`output_graph`, what subscribers see) are described
+    /// separately. `routing_key_fields` name route columns of the routing
+    /// graph; the public columns must all exist on it too.
     pub fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
@@ -1074,6 +1246,7 @@ impl IvmRuntime {
         )
     }
 
+    /// One-sink [`Self::bind_shape`], returning a plain [`Subscription`].
     pub fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1087,6 +1260,9 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// One-sink bind with an explicit public output layout: the subscriber
+    /// sees exactly `public_output`'s columns (validated against the
+    /// terminal's output) instead of the terminal's defaults.
     pub(crate) fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -1114,6 +1290,10 @@ impl IvmRuntime {
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
+    /// Removes a subscription and garbage-collects graph nodes nothing else
+    /// retains. For a shape binding, the binding retraction cannot tick here
+    /// (no storage handle), so it is queued and drained at the start of the
+    /// next tick. Returns whether anything was removed.
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
@@ -1133,6 +1313,9 @@ impl IvmRuntime {
         false
     }
 
+    /// Like [`Self::unsubscribe`], but with storage at hand the binding
+    /// retraction is ticked through the graph immediately instead of being
+    /// queued.
     pub fn unsubscribe_with_storage<S>(
         &mut self,
         subscription_id: SubscriptionId,
@@ -1159,6 +1342,8 @@ impl IvmRuntime {
         Ok(false)
     }
 
+    /// (Re-)installs the durable maintenance chain of every schema-declared
+    /// index; already-present nodes deduplicate to no-ops.
     pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
         for table in self.schema.tables.clone() {
             for index in &table.indices {
@@ -1168,6 +1353,8 @@ impl IvmRuntime {
         Ok(())
     }
 
+    /// The output node of a single-sink subscription (`None` for unknown
+    /// ids or multi-sink subscriptions).
     pub fn subscription_output_node(&self, subscription_id: SubscriptionId) -> Option<NodeId> {
         let subscription = self.multisink_subscriptions.get(&subscription_id)?;
         if subscription.outputs.len() != 1 {
@@ -1180,6 +1367,7 @@ impl IvmRuntime {
             .map(|output| output.node)
     }
 
+    /// The output row layout of a single-sink subscription.
     pub fn subscription_output(
         &self,
         subscription_id: SubscriptionId,
@@ -1195,6 +1383,8 @@ impl IvmRuntime {
             .map(|output| &output.output)
     }
 
+    /// Wraps a one-output multisink subscription as a plain
+    /// [`Subscription`] pinned to `sink`.
     fn single_sink_subscription(
         &self,
         inner: MultisinkSubscription,
@@ -1211,6 +1401,15 @@ impl IvmRuntime {
         })
     }
 
+    /// Tries to rewrite a direct subscription into a shared shape family.
+    ///
+    /// When the graph contains a liftable `field = literal` filter (see
+    /// [`lift_literal_filter`]), the literal becomes a binding value and the
+    /// filter becomes a join against a hidden binding source; the rewritten
+    /// graph (with the literal removed) is the family key, so every
+    /// subscription differing only in the literal maps to the same shape.
+    /// Returns `None` when the graph has no such filter (or is recursive),
+    /// in which case the caller subscribes directly.
     fn plan_auto_direct_family(
         &self,
         graph: &GraphBuilder,
@@ -1259,6 +1458,8 @@ impl IvmRuntime {
         }))
     }
 
+    /// Computes the output row layout a builder graph would produce,
+    /// without inserting anything into the runtime graph.
     fn infer_builder_output(
         &self,
         graph: &GraphBuilder,
@@ -1267,6 +1468,8 @@ impl IvmRuntime {
         self.infer_builder_output_cached(graph, &mut output_memo)
     }
 
+    /// [`Self::infer_builder_output`] memoized by builder-node address, so
+    /// shared subtrees are inferred once per call tree.
     fn infer_builder_output_cached(
         &self,
         graph: &GraphBuilder,
@@ -1281,6 +1484,10 @@ impl IvmRuntime {
         Ok(output)
     }
 
+    /// One level of output inference: sources read their declared/schemxa
+    /// layouts, pass-through operators inherit their input, and the
+    /// shape-changing operators (project, join, unnest, aggregate, ...)
+    /// derive theirs through the descriptor helpers below.
     fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,
@@ -2577,29 +2784,54 @@ impl IvmRuntime {
 }
 
 /// Point-in-time runtime counters for benchmark and diagnostics reporting.
+///
+/// A snapshot of how much the runtime is currently holding and reusing. The
+/// "cheap" fields are always filled; the ones that require walking
+/// arrangement and recursive state (`arrangement_rows`,
+/// `recursive_*`, ...) are only populated when full stats are requested.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
+    /// Total nodes in the deduplicated graph.
     pub graph_nodes: usize,
+    /// Live subscriptions.
     pub active_subscriptions: usize,
+    /// Installed prepared shapes.
     pub active_prepared_shapes: usize,
+    /// Total bound parameter rows across all shapes.
     pub active_shape_params: usize,
+    /// Number of maintained join/aggregate arrangements.
     pub arrangement_count: usize,
+    /// Entries in the evaluation memo (tick + hydration).
     pub eval_memo_entries: usize,
+    /// Payload bytes held by the evaluation memo.
     pub eval_memo_bytes: usize,
+    /// Memo entries that are hydration snapshots (tick-independent).
     pub hydration_memo_entries: usize,
+    /// Lifetime hydration memo hits.
     pub hydration_memo_hits: u64,
+    /// Lifetime hydration memo misses (recomputes).
     pub hydration_memo_computes: u64,
+    /// Distinct nodes ever hydrated.
     pub hydration_memo_distinct_computed_nodes: usize,
+    /// Live rows summed across all arrangements (full stats only).
     pub arrangement_rows: usize,
+    /// Encoded arrangement bytes (full stats only).
     pub arrangement_encoded_bytes: usize,
+    /// Number of recursive operator states (full stats only).
     pub recursive_state_count: usize,
+    /// Rows accumulated by recursive fixpoints (full stats only).
     pub recursive_accumulated_rows: usize,
+    /// Encoded bytes of recursive accumulation (full stats only).
     pub recursive_accumulated_encoded_bytes: usize,
+    /// Builder nodes callers asked for, before deduplication.
     pub logical_nodes_requested: u64,
+    /// Nodes actually present after deduplication.
     pub deduped_graph_nodes: usize,
 }
 
 impl RuntimeStats {
+    /// How well node sharing paid off: deduplicated nodes divided by
+    /// requested nodes. `1.0` means no sharing; lower means more reuse.
     pub fn dedupe_ratio(&self) -> f64 {
         if self.logical_nodes_requested == 0 {
             return 1.0;
@@ -2611,38 +2843,58 @@ impl RuntimeStats {
 /// Metrics produced by one runtime tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TickMetrics {
+    /// The tick number this batch was processed at.
     pub tick: u64,
+    /// Input record changes across all tables in the batch.
     pub table_delta_records: usize,
+    /// Node output records produced while evaluating the tick.
     pub records_processed: usize,
+    /// Number of recursive fixpoints recomputed.
     pub recursive_recomputes: usize,
+    /// Hydration memo hits during this tick.
     pub hydration_memo_hits: u64,
+    /// Hydration memo misses during this tick.
     pub hydration_memo_computes: u64,
+    /// Nodes hydrated during this tick.
     pub hydration_memo_computed_nodes: HashSet<NodeId>,
+    /// Subscriptions that received a non-empty delivery.
     pub notifications_sent: usize,
+    /// Total records across all deliveries.
     pub notification_records: usize,
+    /// Total encoded bytes across all deliveries.
     pub notification_encoded_bytes: usize,
+    /// End-of-tick runtime snapshot (cheap or full per configuration).
     pub runtime_stats: RuntimeStats,
 }
 
 /// Recursive scope path used to namespace context-dependent state.
+///
+/// The empty path is the root (ordinary query execution); each nested
+/// recursive evaluation pushes its recursive node id, so state inside one
+/// fixpoint cannot collide with another's.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) struct ScopePath(Vec<NodeId>);
 
 impl ScopePath {
+    /// The empty (root) path.
     fn root() -> Self {
         Self(Vec::new())
     }
 }
 
+/// Interned handle for a [`ScopePath`], so scopes compare and hash by
+/// identity and can key state maps cheaply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ScopeId(crate::Intern<ScopePath>);
 
 impl ScopeId {
+    /// The shared root scope.
     fn root() -> Self {
         static ROOT: OnceLock<ScopeId> = OnceLock::new();
         *ROOT.get_or_init(|| Self(crate::Intern::new(ScopePath::root())))
     }
 
+    /// The scope one level deeper, for evaluating `recursive_node`'s step.
     pub(super) fn child(self, recursive_node: NodeId) -> Self {
         let mut scope = self.0.0.clone();
         scope.push(recursive_node);
@@ -2662,10 +2914,15 @@ struct OperatorStateKey {
     /// Empty for normal query execution; nested recursive scopes append their
     /// recursive node ids here.
     scope: ScopeId,
+    /// The node the state belongs to.
     node: NodeId,
 }
 
 /// Key for a reusable join-side arrangement.
+///
+/// Two operators that need the same input arranged the same way (same fields,
+/// same layout, same scope) get the same key and thus share one arrangement —
+/// this is what lets unrelated queries reuse each other's indexed state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ArrangementKey {
     /// Context-independent inputs use the root scope and can be shared across
@@ -2673,11 +2930,16 @@ struct ArrangementKey {
     scope: ScopeId,
     /// The graph fragment whose records are arranged.
     input: NodeId,
+    /// The fields the records are keyed by.
     fields: Arc<[String]>,
+    /// The layout of the arranged records.
     descriptor: RecordDescriptor,
 }
 
 /// Database tick plus recursive sub-tick for scoped arrangement freshness.
+///
+/// Root-scope state uses `sub_tick = 0` (table time); recursive state
+/// advances `sub_tick` per fixpoint iteration within one database `tick`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct SubTick {
     tick: u64,
@@ -2700,18 +2962,24 @@ pub(super) struct AsOf<T, S> {
 }
 
 impl<T, S> AsOf<T, S> {
+    /// Wraps a value with no freshness stamp yet (never advanced).
     fn new(value: T) -> Self {
         Self { value, as_of: None }
     }
 
+    /// The wrapped value, ignoring freshness.
     pub(super) fn value(&self) -> &T {
         &self.value
     }
 
+    /// Mutable access to the wrapped value; the caller is responsible for
+    /// then advancing the stamp with `mark_forward_as_of`.
     pub(super) fn value_mut(&mut self) -> &mut T {
         &mut self.value
     }
 
+    /// The logical time the value currently reflects, or `None` if never
+    /// advanced.
     pub(super) fn as_of(&self) -> Option<S>
     where
         S: Copy,
@@ -2724,6 +2992,9 @@ impl<T, S> AsOf<T, S>
 where
     S: Copy + Ord + std::fmt::Debug,
 {
+    /// Reads the value only if it reflects exactly `expected`; otherwise
+    /// fails with [`IvmRuntimeError::StaleRuntimeState`]. This is where a
+    /// stale shared read surfaces loudly instead of returning wrong rows.
     pub(super) fn value_at(&self, expected: S) -> Result<&T, IvmRuntimeError> {
         if self.as_of == Some(expected) {
             return Ok(&self.value);
@@ -2734,6 +3005,8 @@ where
         })
     }
 
+    /// Advances the stamp to `next`, rejecting a move *backwards* with
+    /// [`IvmRuntimeError::OutOfOrderRuntimeState`].
     pub(super) fn mark_forward_as_of(&mut self, next: S) -> Result<(), IvmRuntimeError> {
         if self.as_of.is_some_and(|current| current > next) {
             return Err(IvmRuntimeError::OutOfOrderRuntimeState {
@@ -2745,6 +3018,9 @@ where
         Ok(())
     }
 
+    /// Sets the stamp to `next` unless it is already ahead — used by
+    /// `Replace`-mode rebuilds, which legitimately rewrite state at the same
+    /// logical time.
     pub(super) fn replace_as_of_at_least(&mut self, next: S) {
         if self.as_of.is_none_or(|current| current <= next) {
             self.as_of = Some(next);
@@ -2761,23 +3037,32 @@ impl<T: Default, S> Default for AsOf<T, S> {
 /// Whether an arrangement should consume a delta or be rebuilt from a snapshot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum ArrangementUpdateMode {
+    /// Steady state: apply the delta on top of existing arranged rows.
     #[default]
     Accumulate,
+    /// Hydration: the input is a full snapshot, so rebuild the arrangement
+    /// from scratch instead of layering.
     Replace,
 }
 
+/// Whether a node is being evaluated for a live tick or for hydration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum EvalMode {
+    /// Delta evaluation within a public tick; results are tick-scoped.
     #[default]
     Tick,
+    /// Snapshot evaluation; results are full and tick-independent.
     Hydrate,
 }
 
 /// Key for one cached node evaluation within a logical tick.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct EvalMemoKey {
+    /// The scope the node was evaluated in.
     scope: ScopeId,
+    /// The evaluated node.
     node: NodeId,
+    /// Hash of which tables/bindings/frontiers the node reads.
     input_signature_hash: u64,
     /// Tick-mode results are deltas and are only reusable inside one public
     /// tick. Hydration results are snapshots, so their key omits the tick and
@@ -2786,14 +3071,23 @@ struct EvalMemoKey {
     /// Recursive sub-ticks intentionally affect memoization, not operator
     /// state identity.
     sub_tick: u64,
+    /// Digest of the frontier-binding contents, so different recursive
+    /// frontiers do not share a cache entry.
     context_digest: u64,
 }
 
+/// One cached node result plus the metadata that decides when to reuse or
+/// evict it.
 #[derive(Clone, Debug)]
 struct EvalMemoEntry {
+    /// The cached output.
     records: Arc<RecordDeltas>,
+    /// The `input_generation` the result was computed at; a mismatch means
+    /// an input changed and the entry is stale.
     input_watermark: u64,
+    /// Encoded size of `records`, tracked for the byte budget.
     payload_bytes: usize,
+    /// `memo_use_clock` value at last use, for LRU eviction.
     last_used: u64,
 }
 
@@ -2813,11 +3107,18 @@ impl EvalMemoEntry {
     }
 }
 
+/// The set of external inputs a node (transitively) reads, plus a precomputed
+/// hash. Drives both memo keys and the "does this node depend on a recursive
+/// frontier" question that decides scoping.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NodeInputSignature {
+    /// Base tables read.
     tables: Arc<[String]>,
+    /// Binding-source shapes read.
     bindings: Arc<[String]>,
+    /// Recursive frontier bindings read; non-empty means context-dependent.
     frontier_bindings: Arc<[FrontierName]>,
+    /// Precomputed hash of the three sets.
     hash: u64,
 }
 
@@ -2845,6 +3146,11 @@ impl NodeInputSignature {
 }
 
 /// Current scoped inputs and logical time for node evaluation.
+///
+/// One of these is threaded through a whole evaluation: it carries the scope,
+/// the recursive sub-tick, the frontier bindings visible to
+/// `FrontierSource` nodes, and the tick-vs-hydrate / accumulate-vs-replace
+/// flags. The `root*` constructors set up the common entry points.
 #[derive(Clone, Debug, Default)]
 struct EvalContext {
     /// Current operator-state namespace.
@@ -2853,14 +3159,18 @@ struct EvalContext {
     sub_tick: u64,
     /// FrontierSource bindings, currently used for recursive frontiers.
     bindings: HashMap<FrontierName, RecordDeltas>,
+    /// Content digest of each binding, for memo `context_digest`.
     binding_digests: HashMap<FrontierName, u64>,
     /// Hydrate preparation rebuilds arrangements instead of layering onto them.
     arrangement_update_mode: ArrangementUpdateMode,
+    /// Tick vs hydrate evaluation.
     eval_mode: EvalMode,
+    /// Whether hydration should also seed maintained arrangements.
     hydrate_arrangements: bool,
 }
 
 impl EvalContext {
+    /// Steady-state root context: tick mode, accumulate arrangements.
     fn root() -> Self {
         Self {
             scope: ScopeId::root(),
@@ -2873,6 +3183,8 @@ impl EvalContext {
         }
     }
 
+    /// One-shot hydration context: hydrate mode, rebuild arrangements, do not
+    /// seed maintained state.
     fn root_snapshot() -> Self {
         Self {
             scope: ScopeId::root(),
@@ -2885,6 +3197,8 @@ impl EvalContext {
         }
     }
 
+    /// Subscription hydration context: like [`Self::root_snapshot`] but also
+    /// seeds maintained arrangements so later ticks update incrementally.
     fn root_subscription_snapshot() -> Self {
         Self {
             scope: ScopeId::root(),
@@ -2897,6 +3211,8 @@ impl EvalContext {
         }
     }
 
+    /// Recursive-step context: makes `deltas` visible to the matching
+    /// `FrontierSource` at `sub_tick`, in tick/accumulate mode.
     pub(super) fn with_binding(
         scope: ScopeId,
         sub_tick: u64,
@@ -2919,6 +3235,8 @@ impl EvalContext {
         }
     }
 
+    /// Like [`Self::with_binding`], but with an explicit arrangement update
+    /// mode (recursive hydration passes `Replace`).
     pub(super) fn with_binding_and_arrangement_mode(
         scope: ScopeId,
         sub_tick: u64,
@@ -2948,26 +3266,32 @@ impl EvalContext {
 pub struct SubscriptionId(u64);
 
 impl SubscriptionId {
+    /// The subscription's id as a retainer key string.
     fn retainer_key(self) -> String {
         self.0.to_string()
     }
 }
 
+/// Stable handle for an installed prepared shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PreparedShapeId(u64);
 
 impl PreparedShapeId {
+    /// The shape's id as a retainer key string.
     fn retainer_key(self) -> String {
         self.0.to_string()
     }
 }
 
+/// A prepared shape handle returned by [`IvmRuntime::prepare`], passed back
+/// to [`IvmRuntime::bind_shape`] to create bound subscriptions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedShape {
     id: PreparedShapeId,
 }
 
 impl PreparedShape {
+    /// The shape's id.
     pub fn id(&self) -> PreparedShapeId {
         self.id
     }
@@ -2980,13 +3304,20 @@ impl PreparedShape {
 /// appends a route filter and public projection for each sink.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RoutedMultisinkTerminal {
+    /// The sink name this terminal feeds.
     pub sink: String,
+    /// The route-carrying graph the runtime maintains.
     pub graph: GraphBuilder,
+    /// Output columns holding the binding values, used to filter each
+    /// binding's rows out of the shared output.
     pub route_fields: Vec<String>,
+    /// Output columns a bound subscriber actually sees.
     pub public_fields: Vec<String>,
 }
 
 impl RoutedMultisinkTerminal {
+    /// Builds a terminal from its sink name, graph, route columns, and
+    /// public columns.
     pub fn new(
         sink: impl Into<String>,
         graph: GraphBuilder,
@@ -3014,22 +3345,28 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// The underlying subscription id.
     pub fn id(&self) -> SubscriptionId {
         self.inner.id()
     }
 
+    /// Blocks until the next delivery (first is the snapshot, then per-tick
+    /// deltas), returning this sink's rows.
     pub fn recv(&self) -> Result<RecordDeltas, RecvError> {
         self.inner
             .recv()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
+    /// Non-blocking [`Self::recv`].
     pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
         self.inner
             .try_recv()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
+    /// Pulls this subscription's single sink out of a multisink delivery,
+    /// yielding an empty batch if the sink was absent this tick.
     fn extract_sink_deltas(&self, mut deltas: MultisinkDeltas) -> RecordDeltas {
         deltas
             .sinks
@@ -3041,6 +3378,8 @@ impl Subscription {
 /// Deltas grouped by named output sink for one multisink graph subscription.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultisinkDeltas {
+    /// Per-sink deltas at one logical time; sinks with no change may be
+    /// absent.
     pub sinks: BTreeMap<String, RecordDeltas>,
 }
 
@@ -3059,10 +3398,12 @@ impl QueuedMultisinkDeltas {
 }
 
 impl MultisinkDeltas {
+    /// `true` when no sink carries any delta.
     pub fn is_empty(&self) -> bool {
         self.sinks.values().all(RecordDeltas::is_empty)
     }
 
+    /// The deltas for one named sink, if present.
     pub fn get(&self, sink: &str) -> Option<&RecordDeltas> {
         self.sinks.get(sink)
     }
@@ -3076,20 +3417,26 @@ pub struct MultisinkSubscription {
 }
 
 impl MultisinkSubscription {
+    /// The subscription id.
     pub fn id(&self) -> SubscriptionId {
         self.id
     }
 
+    /// Blocks for the next multisink delivery.
     pub fn recv(&self) -> Result<MultisinkDeltas, RecvError> {
         self.receiver.recv().map(|queued| queued.deltas)
     }
 
+    /// Non-blocking [`Self::recv`].
     pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
         self.receiver.try_recv().map(|queued| queued.deltas)
     }
 }
 
 impl PredicateExpr {
+    /// Evaluates the predicate against one record (SQL NULL semantics; see
+    /// the type docs). This is the runtime side of the descriptor defined in
+    /// [`crate::ivm::op_types`].
     fn matches(&self, record: BorrowedRecord<'_>) -> Result<bool, IvmRuntimeError> {
         match self {
             Self::Eq { field, value } => {
@@ -3138,23 +3485,33 @@ impl PredicateExpr {
 /// Deltas for one base table in a committed batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableDelta {
+    /// The changed table.
     pub table: String,
+    /// The table's row layout.
     pub descriptor: RecordDescriptor,
+    /// The weighted row changes: `+1` inserted, `-1` removed.
     pub deltas: Vec<RecordDelta>,
 }
 
 /// Weighted change to one encoded record.
+///
+/// This is one element of a weighted record set (a Z-set): an encoded row
+/// with a signed multiplicity. Positive weights add copies, negative remove.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordDelta {
+    /// The encoded row.
     pub record: Bytes,
+    /// The signed multiplicity.
     pub weight: i64,
 }
 
 impl RecordDelta {
+    /// The raw encoded bytes.
     pub fn raw(&self) -> &[u8] {
         &self.record
     }
 
+    /// A [`BorrowedRecord`] view over the row, given its descriptor.
     pub fn borrowed<'a>(&'a self, descriptor: &'a RecordDescriptor) -> BorrowedRecord<'a> {
         BorrowedRecord::new(&self.record, descriptor)
     }
@@ -3232,13 +3589,19 @@ struct CompiledNode {
 }
 
 /// Descriptor plus a batch of weighted encoded record changes.
+///
+/// A weighted record set flowing on one graph edge, or a subscription's
+/// delivery: the shared row layout plus the individual [`RecordDelta`]s.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordDeltas {
+    /// The row layout every delta uses.
     pub descriptor: RecordDescriptor,
+    /// The weighted row changes.
     pub deltas: Vec<RecordDelta>,
 }
 
 impl RecordDeltas {
+    /// An empty batch with the given layout.
     fn empty(descriptor: RecordDescriptor) -> Self {
         Self {
             descriptor,
@@ -3246,16 +3609,20 @@ impl RecordDeltas {
         }
     }
 
+    /// `true` when there are no changes.
     pub fn is_empty(&self) -> bool {
         self.deltas.is_empty()
     }
 
+    /// Iterates `(row view, weight)` pairs without decoding to [`Value`]s.
     pub fn iter(&self) -> impl Iterator<Item = (BorrowedRecord<'_>, i64)> {
         self.deltas
             .iter()
             .map(|delta| (delta.borrowed(&self.descriptor), delta.weight))
     }
 
+    /// Decodes every delta into `(values, weight)` pairs — handy in tests and
+    /// callers that want owned values rather than encoded bytes.
     pub fn to_values(&self) -> Result<Vec<(Vec<Value>, i64)>, records::Error> {
         self.iter()
             .map(|(record, weight)| record.to_values().map(|values| (values, weight)))
@@ -4297,7 +4664,12 @@ struct NodeRuntimeMeta {
     aggregate_group_fields: Option<Arc<[String]>>,
 }
 
-/// Namespace for stateless operator helper methods.
+/// Namespace for the stateless operator evaluators.
+///
+/// Each `update_*` here turns one node's input delta into its output delta
+/// without any cross-tick state — sources, filter, project, unnest, union,
+/// index-by, persist. Stateful operators (joins, aggregates, recursion) are
+/// methods on [`TickEvaluator`] instead, because they carry arrangements.
 struct NodeState;
 
 impl NodeState {
@@ -4645,15 +5017,27 @@ impl NodeState {
     }
 }
 
+/// Cross-tick state owned per stateful operator node.
+///
+/// Stateless nodes carry `Stateless` (no state); the others hold the
+/// arranged/accumulated state their incremental algorithm needs. Note semi
+/// and anti joins both reuse [`AntiJoinState`], differing only in how they
+/// read it.
 #[derive(Clone, Debug)]
 enum OperatorState {
+    /// No maintained state.
     Stateless,
+    /// Inner-join arrangement state.
     Join(JoinState),
+    /// Semi-join state (shares the anti-join machinery).
     SemiJoin(AntiJoinState),
+    /// Anti-join state.
     AntiJoin(AntiJoinState),
+    /// Recursive fixpoint accumulation, stamped with its logical tick.
     Recursive(AsOf<RecursiveState, Tick>),
 }
 
+/// The initial [`OperatorState`] an operator needs (or `Stateless`).
 fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
@@ -4734,6 +5118,11 @@ fn validate_arg_by_primary_key_indices(
 }
 
 /// Single-tick evaluator over a deduplicated graph.
+///
+/// Borrows all the mutable state maps from [`IvmRuntime`] for the duration of
+/// one evaluation and drives it through [`Self::update_node`], which
+/// recursively evaluates inputs, applies the operator, and memoizes the
+/// result. The `context` carries scope, sub-tick, and tick-vs-hydrate mode.
 struct TickEvaluator<'a, S> {
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
@@ -4756,6 +5145,10 @@ struct TickEvaluator<'a, S> {
 
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
 /// This avoids giving recursion ownership of the whole [`IvmRuntime`].
+///
+/// [`recursion`] runs step graphs by spinning up fresh [`TickEvaluator`]s
+/// with different frontier bindings; this view hands it exactly the state
+/// maps it needs (via `eval_*`) without the rest of the runtime.
 pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
@@ -4821,6 +5214,8 @@ impl<'a, S> GraphRuntimeView<'a, S>
 where
     S: OrderedKvStorage,
 {
+    /// Evaluates `node` with one recursive frontier binding visible at
+    /// `sub_tick` — one iteration of a fixpoint's step graph.
     pub(super) fn eval_with_binding(
         &mut self,
         sub_tick: u64,
@@ -4852,6 +5247,10 @@ where
             .map(|records| records.as_ref().clone())
     }
 
+    /// Like [`Self::eval_with_binding`], but with a substituted table-delta
+    /// set and an isolated memo — recursive hydration replays the accumulated
+    /// frontier as if it were table input, and must not pollute the outer
+    /// tick's memo.
     pub(super) fn eval_with_binding_and_table_deltas(
         &mut self,
         table_deltas: &[TableDelta],
@@ -4892,11 +5291,16 @@ where
             .map(|records| records.as_ref().clone())
     }
 
+    /// Drops all operator state scoped to this view's recursive scope,
+    /// resetting the fixpoint's per-iteration state between recomputes.
     pub(super) fn clear_operator_state_for_scope(&mut self) {
         self.operator_states
             .retain(|key, _| key.scope != self.scope);
     }
 
+    /// Evaluates `node` at this view's scope with no frontier binding —
+    /// used for the parts of a recursive graph that read base tables rather
+    /// than the frontier.
     pub(super) fn eval_root(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
         let mut evaluator = TickEvaluator {
             schema: self.schema,
@@ -5000,6 +5404,13 @@ where
         Ok(true)
     }
 
+    /// Evaluates one node and returns its output delta (tick mode) or full
+    /// snapshot (hydrate mode).
+    ///
+    /// The heart of the tick loop: it reuses a fresh memo entry when the
+    /// node's inputs have not changed, short-circuits context-independent
+    /// nodes after the first recursive sub-tick, otherwise recursively
+    /// evaluates the inputs, dispatches on the operator, and memoizes.
     fn update_node(&mut self, node: NodeId) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
         let graph_node = self
             .graph
@@ -5447,6 +5858,9 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Incrementally maintains an inner join: pulls both sides' shared
+    /// arrangements, applies the incoming deltas through [`JoinState`], and
+    /// writes the arrangements back. See `join.rs` for the delta algebra.
     fn update_join(
         &mut self,
         node: NodeId,
@@ -5516,6 +5930,8 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Incrementally maintains an anti join (left rows with no right match);
+    /// see [`AntiJoinState::apply`].
     fn update_anti_join(
         &mut self,
         node: NodeId,
@@ -5576,6 +5992,8 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Incrementally maintains a semi join (left rows with at least one right
+    /// match); see [`AntiJoinState::apply_semi`].
     fn update_semi_join(
         &mut self,
         node: NodeId,
@@ -5635,6 +6053,10 @@ where
         })
     }
 
+    /// Incrementally maintains a per-group min/max-row operator. For each
+    /// group touched by the input delta, it recomputes the group's winner
+    /// from the arrangement, compares it to the winner before this delta,
+    /// and emits a retract/insert pair when the winner changed.
     fn update_arg_by(
         &mut self,
         node: NodeId,
@@ -5740,6 +6162,9 @@ where
         })
     }
 
+    /// Incrementally maintains a per-group ordered top-N window. Same shape
+    /// as [`Self::update_arg_by`], but diffs the whole before/after window
+    /// (offset..offset+limit) per touched group instead of a single winner.
     fn update_top_by(
         &mut self,
         node: NodeId,
@@ -5828,6 +6253,10 @@ where
         })
     }
 
+    /// Incrementally maintains grouped aggregates. For each touched group it
+    /// recomputes the aggregate row from the arrangement's members, compares
+    /// against the pre-delta row, and emits a retract/insert pair on change.
+    /// In hydrate mode it computes every group from the snapshot directly.
     fn update_aggregate(
         &mut self,
         node: NodeId,
@@ -6073,6 +6502,11 @@ where
         }
     }
 
+    /// Drives a fixpoint node. In tick mode it computes the incremental
+    /// change to the fixpoint via [`recursive_delta`]; in hydrate mode it
+    /// recomputes the fixpoint from scratch ([`recompute_recursive`]) and
+    /// seeds its step arrangements. The actual iteration lives in
+    /// [`recursion`].
     fn update_recursive(
         &mut self,
         node: NodeId,
@@ -6265,6 +6699,10 @@ fn project_field_expr(
     }
 }
 
+/// Builds one projected output record. When every output field is a plain
+/// field copy it takes the fast byte-copy path
+/// ([`RecordDescriptor::project_record_raw`]); otherwise it decodes to
+/// [`Value`]s, applies literals/nullable wraps, and re-encodes.
 fn project_record(
     expressions: &[ProjectionExpr],
     mapping: &[(usize, usize)],
@@ -6555,6 +6993,10 @@ fn index_record_descriptor() -> RecordDescriptor {
     })
 }
 
+/// Turns row deltas into index-entry deltas: for each input row it builds
+/// the index key(s) (one per row, or one per array element for array-keyed
+/// indices), optionally appends the primary key for non-unique indices, and
+/// emits a `(key, value)` entry carrying the row's weight.
 fn apply_index_by(
     index_by: &IndexByOp,
     input_descriptor: &RecordDescriptor,
@@ -6678,11 +7120,14 @@ fn index_keys(
     Ok(keys)
 }
 
+/// Encoded key bounds a static scan resolves to: a prefix (point/prefix
+/// scans) or a `start..end` range.
 pub(super) enum StaticScanBounds {
     Prefix(Vec<u8>),
     Range { start: Vec<u8>, end: Vec<u8> },
 }
 
+/// Encodes a [`StaticScanSpec`]'s literal key parts into byte bounds.
 pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, IvmRuntimeError> {
     match scan {
         StaticScanSpec::Point(values) | StaticScanSpec::Prefix(values) => {
@@ -6736,6 +7181,8 @@ fn persisted_index_scan_bounds(
     })
 }
 
+/// The storage key prefix that namespaces one table's index inside the
+/// shared `"indices"` column family: `table\0index\0`.
 pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
     let mut prefix = Vec::new();
     // NUL separators keep table/index names prefix-decodable without escaping.
@@ -6768,6 +7215,8 @@ fn primary_key_value_bytes(
     Ok(bytes)
 }
 
+/// Resolves a table's primary-key columns to logical field indices in
+/// `descriptor`; fails if the table has no primary key.
 pub(super) fn primary_key_field_indices(
     table: &TableSchema,
     descriptor: &RecordDescriptor,
@@ -6787,6 +7236,11 @@ pub(super) fn primary_key_field_indices(
         .collect()
 }
 
+/// Appends one field of `record` to `key` in order-preserving key encoding —
+/// a type tag byte followed by big-endian / sign-flipped / escaped payload so
+/// that comparing key bytes matches comparing values. The fast typed
+/// accessor path for common types; the tail falls back to [`encode_key_part`]
+/// on the decoded value.
 fn encode_record_field_key_part(
     key: &mut Vec<u8>,
     descriptor: &RecordDescriptor,
@@ -7230,6 +7684,9 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
+/// The output layout of a join: every left field prefixed `left.` and every
+/// right field prefixed `right.`, so downstream projections can address both
+/// sides unambiguously.
 fn join_descriptor(left: &RecordDescriptor, right: &RecordDescriptor) -> RecordDescriptor {
     let fields = left
         .fields()
@@ -7251,6 +7708,12 @@ fn join_descriptor(left: &RecordDescriptor, right: &RecordDescriptor) -> RecordD
     RecordDescriptor::new(fields)
 }
 
+/// Appends one decoded [`Value`] to `key` in order-preserving key encoding.
+///
+/// The general fallback behind [`encode_record_field_key_part`]. Each value
+/// gets a leading type tag, then a payload chosen so lexicographic byte order
+/// matches value order: big-endian integers, sign-flipped `i64`/`f64`,
+/// NUL-escaped strings/bytes. Arrays have no single key and are rejected.
 pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmRuntimeError> {
     // Type tags make composite keys unambiguous. Payload bytes are chosen to
     // preserve natural ordering in RocksDB's lexicographic iterator order.
@@ -7349,6 +7812,9 @@ fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.extend([0, 0]);
 }
 
+/// Reshapes binding rows to a binding-source node's output layout by name
+/// (the stored binding descriptor and the node's declared output may order
+/// or subset fields differently). A no-op when the layouts already match.
 pub(super) fn project_binding_source_deltas(
     input: &RecordDeltas,
     output_desc: &RecordDescriptor,
@@ -7393,6 +7859,10 @@ pub(super) fn project_binding_source_deltas(
     })
 }
 
+/// Collapses a weighted record set to canonical form: sums the weights of
+/// equal rows and drops any row whose total weight is zero. This is the
+/// Z-set consolidation every operator output goes through so `+1` then `-1`
+/// on the same row cancels instead of both being delivered.
 fn consolidate_deltas(deltas: Vec<RecordDelta>) -> Vec<RecordDelta> {
     if deltas.len() <= 1 {
         return deltas;
@@ -7913,6 +8383,9 @@ fn diff_record_windows(
     retractions
 }
 
+/// Builds the grouping/sort key of a record from several fields, using the
+/// runtime primary-key encoding (see [`encode_runtime_primary_key_part`]).
+/// Used to bucket rows by group in the aggregate/arg-by/top-by operators.
 pub(super) fn encoded_record_key_part(
     descriptor: RecordDescriptor,
     record: &[u8],
@@ -8014,6 +8487,12 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     key.push(0);
 }
 
+/// Everything the runtime can fail with while compiling, ticking, hydrating,
+/// or maintaining a graph. Each `#[error]` string names the specific
+/// condition; the `Graph*` variants are internal invariant violations, the
+/// `Unsupported*` variants are shapes not implemented yet, and
+/// `Stale`/`OutOfOrder`/`UniqueIndexViolation` are the guardrails that turn
+/// bad shared-state reads or constraint breaks into loud errors.
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
     #[error("graph field not found: {0}")]

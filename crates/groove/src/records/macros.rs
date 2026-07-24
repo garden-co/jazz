@@ -12,6 +12,12 @@ use super::{BorrowedRecord, Error, RecordDescriptor, Value, ValueType, decode_va
 pub use paste;
 
 /// Broad record column kind used by generated wrapper layout assertions.
+///
+/// A `FieldKind` deliberately carries less detail than a [`ValueType`]: it
+/// only names the shape (`Enum` with no variant list, `Array` with no
+/// element type, …), which is exactly what a compile-time constant on a
+/// wrapper type can state. [`assert_record_field_layout`] checks it against
+/// the real descriptor at run time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldKind {
     U64,
@@ -30,6 +36,9 @@ pub enum FieldKind {
 }
 
 impl FieldKind {
+    /// `true` when this kind agrees with the concrete `value_type` — an
+    /// `Enum` kind matches any enum schema, an `Array` kind any element
+    /// type, and so on.
     fn matches(self, value_type: &ValueType) -> bool {
         matches!(
             (self, value_type),
@@ -51,13 +60,36 @@ impl FieldKind {
 }
 
 /// Typed field conversion for record newtype wrappers.
+///
+/// Implementing this trait is what lets a Rust type appear as a field in a
+/// [`crate::define_record!`] wrapper: [`Self::read`] pulls the typed value
+/// out of an encoded record, [`Self::to_value`] turns it back into a
+/// [`Value`] for encoding, and [`Self::COLUMN_KIND`] states the expected
+/// column shape so `assert_layout` can verify the descriptor at startup.
+///
+/// Implementations exist for the primitive Rust types, `Option<T>` (nullable
+/// columns), pairs `(A, B)` (two-member tuple columns), and [`Value`] itself
+/// (any column, decoded dynamically). The `impl_record_field_*` macros in
+/// this module generate impls for newtypes such as `struct TrackId(u64)`.
 pub trait RecordField: Sized {
+    /// Reads field `idx` (declaration-order index) of `record` as `Self`.
     fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error>;
 
+    /// Converts `self` back into a [`Value`] for encoding.
     fn to_value(&self) -> Value;
 
+    /// The column shape this type expects; checked against the descriptor
+    /// by [`assert_record_field_layout`].
     const COLUMN_KIND: FieldKind;
 
+    /// Decodes `Self` from exactly one standalone field encoding
+    /// (little-endian scalars).
+    ///
+    /// * `bytes` — the field's encoded bytes, nothing more.
+    /// * `value_type` — the field's declared type, for the type check.
+    ///
+    /// The default rejects everything with a type mismatch; types that can
+    /// appear inside `Option<T>` or tuples override it.
     #[doc(hidden)]
     fn read_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
         let _ = bytes;
@@ -66,6 +98,12 @@ pub trait RecordField: Sized {
         })
     }
 
+    /// Decodes `Self` from one tuple-member encoding, which differs from the
+    /// standalone one: big-endian integers with a sign-flipped `i64`, so
+    /// tuple bytes sort like tuple values.
+    ///
+    /// Types whose two layouts agree (single bytes, UUIDs, …) just inherit
+    /// this default, which delegates to [`Self::read_raw`].
     #[doc(hidden)]
     fn read_tuple_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
         Self::read_raw(bytes, value_type)
@@ -316,6 +354,10 @@ impl RecordField for String {
     }
 }
 
+/// Dynamic escape hatch: reads any column as a decoded [`Value`].
+///
+/// `COLUMN_KIND` is `Nullable` because dynamic cells appear as the nullable
+/// tail columns of [`crate::define_record!`] wrappers.
 impl RecordField for Value {
     fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
         let field = record.field(idx)?;
@@ -338,6 +380,7 @@ impl RecordField for Value {
     }
 }
 
+/// Nullable column: `None` is NULL, `Some` decodes the payload as `T`.
 impl<T: RecordField> RecordField for Option<T> {
     fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
         let field = record.field(idx)?;
@@ -375,6 +418,8 @@ impl<T: RecordField> RecordField for Option<T> {
     }
 }
 
+/// Two-member tuple column, split at the first member's fixed width and
+/// decoded with the order-preserving tuple layout.
 impl<A: RecordField, B: RecordField> RecordField for (A, B) {
     fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
         let field = record.field(idx)?;
@@ -428,6 +473,8 @@ impl<A: RecordField, B: RecordField> RecordField for (A, B) {
     }
 }
 
+/// Shared flag-byte handling for nullable reads: returns `None` for NULL
+/// (validating the zero padding) or hands the payload to `read_present`.
 fn read_nullable_raw<T>(
     bytes: &[u8],
     inner: &ValueType,
@@ -450,6 +497,8 @@ fn read_nullable_raw<T>(
     }
 }
 
+/// Copies `bytes` into a fixed `[u8; N]`, failing unless the length is
+/// exactly `N`.
 fn read_exact_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
     if bytes.len() != N {
         return Err(Error::UnexpectedEof);
@@ -457,6 +506,13 @@ fn read_exact_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
     bytes.try_into().map_err(|_| Error::UnexpectedEof)
 }
 
+/// Checks that field `idx` of `descriptor` is really called `name` and has
+/// the shape `kind` (name and kind checks are debug-only; a missing index
+/// panics in all builds).
+///
+/// Generated wrappers call this from their `assert_layout` so a drifted
+/// field index or a renamed column fails fast at startup instead of quietly
+/// misreading records later.
 #[doc(hidden)]
 pub fn assert_record_field_layout(
     descriptor: &RecordDescriptor,
@@ -481,6 +537,15 @@ pub fn assert_record_field_layout(
     );
 }
 
+/// Implements [`RecordField`] for a `u64` newtype, so it can be used as a
+/// field type in [`crate::define_record!`] wrappers.
+///
+/// ```
+/// use groove::impl_record_field_u64;
+///
+/// struct TrackId(u64);
+/// impl_record_field_u64!(TrackId);
+/// ```
 #[macro_export]
 macro_rules! impl_record_field_u64 {
     ($ty:ty) => {
@@ -515,6 +580,16 @@ macro_rules! impl_record_field_u64 {
     };
 }
 
+/// Implements [`RecordField`] for a `[u8; 16]` newtype stored in a `Bytes`
+/// column. Reading fails with `InvalidOffset` when the stored value is not
+/// exactly 16 bytes long.
+///
+/// ```
+/// use groove::impl_record_field_bytes16;
+///
+/// struct Hash([u8; 16]);
+/// impl_record_field_bytes16!(Hash);
+/// ```
 #[macro_export]
 macro_rules! impl_record_field_bytes16 {
     ($ty:ty) => {
@@ -555,6 +630,15 @@ macro_rules! impl_record_field_bytes16 {
     };
 }
 
+/// Implements [`RecordField`] for a [`uuid::Uuid`] newtype stored in a
+/// `Uuid` column.
+///
+/// ```
+/// use groove::impl_record_field_uuid;
+///
+/// struct PeerId(uuid::Uuid);
+/// impl_record_field_uuid!(PeerId);
+/// ```
 #[macro_export]
 macro_rules! impl_record_field_uuid {
     ($ty:ty) => {
@@ -590,6 +674,23 @@ macro_rules! impl_record_field_uuid {
     };
 }
 
+/// Implements [`RecordField`] for a plain Rust enum stored in an `Enum`
+/// column, mapping each variant to its stored discriminant byte.
+///
+/// The declared discriminants must match the variant positions in the
+/// column's [`EnumSchema`](crate::records::EnumSchema); reading validates
+/// the stored byte against the schema before converting.
+///
+/// ```
+/// use groove::impl_record_field_enum;
+///
+/// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// enum Color {
+///     Red,
+///     Green,
+/// }
+/// impl_record_field_enum!(Color { Color::Red = 0, Color::Green = 1 });
+/// ```
 #[macro_export]
 macro_rules! impl_record_field_enum {
     ($ty:ty { $($variant:path = $disc:expr),+ $(,)? }) => {
@@ -656,6 +757,50 @@ macro_rules! impl_record_field_enum {
     };
 }
 
+/// Defines a typed wrapper struct over an
+/// [`OwnedRecord`](crate::records::OwnedRecord).
+///
+/// Each `index => name: type` line declares one column: its logical field
+/// index, the accessor name, and the Rust type (a [`RecordField`]) to read
+/// it as. The macro generates:
+///
+/// * `FIELD_<NAME>_IDX` constants holding the declared indices;
+/// * `new(record)` / `record()` for wrapping and unwrapping;
+/// * one accessor per field, e.g. `fn title(&self) -> Result<String, Error>`;
+/// * `encode(descriptor, <one value per field>)` to build a wrapped record;
+/// * `assert_layout(descriptor)`, which checks every declared index, name,
+///   and kind against the real descriptor (see
+///   [`assert_record_field_layout`]).
+///
+/// ```
+/// use groove::define_record;
+/// use groove::records::{RecordDescriptor, ValueType};
+///
+/// define_record! {
+///     struct AlbumRow {
+///         0 => id: u64,
+///         1 => title: String,
+///     }
+/// }
+///
+/// let descriptor = RecordDescriptor::new([
+///     ("id", ValueType::U64),
+///     ("title", ValueType::String),
+/// ]);
+/// AlbumRow::assert_layout(&descriptor);
+///
+/// let row = AlbumRow::encode(&descriptor, 13, "Yellow".to_owned()).unwrap();
+/// assert_eq!(row.id().unwrap(), 13);
+/// assert_eq!(row.title().unwrap(), "Yellow");
+/// ```
+///
+/// The second form ends the field list with `.. tail,`. It is for rows whose
+/// trailing columns are only known at run time: the leading columns get
+/// typed accessors as above, while the tail is exposed as dynamic nullable
+/// cells through `cell(i)` / `cells()`. `USER_BASE` (also exported as
+/// `USER_CELLS`) is the number of leading typed columns, so `cell(i)` reads
+/// record field `USER_BASE + i`; `encode` takes the tail as
+/// `&[Option<Value>]`.
 #[macro_export]
 macro_rules! define_record {
     (

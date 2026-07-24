@@ -1,4 +1,10 @@
 //! BTree-backed ordered key/value storage.
+//!
+//! A single-file [`OpfsBTree`] backend, used in the browser over OPFS
+//! ([`OpfsStorage`]) and natively for browser-fidelity harnesses
+//! ([`NativeBtreeStorage`]). The underlying tree has one flat keyspace, so
+//! column families are folded into keys through [`key_codec`]. It implements
+//! [`OrderedKvStorage`] and knows nothing above the byte level.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -16,18 +22,26 @@ use super::{
     apply_storage_delta, key_codec,
 };
 
+/// Ordered KV storage over one BTree file, generic over the file backend
+/// `F`. The tree and the known column-family set are shared (interior
+/// mutability) so clones address the same store.
 #[derive(Clone)]
 pub struct BtreeStorage<F: SyncFile> {
     tree: Rc<RefCell<OpfsBTree<F>>>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
 }
 
+/// The browser storage backend: a BTree over an OPFS file.
 #[cfg(target_arch = "wasm32")]
 pub type OpfsStorage = BtreeStorage<OpfsFile>;
 
+/// The native storage backend: the same BTree over a std file, for
+/// browser-fidelity harnesses.
 #[cfg(not(target_arch = "wasm32"))]
 pub type NativeBtreeStorage = BtreeStorage<StdFile>;
 
+/// BTree options tuned to match browser/OPFS behavior (pin internal pages,
+/// coalesce reads), so native harnesses exercise the same access patterns.
 fn browser_fidelity_options() -> BTreeOptions {
     BTreeOptions {
         pin_internal_pages: true,
@@ -36,6 +50,7 @@ fn browser_fidelity_options() -> BTreeOptions {
     }
 }
 
+/// [`browser_fidelity_options`] with an explicit WAL sync policy.
 fn browser_fidelity_options_with_sync_policy(sync_policy: BtreeSyncPolicy) -> BTreeOptions {
     BTreeOptions {
         sync_policy,
@@ -47,11 +62,15 @@ impl<F> BtreeStorage<F>
 where
     F: SyncFile,
 {
+    /// Opens a store over an already-obtained file `F` with the given column
+    /// families, using the browser-fidelity BTree options.
     pub fn from_file(file: F, column_families: &[&str]) -> Result<Self, Error> {
         let tree = OpfsBTree::open(file, browser_fidelity_options())?;
         Self::from_tree(tree, column_families)
     }
 
+    /// Wraps an opened tree and its declared column families into shared
+    /// handles.
     fn from_tree(tree: OpfsBTree<F>, column_families: &[&str]) -> Result<Self, Error> {
         Ok(Self {
             tree: Rc::new(RefCell::new(tree)),
@@ -61,6 +80,7 @@ where
         })
     }
 
+    /// Fails with [`Error::ColumnFamilyNotFound`] unless `cf` is declared.
     fn ensure_cf(&self, cf: &ColumnFamilyName) -> Result<(), Error> {
         if self.column_families.borrow().contains(cf) {
             Ok(())
@@ -69,11 +89,15 @@ where
         }
     }
 
+    /// Validates the CF, then folds `(cf, key)` into one namespaced tree key
+    /// (see [`key_codec`]).
     fn encoded_key(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Vec<u8>, Error> {
         self.ensure_cf(cf)?;
         key_codec::encode_column_family_key(cf, key)
     }
 
+    /// Checks every operation's CF up front, so a batch with an unknown CF
+    /// fails before any write lands.
     fn prevalidate_write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         let column_families = self.column_families.borrow();
         for operation in operations {
@@ -105,6 +129,8 @@ impl NativeBtreeStorage {
         Self::from_file(StdFile::open(path)?, column_families)
     }
 
+    /// Like [`Self::open`], but with an explicit WAL sync policy (for tests or
+    /// harnesses that want a specific durability/latency trade-off).
     pub fn open_with_sync_policy(
         path: impl AsRef<std::path::Path>,
         column_families: &[&str],
@@ -120,6 +146,7 @@ impl NativeBtreeStorage {
 
 #[cfg(target_arch = "wasm32")]
 impl OpfsStorage {
+    /// Opens the OPFS-backed store for a namespace, syncing the WAL on close.
     pub async fn open(namespace: &str, column_families: &[&str]) -> Result<Self, Error> {
         let file = OpfsFile::open(namespace).await?;
         let tree = OpfsBTree::open(
@@ -129,6 +156,7 @@ impl OpfsStorage {
         Self::from_tree(tree, column_families)
     }
 
+    /// Deletes the OPFS file for a namespace.
     pub async fn destroy(namespace: &str) -> Result<(), Error> {
         Ok(OpfsFile::destroy(namespace).await?)
     }
@@ -360,6 +388,8 @@ impl<F> super::ReopenableStorage for BtreeStorage<F>
 where
     F: SyncFile,
 {
+    /// Adds the given column families to the declared set. The tree has one
+    /// keyspace, so this is just registering names — no file reopen needed.
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
         self.column_families
             .borrow_mut()

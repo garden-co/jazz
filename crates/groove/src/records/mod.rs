@@ -4,13 +4,14 @@
 //! Public APIs use logical declaration-order indices. The encoded bytes use an
 //! internal physical order with fixed-width fields first and variable-width
 //! fields second; that physical space is represented only by the private
-//! [`PhysicalFieldIdx`] newtype and folded into the descriptor layout cache.
+//! `PhysicalFieldIdx` newtype and folded into the descriptor layout cache.
 //! Records only store bytes; names and types live in the descriptor.
 //!
 //! This module owns descriptor construction, layout validation, encoding,
 //! decoding, typed field accessors, projection, patching, and owned/borrowed
 //! record wrappers. Logical values and value-type encoding helpers live in
-//! [`values`]; generated typed row wrappers live in [`macros`]. Schemas decide
+//! the private `values` submodule; generated typed row wrappers live in
+//! [`macros`]. Schemas decide
 //! which descriptors to build, and storage only sees encoded bytes.
 //!
 //! Multi-byte scalars and offsets are little-endian. All offsets are `u32`
@@ -97,6 +98,14 @@ use values::{
     validate_schema_value_type, write_u32,
 };
 
+/// Encodes one standalone value with [`encode_value`], outside any record.
+///
+/// * `value` — the logical value to encode.
+/// * `value_type` — the type to encode it as; the pair must match.
+///
+/// This is the crate-visible door into the private value encoders, for
+/// callers that need a single field's bytes (for example key building)
+/// without laying out a whole record.
 pub(crate) fn encode_single_field_value(
     value: &Value,
     value_type: &ValueType,
@@ -112,6 +121,13 @@ pub(crate) fn encode_single_field_value(
 pub struct RecordDescriptor(Intern<RecordDescriptorData>);
 
 impl RecordDescriptor {
+    /// Builds a descriptor from `(name, type)` pairs in declaration order.
+    ///
+    /// * `fields` — one `(field name, field type)` pair per field, for
+    ///   example `[("id", ValueType::U64), ("title", ValueType::String)]`.
+    ///
+    /// Descriptors are interned: building the same field list twice returns
+    /// handles that compare equal and share one stored copy.
     pub fn new(fields: impl IntoIterator<Item = (impl Into<String>, ValueType)>) -> Self {
         let fields = fields
             .into_iter()
@@ -124,16 +140,38 @@ impl RecordDescriptor {
         Self::from_logical_fields(fields)
     }
 
+    /// All fields in logical (declaration) order.
     pub fn fields(&self) -> &[DescriptorField] {
         &self.fields
     }
 
+    /// Finds the logical index of a field by name.
+    ///
+    /// * `field_name` — the declared name, for example `"title"`.
+    ///
+    /// Returns `None` when no field has that name. Resolve names once and
+    /// keep the index around: the per-field accessors all take indices.
     pub fn field_index(&self, field_name: &str) -> Option<usize> {
         self.fields
             .iter()
             .position(|field| field.name.as_deref() == Some(field_name))
     }
 
+    /// Encodes one record from its logical-order values.
+    ///
+    /// * `values` — one [`Value`] per field, in declaration order; the count
+    ///   and each type must match the descriptor.
+    ///
+    /// Values are validated first, then written in physical order: fixed
+    /// fields, then the offset table, then variable payloads (the module
+    /// docs show the exact layout).
+    ///
+    /// ```text
+    /// descriptor: [id: u64, name: string]
+    /// create(&[Value::U64(13), "Yellow".into()]) ->
+    /// [0d 00 00 00 00 00 00 00][59 65 6c 6c 6f 77]
+    ///  id, fixed, 8 bytes       "Yellow" (last variable field: no offset)
+    /// ```
     pub fn create(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
         if self.fields.len() != values.len() {
             return Err(Error::ArityMismatch {
@@ -183,6 +221,20 @@ impl RecordDescriptor {
         Ok(record)
     }
 
+    /// Builds a new descriptor and record by picking fields out of one or
+    /// more source records.
+    ///
+    /// * `source_descriptors` — the descriptor of each source record,
+    ///   position by position.
+    /// * `source_records` — the encoded source records, in the same order.
+    /// * `mapping` — one `(source record index, source field index)` pair
+    ///   per output field, in output order. For example `[(0, 2), (1, 0)]`
+    ///   builds a two-field record from field 2 of record 0 and field 0 of
+    ///   record 1.
+    ///
+    /// Returns the derived output descriptor together with the encoded
+    /// output record. Prefer [`Self::project_record`] when the output
+    /// descriptor already exists.
     pub fn project(
         source_descriptors: &[RecordDescriptor],
         source_records: &[&[u8]],
@@ -195,6 +247,12 @@ impl RecordDescriptor {
         Ok((descriptor, record))
     }
 
+    /// Encodes a record of *this* descriptor by picking fields from source
+    /// records.
+    ///
+    /// The arguments are the same as [`Self::project`], with `self` playing
+    /// the output descriptor. Each picked field is decoded to a [`Value`]
+    /// and re-encoded; the `raw` variants below skip that round trip.
     pub fn project_record(
         &self,
         source_descriptors: &[RecordDescriptor],
@@ -205,6 +263,14 @@ impl RecordDescriptor {
         self.create(&values)
     }
 
+    /// Like [`Self::project_record`], but copies each field's encoded byte
+    /// span directly — no [`Value`] is ever materialized.
+    ///
+    /// * `source_descriptors` / `source_records` — sources, position by
+    ///   position.
+    /// * `mapping` — `mapping[i] = (source record index, source field
+    ///   index)` for output field `i`. Mapped types must match exactly,
+    ///   since bytes are copied verbatim.
     pub(crate) fn project_record_raw(
         &self,
         source_descriptors: &[RecordDescriptor],
@@ -286,6 +352,21 @@ impl RecordDescriptor {
         Ok(record)
     }
 
+    /// Like [`Self::project_record_raw`], but appends into a shared buffer
+    /// instead of allocating a fresh `Vec` per record.
+    ///
+    /// * `source_descriptors` / `source_records` / `mapping` — as in
+    ///   [`Self::project_record_raw`].
+    /// * `output` — the shared buffer; the record is appended at the end and
+    ///   its byte range inside `output` is returned.
+    /// * `variable_scratch` — reusable work area for variable-width fields
+    ///   (cleared here, so callers just pass the same vector every call).
+    ///   Each entry remembers which source record owns the field and where
+    ///   its bytes are, so payloads can be copied after the offset table is
+    ///   written.
+    ///
+    /// The join runtime uses this to pack every output row of a batch into
+    /// one allocation (see `JoinOutputBuffer` in `ivm/runtime/join.rs`).
     pub(crate) fn project_record_raw_into(
         &self,
         source_descriptors: &[RecordDescriptor],
@@ -372,14 +453,27 @@ impl RecordDescriptor {
         Ok(start..output.len())
     }
 
+    /// Wraps encoded bytes in a zero-copy [`BorrowedRecord`] view.
+    ///
+    /// * `raw` — an encoded record created with this descriptor.
     pub fn bind<'a>(&'a self, raw: &'a [u8]) -> BorrowedRecord<'a> {
         BorrowedRecord::new(raw, self)
     }
 
+    /// Wraps owned encoded bytes in a [`Record`] tied to this descriptor.
+    ///
+    /// * `raw` — an encoded record created with this descriptor.
     pub fn bind_owned<'a>(&'a self, raw: Vec<u8>) -> Record<'a> {
         Record::new(raw, self)
     }
 
+    /// Decodes one field by name.
+    ///
+    /// * `record` — the encoded record bytes.
+    /// * `field_name` — the declared field name, for example `"title"`.
+    ///
+    /// Convenience over [`Self::get_idx`]; it re-resolves the name on every
+    /// call.
     pub fn get(&self, record: &[u8], field_name: &str) -> Result<Value, Error> {
         let field_idx = self
             .field_index(field_name)
@@ -388,6 +482,13 @@ impl RecordDescriptor {
         self.get_idx(record, field_idx)
     }
 
+    /// Decodes one field by logical index.
+    ///
+    /// * `record` — the encoded record bytes.
+    /// * `field_idx` — the field's declaration-order index.
+    ///
+    /// Only the requested field is decoded; the rest of the record is never
+    /// touched.
     pub fn get_idx(&self, record: &[u8], field_idx: usize) -> Result<Value, Error> {
         let field = self
             .fields
@@ -401,6 +502,13 @@ impl RecordDescriptor {
         decode_value(&record[span.start..span.end], &field.value_type)
     }
 
+    /// Returns where one field's encoded bytes live inside `record`.
+    ///
+    /// * `record` — the encoded record bytes.
+    /// * `field_idx` — the field's declaration-order index.
+    ///
+    /// Fixed fields come straight from the cached layout; variable fields
+    /// are located through the offset table.
     pub fn field_span(
         &self,
         record: &[u8],
@@ -409,6 +517,15 @@ impl RecordDescriptor {
         record_value_span(record, self, field_idx)
     }
 
+    /// Returns a copy of `record` with one field replaced.
+    ///
+    /// * `record` — the encoded record to start from.
+    /// * `field_idx` — which field to replace.
+    /// * `value` — the new value; it must match the field's declared type.
+    ///
+    /// A fixed-width field is patched in place in the copy. A variable-width
+    /// field forces a full decode and re-encode, because the offsets of
+    /// everything after it move.
     pub fn patch_field(
         &self,
         record: &[u8],
@@ -440,14 +557,24 @@ impl RecordDescriptor {
         self.create(&values)
     }
 
+    /// Total width in bytes of the record's fixed prefix (all fixed fields).
     fn fixed_size(&self) -> usize {
         self.layout.fixed_size
     }
 
+    /// How many variable-width fields the descriptor has.
     fn variable_count(&self) -> usize {
         self.layout.variable_count
     }
 
+    /// Builds the descriptor and its layout cache from declaration-order
+    /// fields.
+    ///
+    /// This is where physical order is decided: fixed-size fields are packed
+    /// first, each at a precomputed offset, and variable-size fields follow
+    /// in declaration order. Panics on a field type that
+    /// [`validate_schema_value_type`] rejects — descriptors are built from
+    /// schemas, and schemas are validated before ever reaching this point.
     fn from_logical_fields(fields: Vec<DescriptorField>) -> Self {
         for field in &fields {
             validate_schema_value_type(&field.value_type)
@@ -515,6 +642,8 @@ impl Deref for RecordDescriptor {
     }
 }
 
+// Descriptors serialize as their field list only; the layout cache and the
+// intern handle are rebuilt on deserialize.
 impl Serialize for RecordDescriptor {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -534,6 +663,9 @@ impl<'de> Deserialize<'de> for RecordDescriptor {
     }
 }
 
+/// The interned payload behind [`RecordDescriptor`]: the declared fields plus
+/// the precomputed layout cache. Public only because `Deref` needs a public
+/// target; use [`RecordDescriptor`] everywhere.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RecordDescriptorData {
@@ -541,20 +673,35 @@ pub struct RecordDescriptorData {
     layout: RecordLayout,
 }
 
+/// Precomputed layout answers for one descriptor, built once at intern time
+/// so encoding and field lookup never recompute them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct RecordLayout {
+    /// Layout of each field, indexed by logical (declaration) index.
     fields: Vec<FieldLayout>,
+    /// Logical field indices in physical write order: all fixed fields
+    /// first, then variable fields. Encoders walk this list to lay a record
+    /// out.
     logical_by_physical: Vec<usize>,
+    /// Total width in bytes of the fixed prefix.
     fixed_size: usize,
+    /// Number of variable-width fields.
     variable_count: usize,
 }
 
+/// Index into physical (write) order, as opposed to the logical
+/// (declaration) order the public API uses. The newtype exists so the two
+/// index spaces cannot be mixed up by accident.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PhysicalFieldIdx(usize);
 
+/// Where one field lives inside an encoded record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum FieldLayout {
+    /// Fixed-width field: always `width` bytes starting at byte `offset`.
     Static { offset: usize, width: usize },
+    /// Variable-width field: the `variable_idx`-th variable field, located
+    /// through the offset table at read time.
     Variable { variable_idx: usize },
 }
 
@@ -579,20 +726,37 @@ pub struct RecordProjector {
     target_to_source: Vec<usize>,
 }
 
+/// One output field's recipe in a raw (bytes-only) projection, used by
+/// [`RecordDescriptor::project_raw_fields_into`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RawProjectionField {
+    /// Copy the encoded bytes of source field `source_idx` unchanged.
     Copy { source_idx: usize },
+    /// Take non-nullable source field `source_idx` and emit it as a present
+    /// nullable: a `1` flag byte followed by the source bytes.
     WrapNullable { source_idx: usize },
+    /// Emit source field `source_idx` as nullable, wrapping only when the
+    /// source is not already nullable (an already-nullable source is copied
+    /// as-is).
     FlattenNullable { source_idx: usize },
+    /// Splice in pre-encoded bytes as-is, for example a NULL constant.
     Encoded { bytes: Vec<u8> },
 }
 
+/// Reusable buffers for raw projections, cleared at the start of every call
+/// so one scratch value can serve a whole batch of rows.
 #[derive(Debug, Default)]
 pub(crate) struct RawProjectionScratch {
+    /// Variable-width output fields in physical order, parked here until the
+    /// offset table has been written and their payloads can follow it.
     variable_fields: Vec<RawProjectedBytes>,
+    /// Bytes produced during projection (nullable flags, constants) that
+    /// have no home in the source record.
     generated: BytesMut,
 }
 
+/// Where one projected field's bytes come from: a span of the source record,
+/// or a span of the scratch `generated` buffer.
 #[derive(Debug)]
 enum RawProjectedBytes {
     Source(std::ops::Range<usize>),
@@ -600,7 +764,13 @@ enum RawProjectedBytes {
 }
 
 impl RecordProjector {
-    /// Build a projector from source field indices to target field indices.
+    /// Builds a projector from source field indices to target field indices.
+    ///
+    /// * `source` — the descriptor every input record must have.
+    /// * `target` — the descriptor of the produced records.
+    /// * `mapping` — `(source field index, target field index)` pairs. Every
+    ///   target field must be mapped exactly once, and each mapped pair must
+    ///   have identical types (bytes are copied verbatim, never converted).
     pub fn new(
         source: RecordDescriptor,
         target: RecordDescriptor,
@@ -653,7 +823,14 @@ impl RecordProjector {
         })
     }
 
-    /// Project one source record into the target descriptor.
+    /// Projects one source record into the target descriptor.
+    ///
+    /// * `record` — a borrowed view whose descriptor must be the projector's
+    ///   `source` descriptor.
+    ///
+    /// Copies each mapped field's encoded span into a fresh target-layout
+    /// record: fixed fields first, then the offset table, then variable
+    /// payloads.
     pub fn project(&self, record: BorrowedRecord<'_>) -> Result<OwnedRecord, Error> {
         if record.descriptor != self.source {
             return Err(Error::ProjectSourceDescriptorMismatch);
@@ -705,6 +882,20 @@ impl RecordProjector {
 }
 
 impl RecordDescriptor {
+    /// Builds one output record from per-field recipes, appending into a
+    /// shared buffer.
+    ///
+    /// * `source` / `source_record` — the single source record the recipes
+    ///   read from.
+    /// * `fields` — one [`RawProjectionField`] recipe per output field, in
+    ///   logical order.
+    /// * `output` — shared output buffer; the new record's byte range inside
+    ///   it is returned.
+    /// * `scratch` — reusable buffers, cleared here.
+    ///
+    /// This is the bytes-only cousin of [`RecordProjector`] with two extra
+    /// powers plain span copying cannot express: wrapping a value into a
+    /// present nullable, and splicing in pre-encoded constants.
     pub(crate) fn project_raw_fields_into(
         &self,
         source: &RecordDescriptor,
@@ -781,6 +972,22 @@ impl RecordDescriptor {
         Ok(start..output.len())
     }
 
+    /// Copies a record while unwrapping one nullable field to its inner
+    /// type.
+    ///
+    /// * `source` / `source_record` — the input record. Every field except
+    ///   `field_idx` must already have the output type; field counts must
+    ///   match.
+    /// * `field_idx` — the field to unwrap. When that field is nullable and
+    ///   NULL, nothing is written and `Ok(None)` is returned so the caller
+    ///   can drop the row. When present, its payload is copied without the
+    ///   flag byte. A source field that is already non-nullable is copied
+    ///   unchanged.
+    /// * `output` / `scratch` — shared output buffer and reusable scratch,
+    ///   as in [`Self::project_raw_fields_into`].
+    ///
+    /// Returns the new record's byte range in `output`, or `None` when the
+    /// row was dropped because the field was NULL.
     pub(crate) fn unwrap_nullable_field_into(
         &self,
         source: &RecordDescriptor,
@@ -922,6 +1129,8 @@ impl RecordDescriptor {
         Ok(Some(start..output.len()))
     }
 
+    /// Resolves one recipe to the bytes it contributes — a source span or a
+    /// freshly generated span — without writing them to the output yet.
     fn raw_projected_field_bytes(
         &self,
         source: &RecordDescriptor,
@@ -995,6 +1204,9 @@ impl RecordDescriptor {
         }
     }
 
+    /// Writes `[1] + source field bytes` into the scratch buffer: the source
+    /// field re-encoded as a present nullable. The target field's type must
+    /// be `Nullable(source field's type)`.
     fn wrap_nullable_field_bytes(
         &self,
         source: &RecordDescriptor,
@@ -1038,6 +1250,7 @@ impl RecordDescriptor {
 }
 
 impl RawProjectedBytes {
+    /// Byte length of the span, wherever it lives.
     fn len(&self) -> usize {
         match self {
             Self::Source(span) | Self::Generated(span) => span.end - span.start,
@@ -1045,6 +1258,14 @@ impl RawProjectedBytes {
     }
 }
 
+/// Splits an encoded nullable field into its payload.
+///
+/// * `record` — the whole encoded record.
+/// * `span` — where the nullable field lives inside `record`.
+/// * `inner` — the inner (present) type, used to validate NULL padding.
+///
+/// Returns `Some(payload range)` when the value is present, `None` when it
+/// is NULL. Corrupt flags or padding fail with the usual decode errors.
 fn nullable_present_payload(
     record: &[u8],
     span: std::ops::Range<usize>,
@@ -1071,6 +1292,10 @@ fn nullable_present_payload(
 }
 
 impl<'a> BorrowedRecord<'a> {
+    /// Wraps encoded bytes with the descriptor that describes them.
+    ///
+    /// * `raw` — an encoded record created with `descriptor`.
+    /// * `descriptor` — the record's descriptor.
     pub fn new(raw: &'a [u8], descriptor: &'a RecordDescriptor) -> Self {
         Self {
             raw,
@@ -1078,26 +1303,32 @@ impl<'a> BorrowedRecord<'a> {
         }
     }
 
+    /// The underlying encoded bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.raw
     }
 
+    /// The underlying encoded bytes (alias of [`Self::bytes`]).
     pub fn raw(&self) -> &'a [u8] {
         self.raw
     }
 
+    /// The descriptor these bytes belong to.
     pub fn descriptor(&self) -> RecordDescriptor {
         self.descriptor
     }
 
+    /// Decodes one field by name; see [`RecordDescriptor::get`].
     pub fn get(&self, field_name: &str) -> Result<Value, Error> {
         self.descriptor.get(self.raw, field_name)
     }
 
+    /// Decodes one field by logical index; see [`RecordDescriptor::get_idx`].
     pub fn get_idx(&self, field_idx: usize) -> Result<Value, Error> {
         self.descriptor.get_idx(self.raw, field_idx)
     }
 
+    /// Decodes every field into owned [`Value`]s, in declaration order.
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         let spans = record_value_spans(self.raw, &self.descriptor)?;
         self.descriptor
@@ -1108,16 +1339,26 @@ impl<'a> BorrowedRecord<'a> {
             .collect()
     }
 
+    // The typed getters below read one field straight out of the encoded
+    // bytes without building a `Value`. They all take the field's
+    // declaration-order index, and the field's declared type must be exactly
+    // the type in the getter's name (`get_u64` requires `ValueType::U64`,
+    // `get_nullable_u64` requires `ValueType::Nullable(U64)`, and so on).
+
+    /// Reads a `U64` field.
     pub fn get_u64(&self, field_idx: usize) -> Result<u64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U64)?;
         read_exact_array::<8>(bytes).map(u64::from_le_bytes)
     }
 
+    /// Reads an `I64` field.
     pub fn get_i64(&self, field_idx: usize) -> Result<i64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::I64)?;
         read_exact_array::<8>(bytes).map(i64::from_le_bytes)
     }
 
+    /// Reads an `F64` field. A stored NaN is corrupt data and fails with
+    /// [`Error::InvalidF64NaN`].
     pub fn get_f64(&self, field_idx: usize) -> Result<f64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::F64)?;
         let value = read_exact_array::<8>(bytes).map(f64::from_le_bytes)?;
@@ -1127,16 +1368,19 @@ impl<'a> BorrowedRecord<'a> {
         Ok(value)
     }
 
+    /// Reads a `U32` field.
     pub fn get_u32(&self, field_idx: usize) -> Result<u32, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U32)?;
         read_exact_array::<4>(bytes).map(u32::from_le_bytes)
     }
 
+    /// Reads a `U8` field.
     pub fn get_u8(&self, field_idx: usize) -> Result<u8, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U8)?;
         bytes.first().copied().ok_or(Error::UnexpectedEof)
     }
 
+    /// Reads a `Bool` field. Only the bytes `00` and `01` are valid.
     pub fn get_bool(&self, field_idx: usize) -> Result<bool, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::Bool)?;
         match bytes.first().copied().ok_or(Error::UnexpectedEof)? {
@@ -1146,6 +1390,8 @@ impl<'a> BorrowedRecord<'a> {
         }
     }
 
+    /// Reads an `Enum` field's raw discriminant byte. Use
+    /// [`Self::get_enum_name`] when the variant's name is wanted instead.
     pub fn get_enum(&self, field_idx: usize) -> Result<u8, Error> {
         let field = self
             .descriptor
@@ -1164,6 +1410,8 @@ impl<'a> BorrowedRecord<'a> {
         read_exact_array::<1>(&self.raw[span]).map(|bytes| bytes[0])
     }
 
+    /// Reads an `Enum` field and resolves the discriminant to its declared
+    /// variant name through the field's [`EnumSchema`].
     pub fn get_enum_name(&self, field_idx: usize) -> Result<&str, Error> {
         let field = self
             .descriptor
@@ -1181,32 +1429,39 @@ impl<'a> BorrowedRecord<'a> {
         schema.variant(self.get_enum(field_idx)?)
     }
 
+    /// Reads a `Bytes` field, borrowing straight from the record.
     pub fn get_bytes(&self, field_idx: usize) -> Result<&'a [u8], Error> {
         self.field_bytes(field_idx, &ValueType::Bytes)
     }
 
+    /// Reads a `Uuid` field.
     pub fn get_uuid(&self, field_idx: usize) -> Result<uuid::Uuid, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::Uuid)?;
         read_exact_array::<16>(bytes).map(uuid::Uuid::from_bytes)
     }
 
+    /// Reads a `String` field, borrowing straight from the record.
     pub fn get_str(&self, field_idx: usize) -> Result<&'a str, Error> {
         str::from_utf8(self.field_bytes(field_idx, &ValueType::String)?)
             .map_err(|_| Error::InvalidUtf8)
     }
 
+    /// Reads a `Nullable(U64)` field; `None` means NULL.
     pub fn get_nullable_u64(&self, field_idx: usize) -> Result<Option<u64>, Error> {
         self.nullable_field(field_idx, &ValueType::U64, |payload| {
             read_exact_array::<8>(payload).map(u64::from_le_bytes)
         })
     }
 
+    /// Reads a `Nullable(I64)` field; `None` means NULL.
     pub fn get_nullable_i64(&self, field_idx: usize) -> Result<Option<i64>, Error> {
         self.nullable_field(field_idx, &ValueType::I64, |payload| {
             read_exact_array::<8>(payload).map(i64::from_le_bytes)
         })
     }
 
+    /// Reads a `Nullable(F64)` field; `None` means NULL. A stored NaN fails
+    /// with [`Error::InvalidF64NaN`].
     pub fn get_nullable_f64(&self, field_idx: usize) -> Result<Option<f64>, Error> {
         self.nullable_field(field_idx, &ValueType::F64, |payload| {
             let value = read_exact_array::<8>(payload).map(f64::from_le_bytes)?;
@@ -1217,6 +1472,7 @@ impl<'a> BorrowedRecord<'a> {
         })
     }
 
+    /// Reads a `Nullable(Enum)` field's discriminant; `None` means NULL.
     pub fn get_nullable_enum(&self, field_idx: usize) -> Result<Option<u8>, Error> {
         let field = self
             .descriptor
@@ -1251,22 +1507,33 @@ impl<'a> BorrowedRecord<'a> {
         }
     }
 
+    /// Reads a `Nullable(String)` field, borrowing; `None` means NULL.
     pub fn get_nullable_string(&self, field_idx: usize) -> Result<Option<&'a str>, Error> {
         self.nullable_field(field_idx, &ValueType::String, |payload| {
             str::from_utf8(payload).map_err(|_| Error::InvalidUtf8)
         })
     }
 
+    /// Reads a `Nullable(Bytes)` field, borrowing; `None` means NULL.
     pub fn get_nullable_bytes(&self, field_idx: usize) -> Result<Option<&'a [u8]>, Error> {
         self.nullable_field(field_idx, &ValueType::Bytes, Ok)
     }
 
+    /// Reads a `Nullable(Uuid)` field; `None` means NULL.
     pub fn get_nullable_uuid(&self, field_idx: usize) -> Result<Option<uuid::Uuid>, Error> {
         self.nullable_field(field_idx, &ValueType::Uuid, |payload| {
             read_exact_array::<16>(payload).map(uuid::Uuid::from_bytes)
         })
     }
 
+    /// Decodes one element of an `Array` field without touching the others.
+    ///
+    /// * `field_idx` — the array field's declaration-order index.
+    /// * `element_idx` — which element to decode, starting at `0`.
+    ///
+    /// Only arrays of fixed-size elements support random access (the element
+    /// position is `element_idx * element width`); variable-size elements
+    /// fail with [`Error::InvalidTupleMember`].
     pub fn get_array_element(&self, field_idx: usize, element_idx: usize) -> Result<Value, Error> {
         let field = self
             .descriptor
@@ -1306,6 +1573,7 @@ impl<'a> BorrowedRecord<'a> {
         decode_value(element, element_type)
     }
 
+    /// The descriptor field at `field_idx`, bounds-checked.
     pub(crate) fn field(&self, field_idx: usize) -> Result<&DescriptorField, Error> {
         self.descriptor
             .fields
@@ -1316,12 +1584,16 @@ impl<'a> BorrowedRecord<'a> {
             })
     }
 
+    /// A field's raw encoded bytes with only a bounds check — no type check.
+    /// "Unchecked" means the caller already knows what type lives there.
     pub(crate) fn field_bytes_unchecked(&self, field_idx: usize) -> Result<&'a [u8], Error> {
         let _ = self.field(field_idx)?;
         let span = self.descriptor.field_span(self.raw, field_idx)?;
         Ok(&self.raw[span])
     }
 
+    /// A field's raw encoded bytes, after checking that its declared type is
+    /// exactly `expected`.
     fn field_bytes(&self, field_idx: usize, expected: &ValueType) -> Result<&'a [u8], Error> {
         let field = self
             .descriptor
@@ -1340,6 +1612,9 @@ impl<'a> BorrowedRecord<'a> {
         Ok(&self.raw[span])
     }
 
+    /// Shared decode path for the nullable getters: checks the flag byte,
+    /// validates NULL padding, and hands the payload to `decode` when the
+    /// value is present.
     fn nullable_field<T>(
         &self,
         field_idx: usize,
@@ -1367,6 +1642,8 @@ impl<'a> BorrowedRecord<'a> {
         }
     }
 
+    /// Like [`Self::field_bytes`], but for fields declared
+    /// `Nullable(inner)`.
     fn nullable_field_bytes(&self, field_idx: usize, inner: &ValueType) -> Result<&'a [u8], Error> {
         let field = self
             .descriptor
@@ -1389,6 +1666,11 @@ impl<'a> BorrowedRecord<'a> {
     }
 }
 
+/// Decodes the mapped fields out of the source records: the shared front
+/// half of the value-based projection APIs.
+///
+/// Returns the output field list (canonicalized through descriptor
+/// interning) and the decoded values, both in output order.
 fn project_fields_and_values(
     source_descriptors: &[RecordDescriptor],
     source_records: &[&[u8]],
@@ -1436,12 +1718,15 @@ fn project_fields_and_values(
     Ok((descriptor.fields.clone(), values))
 }
 
+/// Byte range of one field inside an encoded record. A plain `start`/`end`
+/// pair instead of `Range<usize>` so it stays `Copy`.
 #[derive(Clone, Copy)]
 struct Span {
     start: usize,
     end: usize,
 }
 
+/// Locates every field of `record`, in logical order.
 fn record_value_spans(record: &[u8], descriptor: &RecordDescriptor) -> Result<Vec<Span>, Error> {
     validate_record_header(record, descriptor)?;
     descriptor
@@ -1452,6 +1737,8 @@ fn record_value_spans(record: &[u8], descriptor: &RecordDescriptor) -> Result<Ve
         .collect()
 }
 
+/// Locates one field of `record`; the body behind
+/// [`RecordDescriptor::field_span`].
 fn record_value_span(
     record: &[u8],
     descriptor: &RecordDescriptor,
@@ -1471,6 +1758,9 @@ fn record_value_span(
     Ok(span.start..span.end)
 }
 
+/// Cheap structural checks before reading any span: the record must be long
+/// enough for its fixed prefix plus offset table, and a record with no
+/// variable fields must be exactly its fixed size.
 fn validate_record_header(record: &[u8], descriptor: &RecordDescriptor) -> Result<(), Error> {
     let fixed_size = descriptor.fixed_size();
     let variable_count = descriptor.variable_count();
@@ -1486,6 +1776,12 @@ fn validate_record_header(record: &[u8], descriptor: &RecordDescriptor) -> Resul
     Ok(())
 }
 
+/// Resolves one field layout to concrete byte positions inside `record`.
+///
+/// A fixed field comes straight from its cached offset and width. A variable
+/// field starts where the previous variable field ends (the first one starts
+/// right after the offset table) and ends at its offset-table entry (the
+/// last one ends at the end of the record).
 fn record_value_span_for_layout(
     record: &[u8],
     descriptor: &RecordDescriptor,
@@ -1522,6 +1818,8 @@ fn record_value_span_for_layout(
     }
 }
 
+/// Converts a slice into `[u8; N]`, distinguishing "too short"
+/// ([`Error::UnexpectedEof`]) from "wrong size" ([`Error::InvalidOffset`]).
 fn read_exact_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
     bytes.try_into().map_err(|_| {
         if bytes.len() < N {
@@ -1532,12 +1830,14 @@ fn read_exact_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
     })
 }
 
+/// Reads one little-endian `u32` at byte `offset`, bounds-checked.
 fn read_u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     let end = checked_add(offset, 4)?;
     let slice = bytes.get(offset..end).ok_or(Error::UnexpectedEof)?;
     read_exact_array::<4>(slice).map(u32::from_le_bytes)
 }
 
+/// Widens a stored `u32` offset back to `usize`.
 fn u32_to_usize(value: u32) -> Result<usize, Error> {
     usize::try_from(value).map_err(|_| Error::LengthOverflow)
 }
@@ -1545,7 +1845,10 @@ fn u32_to_usize(value: u32) -> Result<usize, Error> {
 /// One field in canonical record layout order.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct DescriptorField {
+    /// The declared name, or `None` for synthesized positional fields.
     pub name: Option<String>,
+    /// The field's type, which fixes both the accepted values and the byte
+    /// layout.
     pub value_type: ValueType,
 }
 
@@ -1564,34 +1867,44 @@ pub struct OwnedRecord {
 }
 
 impl OwnedRecord {
+    /// Pairs owned encoded bytes with their descriptor. `raw` must be a
+    /// record created with `descriptor`.
     pub fn new(raw: Vec<u8>, descriptor: RecordDescriptor) -> Self {
         Self { raw, descriptor }
     }
 
+    /// The descriptor these bytes belong to.
     pub fn descriptor(&self) -> &RecordDescriptor {
         &self.descriptor
     }
 
+    /// The encoded bytes.
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }
 
+    /// Consumes the record, keeping only the encoded bytes.
     pub fn into_raw(self) -> Vec<u8> {
         self.raw
     }
 
+    /// A zero-copy [`BorrowedRecord`] view over these bytes, for the typed
+    /// getters.
     pub fn borrowed(&self) -> BorrowedRecord<'_> {
         BorrowedRecord::new(&self.raw, &self.descriptor)
     }
 
+    /// Decodes one field by name; see [`RecordDescriptor::get`].
     pub fn get(&self, field_name: &str) -> Result<Value, Error> {
         self.borrowed().get(field_name)
     }
 
+    /// Decodes one field by logical index; see [`RecordDescriptor::get_idx`].
     pub fn get_idx(&self, field_idx: usize) -> Result<Value, Error> {
         self.borrowed().get_idx(field_idx)
     }
 
+    /// Decodes every field into owned [`Value`]s, in declaration order.
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         self.borrowed().to_values()
     }
@@ -1620,12 +1933,15 @@ impl<'de> Deserialize<'de> for OwnedRecord {
     }
 }
 
+/// Serde shape of [`OwnedRecord`]: the descriptor (as its field list) plus
+/// the raw bytes. Borrowing half, used when serializing.
 #[derive(serde::Serialize)]
 struct OwnedRecordSerde<'a> {
     descriptor: RecordDescriptor,
     raw: &'a [u8],
 }
 
+/// Owning half of the [`OwnedRecord`] serde shape, used when deserializing.
 #[derive(serde::Deserialize)]
 struct OwnedRecordSerdeOwned {
     descriptor: RecordDescriptor,
@@ -1633,34 +1949,44 @@ struct OwnedRecordSerdeOwned {
 }
 
 impl<'a> Record<'a> {
+    /// Pairs owned encoded bytes with a borrowed descriptor. `raw` must be a
+    /// record created with `descriptor`.
     pub fn new(raw: Vec<u8>, descriptor: &'a RecordDescriptor) -> Self {
         Self { raw, descriptor }
     }
 
+    /// The descriptor these bytes belong to.
     pub fn descriptor(&self) -> &'a RecordDescriptor {
         self.descriptor
     }
 
+    /// The encoded bytes.
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }
 
+    /// Consumes the record, keeping only the encoded bytes.
     pub fn into_raw(self) -> Vec<u8> {
         self.raw
     }
 
+    /// A zero-copy [`BorrowedRecord`] view over these bytes, for the typed
+    /// getters.
     pub fn borrowed(&self) -> BorrowedRecord<'_> {
         BorrowedRecord::new(&self.raw, self.descriptor)
     }
 
+    /// Decodes one field by name; see [`RecordDescriptor::get`].
     pub fn get(&self, field_name: &str) -> Result<Value, Error> {
         self.descriptor.get(&self.raw, field_name)
     }
 
+    /// Decodes one field by logical index; see [`RecordDescriptor::get_idx`].
     pub fn get_idx(&self, field_idx: usize) -> Result<Value, Error> {
         self.descriptor.get_idx(&self.raw, field_idx)
     }
 
+    /// Decodes every field into owned [`Value`]s, in declaration order.
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         self.borrowed().to_values()
     }
@@ -1694,6 +2020,9 @@ impl Deref for BorrowedRecord<'_> {
     }
 }
 
+/// Everything that can go wrong building, encoding, decoding, or projecting
+/// records. The `#[error]` string on each variant states exactly which rule
+/// was violated.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
     #[error("expected {expected} values, got {actual}")]

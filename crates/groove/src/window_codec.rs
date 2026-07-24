@@ -28,6 +28,7 @@ pub const TARGET_RECORDS_PER_WINDOW: usize = 256;
 /// This is guidance for the future record-store packer, not a hard codec limit.
 pub const TARGET_DECODED_BYTES_PER_WINDOW: usize = 64 * 1024;
 
+/// The key and value row layouts of the records packed into a window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowSchema {
     key: RecordDescriptor,
@@ -35,10 +36,13 @@ pub struct WindowSchema {
 }
 
 impl WindowSchema {
+    /// Builds a window schema from explicit key and value descriptors.
     pub fn new(key: RecordDescriptor, value: RecordDescriptor) -> Self {
         Self { key, value }
     }
 
+    /// Derives the key descriptor from a table's primary key, pairing it with
+    /// the given value descriptor.
     pub fn from_primary_key(primary_key: &PrimaryKey, value: RecordDescriptor) -> Self {
         let key = RecordDescriptor::new(primary_key.columns.iter().map(|column| {
             (
@@ -49,15 +53,18 @@ impl WindowSchema {
         Self { key, value }
     }
 
+    /// The key row layout.
     pub fn key_descriptor(&self) -> RecordDescriptor {
         self.key
     }
 
+    /// The value row layout.
     pub fn value_descriptor(&self) -> RecordDescriptor {
         self.value
     }
 }
 
+/// One record inside a window: its key row and value row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowRecord {
     pub key: OwnedRecord,
@@ -65,20 +72,32 @@ pub struct WindowRecord {
 }
 
 impl WindowRecord {
+    /// Pairs a key row with its value row.
     pub fn new(key: OwnedRecord, value: OwnedRecord) -> Self {
         Self { key, value }
     }
 }
 
+/// How one column of a window was encoded — each column independently picks
+/// the smallest representation that fits its measured values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnEncodingKind {
+    /// Every row has the same value; store it once.
     Constant,
+    /// Store the first value, then varint deltas between consecutive rows —
+    /// compact for monotonically increasing integer keys.
     DeltaVarint,
+    /// Store the distinct values once plus a per-row index into them.
     Dictionary,
+    /// A row equals the previous row's value in this column; store a back
+    /// reference instead of the value.
     PreviousRowField,
+    /// No pattern found; store each value verbatim.
     Verbatim,
 }
 
+/// Diagnostic summary of one encoded window: its record count, encoded size,
+/// and the encoding chosen per column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowSummary {
     pub record_count: usize,
@@ -86,6 +105,7 @@ pub struct WindowSummary {
     pub column_encodings: Vec<ColumnEncodingKind>,
 }
 
+/// Failures from encoding, decoding, or probing a window.
 #[derive(Debug, Error)]
 pub enum WindowCodecError {
     #[error("record error: {0}")]
@@ -104,6 +124,8 @@ pub enum WindowCodecError {
     TrailingBytes,
 }
 
+/// The serialized (columnar) form of a whole window: a header plus one
+/// encoded column per key and value field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EncodedWindow {
     version: u8,
@@ -113,18 +135,23 @@ struct EncodedWindow {
     columns: Vec<EncodedColumn>,
 }
 
+/// One serialized column: its chosen encoding and the bytes that encoding
+/// produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EncodedColumn {
     kind: ColumnEncodingKind,
     data: Vec<u8>,
 }
 
+/// Whether a column belongs to the key record or the value record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColumnRole {
     Key,
     Value,
 }
 
+/// Locates one column within a window: which record it belongs to, its field
+/// index there, and its type.
 #[derive(Clone, Debug)]
 struct ColumnSpec {
     role: ColumnRole,
@@ -132,12 +159,21 @@ struct ColumnSpec {
     value_type: ValueType,
 }
 
+/// One candidate encoding of a column while the encoder picks the smallest.
 #[derive(Clone)]
 struct Candidate {
     kind: ColumnEncodingKind,
     data: Vec<u8>,
 }
 
+/// Encodes a run of records into one columnar window.
+///
+/// * `schema` — the key/value layouts every record must match.
+/// * `records` — the records to pack (validated against `schema`).
+///
+/// Each column is collected across all rows and encoded with whichever
+/// [`ColumnEncodingKind`] measures smallest, then the columns are serialized
+/// under a header. Reverse with [`decode_window`].
 pub fn encode_window(
     schema: &WindowSchema,
     records: &[WindowRecord],
@@ -170,6 +206,8 @@ pub fn encode_window(
     Ok(postcard::to_allocvec(&encoded)?)
 }
 
+/// Decodes a whole window back into its records, in order. The inverse of
+/// [`encode_window`].
 pub fn decode_window(
     schema: &WindowSchema,
     bytes: &[u8],
@@ -178,6 +216,11 @@ pub fn decode_window(
     decode_records(schema, &encoded)
 }
 
+/// Finds one record in a window by exact key, decoding only that record.
+///
+/// Records in a window are key-sorted, so this binary-searches the key
+/// columns and materializes just the matching row — the cheap point-read
+/// path over a packed window. Returns `None` when the key is absent.
 pub fn lookup_window(
     schema: &WindowSchema,
     bytes: &[u8],
@@ -193,6 +236,8 @@ pub fn lookup_window(
     Ok(Some(decode_record_at(schema, &encoded, row_idx)?))
 }
 
+/// Like [`lookup_window`], but returns the matching record's *index* within
+/// the window rather than the record itself.
 pub fn lookup_window_key_index(
     schema: &WindowSchema,
     bytes: &[u8],
@@ -205,6 +250,8 @@ pub fn lookup_window_key_index(
     lookup_window_key_index_encoded(schema, &encoded, key)
 }
 
+/// Binary-searches an already-decoded window's key columns for `key`,
+/// materializing one candidate key per probe.
 fn lookup_window_key_index_encoded(
     schema: &WindowSchema,
     encoded: &EncodedWindow,
@@ -234,6 +281,9 @@ fn lookup_window_key_index_encoded(
     Ok(None)
 }
 
+/// Reads a window's header and per-column encodings into a [`WindowSummary`]
+/// without materializing any records — for diagnostics and compression
+/// analysis.
 pub fn summarize_window(bytes: &[u8]) -> Result<WindowSummary, WindowCodecError> {
     let encoded = decode_encoded_window(bytes)?;
     Ok(WindowSummary {
@@ -243,6 +293,8 @@ pub fn summarize_window(bytes: &[u8]) -> Result<WindowSummary, WindowCodecError>
     })
 }
 
+/// Deserializes the window header/columns and validates the format version,
+/// rejecting trailing bytes.
 fn decode_encoded_window(bytes: &[u8]) -> Result<EncodedWindow, WindowCodecError> {
     let (encoded, tail) = postcard::take_from_bytes::<EncodedWindow>(bytes)?;
     if !tail.is_empty() {
@@ -254,6 +306,9 @@ fn decode_encoded_window(bytes: &[u8]) -> Result<EncodedWindow, WindowCodecError
     Ok(encoded)
 }
 
+/// Decodes every column of a window, then transposes them back into records
+/// (each row's key columns and value columns re-assembled into a
+/// [`WindowRecord`]).
 fn decode_records(
     schema: &WindowSchema,
     encoded: &EncodedWindow,
@@ -303,6 +358,8 @@ fn decode_records(
     Ok(records)
 }
 
+/// Materializes just one row's key (its encoded bytes) — the per-probe work
+/// of the binary search in [`lookup_window_key_index_encoded`].
 fn decode_key_at(
     schema: &WindowSchema,
     specs: &[ColumnSpec],
@@ -320,6 +377,8 @@ fn decode_key_at(
     Ok(schema.key.create(&key_values)?)
 }
 
+/// Materializes one full record (key + value) at `row_idx` without decoding
+/// the rest of the window — the payload read after a successful key lookup.
 fn decode_record_at(
     schema: &WindowSchema,
     encoded: &EncodedWindow,
@@ -355,6 +414,9 @@ fn decode_record_at(
     })
 }
 
+/// Decodes one column's value at one row, dispatching on the column's
+/// encoding. Results are memoized because `PreviousRowField` columns chase
+/// back references and would otherwise re-decode earlier rows repeatedly.
 fn decode_column_value_at(
     column_idx: usize,
     row_idx: usize,
@@ -393,6 +455,8 @@ fn decode_column_value_at(
     Ok(value)
 }
 
+/// Checks that every record's key and value descriptor matches the window
+/// schema before encoding.
 fn validate_record_descriptors(
     schema: &WindowSchema,
     records: &[WindowRecord],
@@ -405,6 +469,8 @@ fn validate_record_descriptors(
     Ok(())
 }
 
+/// The ordered column layout of a window: every key field first, then every
+/// value field. This order is shared by the encoder and decoder.
 fn column_specs(schema: &WindowSchema) -> Vec<ColumnSpec> {
     schema
         .key
@@ -431,6 +497,9 @@ fn column_specs(schema: &WindowSchema) -> Vec<ColumnSpec> {
         .collect()
 }
 
+/// Transposes row-oriented records into column-oriented value vectors, one
+/// per [`ColumnSpec`] — the step that turns records into columns the encoder
+/// can compress.
 fn collect_columns(
     specs: &[ColumnSpec],
     records: &[WindowRecord],
@@ -451,6 +520,9 @@ fn collect_columns(
     Ok(columns)
 }
 
+/// Encodes one column by trying every applicable encoding and keeping the
+/// smallest (ties broken deterministically by [`encoding_tiebreaker`]).
+/// `Verbatim` is always available as the fallback.
 fn encode_column(
     column_idx: usize,
     spec: &ColumnSpec,
@@ -482,6 +554,9 @@ fn encode_column(
     })
 }
 
+/// Decodes one whole column back to its per-row values, dispatching on the
+/// stored [`ColumnEncodingKind`]. `PreviousRowField` columns read from the
+/// already-decoded earlier columns.
 fn decode_column(
     column_idx: usize,
     spec: &ColumnSpec,
@@ -512,6 +587,8 @@ fn decode_column(
     }
 }
 
+/// Deterministic priority for breaking size ties between encodings, so the
+/// same input always encodes to the same bytes (simplest encoding wins).
 fn encoding_tiebreaker(kind: ColumnEncodingKind) -> u8 {
     match kind {
         ColumnEncodingKind::Constant => 0,
@@ -522,6 +599,8 @@ fn encoding_tiebreaker(kind: ColumnEncodingKind) -> u8 {
     }
 }
 
+/// Candidate: applicable only when every row is equal, storing the value
+/// once. Also the encoding for an empty column.
 fn constant_candidate(values: &[Value]) -> Result<Option<Candidate>, WindowCodecError> {
     let Some(first) = values.first() else {
         return Ok(Some(Candidate {
@@ -541,6 +620,9 @@ fn constant_candidate(values: &[Value]) -> Result<Option<Candidate>, WindowCodec
     }
 }
 
+/// Candidate: applicable to integer columns, storing the first value then
+/// zigzag-varint deltas between consecutive rows — compact for slowly-varying
+/// or monotonic keys.
 fn delta_varint_candidate(
     value_type: &ValueType,
     values: &[Value],
@@ -571,6 +653,9 @@ fn delta_varint_candidate(
     }))
 }
 
+/// Candidate: applicable when values repeat, storing the distinct values once
+/// plus a varint index per row. Declined when every value is unique (no
+/// saving).
 fn dictionary_candidate(values: &[Value]) -> Result<Option<Candidate>, WindowCodecError> {
     if values.len() <= 1 {
         return Ok(None);
@@ -609,6 +694,10 @@ fn dictionary_candidate(values: &[Value]) -> Result<Option<Candidate>, WindowCod
     }))
 }
 
+/// Candidate: applicable when this column equals some earlier column shifted
+/// down one row (row `n` equals the source column's row `n-1`). Stores the
+/// source column index plus this column's first value. Captures
+/// "next-pointer" relationships between columns.
 fn previous_row_field_candidate(
     column_idx: usize,
     values: &[Value],
@@ -631,6 +720,8 @@ fn previous_row_field_candidate(
     Ok(None)
 }
 
+/// The always-available fallback: every value stored one after another. This
+/// is why [`encode_column`] can never fail to find a candidate.
 fn verbatim_candidate(values: &[Value]) -> Result<Candidate, WindowCodecError> {
     let mut data = Vec::new();
     for value in values {
@@ -642,6 +733,7 @@ fn verbatim_candidate(values: &[Value]) -> Result<Candidate, WindowCodecError> {
     })
 }
 
+/// Decodes a `Constant` column: read the single value, repeat it per row.
 fn decode_constant(
     data: &[u8],
     value_type: &ValueType,
@@ -659,6 +751,7 @@ fn decode_constant(
     Ok(vec![value; record_count])
 }
 
+/// Single-row `Constant` decode: the stored value applies to every row.
 fn decode_constant_at(data: &[u8], value_type: &ValueType) -> Result<Value, WindowCodecError> {
     let mut cursor = Cursor::new(data);
     let value = cursor.read_cell(value_type)?;
@@ -666,6 +759,8 @@ fn decode_constant_at(data: &[u8], value_type: &ValueType) -> Result<Value, Wind
     Ok(value)
 }
 
+/// Decodes a `DeltaVarint` column: reconstruct each row by summing deltas
+/// onto the first value.
 fn decode_delta_varint(
     data: &[u8],
     value_type: &ValueType,
@@ -687,6 +782,7 @@ fn decode_delta_varint(
     Ok(values)
 }
 
+/// Single-row `DeltaVarint` decode: sums deltas up to `row_idx` only.
 fn decode_delta_varint_at(
     data: &[u8],
     value_type: &ValueType,
@@ -705,6 +801,8 @@ fn decode_delta_varint_at(
     integer_to_value(current, value_type)
 }
 
+/// Decodes a `Dictionary` column: read the distinct values, then map each
+/// row's stored index back to one of them.
 fn decode_dictionary(
     data: &[u8],
     value_type: &ValueType,
@@ -733,6 +831,7 @@ fn decode_dictionary(
     Ok(values)
 }
 
+/// Single-row `Dictionary` decode: resolves just `row_idx`'s index.
 fn decode_dictionary_at(
     data: &[u8],
     value_type: &ValueType,
@@ -769,6 +868,8 @@ fn decode_dictionary_at(
     selected.ok_or(WindowCodecError::Invalid("dictionary row missing"))
 }
 
+/// Decodes a `PreviousRowField` column: row 0 is the stored first value; row
+/// `n` is the source column's row `n-1`.
 fn decode_previous_row_field(
     column_idx: usize,
     data: &[u8],
@@ -804,6 +905,9 @@ fn decode_previous_row_field(
     Ok(values)
 }
 
+/// Single-row `PreviousRowField` decode: row 0 is the stored first value;
+/// otherwise recurse into the source column at `row_idx - 1` (the memo in
+/// [`decode_column_value_at`] keeps this from re-decoding repeatedly).
 fn decode_previous_row_field_at(
     column_idx: usize,
     row_idx: usize,
@@ -829,6 +933,7 @@ fn decode_previous_row_field_at(
     decode_column_value_at(source_idx, row_idx - 1, specs, encoded, memo)
 }
 
+/// Decodes a `Verbatim` column: read one cell per row in order.
 fn decode_verbatim(
     data: &[u8],
     value_type: &ValueType,
@@ -843,6 +948,7 @@ fn decode_verbatim(
     Ok(values)
 }
 
+/// Single-row `Verbatim` decode: scans cells up to and including `row_idx`.
 fn decode_verbatim_at(
     data: &[u8],
     value_type: &ValueType,
@@ -866,16 +972,21 @@ fn decode_verbatim_at(
     selected.ok_or(WindowCodecError::Invalid("verbatim row missing"))
 }
 
+/// Writes one length-prefixed serialized value into `out`.
 fn write_cell(out: &mut Vec<u8>, value: &Value) -> Result<(), WindowCodecError> {
     let cell = cell_bytes(value)?;
     write_bytes(out, &cell);
     Ok(())
 }
 
+/// Serializes one [`Value`] to bytes (postcard).
 fn cell_bytes(value: &Value) -> Result<Vec<u8>, WindowCodecError> {
     Ok(postcard::to_allocvec(value)?)
 }
 
+/// Deserializes one value and re-validates it against `value_type` — so the
+/// record layer's type rules (arrays, nullables, enums, NaN rejection) stay
+/// the authority even on the columnar path.
 fn value_from_cell(cell: &[u8], value_type: &ValueType) -> Result<Value, WindowCodecError> {
     let (value, tail) = postcard::take_from_bytes::<Value>(cell)?;
     if !tail.is_empty() {
@@ -888,11 +999,13 @@ fn value_from_cell(cell: &[u8], value_type: &ValueType) -> Result<Value, WindowC
     Ok(value)
 }
 
+/// Writes a varint length prefix followed by the bytes.
 fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     write_varint(out, bytes.len() as u128);
     out.extend_from_slice(bytes);
 }
 
+/// Appends an LEB128 varint (7 bits per byte, high bit = continue).
 fn write_varint(out: &mut Vec<u8>, mut value: u128) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
@@ -901,6 +1014,9 @@ fn write_varint(out: &mut Vec<u8>, mut value: u128) {
     out.push(value as u8);
 }
 
+/// Maps a signed integer to an unsigned one so small magnitudes (of either
+/// sign) stay small varints: `0, -1, 1, -2, 2 → 0, 1, 2, 3, 4`. Rejects
+/// `i128::MIN`, which has no positive counterpart.
 fn zigzag(value: i128) -> Result<u128, WindowCodecError> {
     if value == i128::MIN {
         return Err(WindowCodecError::Invalid("delta underflow"));
@@ -912,6 +1028,7 @@ fn zigzag(value: i128) -> Result<u128, WindowCodecError> {
     })
 }
 
+/// Reverses [`zigzag`].
 fn unzigzag(value: u128) -> i128 {
     if value & 1 == 0 {
         (value / 2) as i128
@@ -920,6 +1037,8 @@ fn unzigzag(value: u128) -> i128 {
     }
 }
 
+/// Applies a signed delta to a running unsigned value, failing on
+/// over/underflow — the reconstruction step of delta-varint decoding.
 fn apply_delta(current: u128, delta: i128) -> Result<u128, WindowCodecError> {
     if delta < 0 {
         current
@@ -932,6 +1051,7 @@ fn apply_delta(current: u128, delta: i128) -> Result<u128, WindowCodecError> {
     }
 }
 
+/// `true` for the unsigned integer types that support delta-varint encoding.
 fn is_integer_type(value_type: &ValueType) -> bool {
     matches!(
         value_type,
@@ -939,6 +1059,8 @@ fn is_integer_type(value_type: &ValueType) -> bool {
     )
 }
 
+/// Reads an integer value out as a `u128`, or `None` if it is not the
+/// expected integer type.
 fn integer_value(value: &Value, value_type: &ValueType) -> Option<u128> {
     match (value, value_type) {
         (Value::U8(value), ValueType::U8) => Some(u128::from(*value)),
@@ -949,6 +1071,8 @@ fn integer_value(value: &Value, value_type: &ValueType) -> Option<u128> {
     }
 }
 
+/// Narrows a decoded `u128` back into a typed integer [`Value`], failing when
+/// it does not fit the target width.
 fn integer_to_value(value: u128, value_type: &ValueType) -> Result<Value, WindowCodecError> {
     match value_type {
         ValueType::U8 => u8::try_from(value)
@@ -967,16 +1091,21 @@ fn integer_to_value(value: u128, value_type: &ValueType) -> Result<Value, Window
     }
 }
 
+/// A forward byte reader over one encoded column, tracking a read offset. The
+/// decoders read varints, length-prefixed byte strings, and cells through it,
+/// and call [`Self::finish`] to assert the whole column was consumed.
 struct Cursor<'a> {
     data: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Cursor<'a> {
+    /// A cursor positioned at the start of `data`.
     fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
     }
 
+    /// Reads one LEB128 varint, advancing past it.
     fn read_varint(&mut self) -> Result<u128, WindowCodecError> {
         let mut shift = 0u32;
         let mut value = 0u128;
@@ -997,6 +1126,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    /// Reads a varint length prefix then that many bytes.
     fn read_bytes(&mut self) -> Result<Vec<u8>, WindowCodecError> {
         let len = usize::try_from(self.read_varint()?)
             .map_err(|_| WindowCodecError::Invalid("length too large"))?;
@@ -1013,11 +1143,13 @@ impl<'a> Cursor<'a> {
         Ok(bytes)
     }
 
+    /// Reads one length-prefixed, type-validated value cell.
     fn read_cell(&mut self, value_type: &ValueType) -> Result<Value, WindowCodecError> {
         let cell = self.read_bytes()?;
         value_from_cell(&cell, value_type)
     }
 
+    /// Asserts the column was fully consumed; leftover bytes are corruption.
     fn finish(self) -> Result<(), WindowCodecError> {
         if self.offset == self.data.len() {
             Ok(())

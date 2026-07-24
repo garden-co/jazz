@@ -29,10 +29,12 @@ pub struct PlannedQuery {
     pub logical: LogicalPlan,
     /// Executable subscription graph produced from the logical plan.
     pub graph: GraphBuilder,
+    /// The query's output columns, in order, with resolved types.
     pub output: Vec<LogicalField>,
 }
 
 impl PlannedQuery {
+    /// The record layout of the query's result rows, built from `output`.
     pub fn output_descriptor(&self) -> crate::records::RecordDescriptor {
         crate::records::RecordDescriptor::new(
             self.output
@@ -42,42 +44,71 @@ impl PlannedQuery {
     }
 }
 
+/// A planned parameterized query, ready to be installed as a prepared shape.
+///
+/// Produced by [`plan_prepared_shape`] from a query containing `:name`
+/// parameters. The parameters become a maintained binding relation the graph
+/// joins against, so binding a value is a data change rather than a new
+/// query.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedPreparedShape {
+    /// The plan and graph, with the binding relation already spliced in.
     pub planned: PlannedQuery,
+    /// The shape's derived name; all binding sources in the graph carry it.
     pub shape: String,
+    /// The distinct parameters, sorted by name.
     pub parameters: Vec<QueryParameter>,
+    /// Record layout of one binding row: one field per parameter.
     pub binding_descriptor: crate::records::RecordDescriptor,
+    /// The output columns that carry the parameter values, used by the
+    /// runtime to route each output row back to the binding that produced
+    /// it.
     pub output_key_fields: Vec<String>,
+    /// The output columns visible to subscribers — `planned.output` minus
+    /// the internal binding columns.
     pub public_output: Vec<LogicalField>,
 }
 
+/// One named query parameter with its resolved type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QueryParameter {
+    /// The parameter's name, without the `:` prefix.
     pub name: String,
+    /// The type inferred from the column the parameter is compared to.
     pub value_type: ValueType,
 }
 
+/// Normalized relational plan between the SQL AST and the graph builder.
+///
+/// Every variant carries its resolved output `fields`, so name resolution
+/// happens once, here, and later passes only look fields up.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LogicalPlan {
+    /// Read one base table.
     Scan {
         table: String,
+        /// The SQL alias, when the table was aliased in `FROM`.
         alias: Option<String>,
         fields: Vec<LogicalField>,
     },
+    /// Read a prepared shape's bound parameter rows (one row per binding);
+    /// created for `column = :param` predicates.
     BindingRelation {
         shape: String,
         fields: Vec<LogicalField>,
     },
+    /// Keep rows matching `predicate`.
     Filter {
         input: Box<LogicalPlan>,
         predicate: PredicateExpr,
         fields: Vec<LogicalField>,
     },
+    /// Reorder, rename, or drop columns.
     Project {
         input: Box<LogicalPlan>,
         fields: Vec<LogicalField>,
     },
+    /// Inner equi-join of two plans.
     Join {
         left: Box<LogicalPlan>,
         right: Box<LogicalPlan>,
@@ -87,6 +118,8 @@ pub enum LogicalPlan {
         right_on: Vec<String>,
         fields: Vec<LogicalField>,
     },
+    /// Sum of the inputs' rows (`UNION ALL`); inputs must be
+    /// column-compatible.
     UnionAll {
         inputs: Vec<LogicalPlan>,
         fields: Vec<LogicalField>,
@@ -94,6 +127,7 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// The plan's resolved output columns, in order.
     pub fn fields(&self) -> &[LogicalField] {
         match self {
             Self::Scan { fields, .. }
@@ -105,6 +139,10 @@ impl LogicalPlan {
         }
     }
 
+    /// Recursively canonicalizes the plan — today that means canonicalizing
+    /// every filter predicate (see [`PredicateExpr::canonicalize`]) — so
+    /// logically identical queries lower to identical graphs and share
+    /// nodes.
     pub fn canonicalize(self) -> Self {
         match self {
             Self::Filter {
@@ -152,9 +190,18 @@ pub struct LogicalField {
     pub name: String,
     /// Original record field used when building Project nodes.
     pub source_name: String,
+    /// The field's resolved type.
     pub value_type: ValueType,
 }
 
+/// Plans an ordinary (parameter-free) query.
+///
+/// * `query` — the SQL-ish AST to lower.
+/// * `schema` — the database schema names are resolved against.
+///
+/// Returns the logical plan, the executable [`GraphBuilder`], and the
+/// resolved output columns. A query containing `:name` parameters is
+/// rejected — those go through [`plan_prepared_shape`] instead.
 pub fn plan_query(query: &Query, schema: &DatabaseSchema) -> Result<PlannedQuery, PlannerError> {
     let planned = Planner::new(schema).plan_query(query)?;
     if !planned.parameters.is_empty() {
@@ -165,6 +212,17 @@ pub fn plan_query(query: &Query, schema: &DatabaseSchema) -> Result<PlannedQuery
     Ok(planned.planned)
 }
 
+/// Plans a parameterized query into a prepared shape.
+///
+/// * `query` — the AST; it must contain at least one `:name` parameter,
+///   each used in a `column = :name` equality.
+/// * `schema` — the database schema names are resolved against.
+///
+/// Each parameter equality becomes a join against the shape's binding
+/// relation, so all bindings of the shape share one maintained graph. The
+/// result carries everything the runtime needs to install the shape: the
+/// graph, the binding row layout, and which output columns route rows back
+/// to their binding.
 pub fn plan_prepared_shape(
     query: &Query,
     schema: &DatabaseSchema,
@@ -219,6 +277,9 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// The full lowering pipeline: lower the AST, canonicalize, collect any
+    /// binding parameters, name the shape and stamp it into the plan's
+    /// binding relations, then build the executable graph.
     fn plan_query(&mut self, query: &Query) -> Result<PreparedPlan, PlannerError> {
         let mut logical = self.lower_query(query)?.canonicalize();
         let parameters = collect_binding_fields(&logical);
@@ -242,6 +303,9 @@ impl<'a> Planner<'a> {
         })
     }
 
+    /// Lowers one query level: SELECTs, `UNION ALL` set queries, and
+    /// non-recursive WITH scopes (each CTE is planned once and cloned where
+    /// referenced).
     fn lower_query(&mut self, query: &Query) -> Result<LogicalPlan, PlannerError> {
         match query {
             Query::Select(select) => self.lower_select(select),
@@ -280,6 +344,10 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Lowers a SELECT: FROM first, then WHERE (splitting `column = :param`
+    /// equalities off into a binding join before filtering on the rest),
+    /// then the projection, finally re-appending any binding columns the
+    /// projection dropped (the runtime needs them for routing).
     fn lower_select(&mut self, select: &Select) -> Result<LogicalPlan, PlannerError> {
         if select.quantifier != SelectQuantifier::All {
             return Err(PlannerError::UnsupportedQuery(
@@ -334,6 +402,8 @@ impl<'a> Planner<'a> {
         Ok(projected)
     }
 
+    /// Lowers the FROM clause; exactly one table reference (which may be a
+    /// join tree) is supported today.
     fn lower_from(&mut self, from: &[TableRef]) -> Result<LogicalPlan, PlannerError> {
         let mut refs = from.iter();
         let first = refs
@@ -348,6 +418,8 @@ impl<'a> Planner<'a> {
         Ok(plan)
     }
 
+    /// Lowers one FROM entry: a named table (CTE names shadow schema
+    /// tables), or a join tree. Derived tables are not lowerable yet.
     fn lower_table_ref(&mut self, table_ref: &TableRef) -> Result<LogicalPlan, PlannerError> {
         match table_ref {
             TableRef::Named { name, alias } => {
@@ -376,6 +448,9 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Lowers one join: inner joins with an `ON` clause of AND-ed column
+    /// equalities only. The output fields are both sides' fields with
+    /// `left.` / `right.` source prefixes (see [`join_fields`]).
     fn lower_join(
         &mut self,
         left: &TableRef,
@@ -406,6 +481,9 @@ impl<'a> Planner<'a> {
         })
     }
 
+    /// Lowers the SELECT list into a Project node: wildcards expand to the
+    /// input's fields, qualified wildcards to one qualifier's fields, and
+    /// plain column items resolve (and optionally alias) one field each.
     fn lower_projection(
         &self,
         input: LogicalPlan,
@@ -445,6 +523,8 @@ impl<'a> Planner<'a> {
         })
     }
 
+    /// Resolves one projected column against the input fields, applying the
+    /// `AS alias` (an aliased field loses its qualifier: it is a new name).
     fn resolve_projected_field(
         &self,
         input_fields: &[LogicalField],
@@ -464,6 +544,9 @@ impl<'a> Planner<'a> {
         Ok(field)
     }
 
+    /// Lowers a WHERE expression to a [`PredicateExpr`]: AND/OR recurse,
+    /// comparisons go through [`Self::lower_comparison`], and `IS [NOT]
+    /// NULL` through [`Self::lower_unary_predicate`].
     fn lower_predicate(
         &self,
         expr: &Expr,
@@ -494,6 +577,7 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Lowers `column IS NULL` / `column IS NOT NULL`.
     fn lower_unary_predicate(
         &self,
         op: &UnaryOp,
@@ -519,6 +603,9 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Lowers one comparison into field-vs-literal form, type-checking the
+    /// operands. A literal-on-the-left comparison is flipped
+    /// ([`PredicateKind::reversed`]) so the field always comes first.
     fn lower_comparison(
         &self,
         left: &Expr,
@@ -564,6 +651,7 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Classifies one comparison operand as a resolved field or a literal.
     fn lower_predicate_operand(
         &self,
         expr: &Expr,
@@ -585,6 +673,10 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Splits a WHERE expression into its `column = :param` conjuncts (which
+    /// become binding joins) and the residual expression (which stays an
+    /// ordinary filter). Only top-level AND chains are split; a parameter
+    /// anywhere else is rejected by the binding lowering below.
     fn extract_binding_predicates(
         &self,
         expr: &Expr,
@@ -615,6 +707,8 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Lowers one parameter conjunct; only `column = :param` (either side)
+    /// is supported.
     fn lower_binding_predicate(
         &self,
         expr: &Expr,
@@ -646,24 +740,40 @@ impl<'a> Planner<'a> {
     }
 }
 
+/// Internal planning result before the parameter-free/prepared split:
+/// the planned query plus whatever parameters were found (empty for plain
+/// queries) and the derived shape name (empty when parameter-free).
 struct PreparedPlan {
     planned: PlannedQuery,
     parameters: Vec<QueryParameter>,
     shape: String,
 }
 
+/// One extracted `column = :parameter` conjunct.
 #[derive(Clone, Debug)]
 struct BindingPredicate {
+    /// The resolved column the parameter is compared against.
     field: LogicalField,
+    /// The parameter's name.
     parameter: String,
 }
 
+/// Qualifier marking internal binding-relation columns, so they can be told
+/// apart from user columns and hidden from the public output.
 const BINDING_QUALIFIER: &str = "__bindings";
 
+/// Builds the executable graph for a plan, with no field pruning at the
+/// root (the query's full output is wanted).
 fn graph_from_logical(plan: &LogicalPlan) -> Result<GraphBuilder, PlannerError> {
     graph_from_logical_required(plan, None)
 }
 
+/// Builds the executable graph for a plan.
+///
+/// * `plan` — the logical plan to translate.
+/// * `required` — when set, the fields the *parent* actually needs; the
+///   subtree then projects down to exactly those. This is how projections
+///   are pushed below joins instead of materializing full-width rows.
 fn graph_from_logical_required(
     plan: &LogicalPlan,
     required: Option<&[LogicalField]>,
@@ -726,6 +836,9 @@ fn graph_from_logical_required(
     }
 }
 
+/// Projects a join's `left.<field>` / `right.<field>` output down to the
+/// parent's required fields, translating each required field through the
+/// (already pruned) child field lists.
 fn project_join_required_graph(
     join: GraphBuilder,
     left_required: &[LogicalField],
@@ -747,6 +860,8 @@ fn project_join_required_graph(
     })))
 }
 
+/// Appends a Project node when the parent needs fewer/renamed fields;
+/// passes the graph through untouched when it already matches.
 fn project_required_graph(
     graph: GraphBuilder,
     available: &[LogicalField],
@@ -765,6 +880,9 @@ fn project_required_graph(
     ))
 }
 
+/// Computes which of a join child's fields are actually needed: the child's
+/// join keys plus every parent-required field whose source is prefixed with
+/// this child's side (`"left"` or `"right"`), deduplicated.
 fn join_child_required_fields(
     child_fields: &[LogicalField],
     join_keys: &[String],
@@ -787,6 +905,7 @@ fn join_child_required_fields(
     Ok(fields)
 }
 
+/// Appends `field` unless a field with the same source is already present.
 fn push_unique_field(fields: &mut Vec<LogicalField>, field: LogicalField) {
     if !fields
         .iter()
@@ -796,6 +915,7 @@ fn push_unique_field(fields: &mut Vec<LogicalField>, field: LogicalField) {
     }
 }
 
+/// Finds the field whose `source_name` is `source_name`.
 fn field_for_source<'a>(
     fields: &'a [LogicalField],
     source_name: &str,
@@ -806,6 +926,7 @@ fn field_for_source<'a>(
         .ok_or_else(|| PlannerError::ColumnNotFound(source_name.to_owned()))
 }
 
+/// The output name of the field with the given `source_name`.
 fn field_name_for_source(
     fields: &[LogicalField],
     source_name: &str,
@@ -813,6 +934,13 @@ fn field_name_for_source(
     Ok(field_for_source(fields, source_name)?.name.clone())
 }
 
+/// Joins `input` against a fresh binding relation on the extracted
+/// parameter equalities.
+///
+/// One binding column is created per distinct parameter (a parameter used
+/// twice must see the same column type both times). The relation's shape
+/// name is filled in later by [`rewrite_param_shape`], once the whole plan
+/// is known and the name can be derived from it.
 fn add_binding_join(
     input: LogicalPlan,
     predicates: Vec<BindingPredicate>,
@@ -864,6 +992,10 @@ fn add_binding_join(
     })
 }
 
+/// Decides where the binding join goes. When every parameter constrains
+/// columns of one table, the join is pushed down next to that table's scan
+/// — the parameter then narrows rows *before* any other join instead of
+/// filtering the joined result. Otherwise it wraps the whole input.
 fn place_binding_join(
     input: LogicalPlan,
     predicates: Vec<BindingPredicate>,
@@ -881,6 +1013,10 @@ fn place_binding_join(
     add_binding_join(input, predicates)
 }
 
+/// Recursively descends to the scan owning `qualifier` and wraps *it* in
+/// the binding join, re-deriving the field lists (and join keys) on the way
+/// back up. Returns `None` when no rewrite applies (the caller then joins
+/// at the top instead).
 fn push_param_join_into_qualifier(
     input: LogicalPlan,
     predicates: &[BindingPredicate],
@@ -979,12 +1115,15 @@ fn push_param_join_into_qualifier(
     }
 }
 
+/// `true` when any of the plan's output fields belongs to `qualifier`.
 fn plan_has_qualifier(plan: &LogicalPlan, qualifier: &str) -> bool {
     plan.fields()
         .iter()
         .any(|field| field.qualifier.as_deref() == Some(qualifier))
 }
 
+/// Finds the field with the same `(qualifier, name)` as `target` — the
+/// stable identity that survives re-deriving field lists during rewrites.
 fn resolve_field_by_output_identity<'a>(
     fields: &'a [LogicalField],
     target: &LogicalField,
@@ -995,6 +1134,9 @@ fn resolve_field_by_output_identity<'a>(
         .ok_or_else(|| PlannerError::ColumnNotFound(target.name.clone()))
 }
 
+/// Translates join-key source names from a child's old field list to its
+/// rewritten one (the binding-join pushdown prefixes sources, so keys must
+/// follow).
 fn remap_join_keys(
     old_fields: &[LogicalField],
     new_fields: &[LogicalField],
@@ -1012,6 +1154,10 @@ fn remap_join_keys(
         .collect()
 }
 
+/// Re-appends binding columns the user's projection dropped — the runtime
+/// needs them in the output to route rows to their binding. A user column
+/// may share a binding column's name only when it *is* that parameter's
+/// source column; anything else is an ambiguous collision and is rejected.
 fn append_missing_binding_fields(
     input: LogicalPlan,
     binding_fields: Vec<LogicalField>,
@@ -1049,6 +1195,8 @@ fn append_missing_binding_fields(
     })
 }
 
+/// Collects every parameter appearing in the plan's binding relations,
+/// deduplicated and sorted by name.
 fn collect_binding_fields(plan: &LogicalPlan) -> Vec<QueryParameter> {
     let mut parameters = BTreeMap::<String, ValueType>::new();
     collect_binding_fields_inner(plan, &mut parameters);
@@ -1081,6 +1229,8 @@ fn collect_binding_fields_inner(plan: &LogicalPlan, parameters: &mut BTreeMap<St
     }
 }
 
+/// Stamps the derived shape name into every binding relation of the plan
+/// (they are created with an empty name before the name can be computed).
 fn rewrite_param_shape(plan: &mut LogicalPlan, shape: &str) {
     match plan {
         LogicalPlan::BindingRelation {
@@ -1102,6 +1252,9 @@ fn rewrite_param_shape(plan: &mut LogicalPlan, shape: &str) {
     }
 }
 
+/// Derives the shape's name by hashing the plan (with shape names blanked,
+/// to avoid circularity) plus its parameters — so two identical
+/// parameterized queries share one shape and one maintained graph.
 fn prepared_shape_name(plan: &LogicalPlan, parameters: &[QueryParameter]) -> String {
     let mut plan = plan.clone();
     rewrite_param_shape(&mut plan, "");
@@ -1113,6 +1266,8 @@ fn prepared_shape_name(plan: &LogicalPlan, parameters: &[QueryParameter]) -> Str
     format!("prepared_{:016x}", hasher.finish())
 }
 
+/// `true` when the expression contains a `:parameter` anywhere reachable
+/// (subqueries are deliberately not descended into).
 fn contains_bindingeter(expr: &Expr) -> bool {
     match expr {
         Expr::Parameter(_) => true,
@@ -1153,6 +1308,8 @@ fn function_arg_contains_bindingeter(arg: &crate::queries::FunctionArg) -> bool 
     }
 }
 
+/// Builds the Scan plan for a table: one field per column, qualified by the
+/// alias when given, otherwise by the table name.
 fn scan_plan(table: &TableSchema, alias: Option<String>) -> LogicalPlan {
     let qualifier = alias.clone().or_else(|| Some(table.name.clone()));
     let fields = table
@@ -1172,6 +1329,9 @@ fn scan_plan(table: &TableSchema, alias: Option<String>) -> LogicalPlan {
     }
 }
 
+/// Resolves a (possibly qualified) column name against the fields in scope.
+/// Exactly one field may match: none is [`PlannerError::ColumnNotFound`],
+/// several are [`PlannerError::AmbiguousColumn`].
 fn resolve_column<'a>(
     fields: &'a [LogicalField],
     qualifier: &[String],
@@ -1194,6 +1354,7 @@ fn resolve_column<'a>(
     }
 }
 
+/// One side of a comparison after classification.
 #[derive(Clone, Debug)]
 enum PredicateOperand {
     Field(LogicalField),
@@ -1201,6 +1362,8 @@ enum PredicateOperand {
 }
 
 impl PredicateOperand {
+    /// The operand's type: always known for fields, best-effort for
+    /// literals (a bare NULL has none).
     fn value_type(&self) -> Option<ValueType> {
         match self {
             Self::Field(field) => Some(field.value_type.clone()),
@@ -1209,6 +1372,9 @@ impl PredicateOperand {
     }
 }
 
+/// Rejects `field = NULL`-style comparisons: SQL says they are never true,
+/// and the executable predicates have no way to express that, so they are
+/// refused instead of silently mis-evaluated. Use `IS NULL`.
 fn reject_null_literal(value: &LiteralValue) -> Result<(), PlannerError> {
     if matches!(value, LiteralValue::Nullable(None)) {
         return Err(PlannerError::UnsupportedExpression(
@@ -1218,6 +1384,9 @@ fn reject_null_literal(value: &LiteralValue) -> Result<(), PlannerError> {
     Ok(())
 }
 
+/// Rejects comparisons between incompatible types when both sides' types
+/// are known (an untyped side, like a bare NULL, passes here and is handled
+/// elsewhere).
 fn type_check_comparison(
     left: &PredicateOperand,
     right: &PredicateOperand,
@@ -1235,6 +1404,9 @@ fn type_check_comparison(
     }
 }
 
+/// Adapts a literal to the field it is compared with. Today that means one
+/// thing: a string literal compared to an enum column is converted to the
+/// variant's discriminant (so `color = 'green'` becomes `color = Enum(1)`).
 fn normalize_literal_for_field(
     value: LiteralValue,
     field_type: &ValueType,
@@ -1265,6 +1437,9 @@ fn normalize_literal_for_field(
     }
 }
 
+/// Whether two types may be compared: equal types, either side's nullable
+/// wrapper ignored, and the enum-vs-string pairing (normalized later by
+/// [`normalize_literal_for_field`]).
 fn comparable_value_types(left: &ValueType, right: &ValueType) -> bool {
     if left == right {
         return true;
@@ -1290,6 +1465,10 @@ fn comparable_value_types(left: &ValueType, right: &ValueType) -> bool {
     }
 }
 
+/// Lowers an `ON` clause of AND-ed column equalities into parallel key
+/// lists. Each equality's columns are resolved left-side/right-side; when
+/// that fails, the swapped assignment is tried (`ON artists.id =
+/// albums.artist_id` works too). Key types must match exactly.
 fn lower_join_keys(
     predicate: &Expr,
     left_fields: &[LogicalField],
@@ -1358,6 +1537,9 @@ fn lower_join_keys(
     ))
 }
 
+/// A join's output field list: both sides' fields with their SQL names and
+/// qualifiers kept, and their source names prefixed `left.` / `right.` to
+/// address the joined record's columns.
 fn join_fields(left: &[LogicalField], right: &[LogicalField]) -> Vec<LogicalField> {
     left.iter()
         .map(|field| LogicalField {
@@ -1375,6 +1557,8 @@ fn join_fields(left: &[LogicalField], right: &[LogicalField]) -> Vec<LogicalFiel
         .collect()
 }
 
+/// Whether two field lists are `UNION ALL`-compatible: same length, same
+/// types position by position (names may differ; the left side's win).
 fn comparable_fields(left: &[LogicalField], right: &[LogicalField]) -> bool {
     left.len() == right.len()
         && left
@@ -1383,6 +1567,8 @@ fn comparable_fields(left: &[LogicalField], right: &[LogicalField]) -> bool {
             .all(|(left, right)| left.value_type == right.value_type)
 }
 
+/// Unwraps a one-part object name; qualified names (`db.table`) are not
+/// supported yet.
 fn single_name(name: &[String]) -> Result<&str, PlannerError> {
     match name {
         [name] => Ok(name),
@@ -1392,6 +1578,8 @@ fn single_name(name: &[String]) -> Result<&str, PlannerError> {
     }
 }
 
+/// Ways planning can fail. The `Unsupported*` variants carry a static
+/// message naming the exact SQL shape that is not lowerable yet.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PlannerError {
     #[error("ambiguous column: {0}")]

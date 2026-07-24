@@ -19,16 +19,25 @@ use super::{
     encode_key_part, encode_record_field_key_part,
 };
 
+/// One join key: the encoded key-field bytes, inline for short keys.
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
+/// The records sharing one key, as a weighted multiset (encoded row → weight).
 type JoinBucket = HashMap<Bytes, i64>;
+/// The whole arrangement: join key → its bucket of records.
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
+/// Zero-sized marker for inner-join evaluation; the real state is the shared
+/// [`ArrangementState`]s it operates on.
 #[derive(Clone, Debug, Default)]
 pub(super) struct JoinState;
 
+/// Zero-sized marker for semi/anti-join evaluation (both reuse it).
 #[derive(Clone, Debug, Default)]
 pub(super) struct AntiJoinState;
 
+/// One join input's maintained index — the "arrangement" of ch. 4: a keyed,
+/// self-updating copy of a weighted record set that a join probes instead of
+/// rescanning.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ArrangementState {
     /// key -> record multiset. Records are kept as encoded bytes so probing can
@@ -37,6 +46,17 @@ pub(super) struct ArrangementState {
 }
 
 impl JoinState {
+    /// Applies one tick's left/right deltas to an inner join and returns the
+    /// output delta.
+    ///
+    /// The incremental join identity: for input change `dA` on the left and
+    /// `dB` on the right, the output change is
+    /// `dA ⋈ B_new + A_new ⋈ dB − dA ⋈ dB`. Concretely: advance both
+    /// arrangements, probe the left delta against the (now current) right
+    /// arrangement, probe the right delta against the left arrangement, then
+    /// subtract one copy of the `dA ⋈ dB` cross term that both probes counted.
+    /// The remaining arguments describe the schemas, the join keys, and the
+    /// output field mapping (see the parameter comments below).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
         &self,
@@ -186,6 +206,14 @@ impl JoinState {
 }
 
 impl AntiJoinState {
+    /// Maintains a semi join: emit a left row when its key has at least one
+    /// right match, retract it when the last match disappears.
+    ///
+    /// Unlike an inner join it never multiplies rows — a left row is present
+    /// (weight from its bucket) or absent. `Accumulate` mode diffs each
+    /// affected key's visible left bucket before and after the tick (visible
+    /// meaning "the right side has ≥1 match"); `Replace` mode rebuilds from a
+    /// snapshot and emits the currently-matched left buckets.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_semi(
         &self,
@@ -294,6 +322,10 @@ impl AntiJoinState {
         Ok(consolidate_deltas(deltas))
     }
 
+    /// Maintains an anti join: emit a left row when its key has *no* right
+    /// match, retract it as soon as a match appears. The mirror image of
+    /// [`Self::apply_semi`] — it diffs the left buckets that are visible
+    /// precisely when the right side is empty.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply(
         &self,
@@ -402,6 +434,7 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
+    /// Number of live (non-zero-weight) records across all keys, for stats.
     pub(super) fn row_count(&self) -> usize {
         self.index
             .values()
@@ -409,6 +442,7 @@ impl ArrangementState {
             .sum()
     }
 
+    /// Total encoded bytes of keys and records held, for stats.
     pub(super) fn encoded_bytes(&self) -> usize {
         self.index
             .iter()
@@ -418,6 +452,8 @@ impl ArrangementState {
             .sum()
     }
 
+    /// Folds keyed deltas into the index: `Accumulate` layers them on,
+    /// `Replace` rebuilds the index from just these deltas (hydration).
     fn apply_update(
         &mut self,
         deltas: &[KeyedRecordDelta<'_>],
@@ -433,6 +469,8 @@ impl ArrangementState {
         }
     }
 
+    /// Total weight of all records under one key (`0` when the key is
+    /// absent) — how anti/semi joins ask "does this key have any match?".
     fn key_count(&self, key: &[u8]) -> i64 {
         self.index
             .get(key)
@@ -440,10 +478,14 @@ impl ArrangementState {
             .unwrap_or_default()
     }
 
+    /// The record bucket under one key, if any.
     fn bucket(&self, key: &[u8]) -> Option<&JoinBucket> {
         self.index.get(key)
     }
 
+    /// Keys `deltas` by `fields` and folds them in — the entry point for
+    /// operators (arg-by, top-by, aggregate) that arrange their input by a
+    /// grouping key.
     pub(super) fn apply_record_deltas(
         &mut self,
         descriptor: RecordDescriptor,
@@ -456,6 +498,8 @@ impl ArrangementState {
         Ok(())
     }
 
+    /// The live records (positive weight) under one key, cloned — how
+    /// grouped operators read out a group's current members.
     pub(super) fn records_for_key(&self, key: &[u8]) -> Vec<(Bytes, i64)> {
         self.index
             .get(key)
@@ -466,6 +510,14 @@ impl ArrangementState {
     }
 }
 
+/// Advances a shared arrangement to `sub_tick` by folding in `deltas`.
+///
+/// In `Accumulate` mode a matching stamp means the arrangement already saw
+/// this delta (a sibling operator advanced it), so it is a no-op. A stamp
+/// that is *ahead* of `sub_tick` is an ordering bug and fails with
+/// [`IvmRuntimeError::OutOfOrderRuntimeState`]. `Replace` callers
+/// legitimately rebuild at the same tick and update the stamp with
+/// `replace_as_of_at_least`.
 fn advance_arrangement(
     arrangement: &mut AsOf<ArrangementState, SubTick>,
     deltas: &[KeyedRecordDelta<'_>],
@@ -536,16 +588,28 @@ struct JoinOutputBuffer {
     variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
+/// A record delta paired with the join key extracted from it — one row may
+/// produce several of these when the key field is an array.
 struct KeyedRecordDelta<'a> {
     delta: &'a RecordDelta,
     key: JoinKey,
 }
 
+/// Which side of a join the changed rows come from, so the joined record is
+/// assembled with left/right in the right order.
 enum JoinProbeSide {
     LeftDelta,
     RightDelta,
 }
 
+/// Probes `delta_records` against the `stored` arrangement and appends every
+/// resulting joined row to `output`.
+///
+/// For each changed row, every record under the same key in `stored`
+/// produces one output row whose weight is `sign × delta_weight ×
+/// stored_weight`. `side` decides whether the changed row is the left or
+/// right half of the joined record; `sign` is `+1` for the two forward
+/// probes and `-1` for the cross-term correction.
 fn append_join_deltas(
     output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
@@ -588,6 +652,9 @@ fn append_join_deltas(
     Ok(())
 }
 
+/// Folds keyed deltas into an index in place: adds weights, and prunes
+/// records (and then empty buckets) whose weight reaches zero, keeping the
+/// arrangement consolidated.
 fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'_>]) {
     for delta in deltas {
         let bucket = index.entry(delta.key.clone()).or_default();
@@ -604,12 +671,24 @@ fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'
     }
 }
 
+/// Builds a fresh index from a delta set — used both to `Replace` an
+/// arrangement and to build the temporary same-tick index for the cross-term
+/// correction.
 fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
     let mut index = HashMap::default();
     apply_join_delta_to_index(&mut index, deltas);
     index
 }
 
+/// Attaches the join key to each record delta.
+///
+/// * `descriptor` — the row layout of the deltas.
+/// * `fields` — the key field names.
+/// * `deltas` — the record deltas to key.
+///
+/// Scalar key fields take a fast path that encodes the key directly; a
+/// field that can be an array falls back to [`join_keys`], which may emit
+/// several keyed deltas for one row (one per element).
 fn keyed_join_deltas<'a>(
     descriptor: &RecordDescriptor,
     fields: &[String],
@@ -639,6 +718,9 @@ fn keyed_join_deltas<'a>(
     Ok(keyed)
 }
 
+/// Resolves the key field names to indices, but only when every field is
+/// scalar — returns `None` if any field is (or wraps) an array, signalling
+/// that the array-aware slow path must be used instead.
 fn scalar_join_field_indices(
     descriptor: &RecordDescriptor,
     fields: &[String],
@@ -663,6 +745,9 @@ fn scalar_join_field_indices(
     Ok(Some(indices))
 }
 
+/// Appends every record of `bucket` to `deltas`, each with its weight times
+/// `sign` (so `-1` emits the bucket as retractions). Skips a `None` bucket
+/// and any zero-weight result.
 fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sign: i64) {
     let Some(bucket) = bucket else {
         return;
@@ -679,6 +764,9 @@ fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sig
     }
 }
 
+/// Emits the change from `old_bucket` to `new_bucket`: the old records as
+/// retractions and the new records as insertions. Semi/anti joins use this
+/// to turn a key's "was visible → is visible" transition into output deltas.
 fn append_bucket_diff(
     deltas: &mut Vec<RecordDelta>,
     new_bucket: Option<&JoinBucket>,
@@ -692,6 +780,12 @@ fn append_bucket_diff(
     }
 }
 
+/// Extracts the join key(s) for one record: the array-aware general path.
+///
+/// A record usually yields exactly one key. An array key field yields one
+/// key per distinct element; several array fields yield the cross product of
+/// their elements. An empty array field means the record matches nothing, so
+/// no keys are produced.
 pub(super) fn join_keys(
     descriptor: &RecordDescriptor,
     record: &[u8],
@@ -750,6 +844,9 @@ pub(super) fn join_keys(
     Ok(keys.into_iter().map(JoinKey::from_vec).collect())
 }
 
+/// Splits one key-field value into the values it keys on: array elements
+/// individually, everything else as itself (nullability preserved). This is
+/// what makes a single array-valued field join on each of its elements.
 fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
     match value {
         crate::records::Value::Array(values) => values,
@@ -764,6 +861,10 @@ fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
     }
 }
 
+/// Builds one joined output record from a matching left/right pair, deriving
+/// the `left.`/`right.` field mapping from the output descriptor. The
+/// allocating form used on the recompute path; the tick path uses
+/// [`create_join_record_into`] to pack into a shared buffer.
 pub(super) fn create_join_record(
     left_descriptor: &RecordDescriptor,
     left_record: &[u8],
@@ -779,6 +880,9 @@ pub(super) fn create_join_record(
     )?)
 }
 
+/// Builds one joined output record straight into the shared `output` buffer,
+/// reusing the precomputed mapping in `context`, and returns its byte range —
+/// the allocation-light path used while emitting a batch of join deltas.
 fn create_join_record_into(
     left_record: &[u8],
     right_record: &[u8],
@@ -798,6 +902,10 @@ fn create_join_record_into(
         .map_err(IvmRuntimeError::RecordEncoding)
 }
 
+/// Derives the output field mapping from field names: each output field is
+/// named `left.<name>` or `right.<name>`, and this resolves it to
+/// `(0 or 1, source field index)` — `0` for the left input, `1` for the
+/// right. An output field without such a prefix is an error.
 pub(super) fn join_output_mapping(
     left_descriptor: &RecordDescriptor,
     right_descriptor: &RecordDescriptor,
