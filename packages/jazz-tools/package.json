@@ -2,13 +2,25 @@
   "name": "jazz-tools",
   "version": "2.0.0-alpha.53",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
+  "keywords": [
+    "database",
+    "jazz",
+    "local-first",
+    "tanstack-intent"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garden-co/jazz.git",
+    "directory": "packages/jazz-tools"
+  },
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
   },
   "files": [
     "bin/**",
     "dist/**",
+    "skills",
     "README.md"
   ],
   "type": "module",
@@ -123,6 +135,14 @@
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
+    "skills:eval": "node scripts/eval-skills.mjs check",
+    "skills:eval:archive": "node scripts/archive-skill-eval-results.mjs",
+    "skills:eval:html": "node scripts/render-skill-eval-results.mjs skill-evals/results/latest.json skill-evals/results/latest.html",
+    "skills:eval:prompts": "node scripts/eval-skills.mjs prompts",
+    "skills:eval:run": "node scripts/run-skill-evals.mjs",
+    "skills:eval:score": "node scripts/eval-skills.mjs score",
+    "skills:validate": "intent validate skills",
+    "skills:stale": "intent stale skills",
     "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",
     "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
@@ -155,6 +175,7 @@
     "@better-auth/test-utils": "^1.5.5",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "@tanstack/intent": "^0.3.5",
     "@testing-library/react": "^16.3.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",

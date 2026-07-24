@@ -7,5 +7,6 @@ examples/*/schema/app.ts
 examples/docs/*/schema/app.ts
 dev/benchmarks/**/*.json
 dev/benchmarks/**/*.html
+packages/jazz-tools/skill-evals/results/**
 **/ENV.md
 **/.jazz-schema-*.mjs

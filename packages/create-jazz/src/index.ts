@@ -1,10 +1,11 @@
-import { intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
+import { confirm, intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
 import pc from "picocolors";
 import * as path from "node:path";
 import { scaffold, validateAppName, type StarterName, type ScaffoldOptions } from "./scaffold.js";
 import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
+import { intentInstallCommand, setupAgentSkills } from "./agent-skills.js";
 
 type Framework = "next" | "react" | "sveltekit" | "ts";
 type Hosting = "hosted" | "selfhosted";
@@ -101,6 +102,15 @@ async function main() {
   const rawHostingArg = readFlagValue(args, "hosting");
 
   const gitOptOut = args.includes("--no-git");
+  const skillsOptIn = args.includes("--skills");
+  const skillsOptOut = args.includes("--no-skills");
+
+  if (skillsOptIn && skillsOptOut) {
+    log.error("Choose either --skills or --no-skills, not both.");
+    process.exit(1);
+  }
+
+  let enableAgentSkills = skillsOptIn;
 
   // App name is the first non-flag argument
   const argvName = args.find((a) => !a.startsWith("-"));
@@ -187,6 +197,15 @@ async function main() {
     });
     if (isCancel(auth)) process.exit(0);
 
+    if (!skillsOptIn && !skillsOptOut) {
+      const pickedAgentSkills = await confirm({
+        message: "Set up Jazz coding skills for your AI agent?",
+        initialValue: true,
+      });
+      if (isCancel(pickedAgentSkills)) process.exit(0);
+      enableAgentSkills = pickedAgentSkills;
+    }
+
     const picked = STARTERS[framework][auth];
     if (!picked) {
       log.error(`No starter available for ${framework} + ${auth} yet.`);
@@ -250,6 +269,29 @@ async function main() {
       onStep: (label) => s.message(label),
       preInstall,
     });
+
+    if (enableAgentSkills && pm) {
+      s.message("Setting up Jazz coding skills");
+      try {
+        setupAgentSkills(targetDir, pm);
+        deferredLogs.push({
+          kind: "info",
+          message: "Jazz coding skills are ready for your agent.",
+        });
+      } catch (error) {
+        const command = intentInstallCommand(pm);
+        deferredLogs.push({
+          kind: "warn",
+          message: `${error instanceof Error ? error.message : String(error)}\nYour app is ready. Retry skill setup with: ${[command.executable, ...command.args].join(" ")}`,
+        });
+      }
+    } else if (enableAgentSkills) {
+      deferredLogs.push({
+        kind: "warn",
+        message:
+          "Dependencies were not installed, so Jazz coding skills were not set up. After installing them, run: npx @tanstack/intent@latest install",
+      });
+    }
 
     s.stop("Done.");
   } catch (err) {

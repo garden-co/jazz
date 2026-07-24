@@ -1,0 +1,2172 @@
+{
+  "version": 1,
+  "generatedAt": "2026-07-17T16:02:46.762Z",
+  "runner": "scripts/codex-skill-eval-runner.mjs",
+  "summary": {
+    "routing": {
+      "passed": 31,
+      "exact": 31,
+      "total": 33
+    },
+    "baseline": {
+      "skillSelection": {
+        "passed": 28,
+        "exact": 26,
+        "total": 28
+      },
+      "rubric": {
+        "passed": 40,
+        "total": 111
+      }
+    },
+    "loaded": {
+      "skillSelection": {
+        "passed": 28,
+        "exact": 27,
+        "total": 28
+      },
+      "rubric": {
+        "passed": 102,
+        "total": 111
+      }
+    },
+    "rubricUplift": 62
+  },
+  "runs": [
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 34241,
+      "tokens": 19766
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 40780,
+      "tokens": 20027
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 12988,
+      "tokens": 20562
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 9012,
+      "tokens": 19967
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 14685,
+      "tokens": 21106
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 23488,
+      "tokens": 24211
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 11700,
+      "tokens": 20186
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 14635,
+      "tokens": 19623
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 11195,
+      "tokens": 20380
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 10633,
+      "tokens": 20396
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 12945,
+      "tokens": 20049
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 62631,
+      "tokens": 19623
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 663852,
+      "tokens": 3024
+    },
+    {
+      "runner": "codex",
+      "runnerVersion": "codex-cli 0.145.0-alpha.18",
+      "model": "gpt-5.6-terra",
+      "reasoning": "medium",
+      "durationMs": 42607,
+      "tokens": 25186
+    }
+  ],
+  "routing": [
+    {
+      "id": "route-core-react-query",
+      "selectedSkills": [
+        "jazz-core"
+      ],
+      "response": "Subscribe to incomplete todo rows in the React component, render the live result, and update the clicked row’s completion field optimistically.",
+      "prompt": "Build a React todo list that subscribes to incomplete Jazz rows and marks a row complete when clicked.",
+      "expectedSkills": [
+        "jazz-core"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-core-optimistic-rejection",
+      "selectedSkills": [
+        "jazz-core"
+      ],
+      "response": "Inspect the mutation and sync/error handling: a disappearing row usually indicates an edge rejection or query predicate mismatch. Surface the rejection, verify required fields and permissions, and retain actionable error state.",
+      "prompt": "A Jazz item appears immediately and then silently disappears after sync. Troubleshoot the existing application code.",
+      "expectedSkills": [
+        "jazz-core"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-core-solid-reactivity",
+      "selectedSkills": [
+        "jazz-core"
+      ],
+      "response": "Make the Jazz query depend on a Solid accessor or memo of the selected project ID, rather than reading a non-reactive snapshot, so changing the selection recreates the subscription.",
+      "prompt": "Fix a Solid component whose Jazz query does not react when the selected project changes.",
+      "expectedSkills": [
+        "jazz-core"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-core-existing-tests",
+      "selectedSkills": [
+        "jazz-core"
+      ],
+      "response": "Add the Jazz-backed search view using the existing schema and query APIs, then run the existing suite; no testing skill is needed unless test code changes.",
+      "prompt": "Add a Jazz-backed search view and make sure the existing test suite still passes.",
+      "expectedSkills": [
+        "jazz-core"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-schema-required-column",
+      "selectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "response": "Introduce status through a backwards-compatible migration: provide a default or optional compatibility path first, update clients, then enforce required semantics only after older clients are retired.",
+      "prompt": "Add a required status column to a deployed Jazz app while keeping older clients working.",
+      "expectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-schema-permissions",
+      "selectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "response": "Define row rules that permit creators to manage their own rows and permit public reads only when the row is published; ensure every operation and historical row is covered.",
+      "prompt": "Write permissions.ts so creators can manage their own rows and published rows are readable by everyone.",
+      "expectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-schema-first-policy-publish",
+      "selectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "response": "Audit the initial policy as applying to all existing rows, not just future ones. Confirm ownership/backfill assumptions, public-read exposure, server/admin access, and test against representative historical data before publishing.",
+      "prompt": "Review the risks of publishing this app's first Jazz permissions bundle, including access to historical data.",
+      "expectedSkills": [
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-testing-cross-client",
+      "selectedSkills": [
+        "jazz-testing"
+      ],
+      "response": "Create two isolated user clients, write as Alice through public APIs, then await synchronisation and assert Bob can read the row.",
+      "prompt": "Write a black-box test proving that a Jazz write from Alice eventually becomes visible to Bob.",
+      "expectedSkills": [
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-testing-permission-denial",
+      "selectedSkills": [
+        "jazz-testing"
+      ],
+      "response": "Create owner and non-owner clients; assert permitted owner reads/updates succeed and non-owner reads or ownership-sensitive updates are rejected through public APIs.",
+      "prompt": "Add tests for allowed and denied Jazz reads and ownership-sensitive updates as two users.",
+      "expectedSkills": [
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-schema-and-testing",
+      "selectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-testing"
+      ],
+      "response": "Implement a compatibility migration for the renamed column, then add black-box old/new-client tests proving both representations remain readable and writable during rollout.",
+      "prompt": "Rename a column in a deployed Jazz schema and add old/new client compatibility tests for the migration.",
+      "expectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-core-and-testing",
+      "selectedSkills": [
+        "jazz-core",
+        "jazz-testing"
+      ],
+      "response": "Implement the optimistic offline edit in the client, then add an integration test that disconnects, edits, reconnects, and asserts eventual converged state.",
+      "prompt": "Implement an offline optimistic todo edit and add a reconnect-and-convergence integration test.",
+      "expectedSkills": [
+        "jazz-core",
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-core-and-schema",
+      "selectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-core"
+      ],
+      "response": "Migrate the established schema to add the project relation safely, then update the React query/view to load and display each todo’s project.",
+      "prompt": "Add a project relation to an established Jazz schema and update the React view to include each todo's project.",
+      "expectedSkills": [
+        "jazz-core",
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-all-three",
+      "selectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-core",
+        "jazz-testing"
+      ],
+      "response": "Add the share relation and relation-aware policies, query/render shared rows in Svelte, and cover multi-user server behaviour with black-box tests.",
+      "prompt": "Add a share table and relation-aware permissions, expose shared rows in the Svelte UI, and write multi-user server tests.",
+      "expectedSkills": [
+        "jazz-core",
+        "jazz-schema-evolution",
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-auth-principal-refresh",
+      "selectedSkills": [
+        "jazz-auth"
+      ],
+      "response": "Treat a principal change as a full session transition: clear Alice-scoped session/cache state before applying Bob’s token, await refresh completion, and prevent stale subscriptions from surviving.",
+      "prompt": "Fix a Jazz login flow that uses updateAuthToken to switch from Alice to Bob and sometimes keeps Alice's session state.",
+      "expectedSkills": [
+        "jazz-auth"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-auth-localfirst-upgrade",
+      "selectedSkills": [
+        "jazz-auth"
+      ],
+      "response": "Link the existing local-first identity to the Better Auth account instead of replacing it, preserving its credentials and ownership/access relationships through the upgrade flow.",
+      "prompt": "Let a local-first Jazz user sign up with Better Auth without losing access to data they created before signup.",
+      "expectedSkills": [
+        "jazz-auth"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-auth-and-permissions",
+      "selectedSkills": [
+        "jazz-auth",
+        "jazz-schema-evolution"
+      ],
+      "response": "Configure JWT validation and claim mapping for the external provider, then enforce report updates in permissions using an authenticated manager claim/role.",
+      "prompt": "Integrate an external JWT provider and change permissions.ts so only signed-in managers can update reports.",
+      "expectedSkills": [
+        "jazz-auth",
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-backend-request-context",
+      "selectedSkills": [
+        "jazz-backend"
+      ],
+      "response": "In the Hono route, verify the bearer token and create a caller-scoped Jazz context/handle from it; use that handle for reads so row policies are enforced server-side.",
+      "prompt": "Add a Hono API route that reads Jazz rows using the caller's bearer token and server-enforced row permissions.",
+      "expectedSkills": [
+        "jazz-backend"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-backend-attribution",
+      "selectedSkills": [
+        "jazz-backend"
+      ],
+      "response": "Use trusted backend credentials for webhook access while constructing the write with the triggering user as its caller/author attribution; do not expose backend authority to the client.",
+      "prompt": "A trusted webhook needs backend access to Jazz but its writes should be attributed to the user who triggered it.",
+      "expectedSkills": [
+        "jazz-backend"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-backend-auth-provider",
+      "selectedSkills": [
+        "jazz-backend"
+      ],
+      "response": "Configure WorkOS JWT verification and JWKS/issuer/audience settings, then create request-scoped caller handles from validated claims for each API request.",
+      "prompt": "Configure a TypeScript Jazz backend to validate WorkOS JWTs and create caller-scoped database handles for API requests.",
+      "expectedSkills": [
+        "jazz-auth",
+        "jazz-backend"
+      ],
+      "passed": false,
+      "exact": false,
+      "extraSkills": []
+    },
+    {
+      "id": "route-files-private-upload",
+      "selectedSkills": [
+        "jazz-files"
+      ],
+      "response": "Use the conventional chunked file storage helpers to upload images, link attachment metadata to application rows, restrict file access to authorised users, and generate downloads/object URLs safely.",
+      "prompt": "Add private image attachments to a new Jazz TypeScript app using chunked upload and download helpers.",
+      "expectedSkills": [
+        "jazz-files"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-files-existing-schema",
+      "selectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-files"
+      ],
+      "response": "Add files and file_parts through a backwards-compatible schema migration, then define attachment and chunk permissions that match the parent resource’s access rules.",
+      "prompt": "Add files and file_parts tables plus attachment permissions to an already deployed Jazz schema.",
+      "expectedSkills": [
+        "jazz-files",
+        "jazz-schema-evolution"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-files-and-testing",
+      "selectedSkills": [
+        "jazz-files",
+        "jazz-testing"
+      ],
+      "response": "Implement chunked Blob upload and safe deletion behaviour, then add black-box coverage for incomplete uploads and explicit cleanup of file metadata/chunks.",
+      "prompt": "Implement a Jazz Blob upload and add a black-box test for incomplete chunks and safe file deletion.",
+      "expectedSkills": [
+        "jazz-files",
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-sync-offline-counter",
+      "selectedSkills": [
+        "jazz-sync"
+      ],
+      "response": "Use a counter merge strategy for score increments, retain separate optimistic and edge-confirmed UI values, and model disconnected writes as operations that converge after reconnect.",
+      "prompt": "Design an offline collaborative score where concurrent increments converge and the UI distinguishes optimistic local state from edge-confirmed state.",
+      "expectedSkills": [
+        "jazz-sync"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-sync-schema-change",
+      "selectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-sync"
+      ],
+      "response": "Plan a mixed-version migration rather than changing merge semantics in place: introduce compatible representation and migration logic, then retire LWW only after offline legacy clients have upgraded.",
+      "prompt": "Change an established Jazz column from last-write-wins to a counter merge strategy without breaking old offline clients.",
+      "expectedSkills": [
+        "jazz-schema-evolution",
+        "jazz-sync"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-sync-and-testing",
+      "selectedSkills": [
+        "jazz-sync",
+        "jazz-testing"
+      ],
+      "response": "Create a deterministic two-client test that disconnects both clients, applies concurrent edits, reconnects in varied delivery orders, and asserts the designed converged result.",
+      "prompt": "Add a deterministic TypeScript integration test for two disconnected Jazz clients making concurrent edits and converging after reconnect.",
+      "expectedSkills": [
+        "jazz-sync",
+        "jazz-testing"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-expo-native-setup",
+      "selectedSkills": [
+        "jazz-expo"
+      ],
+      "response": "Configure Jazz’s native bindings, persistent offline data path, SecureStore-backed identity, Metro/withJazz integration, and verify via iOS and Android development builds.",
+      "prompt": "Set up Jazz in an existing Expo app with native offline storage, SecureStore identity, Metro configuration, and iOS and Android development builds.",
+      "expectedSkills": [
+        "jazz-expo"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-expo-auth",
+      "selectedSkills": [
+        "jazz-expo",
+        "jazz-auth"
+      ],
+      "response": "Implement native external login and recovery using the Expo-supported identity/storage flow, preserving and linking the existing local-first identity rather than replacing it.",
+      "prompt": "Add external login and recovery to a Jazz Expo app while preserving the user's existing local-first identity.",
+      "expectedSkills": [
+        "jazz-auth",
+        "jazz-expo"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-expo-files",
+      "selectedSkills": [
+        "jazz-expo",
+        "jazz-files"
+      ],
+      "response": "Select or capture native images, stream them through Jazz chunked file storage, attach them privately to app rows, and use native-compatible download/display handling.",
+      "prompt": "Add private camera attachments to a Jazz Expo app using native file selection and Jazz chunked file storage.",
+      "expectedSkills": [
+        "jazz-expo",
+        "jazz-files"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-rust-client",
+      "selectedSkills": [
+        "jazz-rust"
+      ],
+      "response": "Build a persistent JazzClient-backed CLI, define schema/query and Rust row decoding, persist local storage, submit todo writes, and await edge durability before reporting success.",
+      "prompt": "Build a persistent Rust CLI that connects with JazzClient, queries todos, decodes rows into Rust structs, and waits for writes at edge.",
+      "expectedSkills": [
+        "jazz-rust"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-rust-axum",
+      "selectedSkills": [
+        "jazz-rust"
+      ],
+      "response": "Authenticate the Axum request, derive a caller-scoped Jazz context, and use it for reads and writes so both row permissions and user authorship are preserved.",
+      "prompt": "Add an authenticated Axum endpoint that reads and updates Jazz rows using the caller's permissions and authorship.",
+      "expectedSkills": [
+        "jazz-rust"
+      ],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-rust-sync",
+      "selectedSkills": [
+        "jazz-rust"
+      ],
+      "response": "Build a cross-language deterministic sync topology with Rust and TypeScript clients, apply concurrent g-set operations, vary delivery order, and assert identical converged sets.",
+      "prompt": "Test a Rust Jazz client and a TypeScript Jazz client making concurrent g-set updates and converging regardless of delivery order.",
+      "expectedSkills": [
+        "jazz-rust",
+        "jazz-sync"
+      ],
+      "passed": false,
+      "exact": false,
+      "extraSkills": []
+    },
+    {
+      "id": "route-none-rust-core",
+      "selectedSkills": [],
+      "response": "Profile the Rust planner, identify the index-selection bottleneck, optimise the internal algorithm, and benchmark correctness and performance without altering the TypeScript API.",
+      "prompt": "Optimize the Rust query planner's index selection algorithm without changing the TypeScript API.",
+      "expectedSkills": [],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    },
+    {
+      "id": "route-none-doc-copy",
+      "selectedSkills": [],
+      "response": "Correct the README typo and verify the release instructions remain accurate and internally consistent.",
+      "prompt": "Fix a typo in the package README release instructions.",
+      "expectedSkills": [],
+      "passed": true,
+      "exact": true,
+      "extraSkills": []
+    }
+  ],
+  "behavior": {
+    "baseline": [
+      {
+        "id": "behavior-nullable-update",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Set `projectId` explicitly to `null` in the update payload; omitting it preserves the existing value. Ensure the column is nullable in the schema.",
+        "rubricScores": [
+          1,
+          1
+        ],
+        "rationale": "Explicitly uses null and says omission preserves the existing value.",
+        "prompt": "Change this Jazz update so it clears an optional projectId instead of leaving it unchanged.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses null to clear the optional column.",
+          "Does not use undefined to clear the column."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-reactive-accessors",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Keep query inputs reactive: in Svelte, derive the query from reactive state (for example `$derived(() => query({ id }))`); in Solid, pass accessors such as `() => id()` into the reactive query hook rather than a one-time `id()` value.",
+        "rubricScores": [
+          1,
+          1
+        ],
+        "rationale": "Shows reactive derived/accessor-shaped inputs in Svelte and accessor functions in Solid.",
+        "prompt": "Show the correct reactive-query shape when query inputs change in both Svelte and Solid.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses an accessor for Svelte QuerySubscription when inputs are reactive.",
+          "Uses a function or accessor for Solid useAll when inputs are reactive."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-batch-transaction",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Use a batch for two independent optimistic local-first writes. Use a transaction when both writes need authority acknowledgement and must become globally visible atomically.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correctly distinguishes optimistic batches from authority-atomic transactions and does not advise awaiting writes inside either.",
+        "prompt": "Choose between a Jazz batch and transaction for two optimistic UI writes versus two writes that must wait for authority and become globally visible together.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Chooses batch for writes that should become optimistically visible together.",
+          "Chooses transaction for authority-accepted globally atomic visibility.",
+          "Does not await individual writes inside the open batch or transaction."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-docs-live-lookup",
+        "selectedSkills": [
+          "jazz-docs"
+        ],
+        "response": "Use the current official Jazz documentation, found via the Jazz documentation site rather than memory or third-party examples. Select the table/schema-definition reference that matches the presently documented API, then cite its canonical URL and version context.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          0
+        ],
+        "rationale": "Selects a relevant reference page, but does not mention llms.txt, .mdx, or installed types taking precedence.",
+        "prompt": "There is no Jazz project or installed package to inspect. Find the current official documentation for defining tables and explain how you selected the source.",
+        "expectedSkills": [
+          "jazz-docs"
+        ],
+        "rubric": [
+          "Uses https://jazz.tools/llms.txt to identify the relevant documentation page.",
+          "Identifies the selected page's machine-readable MDX URL by appending .mdx to its documentation URL.",
+          "Selects only the relevant page or pages instead of recommending that the complete documentation set be loaded.",
+          "Explains that an installed package version and its public types take precedence for version-specific implementation details when available."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-core-self-reference",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Define `employees` first, then give it a nullable self-reference: `managerId: z.string().nullable()` with a `references(() => employees.id)` relation (using the project’s installed schema API). This allows an employee with no manager and prevents references outside `employees`.",
+        "rubricScores": [
+          0,
+          1,
+          0
+        ],
+        "rationale": "Uses managerId but proposes a different schema API rather than s.table, s.defineApp, and s.ref().optional().",
+        "prompt": "Show an initial Jazz schema for employees with an optional manager relation back to another employee.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Defines employees with s.table and exports a typed app through s.defineApp.",
+          "Defines the scalar relation column as managerId or manager_id.",
+          "Uses s.ref(\"employees\").optional() for the self-reference."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-core-column-types",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Use a timestamp/date column for the event time, a small inline bytes/binary column for the fingerprint so it loads with the row, and a typed reference/foreign-key column for `projectId` targeting `projects.id`.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "rationale": "Identifies the concepts but does not provide the required Jazz schema constructors; projectId is named correctly.",
+        "prompt": "Choose Jazz schema columns for an event timestamp, a small binary fingerprint that always loads with its row, and a reference to a projects table.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses s.timestamp() for the event timestamp.",
+          "Uses s.bytes() for the small inline binary fingerprint.",
+          "Uses s.ref(\"projects\") for the project reference.",
+          "Names the scalar reference projectId or project_id."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-permission-defaults",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "Publishing the first permissions bundle establishes the effective policy for existing rows as well as new ones. Later policy deployments are evaluated against historical rows too; permissions are not permanently copied into each row at creation.",
+        "rubricScores": [
+          0,
+          0,
+          1
+        ],
+        "rationale": "Correctly states current policy affects historical rows, but omits the before/after-first-bundle defaults.",
+        "prompt": "Explain what changes when an app publishes its first permissions bundle and how later permissions affect historical rows.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "States that before the first bundle all actors are allowed by the row-policy layer.",
+          "States that after the first bundle operations without grants are denied.",
+          "States that current permissions govern historical rows."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-permission-composition",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "No. `allowInsert.never()` contributes no grant; it does not deny or override another matching grant. Permission rules compose as an OR, so source order does not change the result.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Explicitly states OR composition, no override by never(), and order independence.",
+        "prompt": "Explain whether allowInsert.never() overrides another insert grant and whether source order matters.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "States that grants for the same operation are OR-combined.",
+          "States that never() does not override another grant.",
+          "States that source order does not matter."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-migration-generation",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "Run the project’s migration generator with a descriptive, stable name such as `add-project-status`. The generated migration records a `from` schema witness for the previously deployed shape and a `to` witness for the new shape, so Jazz can select and validate the correct transformation across client versions.",
+        "rubricScores": [
+          0,
+          0,
+          0
+        ],
+        "rationale": "Does not give the migrations create --name command, filename behaviour, or immutable minimal witnesses.",
+        "prompt": "Generate a named migration and explain what the name and generated from/to schema witnesses represent.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "Uses migrations create --name with a descriptive label.",
+          "Explains that the name affects the filename rather than migration metadata.",
+          "Keeps generated minimal from/to witness objects instead of importing the mutable current schema."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-deterministic-sync-test",
+        "selectedSkills": [
+          "jazz-testing"
+        ],
+        "response": "Create two isolated clients, write several uniquely identified rows, wait for synchronisation, then compare a normalised result (for example a map keyed by row ID or sorted IDs). Do not assert query iteration order unless ordering is the behaviour under test.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          0
+        ],
+        "rationale": "Normalises ordering, but lacks durability tier, retrying assertion, and cleanup.",
+        "prompt": "Sketch a stable black-box test for two clients syncing several rows whose order is not itself under test.",
+        "expectedSkills": [
+          "jazz-testing"
+        ],
+        "rubric": [
+          "Waits for edge or global durability before asserting peer or server visibility.",
+          "Uses a retrying assertion for eventual delivery instead of a fixed sleep.",
+          "Orders the query explicitly or normalizes rows by a stable key.",
+          "Shuts down clients and server, and disposes any subscriptions the test creates."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-denied-read-write",
+        "selectedSkills": [
+          "jazz-schema-evolution",
+          "jazz-testing"
+        ],
+        "response": "Create Alice’s row under Alice, then connect as Bob. Assert Bob’s public read/query returns no accessible row, and assert Bob’s attempted update/delete is rejected and Alice’s authoritative value remains unchanged. Also assert Alice can still read and mutate it.",
+        "rubricScores": [
+          1,
+          1,
+          0
+        ],
+        "rationale": "Correctly tests filtered reads and rejected writes, but does not establish use of public testing APIs for separate sessions.",
+        "prompt": "Test a policy that denies Bob access to Alice's row, covering both reads and writes.",
+        "expectedSkills": [
+          "jazz-testing"
+        ],
+        "rubric": [
+          "Asserts a denied read as an absent or filtered row rather than an exception.",
+          "Asserts the denied write as rejected or expectDenied.",
+          "Uses separate actor sessions through public testing APIs."
+        ],
+        "selectionPassed": true,
+        "selectionExact": false,
+        "extraSkills": [
+          "jazz-schema-evolution"
+        ]
+      },
+      {
+        "id": "behavior-auth-principal-lifecycle",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "Supply Alice’s refreshed JWT through the client auth/session update path before expiry or on refresh. For the principal switch, sign out, wait for auth state to clear, then authenticate with Bob’s token; do not reuse Alice’s live session or credentials for Bob.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          0
+        ],
+        "rationale": "Avoids updateAuthToken(null), but does not specify updateAuthToken, client recreation/re-keying, or stable sub verification.",
+        "prompt": "Explain how a live Jazz client should refresh an expired JWT for Alice, then later sign out and sign in as Bob.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "Uses updateAuthToken only for Alice's same-principal token refresh.",
+          "Creates a new Db or replaces or re-keys JazzProvider when signing in as Bob after Alice signs out.",
+          "Does not use updateAuthToken(null) as logout or a principal switch.",
+          "Uses Alice's stable JWT sub to confirm that the refreshed token is for the same principal."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-auth-storage-lifecycle",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "`logout()` ends the active session but retains local data. `logout({ wipeData: true })` also removes local replicated data for that logout flow. `deleteClientStorage()` removes the client’s persisted storage entirely. Clearing a local-first secret removes the recoverable local identity credential; use it only when that identity should no longer be recoverable on the device.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Omits the specified credential, OPFS, identity-state, and accessibility distinctions.",
+        "prompt": "Compare Jazz logout, logout with wipeData, deleteClientStorage, and clearing a local-first secret.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "States that logout shuts down the client but does not clear provider credentials for the app.",
+          "States that wipeData deletes browser OPFS data but preserves the local-first secret.",
+          "States that deleteClientStorage resets browser worker-backed database storage while preserving the current identity or sign-in state, for example by not signing out or deleting credentials.",
+          "Explains that clearing or replacing the local-first secret changes identity access and can make data owned by the previous identity inaccessible."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-auth-localfirst-upgrade",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "While the local-first identity is active, complete external-provider authentication and link/upgrade that external account to the existing Jazz principal. Persist the external session, verify the same principal/rows remain accessible, and only then retire the local-only recovery mechanism if desired.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Describes a general linking flow but omits proof generation, server verification/audience, JWT sub, and client recreation.",
+        "prompt": "Sketch the identity-preserving flow for upgrading a local-first Jazz user to an external provider account.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "Generates a short-lived local-first identity proof on the client.",
+          "Verifies the proof on a trusted server with a matching audience.",
+          "Stores the proven Jazz user ID on the external account and emits it as JWT sub.",
+          "Recreates the Jazz client with external auth after linking."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-backend-authority",
+        "selectedSkills": [
+          "jazz-backend"
+        ],
+        "response": "For a user request, create a request-scoped context authenticated as that user. For a cron job, use a long-lived backend/admin context. For a webhook requiring backend permissions but attributable to a user, use backend authority with the supported caller/write-attribution mechanism set to the verified user principal.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          1
+        ],
+        "rationale": "Describes attribution correctly and distinguishes it from backend permission use, but does not name or demonstrate the required request/session and asBackend handles.",
+        "prompt": "Choose Jazz backend handles for an authenticated user API request, a system cron job, and a webhook that needs backend permissions but user authorship.",
+        "expectedSkills": [
+          "jazz-backend"
+        ],
+        "rubric": [
+          "Uses forRequest or forSession for the authenticated API request so user permissions and authorship apply.",
+          "Uses asBackend for the system cron job.",
+          "Uses a withAttribution helper for backend-authorized webhook writes with user authorship.",
+          "Distinguishes attribution from permission impersonation."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-backend-runtime",
+        "selectedSkills": [
+          "jazz-backend"
+        ],
+        "response": "Create one process-lifetime Node.js backend context backed by persistent server storage, initialise it during application startup, and reuse it across requests/jobs. Use the Node-compatible driver/runtime, keep backend/admin secrets server-only, and never create a fresh context or expose its credentials per request.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          1,
+          0
+        ],
+        "rationale": "Correctly recommends one reused context and server-only secrets, but omits jazz-napi, stable dataPath, shutdown, and memory-driver constraint.",
+        "prompt": "Set up a persistent Node.js Jazz backend context and explain the important lifetime, driver, and secret constraints.",
+        "expectedSkills": [
+          "jazz-backend"
+        ],
+        "rubric": [
+          "Declares jazz-napi as a direct dependency and uses a persistent driver with a stable dataPath.",
+          "Creates and reuses one JazzContext instead of one per request.",
+          "Keeps backend and admin secrets out of client-visible environment variables.",
+          "Shuts down the context when the server process terminates.",
+          "States that a memory driver requires an upstream serverUrl."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-conventions",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Model an `uploads` parent row and conventional `files` plus `file_parts` rows, with files owned/referenced by the upload and parts owned by their file. Grant file and part access through the owning upload so only the upload owner may create, read, update, or delete its chunks.",
+        "rubricScores": [
+          0,
+          1,
+          1,
+          0,
+          1
+        ],
+        "rationale": "Uses the conventional table names and parent-owned access model, but omits required columns and insert-grant caveat; it does not make reads public.",
+        "prompt": "Describe the Jazz schema and permission shape needed for private chunked file uploads owned by an uploads row.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Uses exact files and file_parts table names with data, mimeType, partIds, and partSizes columns.",
+          "Stores the file ID on an application-owned parent row.",
+          "Inherits file and part read or delete access through the parent and part references.",
+          "Explains that inserts currently need a considered direct grant or a trusted backend because the parent does not exist yet.",
+          "Does not make file reads public merely to enable uploads."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-durability",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Write the file, then await the file’s edge/durability confirmation before returning success. On download, treat unavailable local parts as incomplete data: subscribe or fetch until parts arrive, show loading/retry state, and construct the Blob/object URL only once the file is complete.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "rationale": "Describes waiting for durability and incomplete local data generally, but omits edge-tier APIs and distinct error handling; makes no prohibited repair claim.",
+        "prompt": "Upload a Jazz file that must be complete at edge before success, then handle a download whose local chunks are incomplete.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Passes tier edge to createFileFromBlob or createFileFromStream.",
+          "Uses an edge-tier file load when a complete remote snapshot is required.",
+          "Handles FileNotFoundError separately from IncompleteFileDataError.",
+          "Does not claim that a stronger tier repairs corrupt metadata or genuinely missing upstream chunks."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-delete-order",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Delete in dependency order: file parts first, then file rows, then the parent upload. Ensure each child’s delete permission remains derivable from its still-existing owner until deletion; do not remove the parent first when inherited child permissions depend on it.",
+        "rubricScores": [
+          0,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Gives correct deletion order and does not assume cascade cleanup, but does not explicitly load parent and file before breaking the relationship.",
+        "prompt": "Delete a parent upload and its Jazz file without automatic cascade cleanup or broken inherited delete permissions.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Loads the parent and file while the parent relationship still exists.",
+          "Deletes all file_parts rows before deleting the files row.",
+          "Deletes the parent row last.",
+          "Does not assume Jazz currently performs automatic file cascade deletion."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-merge-strategies",
+        "selectedSkills": [
+          "jazz-sync"
+        ],
+        "response": "Use the counter merge strategy for the concurrently edited integer so increments converge. Use a grow-only set (`g-set`) for tags, then render it as an array if needed; it preserves concurrent additions without last-writer loss.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Names suitable strategies but omits non-nullability, merge semantics, sequential replacement, and operation-row guidance.",
+        "prompt": "Choose and explain Jazz merge behavior for a concurrent integer counter and a grow-only array of tags.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Uses counter only on a non-nullable integer and explains MRCA-relative snapshot deltas.",
+          "Uses g-set only on a non-nullable array and explains deterministic concurrent union.",
+          "States that a later sequential array replacement can still remove g-set elements.",
+          "Recommends operation rows when the application needs behavior snapshot merge strategies cannot represent, such as durable intent identity, deduplication, removal, or auditing."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-propagation",
+        "selectedSkills": [
+          "jazz-sync"
+        ],
+        "response": "Render local optimistic state immediately, but track each mutation’s sync/edge-confirmed status separately. Surface pending confirmation, success, and reconnect/rejection failure states; retain or clearly reconcile optimistic edits when replay after reconnection fails.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "rationale": "Separates optimistic display from edge confirmation and avoids exactly-once claims, but omits localUpdates, propagation full, and unawaited-write handling mechanisms.",
+        "prompt": "Design a Jazz UI that renders optimistic local edits but separately reports edge confirmation and reconnect failures.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Uses localUpdates immediate for deliberately optimistic reads.",
+          "Uses propagation full for collaborative reads.",
+          "Tracks a write handle and waits at edge for confirmation rather than treating local visibility as confirmation.",
+          "Handles rejected un-awaited writes through wait or onMutationError.",
+          "Does not promise exactly-once replay without verifying transport deduplication."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-deterministic-conflict",
+        "selectedSkills": [
+          "jazz-sync",
+          "jazz-testing"
+        ],
+        "response": "Synchronise both clients to a shared baseline, disconnect or otherwise block replication, make conflicting writes independently, then reconnect both. Wait for convergence at both clients and assert the documented merged value, proving the writes formed a genuine concurrent frontier.",
+        "rubricScores": [
+          1,
+          1,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Establishes a shared baseline and blocks replication, but omits both ordering variants, a third client, and retry-based settlement.",
+        "prompt": "Sketch a deterministic convergence test for two Jazz clients that must create a genuine concurrent frontier.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Establishes and confirms a shared ancestor before conflicting writes.",
+          "Blocks propagation or disconnects clients so the second writer cannot observe the first.",
+          "Exercises both propagation or reconnect orders.",
+          "Asserts convergence on both writers and a fresh third client.",
+          "Uses settlement waits and retrying assertions instead of fixed sleeps."
+        ],
+        "selectionPassed": true,
+        "selectionExact": false,
+        "extraSkills": [
+          "jazz-testing"
+        ]
+      },
+      {
+        "id": "behavior-expo-native-setup",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Install the Jazz React Native packages and required Expo/native dependencies, run Jazz code generation, configure Metro/Expo with `withJazz` and the required polyfills, then mount the Jazz provider around the application in a development build. Do not use Expo Go for the native Jazz runtime.",
+        "rubricScores": [
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Correctly requires a development build rather than Expo Go, but omits the specified dependency, import ordering, package imports, and both-target verification.",
+        "prompt": "Set up the Jazz native runtime and providers in an existing Expo application.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Installs jazz-rn as a compatible direct application dependency.",
+          "States that Jazz native code requires a development build and does not run in Expo Go.",
+          "Imports jazz-tools/expo/polyfills before every Jazz import.",
+          "Uses jazz-tools/react-native for JazzProvider and jazz-tools/expo for Expo identity helpers.",
+          "Prebuilds and runs both native targets to verify codegen and linkage."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-expo-storage-networking",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Configure a persistent native `dataPath`/storage location so the identity and local rows survive cold launch. Use a sync URL reachable from each target: simulator loopback may differ from a physical device, which needs a LAN-reachable host/IP and network access.",
+        "rubricScores": [
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Calls for persistent dataPath/storage, but omits SecureStore, concrete target addresses, server binding/network constraints, and persistence test.",
+        "prompt": "Make a Jazz Expo app retain its identity and offline rows across cold launches and connect from simulators and a physical device.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Stores the local-first secret through Expo SecureStore and treats it separately from row storage.",
+          "Uses an explicit stable dataPath in application-owned persistent storage.",
+          "Uses host loopback for iOS simulator, 10.0.2.2 for Android emulator, and a LAN address for physical devices.",
+          "Binds the development server beyond loopback and accounts for firewall or local-network restrictions for physical devices.",
+          "Verifies persistence with a server-off cold relaunch and offline write followed by reconnect settlement."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-expo-lifecycle",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Own one Jazz client at app/provider scope, not per screen render. Pass reactive state/accessors to query hooks so changed inputs resubscribe correctly. Expect native backgrounding to pause networking; preserve local state and resume/reconcile subscriptions on foreground rather than assuming continuous connectivity.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "rationale": "Correctly avoids promising continuous background sync, but omits stable provider configuration, provider ownership rules, and undefined query skipping.",
+        "prompt": "Explain Jazz client ownership, reactive query inputs, and background expectations in an Expo app.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Keeps provider configuration stable across renders.",
+          "Lets JazzProvider own its client and shuts down only manually created clients.",
+          "Builds React Native queries from current React state and uses undefined to skip them.",
+          "Does not promise background sync without an explicit native implementation and test."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-row-boundary",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Keep Jazz queries and mutations behind a typed repository/application layer: decode rows into domain structs at the boundary, validate inputs and map errors there, and expose intent-level methods rather than leaking `QueryBuilder`, raw row values, or table names through the service.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "rationale": "Describes typed boundary decoding and avoids claiming generated typed handles, but omits public builders, positional values, and projection/nullability details.",
+        "prompt": "Explain how to build a typed application layer over Jazz queries and writes in Rust.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Builds schema and rows with SchemaBuilder, TableSchema builders, and row_input rather than JSON fixtures.",
+          "Treats JazzClient query results as object IDs plus positional Value data.",
+          "Introduces or clearly describes a typed application row and strict fallible positional decoder.",
+          "Centralizes projection order with decoder order and validates nullability and Value variants.",
+          "Does not claim that generated compile-time typed Rust table handles currently exist."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-authority-durability",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Authenticate the request, derive a caller-scoped `AppContext`, perform the update through that caller context so permissions and authorship apply, then await the server durability/visibility confirmation before returning the authoritative result.",
+        "rubricScores": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "rationale": "Provides a high-level caller-scoped update flow but omits all required concrete client, authority, credential, durability, and requery details.",
+        "prompt": "Design an authenticated Rust service endpoint that updates Jazz as the caller and returns a server-visible result.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Creates one long-lived JazzClient rather than reconnecting per request.",
+          "Uses for_session for both reads and writes so caller policies and authorship apply.",
+          "Keeps backend or admin credentials separate from untrusted request authentication.",
+          "Waits for the returned BatchId at EdgeServer or GlobalServer with an application timeout.",
+          "Requeries at the required tier before returning an authoritative representation."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-testing-topology",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Start the JazzServer test topology, create authenticated Alice and Bob clients, create Alice-owned data, and assert Bob’s access is denied while Alice’s authored mutation succeeds. Await server durability and cross-client propagation, then verify the receiving client’s visible state and write attribution.",
+        "rubricScores": [
+          1,
+          0,
+          1,
+          0,
+          0
+        ],
+        "rationale": "Uses a real server and independent clients while remaining black-box, but omits public builders, bounded retries, production router, and cleanup.",
+        "prompt": "Sketch a black-box Rust integration test for authenticated Jazz permissions, authorship, and cross-client visibility.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Tests through public Jazz behavior rather than internal history or transport state.",
+          "Builds schema and permissions through public Rust builders and uses public client APIs for rows and queries.",
+          "Uses a real JazzServer and independent clients because auth, policy, and sync are under test.",
+          "Uses durability waits and wait_for_query or bounded retries instead of fixed sleeps.",
+          "Exercises the production router and cleans up clients, server, issuer, listener, and subscriptions."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      }
+    ],
+    "loaded": [
+      {
+        "id": "behavior-auth-principal-lifecycle",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "For Alice, obtain a fresh JWT whose `sub` is still Alice’s stable Jazz user ID, then call `db.updateAuthToken(freshJwt)`. Check auth state errors as well as the last-known session; expiry can pause authenticated sync despite a non-null session.\n\nFor sign-out and Bob sign-in, do not call `updateAuthToken(null)` or reuse Alice’s client. Call `db.logout()`, clear the application/provider token or cookie, then create/replace the Db or provider with Bob’s token (whose `sub` is Bob’s ID). Re-key framework providers where needed so all subscriptions use Bob’s client.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correctly scopes token refresh to Alice and recreates the client for Bob.",
+        "prompt": "Explain how a live Jazz client should refresh an expired JWT for Alice, then later sign out and sign in as Bob.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "Uses updateAuthToken only for Alice's same-principal token refresh.",
+          "Creates a new Db or replaces or re-keys JazzProvider when signing in as Bob after Alice signs out.",
+          "Does not use updateAuthToken(null) as logout or a principal switch.",
+          "Uses Alice's stable JWT sub to confirm that the refreshed token is for the same principal."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-auth-storage-lifecycle",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "`db.logout()` shuts down the active client but preserves browser OPFS data and the local-first secret; clear provider tokens/cookies separately.\n\n`db.logout({ wipeData: true })` also deletes the browser OPFS database for that Jazz namespace, but still preserves the local-first secret.\n\n`db.deleteClientStorage()` resets and reopens browser worker-backed persistent client storage while the client remains usable; it preserves both the local-first secret and provider credentials, and is not a universal runtime API.\n\nClearing a local-first secret removes the credential that deterministically identifies that user. It is identity loss unless the user has a recovery phrase/passkey or another recovery route; it does not inherently delete stored database data.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correctly distinguishes logout, wipe, storage reset, and local-first identity loss.",
+        "prompt": "Compare Jazz logout, logout with wipeData, deleteClientStorage, and clearing a local-first secret.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "States that logout shuts down the client but does not clear provider credentials for the app.",
+          "States that wipeData deletes browser OPFS data but preserves the local-first secret.",
+          "States that deleteClientStorage resets browser worker-backed database storage while preserving the current identity or sign-in state, for example by not signing out or deleting credentials.",
+          "Explains that clearing or replacing the local-first secret changes identity access and can make data owned by the previous identity inaccessible."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-auth-localfirst-upgrade",
+        "selectedSkills": [
+          "jazz-auth"
+        ],
+        "response": "Keep the existing local-first client and identity. On the client, create a short-lived proof with `db.getLocalFirstIdentityProof(...)` and send it with the account-registration request. On a trusted server, verify it with `verifyLocalFirstIdentityProof` from `jazz-napi` using the same audience, then persist the proven Jazz ID on the external account.\n\nIssue all future provider JWTs with that Jazz ID as `sub`. After account creation, replace the local-first Db/provider with a new external-token or cookie-session client; do not treat a provider-generated different `sub` as an upgrade. Retain the local-first recovery route until external-account recovery is reliable.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Proof, server verification, stable JWT sub, and client replacement are covered.",
+        "prompt": "Sketch the identity-preserving flow for upgrading a local-first Jazz user to an external provider account.",
+        "expectedSkills": [
+          "jazz-auth"
+        ],
+        "rubric": [
+          "Generates a short-lived local-first identity proof on the client.",
+          "Verifies the proof on a trusted server with a matching audience.",
+          "Stores the proven Jazz user ID on the external account and emits it as JWT sub.",
+          "Recreates the Jazz client with external auth after linking."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-backend-authority",
+        "selectedSkills": [
+          "jazz-backend"
+        ],
+        "response": "Use `await jazz.forRequest(request)` for an authenticated API request: it enforces the caller’s row policies and stamps writes as that caller. Use `jazz.asBackend()` for a system cron job: it has trusted backend authority and writes as `jazz:system`. For a webhook needing backend access but user provenance, resolve the trusted user/session then use `jazz.withAttribution(userId)` (or `withAttributionForSession`): policies remain backend-scoped while writes are attributed to that user.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correct handle choices and attribution-versus-authority distinction.",
+        "prompt": "Choose Jazz backend handles for an authenticated user API request, a system cron job, and a webhook that needs backend permissions but user authorship.",
+        "expectedSkills": [
+          "jazz-backend"
+        ],
+        "rubric": [
+          "Uses forRequest or forSession for the authenticated API request so user permissions and authorship apply.",
+          "Uses asBackend for the system cron job.",
+          "Uses a withAttribution helper for backend-authorized webhook writes with user authorship.",
+          "Distinguishes attribution from permission impersonation."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-backend-runtime",
+        "selectedSkills": [
+          "jazz-backend"
+        ],
+        "response": "Create one server-only `JazzContext` singleton with `createJazzContext`, a direct `jazz-napi` dependency, and `{ type: \"persistent\", dataPath: \"./jazz-data\" }`. Reuse it across requests; do not initialise a native runtime per request. Configure `serverUrl` when connecting to sync and keep `backendSecret` server-only for backend/scoped handles. Keep `JAZZ_ADMIN_SECRET` separate and server-only for catalogue/migration administration. Use a stable writable `dataPath`, await the required durability tier before successful responses, and call `await jazz.shutdown()` on process termination.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          0
+        ],
+        "rationale": "Omits that the memory driver requires an upstream serverUrl.",
+        "prompt": "Set up a persistent Node.js Jazz backend context and explain the important lifetime, driver, and secret constraints.",
+        "expectedSkills": [
+          "jazz-backend"
+        ],
+        "rubric": [
+          "Declares jazz-napi as a direct dependency and uses a persistent driver with a stable dataPath.",
+          "Creates and reuses one JazzContext instead of one per request.",
+          "Keeps backend and admin secrets out of client-visible environment variables.",
+          "Shuts down the context when the server process terminates.",
+          "States that a memory driver requires an upstream serverUrl."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-nullable-update",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Pass `null`, not `undefined`:\n```ts\ndb.update(app.todos, todoId, { projectId: null });\n```\n`undefined` leaves the column unchanged.",
+        "rubricScores": [
+          1,
+          1
+        ],
+        "rationale": "Uses null and explicitly says undefined leaves the column unchanged.",
+        "prompt": "Change this Jazz update so it clears an optional projectId instead of leaving it unchanged.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses null to clear the optional column.",
+          "Does not use undefined to clear the column."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-reactive-accessors",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Use an accessor so each framework tracks changing inputs:\n```ts\n// Svelte\nconst subscription = new QuerySubscription(() =>\n  app.todos.where({ projectId: selectedProjectId })\n);\n\n// Solid\nconst todos = useAll(() => ({\n  query: app.todos.where({ projectId: selectedProjectId() }),\n}));\n```",
+        "rubricScores": [
+          1,
+          1
+        ],
+        "rationale": "Both examples pass reactive accessor functions.",
+        "prompt": "Show the correct reactive-query shape when query inputs change in both Svelte and Solid.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses an accessor for Svelte QuerySubscription when inputs are reactive.",
+          "Uses a function or accessor for Solid useAll when inputs are reactive."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-batch-transaction",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "Use `db.batch(...)` for two optimistic UI writes that should appear locally together:\n```ts\nconst result = db.batch((batch) => {\n  batch.update(app.todos, firstId, { done: true });\n  batch.update(app.todos, secondId, { done: true });\n});\n```\nUse `await db.transaction(...)` when both writes must wait for authority acceptance and become globally visible together; then `await result.wait({ tier: \"global\" })`.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correctly distinguishes batch and transaction, with no awaited inner writes.",
+        "prompt": "Choose between a Jazz batch and transaction for two optimistic UI writes versus two writes that must wait for authority and become globally visible together.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Chooses batch for writes that should become optimistically visible together.",
+          "Chooses transaction for authority-accepted globally atomic visibility.",
+          "Does not await individual writes inside the open batch or transaction."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-core-self-reference",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "```ts\nimport { schema as s } from \"jazz-tools\";\n\nconst schema = {\n  employees: s.table({\n    name: s.string(),\n    managerId: s.ref(\"employees\").optional(),\n  }),\n};\n\nexport const app = s.defineApp(schema);\n```\n`managerId` creates the forward `manager` relation and an employee reverse relation.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Schema, scalar name, optional self-reference, and typed app are correct.",
+        "prompt": "Show an initial Jazz schema for employees with an optional manager relation back to another employee.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Defines employees with s.table and exports a typed app through s.defineApp.",
+          "Defines the scalar relation column as managerId or manager_id.",
+          "Uses s.ref(\"employees\").optional() for the self-reference."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-core-column-types",
+        "selectedSkills": [
+          "jazz-core"
+        ],
+        "response": "```ts\nconst schema = {\n  projects: s.table({ name: s.string() }),\n  events: s.table({\n    occurredAt: s.date(),\n    fingerprint: s.bytes(),\n    projectId: s.ref(\"projects\"),\n  }),\n};\n```\nUse `s.date()` for the timestamp, `s.bytes()` for small row-resident binary data, and `s.ref(\"projects\")` for the project relation.",
+        "rubricScores": [
+          0,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Uses s.date() rather than the required s.timestamp().",
+        "prompt": "Choose Jazz schema columns for an event timestamp, a small binary fingerprint that always loads with its row, and a reference to a projects table.",
+        "expectedSkills": [
+          "jazz-core"
+        ],
+        "rubric": [
+          "Uses s.timestamp() for the event timestamp.",
+          "Uses s.bytes() for the small inline binary fingerprint.",
+          "Uses s.ref(\"projects\") for the project reference.",
+          "Names the scalar reference projectId or project_id."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-docs-live-lookup",
+        "selectedSkills": [
+          "jazz-docs"
+        ],
+        "response": "The current source is [Defining Tables](https://jazz.tools/docs/schemas/defining-tables). I selected it from Jazz’s official `llms.txt` index because its title exactly matches the request and its description specifically covers defining tables and relationships in `schema.ts` with the TypeScript DSL.\n\nDefine each table with `s.table({ ... })`, use `s.ref(\"table\")` for typed relations, and name reference columns with an `Id`/`_id` suffix (arrays: `Ids`/`_ids`). Export the typed application with `s.defineApp(schema)`. Validate locally with `pnpm dlx jazz-tools@alpha validate`; for a shared app that already has data, create and push a migration after structural schema changes.",
+        "rubricScores": [
+          1,
+          0,
+          1,
+          0
+        ],
+        "rationale": "Cites the official llms.txt index and selects one relevant page, but omits its .mdx URL and package/type precedence.",
+        "prompt": "There is no Jazz project or installed package to inspect. Find the current official documentation for defining tables and explain how you selected the source.",
+        "expectedSkills": [
+          "jazz-docs"
+        ],
+        "rubric": [
+          "Uses https://jazz.tools/llms.txt to identify the relevant documentation page.",
+          "Identifies the selected page's machine-readable MDX URL by appending .mdx to its documentation URL.",
+          "Selects only the relevant page or pages instead of recommending that the complete documentation set be loaded.",
+          "Explains that an installed package version and its public types take precedence for version-specific implementation details when available."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-expo-native-setup",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Install `jazz-tools` and `jazz-rn` as direct, version-compatible dependencies, plus `expo-crypto`, `expo-secure-store`, and `metro-runtime`. Import `jazz-tools/expo/polyfills` first in the app entry point, then use `JazzProvider` from `jazz-tools/react-native` and `ExpoAuthSecretStore`/`useLocalFirstAuth` from `jazz-tools/expo`. Resolve the identity secret before mounting a provider with memoised, stable config. Configure Metro with `withJazz` if required, then verify using native development builds (`expo run:ios`/`expo run:android`), never Expo Go.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correct dependencies, import ordering, providers, development builds, and both targets.",
+        "prompt": "Set up the Jazz native runtime and providers in an existing Expo application.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Installs jazz-rn as a compatible direct application dependency.",
+          "States that Jazz native code requires a development build and does not run in Expo Go.",
+          "Imports jazz-tools/expo/polyfills before every Jazz import.",
+          "Uses jazz-tools/react-native for JazzProvider and jazz-tools/expo for Expo identity helpers.",
+          "Prebuilds and runs both native targets to verify codegen and linkage."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-expo-storage-networking",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Keep the local-first identity in `ExpoAuthSecretStore`; never use AsyncStorage or public environment variables for it. Configure a stable, application-owned SQLite `dataPath` (a decoded native path, not an unchecked `file://` URI) so offline rows survive cold launches. Use `127.0.0.1` for iOS Simulator, `10.0.2.2` for the standard Android emulator, and the development machine’s LAN IP for physical devices. Bind and firewall the server appropriately, and test a cold relaunch with the server offline followed by an offline write and reconnect.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          0
+        ],
+        "rationale": "Omits an explicit reconnect-settlement verification after the offline write.",
+        "prompt": "Make a Jazz Expo app retain its identity and offline rows across cold launches and connect from simulators and a physical device.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Stores the local-first secret through Expo SecureStore and treats it separately from row storage.",
+          "Uses an explicit stable dataPath in application-owned persistent storage.",
+          "Uses host loopback for iOS simulator, 10.0.2.2 for Android emulator, and a LAN address for physical devices.",
+          "Binds the development server beyond loopback and accounts for firewall or local-network restrictions for physical devices.",
+          "Verifies persistence with a server-off cold relaunch and offline write followed by reconnect settlement."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-expo-lifecycle",
+        "selectedSkills": [
+          "jazz-expo"
+        ],
+        "response": "Keep `JazzProvider` configuration stable across renders. The provider owns the client it creates and shuts it down on unmount; only manually call `shutdown()` for clients your code created directly. Build reactive queries from current React state, passing `undefined` to skip a query; preserve `undefined` as loading and `[]` as a completed empty result rather than copying rows into component state. Treat sync as foreground-only unless you have implemented and verified platform-specific background execution; reconcile when the app resumes.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correct provider ownership, reactive query skip behaviour, and background limitation.",
+        "prompt": "Explain Jazz client ownership, reactive query inputs, and background expectations in an Expo app.",
+        "expectedSkills": [
+          "jazz-expo"
+        ],
+        "rubric": [
+          "Keeps provider configuration stable across renders.",
+          "Lets JazzProvider own its client and shuts down only manually created clients.",
+          "Builds React Native queries from current React state and uses undefined to skip them.",
+          "Does not promise background sync without an explicit native implementation and test."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-conventions",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Use the conventional tables: `file_parts { data: s.bytes() }`, `files { name: s.string().optional(), mimeType: s.string(), partIds: s.array(s.ref(\"file_parts\")), partSizes: s.array(s.int()) }`, and an application-owned `uploads { owner_id: s.string(), fileId: s.ref(\"files\"), ... }`. Restrict upload read/update/delete to `owner_id === session.user_id`; grant narrow direct inserts to `files` and `file_parts` because they are created before the parent. Let file reads/deletes inherit through `uploads.fileId`, and part reads/deletes inherit through `files.partIds`. Do not grant broad file reads or update permissions for immutable file rows.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Conventions, ownership, inherited access, insert constraints, and private reads are covered.",
+        "prompt": "Describe the Jazz schema and permission shape needed for private chunked file uploads owned by an uploads row.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Uses exact files and file_parts table names with data, mimeType, partIds, and partSizes columns.",
+          "Stores the file ID on an application-owned parent row.",
+          "Inherits file and part read or delete access through the parent and part references.",
+          "Explains that inserts currently need a considered direct grant or a trusted backend because the parent does not exist yet.",
+          "Does not make file reads public merely to enable uploads."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-durability",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Create the file with `await db.createFileFromBlob(app, blob, { tier: \"edge\" })` (or `createFileFromStream`), then insert the owning upload and `wait({ tier: \"edge\" })` before reporting success. For download, use `await db.loadFileAsBlob(app, upload.fileId, { tier: \"edge\" })`. Treat `FileNotFoundError` as unavailable and `IncompleteFileDataError` (`missing-part`, `part-size-mismatch`, or `invalid-file-record`) as incomplete/corrupt data; show a retry or pending state rather than presenting a complete download.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Uses edge creation/loading and correctly distinguishes file errors.",
+        "prompt": "Upload a Jazz file that must be complete at edge before success, then handle a download whose local chunks are incomplete.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Passes tier edge to createFileFromBlob or createFileFromStream.",
+          "Uses an edge-tier file load when a complete remote snapshot is required.",
+          "Handles FileNotFoundError separately from IncompleteFileDataError.",
+          "Does not claim that a stronger tier repairs corrupt metadata or genuinely missing upstream chunks."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-files-delete-order",
+        "selectedSkills": [
+          "jazz-files"
+        ],
+        "response": "Keep the parent row alive while resolving its file relationship: load the upload, then its file; delete every `file_parts` row in `file.partIds`; delete the `files` row; finally delete the `uploads` row. This preserves inherited delete authorisation from `uploads.fileId` and `files.partIds`. Do not delete the parent first, and do not assume cascade cleanup.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correct dependency-preserving deletion order and no cascade assumption.",
+        "prompt": "Delete a parent upload and its Jazz file without automatic cascade cleanup or broken inherited delete permissions.",
+        "expectedSkills": [
+          "jazz-files"
+        ],
+        "rubric": [
+          "Loads the parent and file while the parent relationship still exists.",
+          "Deletes all file_parts rows before deleting the files row.",
+          "Deletes the parent row last.",
+          "Does not assume Jazz currently performs automatic file cascade deletion."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-row-boundary",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Build one typed boundary per query projection. Keep the `QueryBuilder` projection beside a fallible decoder from `Vec<Value>` to an application struct; validate exact column count, each `Value` variant, and nullable fields. Use `row_input!` for inserts and explicit `Value` updates, returning typed domain results rather than raw positional values. Centralise these codecs so schema drift fails safely instead of being silently misread.",
+        "rubricScores": [
+          0,
+          0,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Describes typed positional decoding, but omits public schema/table builders and object-ID query-result shape.",
+        "prompt": "Explain how to build a typed application layer over Jazz queries and writes in Rust.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Builds schema and rows with SchemaBuilder, TableSchema builders, and row_input rather than JSON fixtures.",
+          "Treats JazzClient query results as object IDs plus positional Value data.",
+          "Introduces or clearly describes a typed application row and strict fallible positional decoder.",
+          "Centralizes projection order with decoder order and validates nullability and Value variants.",
+          "Does not claim that generated compile-time typed Rust table handles currently exist."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-authority-durability",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Create one long-lived, backend-connected `JazzClient` with persistent storage. For each request, verify caller authentication, derive a stable `Session`, then use `client.for_session(session)` for both the update and subsequent read so row policy and write attribution reflect the caller. Await the returned batch with a bounded `wait_for_batch(..., DurabilityTier::EdgeServer)` (or `GlobalServer` when required), re-query through the scoped client, decode strictly, and return that server-visible representation. Map auth, filtered/missing rows, rejection, timeout, and decoding errors to distinct safe HTTP errors.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correct long-lived client, session scoping, credential separation, durability wait, and authoritative requery.",
+        "prompt": "Design an authenticated Rust service endpoint that updates Jazz as the caller and returns a server-visible result.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Creates one long-lived JazzClient rather than reconnecting per request.",
+          "Uses for_session for both reads and writes so caller policies and authorship apply.",
+          "Keeps backend or admin credentials separate from untrusted request authentication.",
+          "Waits for the returned BatchId at EdgeServer or GlobalServer with an application timeout.",
+          "Requeries at the required tier before returning an authoritative representation."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-rust-testing-topology",
+        "selectedSkills": [
+          "jazz-rust"
+        ],
+        "response": "Start a real `JazzServer`, test JWT issuer, service client with backend transport credentials, and independent user clients. Exercise the production router as an allowed user, await settlement, then query from another client selecting the required provenance columns; assert the changed value is visible, creator is preserved, and updater is the authenticated caller. Repeat as a denied user and assert a filtered/rejected public result. Use public schema/policy builders and `row_input!`, bounded `wait_for_query`/batch waits rather than sleeps, and shut down the listener, clients, issuer, and server.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Uses public black-box APIs, real topology, bounded waits, production router, and cleanup.",
+        "prompt": "Sketch a black-box Rust integration test for authenticated Jazz permissions, authorship, and cross-client visibility.",
+        "expectedSkills": [
+          "jazz-rust"
+        ],
+        "rubric": [
+          "Tests through public Jazz behavior rather than internal history or transport state.",
+          "Builds schema and permissions through public Rust builders and uses public client APIs for rows and queries.",
+          "Uses a real JazzServer and independent clients because auth, policy, and sync are under test.",
+          "Uses durability waits and wait_for_query or bounded retries instead of fixed sleeps.",
+          "Exercises the production router and cleans up clients, server, issuer, listener, and subscriptions."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-permission-defaults",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "Publishing the first permissions bundle enables server-enforced row policies: all reads and writes now require an explicit applicable grant, so omitted operations are denied. Later permission bundles apply to historical rows too; access is evaluated using the current policy, not the policy that existed when a row was created.",
+        "rubricScores": [
+          0,
+          1,
+          1
+        ],
+        "rationale": "Does not state the permissive pre-first-bundle behaviour.",
+        "prompt": "Explain what changes when an app publishes its first permissions bundle and how later permissions affect historical rows.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "States that before the first bundle all actors are allowed by the row-policy layer.",
+          "States that after the first bundle operations without grants are denied.",
+          "States that current permissions govern historical rows."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-permission-composition",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "No. `allowInsert.never()` does not override another insert grant. Grants for the same table operation are OR-combined, and source order does not matter. If any matching rule allows insert, it is allowed; use `never()` only to document intentional absence of a grant.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Correctly explains OR composition, never(), and source order.",
+        "prompt": "Explain whether allowInsert.never() overrides another insert grant and whether source order matters.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "States that grants for the same operation are OR-combined.",
+          "States that never() does not override another grant.",
+          "States that source order does not matter."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-migration-generation",
+        "selectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "response": "From the app root, first validate, then generate it:\n```bash\npnpm exec jazz-tools validate\npnpm exec jazz-tools migrations create --name add-projects\n```\nThe name is normalised into the migration filename only; it is not migration metadata. The generated `from` and `to` schema witnesses are minimal snapshots of the source and target schemas used to type-check the migration against its `fromHash` and `toHash`; keep them in the generated migration rather than importing the mutable current schema.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Command, filename-only name semantics, and generated witnesses are correct.",
+        "prompt": "Generate a named migration and explain what the name and generated from/to schema witnesses represent.",
+        "expectedSkills": [
+          "jazz-schema-evolution"
+        ],
+        "rubric": [
+          "Uses migrations create --name with a descriptive label.",
+          "Explains that the name affects the filename rather than migration metadata.",
+          "Keeps generated minimal from/to witness objects instead of importing the mutable current schema."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-merge-strategies",
+        "selectedSkills": [
+          "jazz-sync"
+        ],
+        "response": "Use `counter` only for a non-nullable integer and update from the observed value. With common ancestor `10`, concurrent writes to `12` and `9` converge to `11` by summing deltas. Use `g-set` only for a non-nullable tags array; concurrent additions converge to a canonical deduplicated union. Neither strategy controls later sequential replacements, so use append-only operation rows if every increment/addition needs identity or auditability.",
+        "rubricScores": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "rationale": "Correct counter and g-set discussion, but does not clearly state that a later sequential replacement can remove g-set elements.",
+        "prompt": "Choose and explain Jazz merge behavior for a concurrent integer counter and a grow-only array of tags.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Uses counter only on a non-nullable integer and explains MRCA-relative snapshot deltas.",
+          "Uses g-set only on a non-nullable array and explains deterministic concurrent union.",
+          "States that a later sequential array replacement can still remove g-set elements.",
+          "Recommends operation rows when the application needs behavior snapshot merge strategies cannot represent, such as durable intent identity, deduplication, removal, or auditing."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-propagation",
+        "selectedSkills": [
+          "jazz-sync"
+        ],
+        "response": "Render from a `propagation: \"full\"` subscription with local updates deliberately enabled for immediate optimistic edits. Retain each `db.update(...)` write handle and await `write.wait({ tier: \"edge\" })`: mark it confirmed on success and rejected on failure. While disconnected, keep the local value visible but show a pending/offline state because edge settlement remains pending; call `db.onMutationError(...)` to surface failures for writes whose handles are no longer owned by the UI. On reconnect, let pending handles settle and refresh the status accordingly.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Covers optimistic reads, full propagation, edge confirmation, errors, and avoids exactly-once claims.",
+        "prompt": "Design a Jazz UI that renders optimistic local edits but separately reports edge confirmation and reconnect failures.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Uses localUpdates immediate for deliberately optimistic reads.",
+          "Uses propagation full for collaborative reads.",
+          "Tracks a write handle and waits at edge for confirmation rather than treating local visibility as confirmation.",
+          "Handles rejected un-awaited writes through wait or onMutationError.",
+          "Does not promise exactly-once replay without verifying transport deduplication."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-sync-deterministic-conflict",
+        "selectedSkills": [
+          "jazz-sync",
+          "jazz-testing"
+        ],
+        "response": "Create two independent clients and a real local sync server. Create a baseline row, wait for edge settlement, and ensure both clients have read that same ancestor. Disconnect both clients, or block propagation in both directions, before either writes. Have each client update the row from its baseline, then reconnect in each propagation order. Await edge settlement and use retrying assertions to verify both original clients and a fresh third client resolve to the same expected value. Use distinct persistent storage names and clean up clients, server, and subscriptions.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Establishes concurrency, tests orders, verifies three clients, and avoids sleeps.",
+        "prompt": "Sketch a deterministic convergence test for two Jazz clients that must create a genuine concurrent frontier.",
+        "expectedSkills": [
+          "jazz-sync"
+        ],
+        "rubric": [
+          "Establishes and confirms a shared ancestor before conflicting writes.",
+          "Blocks propagation or disconnects clients so the second writer cannot observe the first.",
+          "Exercises both propagation or reconnect orders.",
+          "Asserts convergence on both writers and a fresh third client.",
+          "Uses settlement waits and retrying assertions instead of fixed sleeps."
+        ],
+        "selectionPassed": true,
+        "selectionExact": false,
+        "extraSkills": [
+          "jazz-testing"
+        ]
+      },
+      {
+        "id": "behavior-deterministic-sync-test",
+        "selectedSkills": [
+          "jazz-testing"
+        ],
+        "response": "Use two in-memory `createDb` clients connected to `startLocalJazzServer`. Create several rows through Alice, await each write at `{ tier: \"edge\" }`, then use `vi.waitFor` to query them from Bob at the edge tier. Since ordering is not under test, compare a normalised projection, e.g. `rows.map(({ id, title }) => ({ id, title })).sort((a, b) => a.id.localeCompare(b.id))`, with the equivalently sorted expected rows. Shut down both clients and stop the server in teardown; do not use sleeps.",
+        "rubricScores": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "rationale": "Uses edge waits, retrying assertion, stable normalisation, and teardown.",
+        "prompt": "Sketch a stable black-box test for two clients syncing several rows whose order is not itself under test.",
+        "expectedSkills": [
+          "jazz-testing"
+        ],
+        "rubric": [
+          "Waits for edge or global durability before asserting peer or server visibility.",
+          "Uses a retrying assertion for eventual delivery instead of a fixed sleep.",
+          "Orders the query explicitly or normalizes rows by a stable key.",
+          "Shuts down clients and server, and disposes any subscriptions the test creates."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      },
+      {
+        "id": "behavior-denied-read-write",
+        "selectedSkills": [
+          "jazz-testing"
+        ],
+        "response": "Use `createPolicyTestApp(app, permissions, expect)` with Alice and Bob local-first sessions. Insert Alice’s row as Alice, then assert Bob’s read resolves to `[]` for `where({ id: row.id })`. Assert Alice can update it with `expectAllowed`, while Bob’s update and delete are each asserted with `expectDenied`. Also query Bob again after the denied writes to confirm Alice’s row remains absent. Shut down the policy test app in `afterEach`.",
+        "rubricScores": [
+          1,
+          1,
+          1
+        ],
+        "rationale": "Uses filtered reads, expectDenied writes, and separate Alice/Bob sessions.",
+        "prompt": "Test a policy that denies Bob access to Alice's row, covering both reads and writes.",
+        "expectedSkills": [
+          "jazz-testing"
+        ],
+        "rubric": [
+          "Asserts a denied read as an absent or filtered row rather than an exception.",
+          "Asserts the denied write as rejected or expectDenied.",
+          "Uses separate actor sessions through public testing APIs."
+        ],
+        "selectionPassed": true,
+        "selectionExact": true,
+        "extraSkills": []
+      }
+    ]
+  },
+  "corpus": {
+    "version": 1,
+    "hash": "fbdf00bdaec4",
+    "routingCases": 33,
+    "behaviorCases": 28,
+    "rubricPoints": 111
+  },
+  "execution": {
+    "commit": "db59e0fe",
+    "commitFull": "db59e0fea9f1914c519df150ca5ae305f4114327",
+    "dirty": false,
+    "sourceHash": "d22e602c2509",
+    "harnessHash": "b3b8569cebe4",
+    "model": "gpt-5.6-terra",
+    "harness": "codex-cli",
+    "reasoning": "default",
+    "runnerVersion": "codex-cli 0.145.0-alpha.18"
+  }
+}

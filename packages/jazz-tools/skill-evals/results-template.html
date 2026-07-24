@@ -1,0 +1,1255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jazz skill evaluations</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        --page: light-dark(#f6f4ef, #111418);
+        --panel: light-dark(#ffffff, #191d23);
+        --panel-alt: light-dark(#efede7, #22272f);
+        --ink: light-dark(#1b1d1f, #f2f0ea);
+        --muted: light-dark(#666961, #aeb5be);
+        --line: light-dark(#d8d4ca, #343a44);
+        --accent: light-dark(#0a7358, #65d6ac);
+        --accent-soft: light-dark(#d9f0e7, #173d33);
+        --warn: light-dark(#a55710, #ffb35c);
+        --danger: light-dark(#ae3f3f, #ff8b8b);
+        --radius: 16px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      main {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 48px 0 72px;
+      }
+      header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 28px;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 0.75rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      h1 {
+        margin: 8px 0 5px;
+        font-size: clamp(2rem, 5vw, 3.5rem);
+        line-height: 0.98;
+        letter-spacing: -0.045em;
+      }
+      h2 {
+        margin: 0;
+        font-size: 1.25rem;
+        letter-spacing: -0.02em;
+      }
+      p {
+        margin: 0;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      .upload {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--ink);
+        cursor: pointer;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .upload:hover {
+        border-color: var(--accent);
+      }
+      .upload input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: 0 12px 30px light-dark(#24200f0a, #00000020);
+      }
+      .metric {
+        padding: 20px;
+        min-height: 164px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .metric-label {
+        color: var(--muted);
+        font-size: 0.8rem;
+        font-weight: 750;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      .metric-value {
+        margin-top: 18px;
+        font-size: clamp(2.35rem, 6vw, 4rem);
+        line-height: 1;
+        font-weight: 760;
+        letter-spacing: -0.06em;
+      }
+      .metric-detail {
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
+      .accent {
+        color: var(--accent);
+      }
+      section {
+        margin-top: 28px;
+      }
+      .section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin: 0 2px 12px;
+      }
+      .comparison {
+        display: grid;
+        grid-template-columns: minmax(120px, 0.42fr) 1fr;
+        gap: 20px;
+        padding: 22px;
+      }
+      .uplift {
+        align-self: center;
+      }
+      .uplift strong {
+        display: block;
+        color: var(--accent);
+        font-size: 2.5rem;
+        letter-spacing: -0.05em;
+      }
+      .bar-row {
+        display: grid;
+        grid-template-columns: 74px 1fr 58px;
+        align-items: center;
+        gap: 12px;
+        margin: 10px 0;
+        font-size: 0.88rem;
+      }
+      .bar {
+        height: 12px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--panel-alt);
+      }
+      .bar > span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--muted);
+      }
+      .bar.loaded > span {
+        background: var(--accent);
+      }
+      .history-card {
+        padding: 22px;
+      }
+      .history-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .history-controls label,
+      .run-filters label {
+        display: grid;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .history-controls select,
+      .run-filters select {
+        min-width: 180px;
+        padding: 8px 30px 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel-alt);
+        color: var(--ink);
+        font: inherit;
+        text-transform: none;
+      }
+      .history-chart {
+        min-height: 0;
+      }
+      .impact-axis,
+      .impact-row {
+        display: grid;
+        grid-template-columns: minmax(160px, 220px) minmax(280px, 1fr) 140px;
+        gap: 18px;
+        align-items: center;
+      }
+      .impact-axis {
+        margin-bottom: 7px;
+        color: var(--muted);
+        font-size: 0.7rem;
+        font-weight: 750;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .impact-scale {
+        display: flex;
+        justify-content: space-between;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+      .impact-row {
+        min-height: 52px;
+        padding: 11px 0;
+        border-top: 1px solid var(--line);
+      }
+      .impact-config b,
+      .impact-config span {
+        display: block;
+      }
+      .impact-config b {
+        font-size: 0.88rem;
+      }
+      .impact-config span {
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+      .dumbbell-track {
+        position: relative;
+        height: 26px;
+        border-right: 1px solid var(--line);
+        background:
+          linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat,
+          repeating-linear-gradient(
+            to right,
+            var(--line) 0,
+            var(--line) 1px,
+            transparent 1px,
+            transparent 25%
+          );
+      }
+      .dumbbell-connector,
+      .dumbbell-dot {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+      }
+      .dumbbell-connector {
+        left: var(--start);
+        width: var(--span);
+        height: 5px;
+        border-radius: 999px;
+        background: var(--accent);
+        opacity: 0.42;
+      }
+      .dumbbell-dot {
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--panel);
+        border-radius: 50%;
+        box-shadow: 0 0 0 1px rgb(0 0 0 / 10%);
+        transform: translate(-50%, -50%);
+      }
+      .dumbbell-dot.baseline {
+        left: var(--baseline);
+        background: var(--muted);
+      }
+      .dumbbell-dot.loaded {
+        left: var(--loaded);
+        background: var(--accent);
+      }
+      .impact-values {
+        display: flex;
+        justify-content: flex-end;
+        gap: 9px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .impact-values strong {
+        min-width: 34px;
+        color: var(--accent);
+        text-align: right;
+      }
+      .history-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 18px;
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .history-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      .legend-dot.baseline {
+        background: var(--muted);
+      }
+      .legend-dot.loaded {
+        background: var(--accent);
+      }
+      .history-note {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .history-table {
+        margin: 0;
+        border-top: 1px solid var(--line);
+      }
+      .empty-chart {
+        display: grid;
+        min-height: 240px;
+        place-items: center;
+        color: var(--muted);
+        text-align: center;
+      }
+      .table-wrap {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.88rem;
+      }
+      th,
+      td {
+        padding: 13px 16px;
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      .status {
+        font-weight: 800;
+      }
+      .status.pass {
+        color: var(--accent);
+      }
+      .status.fail {
+        color: var(--danger);
+      }
+      .status-note {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .pill {
+        display: inline-block;
+        margin: 0 5px 4px 0;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 0.76rem;
+        font-weight: 720;
+      }
+      .pill.none {
+        background: var(--panel-alt);
+        color: var(--muted);
+      }
+      details {
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: var(--panel);
+        overflow: hidden;
+      }
+      details + details {
+        margin-top: 10px;
+      }
+      summary {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 16px;
+        align-items: center;
+        padding: 16px 18px;
+        cursor: pointer;
+        font-weight: 720;
+      }
+      summary::marker {
+        color: var(--accent);
+      }
+      .run-history {
+        margin: 18px -22px 0;
+        border-width: 1px 0 0;
+        border-radius: 0;
+        background: transparent;
+      }
+      .run-history summary {
+        grid-template-columns: 1fr auto;
+        padding: 14px 22px;
+        background: var(--panel-alt);
+      }
+      .run-history[open] summary {
+        border-bottom: 1px solid var(--line);
+      }
+      .run-filters {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px 22px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      .run-filters select {
+        width: 100%;
+        min-width: 0;
+      }
+      .run-history .history-table {
+        border-top: 0;
+      }
+      .empty-table {
+        padding: 28px 22px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .run-select {
+        appearance: none;
+        width: 100%;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+        text-align: left;
+      }
+      .run-select:hover b,
+      .run-select:focus-visible b {
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      .history-run-row.is-active {
+        background: var(--accent-soft);
+      }
+      .history-run-row.is-active .run-select b {
+        color: var(--accent);
+      }
+      .stale-run {
+        color: var(--danger);
+      }
+      .results-context {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 16px;
+        align-items: center;
+        margin-top: 18px;
+        padding: 14px 16px;
+        border-radius: 11px;
+        background: var(--panel-alt);
+      }
+      .results-context b,
+      .results-context .meta {
+        display: block;
+      }
+      .results-context .meta {
+        margin-top: 2px;
+        overflow-wrap: anywhere;
+        font-size: 0.76rem;
+      }
+      .score {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .details-body {
+        padding: 0 18px 18px;
+        border-top: 1px solid var(--line);
+      }
+      .prompt {
+        padding: 14px 0;
+        color: var(--muted);
+      }
+      .rubric {
+        display: grid;
+        grid-template-columns: 1fr 76px 76px;
+        gap: 0;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        font-size: 0.84rem;
+      }
+      .rubric > div {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      .rubric > div:nth-last-child(-n + 3) {
+        border-bottom: 0;
+      }
+      .rubric .head {
+        color: var(--muted);
+        background: var(--panel-alt);
+        font-size: 0.7rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .response-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .response {
+        min-width: 0;
+        padding: 13px;
+        border-radius: 10px;
+        background: var(--panel-alt);
+      }
+      .response b {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .response pre {
+        margin: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        color: var(--muted);
+        font:
+          0.79rem/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      footer {
+        margin-top: 30px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100% - 20px, 1120px);
+          padding-top: 28px;
+        }
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .comparison,
+        .response-grid {
+          grid-template-columns: 1fr;
+        }
+        .history-controls label,
+        .history-controls select,
+        .run-filters label,
+        .run-filters select {
+          width: 100%;
+        }
+        .run-filters {
+          grid-template-columns: 1fr;
+        }
+        .impact-axis {
+          display: none;
+        }
+        .impact-row {
+          grid-template-columns: 1fr;
+          gap: 7px;
+          padding: 14px 0;
+        }
+        .impact-values {
+          justify-content: flex-start;
+        }
+        .run-history summary,
+        .results-context {
+          grid-template-columns: 1fr;
+        }
+        summary {
+          grid-template-columns: 1fr auto;
+        }
+        summary .score:first-of-type {
+          display: none;
+        }
+        .rubric {
+          grid-template-columns: 1fr 58px 58px;
+        }
+        table,
+        tbody,
+        tr,
+        td {
+          display: block;
+          width: 100%;
+        }
+        thead {
+          display: none;
+        }
+        tr {
+          padding: 10px 12px;
+          border-bottom: 1px solid var(--line);
+        }
+        tr:last-child {
+          border-bottom: 0;
+        }
+        td,
+        tr:last-child td {
+          padding: 5px 0;
+          border-bottom: 0;
+        }
+        td::before {
+          content: attr(data-label);
+          display: block;
+          margin-bottom: 3px;
+          color: var(--muted);
+          font-size: 0.64rem;
+          font-weight: 800;
+          letter-spacing: 0.07em;
+          text-transform: uppercase;
+        }
+      }
+
+      @media print {
+        :root {
+          color-scheme: light;
+        }
+        main {
+          width: 100%;
+          padding: 0;
+        }
+        .upload {
+          display: none;
+        }
+        .card,
+        details {
+          break-inside: avoid;
+          box-shadow: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">Jazz tools</div>
+          <h1>Skill evaluations</h1>
+          <p class="meta" id="meta"></p>
+        </div>
+        <label class="upload"
+          >Update scores <input id="report-file" type="file" accept="application/json,.json"
+        /></label>
+      </header>
+
+      <div class="grid" id="summary"></div>
+
+      <section>
+        <div class="section-head">
+          <h2>Behavior quality</h2>
+          <span class="meta" id="comparison-meta">median across configurations</span>
+        </div>
+        <div class="card comparison" id="comparison"></div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Skill impact</h2>
+          <span class="meta" id="history-meta"></span>
+        </div>
+        <div class="card history-card">
+          <div class="history-controls">
+            <label
+              >Corpus
+              <select id="history-corpus"></select>
+            </label>
+          </div>
+          <div class="history-chart" id="history-chart"></div>
+          <div class="history-legend" id="history-legend"></div>
+          <p class="history-note">
+            Each row compares the latest baseline and skills-loaded run for one model, harness, and
+            reasoning configuration. Earlier runs remain in the table. Use the corpus filter for
+            like-for-like comparisons when the eval set changes.
+          </p>
+          <details class="run-history" id="run-history">
+            <summary>
+              <span>Run history</span>
+              <span class="meta" id="run-history-meta"></span>
+            </summary>
+            <div class="run-filters" role="group" aria-label="Run history filters">
+              <label
+                >Model
+                <select id="run-model-filter"></select>
+              </label>
+              <label
+                >Harness
+                <select id="run-harness-filter"></select>
+              </label>
+              <label
+                >Reasoning
+                <select id="run-reasoning-filter"></select>
+              </label>
+            </div>
+            <div class="table-wrap history-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Run</th>
+                    <th>Configuration</th>
+                    <th>Corpus</th>
+                    <th>Routing</th>
+                    <th>Baseline</th>
+                    <th>Loaded</th>
+                  </tr>
+                </thead>
+                <tbody id="history-runs"></tbody>
+              </table>
+            </div>
+          </details>
+          <div class="results-context" aria-live="polite">
+            <span class="metric-label">Results shown below</span>
+            <div>
+              <b id="active-run-title"></b>
+              <span class="meta" id="active-run-meta"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Routing</h2>
+          <span class="meta" id="routing-meta"></span>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Expected</th>
+                <th>Selected</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="routing"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Behavior cases</h2>
+          <span class="meta">baseline versus loaded skill</span>
+        </div>
+        <div id="behavior"></div>
+      </section>
+
+      <footer>
+        Load a new JSON report with “Update scores” to preview it locally. Finalize a run with
+        <code>pnpm skills:eval:archive -- --model … --harness … --reasoning …</code> to preserve its
+        history and regenerate this shareable page.
+      </footer>
+    </main>
+
+    <script id="eval-report" type="application/json">
+      {
+        "version": 1,
+        "generatedAt": "",
+        "runner": "template",
+        "summary": {
+          "routing": { "passed": 0, "total": 0 },
+          "baseline": {
+            "skillSelection": { "passed": 0, "total": 0 },
+            "rubric": { "passed": 0, "total": 0 }
+          },
+          "loaded": {
+            "skillSelection": { "passed": 0, "total": 0 },
+            "rubric": { "passed": 0, "total": 0 }
+          },
+          "rubricUplift": 0
+        },
+        "routing": [],
+        "behavior": { "baseline": [], "loaded": [] }
+      }
+    </script>
+    <script id="eval-history" type="application/json">
+      []
+    </script>
+    <script>
+      const escapeHtml = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (character) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character],
+        );
+      const exactPercentage = (score) => (score.total ? (score.passed / score.total) * 100 : 0);
+      const ratio = (score) => Math.round(exactPercentage(score));
+      const median = (values) => {
+        const sorted = [...values].sort((left, right) => left - right);
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+      };
+      const percentage = (value) => String(Number(value.toFixed(1)));
+      const scoreText = (score) => `${score.passed}/${score.total}`;
+      const pills = (skills) =>
+        skills?.length
+          ? skills.map((skill) => `<span class="pill">${escapeHtml(skill)}</span>`).join("")
+          : '<span class="pill none">none</span>';
+      const resultMark = (passed) =>
+        `<span class="status ${passed ? "pass" : "fail"}">${passed ? "Pass" : "Miss"}</span>`;
+      const routingSelection = (actual, expected) => {
+        const exact =
+          actual.length === expected.length && expected.every((skill) => actual.includes(skill));
+        const passed =
+          expected.length === 0
+            ? actual.length === 0
+            : expected.every((skill) => actual.includes(skill));
+        return {
+          passed,
+          exact,
+          extraSkills: actual.filter((skill) => !expected.includes(skill)),
+        };
+      };
+      const rescoreReportRouting = (report) => {
+        const routing = report.routing.map((result) => ({
+          ...result,
+          ...routingSelection(result.selectedSkills, result.expectedSkills),
+        }));
+        return {
+          ...report,
+          summary: {
+            ...report.summary,
+            routing: {
+              passed: routing.filter((result) => result.passed).length,
+              exact: routing.filter((result) => result.exact).length,
+              total: routing.length,
+            },
+          },
+          routing,
+        };
+      };
+      const routingResultMark = (result) => {
+        if (!result.passed) return resultMark(false);
+        if (result.exact) return resultMark(true);
+        const count = result.extraSkills?.length ?? 0;
+        return `<span class="status pass">Pass</span><span class="status-note">broader match${count ? ` · +${count}` : ""}</span>`;
+      };
+
+      const historyConfigurationParts = (entry) => {
+        const execution = entry.execution ?? {};
+        return {
+          model: execution.model ?? "unknown model",
+          harness: execution.harness ?? entry.runner ?? "unknown harness",
+          reasoning: execution.reasoning ?? "unknown reasoning",
+        };
+      };
+      const historyConfiguration = (entry) =>
+        Object.values(historyConfigurationParts(entry)).join(" · ");
+      const historyConfigurationKey = (entry) => historyConfiguration(entry);
+      const modelOrder = [
+        "gpt-5",
+        "gpt-5.4",
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+      ];
+      const historyCorpusKey = (entry) =>
+        entry.corpus?.hash ??
+        `legacy-${entry.summary.routing.total}-${entry.summary.loaded.rubric.total}`;
+      const historyCorpusLabel = (entry) =>
+        entry.corpus?.hash
+          ? `${entry.corpus.hash} · ${entry.corpus.rubricPoints} points`
+          : `legacy · ${entry.summary.loaded.rubric.total} points`;
+      const routingExact = (score) => score.exact ?? score.passed;
+
+      const renderMetricCards = (metrics) => {
+        document.querySelector("#summary").innerHTML = metrics
+          .map(
+            ([label, value, detail, className]) =>
+              `<article class="card metric"><div><div class="metric-label">${label}</div><div class="metric-value ${className}">${value}</div></div><div class="metric-detail">${detail}</div></article>`,
+          )
+          .join("");
+      };
+
+      const aggregateQuality = (entries) => ({
+        routing: median(entries.map((entry) => exactPercentage(entry.summary.routing))),
+        baseline: median(entries.map((entry) => exactPercentage(entry.summary.baseline.rubric))),
+        loaded: median(entries.map((entry) => exactPercentage(entry.summary.loaded.rubric))),
+        uplift: median(
+          entries.map(
+            (entry) =>
+              exactPercentage(entry.summary.loaded.rubric) -
+              exactPercentage(entry.summary.baseline.rubric),
+          ),
+        ),
+      });
+
+      const renderAggregateSummary = (entries) => {
+        if (entries.length === 0) return;
+        const quality = aggregateQuality(entries);
+        const count = entries.length;
+        const scope = `latest run per configuration · ${count} configuration${count === 1 ? "" : "s"}`;
+        document.querySelector("#meta").textContent =
+          `${historyCorpusLabel(entries[0])} · ${scope}`;
+        renderMetricCards([
+          ["Median routing", `${percentage(quality.routing)}%`, scope, ""],
+          ["Median baseline", `${percentage(quality.baseline)}%`, "rubric criteria passed", ""],
+          ["Median loaded", `${percentage(quality.loaded)}%`, "rubric criteria passed", "accent"],
+        ]);
+      };
+
+      const renderComparison = (entries) => {
+        if (entries.length === 0) return;
+        const quality = aggregateQuality(entries);
+        const count = entries.length;
+        document.querySelector("#comparison-meta").textContent =
+          `latest run per configuration · ${count} configuration${count === 1 ? "" : "s"}`;
+        document.querySelector("#comparison").innerHTML =
+          `<div class="uplift"><span class="metric-label">Median uplift</span><strong>${quality.uplift >= 0 ? "+" : ""}${percentage(quality.uplift)}</strong><span class="meta">percentage points after loading skills</span></div><div><div class="bar-row"><span>Median baseline</span><div class="bar"><span style="width:${quality.baseline}%"></span></div><b>${percentage(quality.baseline)}%</b></div><div class="bar-row"><span>Median loaded</span><div class="bar loaded"><span style="width:${quality.loaded}%"></span></div><b>${percentage(quality.loaded)}%</b></div></div>`;
+      };
+
+      function renderHistory(history, initialReport) {
+        const runs = [...history].sort((left, right) =>
+          String(left.generatedAt).localeCompare(String(right.generatedAt)),
+        );
+        const historyByFilename = new Map(runs.map((entry) => [entry.filename, entry]));
+        const latestRun = runs.at(-1);
+        const currentSourceHash = initialReport.execution?.sourceHash;
+        let activeFilename = null;
+        const corpusSelect = document.querySelector("#history-corpus");
+        const runHistory = document.querySelector("#run-history");
+        const modelSelect = document.querySelector("#run-model-filter");
+        const harnessSelect = document.querySelector("#run-harness-filter");
+        const reasoningSelect = document.querySelector("#run-reasoning-filter");
+        const corpora = new Map();
+        for (const entry of runs) {
+          const key = historyCorpusKey(entry);
+          const current = corpora.get(key);
+          if (!current || String(entry.generatedAt).localeCompare(current.generatedAt) > 0)
+            corpora.set(key, {
+              generatedAt: String(entry.generatedAt),
+              label: historyCorpusLabel(entry),
+            });
+        }
+        const sortedCorpora = [...corpora].sort(([, left], [, right]) =>
+          right.generatedAt.localeCompare(left.generatedAt),
+        );
+        corpusSelect.innerHTML =
+          '<option value="all">All corpora</option>' +
+          sortedCorpora
+            .map(
+              ([value, corpus]) =>
+                `<option value="${escapeHtml(value)}">${escapeHtml(corpus.label)}</option>`,
+            )
+            .join("");
+        if (sortedCorpora.length > 0) corpusSelect.value = sortedCorpora[0][0];
+
+        const populateFilter = (select, entries, key, allLabel) => {
+          const currentValue = select.value || "all";
+          const values = [
+            ...new Set(entries.map((entry) => historyConfigurationParts(entry)[key])),
+          ].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+          select.innerHTML =
+            `<option value="all">${allLabel}</option>` +
+            values
+              .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+              .join("");
+          select.value = values.includes(currentValue) ? currentValue : "all";
+        };
+
+        const syncActiveRows = () => {
+          for (const row of document.querySelectorAll(".history-run-row")) {
+            const active = row.dataset.runFilename === activeFilename;
+            row.classList.toggle("is-active", active);
+            row.querySelector(".run-select")?.setAttribute("aria-pressed", String(active));
+          }
+        };
+
+        const updateResultsContext = (report, label, filename) => {
+          const parts = historyConfigurationParts(report);
+          const generated = report.generatedAt
+            ? new Date(report.generatedAt).toLocaleString()
+            : "unknown time";
+          document.querySelector("#active-run-title").textContent = `${label} · ${parts.model}`;
+          document.querySelector("#active-run-meta").textContent =
+            `${generated} · ${parts.harness} · ${parts.reasoning}${filename ? ` · ${filename}` : ""}`;
+        };
+
+        const selectRun = (entry, { collapse = false, label = null } = {}) => {
+          const selected = rescoreReportRouting(entry);
+          activeFilename = entry.filename ?? null;
+          render(selected, { showRunSummary: true });
+          updateResultsContext(
+            selected,
+            label ?? (entry === latestRun ? "Most recent run" : "Selected historical run"),
+            entry.filename,
+          );
+          syncActiveRows();
+          if (collapse) runHistory.open = false;
+        };
+
+        const draw = () => {
+          const selectedCorpus = corpusSelect.value;
+          const filtered = runs.filter(
+            (entry) => selectedCorpus === "all" || historyCorpusKey(entry) === selectedCorpus,
+          );
+          populateFilter(modelSelect, filtered, "model", "All models");
+          populateFilter(harnessSelect, filtered, "harness", "All harnesses");
+          populateFilter(reasoningSelect, filtered, "reasoning", "All reasoning levels");
+          const tableRuns = filtered.filter((entry) => {
+            const parts = historyConfigurationParts(entry);
+            return (
+              (modelSelect.value === "all" || parts.model === modelSelect.value) &&
+              (harnessSelect.value === "all" || parts.harness === harnessSelect.value) &&
+              (reasoningSelect.value === "all" || parts.reasoning === reasoningSelect.value)
+            );
+          });
+          const latestByConfiguration = new Map();
+          for (const entry of filtered)
+            latestByConfiguration.set(
+              `${historyCorpusKey(entry)} · ${historyConfigurationKey(entry)}`,
+              entry,
+            );
+          const series = [...latestByConfiguration.entries()].sort(([, left], [, right]) => {
+            const leftParts = historyConfigurationParts(left);
+            const rightParts = historyConfigurationParts(right);
+            const leftRank = modelOrder.indexOf(leftParts.model);
+            const rightRank = modelOrder.indexOf(rightParts.model);
+            if (leftRank !== rightRank && leftRank !== -1 && rightRank !== -1)
+              return leftRank - rightRank;
+            return historyConfigurationKey(left).localeCompare(
+              historyConfigurationKey(right),
+              undefined,
+              {
+                numeric: true,
+              },
+            );
+          });
+          document.querySelector("#history-meta").textContent =
+            `${filtered.length} run${filtered.length === 1 ? "" : "s"} · ${series.length} configuration${series.length === 1 ? "" : "s"}`;
+          document.querySelector("#run-history-meta").textContent =
+            `${tableRuns.length} of ${filtered.length} archived run${filtered.length === 1 ? "" : "s"} shown · select one to inspect`;
+          const summaryEntries =
+            series.length > 0 ? series.map(([, entry]) => entry) : [initialReport];
+          activeFilename = null;
+          renderAggregateSummary(summaryEntries);
+          renderComparison(summaryEntries);
+
+          if (filtered.length === 0) {
+            document.querySelector("#history-chart").innerHTML =
+              '<div class="empty-chart">No archived runs match this corpus.</div>';
+            document.querySelector("#history-legend").innerHTML = "";
+            document.querySelector("#history-runs").innerHTML = "";
+            return;
+          }
+
+          const rows = series
+            .map(([, entry]) => {
+              const parts = historyConfigurationParts(entry);
+              const configuration = historyConfiguration(entry);
+              const baseline = entry.summary.baseline.rubric;
+              const loaded = entry.summary.loaded.rubric;
+              const baselineValue = ratio(baseline);
+              const loadedValue = ratio(loaded);
+              const uplift = loadedValue - baselineValue;
+              const start = Math.min(baselineValue, loadedValue);
+              const span = Math.abs(uplift);
+              const label = `${configuration}. Baseline ${baselineValue}%. Skills loaded ${loadedValue}%. ${uplift >= 0 ? "Uplift" : "Change"} ${uplift >= 0 ? "+" : ""}${uplift} percentage points.`;
+              return `<div class="impact-row" role="group" aria-label="${escapeHtml(label)}" style="--baseline:${baselineValue}%;--loaded:${loadedValue}%;--start:${start}%;--span:${span}%"><div class="impact-config"><b>${escapeHtml(parts.model)}</b><span>${escapeHtml(parts.harness)} · ${escapeHtml(parts.reasoning)}</span></div><div class="dumbbell-track" aria-hidden="true"><i class="dumbbell-connector"></i><i class="dumbbell-dot baseline"></i><i class="dumbbell-dot loaded"></i></div><div class="impact-values"><span>${baselineValue}% → ${loadedValue}%</span><strong>${uplift >= 0 ? "+" : ""}${uplift}</strong></div></div>`;
+            })
+            .join("");
+          document.querySelector("#history-chart").innerHTML =
+            `<div class="impact-axis" aria-hidden="true"><span>Configuration</span><div class="impact-scale"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div><span>Score change</span></div>${rows}`;
+          document.querySelector("#history-legend").innerHTML =
+            '<span><i class="legend-dot baseline"></i>Baseline</span><span><i class="legend-dot loaded"></i>Skills loaded</span>';
+          document.querySelector("#history-runs").innerHTML =
+            tableRuns.length === 0
+              ? '<tr><td class="empty-table" colspan="6">No archived runs match these filters.</td></tr>'
+              : [...tableRuns]
+                  .reverse()
+                  .map((entry) => {
+                    const sourceMismatch =
+                      currentSourceHash &&
+                      entry.execution?.sourceHash &&
+                      entry.execution.sourceHash !== currentSourceHash;
+                    const provenance = [
+                      entry.execution?.harnessHash
+                        ? `harness ${entry.execution.harnessHash}`
+                        : "legacy harness fingerprint",
+                      entry.execution?.dirty ? "dirty worktree" : null,
+                      sourceMismatch
+                        ? `skill source ${entry.execution.sourceHash}; current ${currentSourceHash}`
+                        : null,
+                    ].filter(Boolean);
+                    const provenanceClass =
+                      entry.execution?.dirty || sourceMismatch ? "meta stale-run" : "meta";
+                    return `<tr class="history-run-row" data-run-filename="${escapeHtml(entry.filename)}"><td data-label="Run"><button class="run-select" type="button" data-run-filename="${escapeHtml(entry.filename)}" aria-pressed="false"><b>${escapeHtml(new Date(entry.generatedAt).toLocaleString())}</b><br><span class="meta">${escapeHtml(entry.filename)}</span></button></td><td data-label="Configuration">${escapeHtml(historyConfiguration(entry))}<br><span class="${provenanceClass}">${escapeHtml(provenance.join(" · "))}</span></td><td data-label="Corpus">${escapeHtml(historyCorpusLabel(entry))}</td><td data-label="Routing">${scoreText(entry.summary.routing)} · ${ratio(entry.summary.routing)}%<br><span class="meta">${routingExact(entry.summary.routing)} exact</span></td><td data-label="Baseline">${scoreText(entry.summary.baseline.rubric)} · ${ratio(entry.summary.baseline.rubric)}%</td><td data-label="Loaded">${scoreText(entry.summary.loaded.rubric)} · ${ratio(entry.summary.loaded.rubric)}%</td></tr>`;
+                  })
+                  .join("");
+          for (const button of document.querySelectorAll(".run-select")) {
+            button.addEventListener("click", () => {
+              const entry = historyByFilename.get(button.dataset.runFilename);
+              if (entry) selectRun(entry, { collapse: true });
+            });
+          }
+          syncActiveRows();
+        };
+
+        corpusSelect.addEventListener("change", draw);
+        modelSelect.addEventListener("change", draw);
+        harnessSelect.addEventListener("change", draw);
+        reasoningSelect.addEventListener("change", draw);
+        draw();
+        const initialRun =
+          runs.find(
+            (entry) =>
+              entry.generatedAt === initialReport.generatedAt &&
+              historyConfigurationKey(entry) === historyConfigurationKey(initialReport),
+          ) ?? latestRun;
+        const initialDetails = rescoreReportRouting(initialRun ?? initialReport);
+        render(initialDetails, { showRunSummary: false });
+        updateResultsContext(
+          initialDetails,
+          initialRun ? "Most recent run" : "Current report",
+          initialRun?.filename,
+        );
+        syncActiveRows();
+
+        return {
+          showPreview(report, filename) {
+            activeFilename = null;
+            const preview = rescoreReportRouting(report);
+            render(preview, { showRunSummary: true });
+            updateResultsContext(preview, "Previewed report", filename);
+            syncActiveRows();
+          },
+        };
+      }
+
+      function render(report, { showRunSummary = true } = {}) {
+        const generated = report.generatedAt
+          ? new Date(report.generatedAt).toLocaleString()
+          : "template preview";
+        const summary = report.summary;
+        if (showRunSummary) {
+          document.querySelector("#meta").textContent =
+            `Selected run · ${generated} · ${report.runner ?? "unknown runner"}`;
+          renderMetricCards([
+            [
+              "Selected run routing",
+              scoreText(summary.routing),
+              `${ratio(summary.routing)}% includes every expected skill · ${routingExact(summary.routing)} exact`,
+              "",
+            ],
+            [
+              "Selected run baseline",
+              scoreText(summary.baseline.rubric),
+              `${ratio(summary.baseline.rubric)}% of rubric criteria`,
+              "",
+            ],
+            [
+              "Selected run loaded",
+              scoreText(summary.loaded.rubric),
+              `${ratio(summary.loaded.rubric)}% of rubric criteria`,
+              "accent",
+            ],
+          ]);
+        }
+
+        document.querySelector("#routing-meta").textContent =
+          `${scoreText(summary.routing)} acceptable matches · ${routingExact(summary.routing)} exact`;
+        document.querySelector("#routing").innerHTML = report.routing
+          .map(
+            (item) =>
+              `<tr><td data-label="Case"><b>${escapeHtml(item.id)}</b><br><span class="meta">${escapeHtml(item.prompt)}</span></td><td data-label="Expected">${pills(item.expectedSkills)}</td><td data-label="Selected">${pills(item.selectedSkills)}</td><td data-label="Result">${routingResultMark(item)}</td></tr>`,
+          )
+          .join("");
+
+        const loadedById = new Map(report.behavior.loaded.map((item) => [item.id, item]));
+        document.querySelector("#behavior").innerHTML = report.behavior.baseline
+          .map((baseline) => {
+            const loaded = loadedById.get(baseline.id);
+            const baselinePassed = baseline.rubricScores.reduce((sum, value) => sum + value, 0);
+            const loadedPassed = loaded.rubricScores.reduce((sum, value) => sum + value, 0);
+            const rubricRows = baseline.rubric
+              .map(
+                (criterion, index) =>
+                  `<div>${escapeHtml(criterion)}</div><div>${resultMark(Boolean(baseline.rubricScores[index]))}</div><div>${resultMark(Boolean(loaded.rubricScores[index]))}</div>`,
+              )
+              .join("");
+            return `<details><summary><span>${escapeHtml(baseline.id)}</span><span class="score">baseline ${baselinePassed}/${baseline.rubric.length}</span><span class="score accent">loaded ${loadedPassed}/${baseline.rubric.length}</span></summary><div class="details-body"><p class="prompt">${escapeHtml(baseline.prompt)}</p><div class="rubric"><div class="head">Criterion</div><div class="head">Base</div><div class="head">Loaded</div>${rubricRows}</div><div class="response-grid"><div class="response"><b>Baseline response</b><pre>${escapeHtml(baseline.response)}</pre></div><div class="response"><b>Skill-loaded response</b><pre>${escapeHtml(loaded.response)}</pre></div></div></div></details>`;
+          })
+          .join("");
+      }
+
+      const embeddedReport = JSON.parse(document.querySelector("#eval-report").textContent);
+      const embeddedHistory = JSON.parse(document.querySelector("#eval-history").textContent);
+      const historyController = renderHistory(embeddedHistory, embeddedReport);
+      document.querySelector("#report-file").addEventListener("change", async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        try {
+          historyController.showPreview(JSON.parse(await file.text()), file.name);
+        } catch (error) {
+          window.alert(`Could not load report: ${error.message}`);
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -21,6 +21,18 @@ The CLI will:
 3. Initialise a git repository with an initial commit.
 4. Run `install` using your detected package manager.
 
+During interactive setup, `create-jazz` offers to set up Jazz coding skills for your AI agent. This
+runs [TanStack Intent](https://tanstack.com/intent/latest) after dependencies are installed and adds
+version-aware skill loading guidance to the generated project's agent configuration. The prompt
+defaults to “Yes”; choose “No” to skip it.
+
+For non-interactive use, pass `--skills` to enable this setup or `--no-skills` to explicitly disable
+it:
+
+```bash
+pnpm create jazz my-app --skills
+```
+
 ## Starters
 
 The interactive picker lets you choose a framework and auth mode. You can also

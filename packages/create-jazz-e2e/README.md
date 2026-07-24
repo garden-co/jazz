@@ -31,6 +31,11 @@ For each starter, the harness:
    from `pnpm dev` to the framework-appropriate production start
    (`next start`, `vite preview`, `node build`, `node server-dist/index.js`).
 
+The harness also has one focused agent-skills test. It drives the interactive
+`create-jazz` CLI through a real pseudo-terminal, accepts the default “Yes”
+answer, installs a generated TypeScript app with pnpm, runs the real TanStack
+Intent installer, and verifies that Intent updated the generated `AGENTS.md`.
+
 ## Running locally
 
 ```bash
@@ -53,6 +58,9 @@ pnpm --filter create-jazz-e2e exec tsx src/cli.ts next-localfirst --keep
 # Skip the in-process `pnpm pack` step and consume prebuilt tarballs
 # (one *.tgz per package in PACKAGES_TO_PACK). Used by CI's prepare job.
 pnpm --filter create-jazz-e2e exec tsx src/cli.ts next-localfirst --tarball-dir ./_e2e-state/tarballs
+
+# Exercise interactive agent-skill setup with real pnpm and Intent.
+pnpm --filter create-jazz-e2e e2e:agent-skills
 ```
 
 Browsers must be installed once per machine:
@@ -63,7 +71,7 @@ pnpm exec playwright install chromium --with-deps
 
 ## CI
 
-`.github/workflows/starters-e2e.yml` is split into two jobs to avoid repeating
+`.github/workflows/starters-e2e.yml` is split into three jobs to avoid repeating
 the ~10-minute `build:core` across 12 matrix runners:
 
 1. `prepare` — builds the workspace once, packs the three workspace tarballs,
@@ -72,6 +80,8 @@ the ~10-minute `build:core` across 12 matrix runners:
    workflow artifact.
 2. `e2e` (matrix) — downloads that artifact, installs Playwright browsers, and
    runs the harness with `--tarball-dir` so it skips the pack step.
+3. `agent-skills-e2e` — downloads the same packed dependencies and runs the
+   focused interactive pnpm/Intent test once per workflow.
 
 Fires on every push to a `changeset-release/*` branch (the release PR that the
 changesets action keeps updated against `main`). Failures block the release.
