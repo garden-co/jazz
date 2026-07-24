@@ -9,14 +9,58 @@
 //! 5. Integer `AVG` has the fixed output type `Nullable(F64)`; maintained view
 //!    output types never change with their contents.
 //! 6. Signed `I64` inputs are supported by `SUM`, `AVG`, `MIN`, and `MAX`.
+//! 7. A failed aggregate update leaves maintained state unchanged, so a later
+//!    valid update emits a delta from the last successfully committed state.
+//! 8. A one-row aggregate update has allocation cost independent of the number
+//!    of rows already maintained by the aggregate.
 
-use groove::db::{Database, GraphBuilder};
-use groove::ivm::{AggregateExpr, AggregateFunction, PlanExpr};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+use groove::db::{Database, Error, GraphBuilder};
+use groove::ivm::{AggregateExpr, AggregateFunction, IvmRuntimeError, PlanExpr};
 use groove::records::{Value, ValueType};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::MemoryStorage;
+
+struct CountingAllocator;
+
+thread_local! {
+    static ALLOCATION_COUNTING_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATION_COUNTING_ACTIVE.try_with(|active| {
+            if active.get() {
+                let _ = ALLOCATED_BYTES.try_with(|bytes| {
+                    bytes.set(bytes.get() + layout.size() as u64);
+                });
+            }
+        });
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn start_counting_allocations() {
+    ALLOCATED_BYTES.with(|bytes| bytes.set(0));
+    ALLOCATION_COUNTING_ACTIVE.with(|active| active.set(true));
+}
+
+fn stop_counting_allocations() -> u64 {
+    ALLOCATION_COUNTING_ACTIVE.with(|active| active.set(false));
+    ALLOCATED_BYTES.with(Cell::get)
+}
 
 fn metric_schema(score_type: ColumnType) -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -217,5 +261,115 @@ fn signed_i64_inputs_are_supported() {
             ],
             1,
         )]
+    );
+}
+
+// Integer SUM overflow is currently a legitimate error. Accepted trade-off:
+// SUM preserves the input column's integer type, so the result cannot exceed
+// that type's representable range.
+#[test]
+fn aggregate_subscription_recovers_after_sum_overflow() {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [aggregate(
+            AggregateFunction::Sum,
+            Some("score"),
+            "sum_score",
+        )],
+    );
+    let subscription = database.subscribe_one_sink(graph).unwrap();
+
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U8(250)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(10), some(Value::U8(250))], 1,)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U8(10)],
+    );
+
+    assert!(matches!(
+        database.commit_batch(batch),
+        Err(Error::IvmRuntime(IvmRuntimeError::UnsupportedOperator))
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("metrics", vec![Value::U64(3), Value::U64(10), Value::U8(5)]);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (vec![Value::U64(10), some(Value::U8(250))], -1,),
+            (vec![Value::U64(10), some(Value::U8(255))], 1,),
+        ]
+    );
+}
+
+fn measure_single_row_aggregate_update(existing_rows: usize) -> u64 {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U64), storage).unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..existing_rows {
+        batch.insert(
+            "metrics",
+            vec![Value::U64(id as u64), Value::U64(id as u64), Value::U64(1)],
+        );
+    }
+    database.commit_batch(batch).unwrap();
+
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [aggregate(
+            AggregateFunction::Sum,
+            Some("score"),
+            "sum_score",
+        )],
+    );
+    let subscription = database.subscribe_one_sink(graph).unwrap();
+    subscription.recv().unwrap();
+
+    start_counting_allocations();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![
+            Value::U64(existing_rows as u64),
+            Value::U64(0),
+            Value::U64(1),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    subscription.recv().unwrap();
+    stop_counting_allocations()
+}
+
+#[test]
+fn aggregate_single_row_update_allocations_are_scale_independent() {
+    let small = measure_single_row_aggregate_update(1_000);
+    let large = measure_single_row_aggregate_update(20_000);
+    let ratio = large as f64 / small.max(1) as f64;
+
+    // Keep the same 3x noise allowance as the incremental-delivery canaries:
+    // it tolerates allocator/runtime noise while catching full-state rebuilds.
+    assert!(
+        ratio <= 3.0,
+        "one-row aggregate update allocation scaled with maintained state: \
+         small={small}, large={large}, ratio={ratio:.2}"
     );
 }
