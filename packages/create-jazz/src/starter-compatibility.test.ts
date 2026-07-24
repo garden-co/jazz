@@ -15,13 +15,13 @@ const BETTER_AUTH_STARTERS = [
 ] as const;
 
 describe("Better Auth starter compatibility", () => {
-  it("pins every Better Auth starter to the tested client API version", () => {
+  it("requires every Better Auth starter to use the current stable release line", () => {
     for (const starter of BETTER_AUTH_STARTERS) {
       const packageJson = JSON.parse(
         fs.readFileSync(path.join(repoRoot, "starters", starter, "package.json"), "utf8"),
       ) as { dependencies?: Record<string, string> };
 
-      expect(packageJson.dependencies?.["better-auth"], starter).toBe("1.5.6");
+      expect(packageJson.dependencies?.["better-auth"], starter).toBe("^1.6.24");
     }
   });
 });
