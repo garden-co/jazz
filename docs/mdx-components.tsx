@@ -10,6 +10,7 @@ import { LensDiagram } from "./components/mdx/lens-diagram";
 import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
 import { Graph, Sequence } from "./components/mdx/diagram";
 import { WriteTierDiagram } from "./components/mdx/write-tier-diagram";
+import { ConcurrentWritesDiagram } from "./components/mdx/concurrent-writes-diagram";
 import { JazzLogo } from "./components/brand/jazz-logo";
 
 type CodeBlockPreProps = CodeBlockProps & {
@@ -61,6 +62,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     Graph,
     Sequence,
     WriteTierDiagram,
+    ConcurrentWritesDiagram,
     JazzLogo,
     SlideCodeCell,
     ...components,
