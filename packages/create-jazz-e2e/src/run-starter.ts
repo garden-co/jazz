@@ -346,7 +346,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
-    server = await startLocalJazzServer({ inMemory: true });
+    server = await startLocalJazzServer({ inMemory: true, allowLocalFirstAuth: true });
     writeEnvFile(appDir, opts.starter, server, config);
 
     await recordPhase("build", () =>
