@@ -2599,7 +2599,7 @@ fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggre
 fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
     match aggregate.function {
         AggregateFunction::Count => ColumnType::U64,
-        AggregateFunction::Avg => ColumnType::F64,
+        AggregateFunction::Avg => ColumnType::Nullable(Box::new(ColumnType::F64)),
         // Aggregate lowering is currently reported as an unsupported
         // query-engine capability before Groove needs the exact result type.
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
@@ -9736,14 +9736,18 @@ fn aggregate_result_column_type(
                 .column
                 .as_ref()
                 .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
-            source_table
+            let column_type = source_table
                 .columns
                 .iter()
                 .find(|candidate| &candidate.name == column)
                 .map(|column| column.column_type.clone())
-                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))
+                .ok_or(Error::InvalidStoredValue("aggregate input column missing"))?;
+            Ok(match column_type {
+                ColumnType::Nullable(inner) => ColumnType::Nullable(inner),
+                column_type => ColumnType::Nullable(Box::new(column_type)),
+            })
         }
-        AggregateFunction::Avg => Ok(ColumnType::F64),
+        AggregateFunction::Avg => Ok(ColumnType::Nullable(Box::new(ColumnType::F64))),
     }
 }
 
@@ -12350,9 +12354,18 @@ mod tests {
             .query_rows(&shape, &binding, DurabilityTier::Local)
             .unwrap();
         let cells = rows[0].test_cells_by_descriptor();
-        assert_eq!(cells["sum_priority"], Value::U64(6));
-        assert_eq!(cells["min_priority"], Value::U64(0));
-        assert_eq!(cells["max_priority"], Value::U64(4));
+        assert_eq!(
+            cells["sum_priority"],
+            Value::Nullable(Some(Box::new(Value::U64(6))))
+        );
+        assert_eq!(
+            cells["min_priority"],
+            Value::Nullable(Some(Box::new(Value::U64(0))))
+        );
+        assert_eq!(
+            cells["max_priority"],
+            Value::Nullable(Some(Box::new(Value::U64(4))))
+        );
     }
 
     #[test]

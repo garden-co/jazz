@@ -4040,7 +4040,7 @@ mod tests {
         let binding = shape.bind(BTreeMap::new()).unwrap();
 
         for (identity, expected_count, expected_sum) in
-            [(admin, 2, 30), (member, 2, 40), (spy, 0, 0)]
+            [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
         {
             let rows = core
                 .query_rows_with_prepared_plan_for_identity(
@@ -4051,13 +4051,12 @@ mod tests {
                     identity,
                 )
                 .unwrap();
-            if expected_count == 0 {
-                assert!(rows.is_empty());
-                continue;
-            }
             let cells = aggregate_cells(&rows[0]);
             assert_eq!(cells["count"], Value::U64(expected_count));
-            assert_eq!(cells["sum_score"], Value::U64(expected_sum));
+            assert_eq!(
+                cells["sum_score"],
+                Value::Nullable(expected_sum.map(|sum| Box::new(Value::U64(sum))))
+            );
         }
     }
 

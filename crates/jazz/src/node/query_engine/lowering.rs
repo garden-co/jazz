@@ -6116,7 +6116,7 @@ fn aggregate_output_value_type(
 ) -> CapabilityResult<ValueType> {
     match output.function {
         AggregateFunction::Count => Ok(ValueType::U64),
-        AggregateFunction::Avg => Ok(ValueType::F64),
+        AggregateFunction::Avg => Ok(ValueType::Nullable(Box::new(ValueType::F64))),
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
             let input = output.input.as_ref().ok_or_else(|| {
                 Box::new(CapabilityReport {
@@ -6127,13 +6127,17 @@ fn aggregate_output_value_type(
                 })
             })?;
             let field = aggregate_source_field_name(input, source)?;
-            source_field_type(source, &field).cloned().ok_or_else(|| {
+            let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
                 Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Runtime(format!(
                         "aggregate input field {field:?} is missing from resolved descriptor"
                     ))],
                     explain: ExplainPlan::default(),
                 })
+            })?;
+            Ok(match value_type {
+                ValueType::Nullable(inner) => ValueType::Nullable(inner),
+                value_type => ValueType::Nullable(Box::new(value_type)),
             })
         }
     }
