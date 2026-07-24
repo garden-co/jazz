@@ -45,6 +45,34 @@ describe("resolveDefaultPersistentDbName", () => {
     expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::principal%2F456");
   });
 
+  it("scopes the default namespace by user_id for cookie sessions", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      driver: { type: "persistent" },
+      cookieSession: {
+        user_id: "alice@example.com",
+        claims: {},
+        authMode: "external",
+      },
+    };
+
+    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::alice%40example.com");
+  });
+
+  it("does not scope by user_id for anonymous cookie sessions", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      driver: { type: "persistent" },
+      cookieSession: {
+        user_id: "ephemeral-visitor",
+        claims: {},
+        authMode: "anonymous",
+      },
+    };
+
+    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+  });
+
   it("falls back to appId when no session can be resolved", () => {
     const config: DbConfig = {
       appId: "chat-app",
