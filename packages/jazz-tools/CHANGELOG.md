@@ -1,5 +1,23 @@
 # jazz-tools
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- 0b6d070: Improve write and sync performance by replacing full row-history scans with batch-indexed or exact row lookups across batch tracking, transaction validation, permission rejection, and common parent resolution.
+
+  Disable automatic full-storage reconciliation when connecting to a server, avoiding a replay of all stored rows' history on every connection. This means rows that couldn't be synced to the server will not be sent on reconnection, instead needing to wait until a query loads them again. Also, the full client storage won't be automatically reconciled when connecting to a new server.
+
+- 5e1064b: Fix deletes of rows created under earlier schema versions when permission checks need the row's historical content. Rejected migrated deletes now also leave the row usable for a subsequent update.
+- 41f5012: Persist batch settlement and recovery metadata before publishing rows, so failed commits cannot expose partially durable writes.
+- 8a29aae: Fix: preserve sorting after updates on sorted values for queries that use projections and magic columns.
+- 6122619: Validate `s.int()` values against Jazz's signed 32-bit range before native writes and report actionable errors for invalid values.
+- bbfa46f: BREAKING CHANGE: Align React and React Native `useAll` with the other framework bindings by returning `{ data, isLoading, error }` instead of a bare `T[] | undefined`. `useAllSuspense` still returns `T[]`.
+- 74717db: Prevent replay from resubmitting terminally rejected batches or echoing accepted rows back to the authoritative server that delivered them.
+- 9255074: Preserve specialised TypeScript types when chaining column merge and transform modifiers.
+  - jazz-wasm@2.0.0-alpha.54
+  - jazz-rn@2.0.0-alpha.54
+
 ## 2.0.0-alpha.53
 
 ### Major Changes
