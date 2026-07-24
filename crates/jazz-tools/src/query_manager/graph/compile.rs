@@ -1047,7 +1047,7 @@ impl QueryGraph {
             }
         }
         for condition in &spec.filters {
-            base_builder = apply_condition_to_builder(base_builder, condition);
+            base_builder = apply_condition_to_builder(base_builder, condition)?;
         }
         for (column, direction) in &spec.order_by {
             base_builder = match direction {
@@ -1210,7 +1210,7 @@ impl QueryGraph {
             }
         }
         for condition in &spec.filters {
-            step_builder = apply_condition_to_builder(step_builder, condition);
+            step_builder = apply_condition_to_builder(step_builder, condition)?;
         }
         if let Some(cols) = &spec.select_columns {
             let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
@@ -2408,9 +2408,14 @@ fn compare_index_values(left: &Value, right: &Value) -> Option<Ordering> {
     }
 }
 
-fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) -> QueryBuilder {
+fn apply_condition_to_builder(
+    mut builder: QueryBuilder,
+    condition: &Condition,
+) -> Option<QueryBuilder> {
     builder = match condition {
         Condition::Eq { column, value } => builder.filter_eq(column, value.clone()),
+        Condition::In { column, values } => builder.filter_in(column, values.clone()),
+        Condition::NotIn { .. } => return None,
         Condition::Ne { column, value } => builder.filter_ne(column, value.clone()),
         Condition::Lt { column, value } => builder.filter_lt(column, value.clone()),
         Condition::Le { column, value } => builder.filter_le(column, value.clone()),
@@ -2423,7 +2428,7 @@ fn apply_condition_to_builder(mut builder: QueryBuilder, condition: &Condition) 
         Condition::IsNull { column } => builder.filter_is_null(column),
         Condition::IsNotNull { column } => builder.filter_is_not_null(column),
     };
-    builder
+    Some(builder)
 }
 
 /// Convert a condition to a scan condition.

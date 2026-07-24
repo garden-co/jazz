@@ -170,6 +170,16 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
         PredicateExpr::IsNotNull { column } => Some(Condition::IsNotNull {
             column: to_scoped_runtime_column(column),
         }),
+        PredicateExpr::In { left, values } => Some(Condition::In {
+            column: to_scoped_runtime_column(left),
+            values: values
+                .iter()
+                .map(|value| match value {
+                    ValueRef::Literal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
         PredicateExpr::True => None,
         _ => None,
     }
@@ -959,6 +969,7 @@ pub(crate) fn lower_relation_to_execution_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::query::QueryBuilder;
     use crate::query_manager::relation_ir::{ColumnRef, JoinCondition, PredicateCmpOp};
     use crate::query_manager::types::Value;
 
@@ -1069,6 +1080,38 @@ mod tests {
                     column: "name".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn lower_relation_to_execution_plan_lowers_recursive_in_filter() {
+        let query = QueryBuilder::new("teams")
+            .with_recursive(|r| {
+                r.from("team_edges")
+                    .correlate("child_team", "_id")
+                    .filter_in("kind", vec![Value::Text("target".to_string())])
+                    .max_depth(4)
+            })
+            .build();
+        let relation =
+            crate::query_manager::query_to_relation_ir::normalize_query_to_rel_expr(&query)
+                .expect("recursive in filter should normalize to relation");
+
+        let plan = lower_relation_to_execution_plan(
+            &relation,
+            &["main".to_string()],
+            false,
+            Vec::new(),
+            None,
+        )
+        .expect("recursive in filter should lower to an execution plan");
+
+        assert_eq!(
+            plan.recursive.expect("expected recursive plan").filters,
+            vec![Condition::In {
+                column: "kind".to_string(),
+                values: vec![Value::Text("target".to_string())],
+            }]
         );
     }
 

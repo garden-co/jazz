@@ -929,6 +929,100 @@ describe("TS Query API", () => {
       );
     });
 
+    it("include builders filter reverse relations with in", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: matchingTodoId } = insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+      insertTodo(db, {
+        title: "Ship release",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({ id: { in: [matchingTodoId] } }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject.map((todo) => todo.id)).toEqual([matchingTodoId]);
+    });
+
+    it("include builders return no rows for an empty in list", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      insertTodo(db, {
+        title: "Write tests",
+        projectId,
+        assigneesIds: [],
+      });
+
+      const result = await db.one(
+        app.projects.where({ id: { eq: projectId } }).include({
+          todosViaProject: app.todos.where({ id: { in: [] } }),
+        }),
+      );
+
+      assert(result, "Result is not defined");
+      expect(result.todosViaProject).toEqual([]);
+    });
+
+    it("subscribeAll updates filtered included relations", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const query = app.projects.where({ id: { eq: projectId } }).include({
+        todosViaProject: app.todos.where({ title: { in: ["Target"] } }),
+      });
+      const snapshots: string[][] = [];
+      let nextSnapshotIndex = 0;
+      const unsubscribe = db.subscribeAll(query, (delta) => {
+        const project = delta.all[0];
+        if (project) {
+          snapshots.push(project.todosViaProject.map((todo) => todo.id).sort());
+        }
+      });
+
+      const waitForSnapshot = async (expected: string[]) => {
+        const deadline = Date.now() + 4_000;
+        while (Date.now() < deadline) {
+          while (nextSnapshotIndex < snapshots.length) {
+            const actual = snapshots[nextSnapshotIndex++];
+            if (JSON.stringify(actual) === JSON.stringify(expected)) {
+              return;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        throw new Error(`Timed out waiting for included rows ${JSON.stringify(expected)}`);
+      };
+
+      await waitForSnapshot([]);
+      const { id: otherTodoId } = insertTodo(db, {
+        title: "Other",
+        projectId,
+        assigneesIds: [],
+      });
+
+      db.update(app.todos, otherTodoId, { title: "Target" });
+      await waitForSnapshot([otherTodoId]);
+
+      db.update(app.todos, otherTodoId, { title: "Other" });
+      await waitForSnapshot([]);
+
+      const { id: targetTodoId } = insertTodo(db, {
+        title: "Target",
+        projectId,
+        assigneesIds: [],
+      });
+      await waitForSnapshot([targetTodoId]);
+
+      db.delete(app.todos, targetTodoId);
+      await waitForSnapshot([]);
+      unsubscribe();
+    });
+
     it("include builders can project nested relation columns", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);

@@ -272,6 +272,12 @@ fn normalize_condition(condition: &Condition) -> Option<PredicateExpr> {
             op: PredicateCmpOp::Eq,
             right: ValueRef::Literal(value.clone()),
         }),
+        Condition::In { values, .. } => Some(PredicateExpr::In {
+            left: column_ref,
+            values: values.iter().cloned().map(ValueRef::Literal).collect(),
+        }),
+        // Reserved wire variant: reject until NOT IN is implemented.
+        Condition::NotIn { .. } => None,
         Condition::Ne { value, .. } => Some(PredicateExpr::Cmp {
             left: column_ref,
             op: PredicateCmpOp::Ne,

@@ -8,7 +8,7 @@ use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, Sy
 use futures::channel::mpsc;
 use std::time::Duration;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 3;
+pub const SYNC_PROTOCOL_VERSION: u32 = 4;
 const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
 
 pub trait TickNotifier: 'static {
@@ -1415,6 +1415,38 @@ mod tests {
     impl TickNotifier for CountingTick {
         fn notify(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_fixed_v3_response() {
+        let controller = Arc::new(TestStreamController::default());
+        let response = ConnectedResponse {
+            sync_protocol_version: 3,
+            connection_id: "conn-1".into(),
+            client_id: "client-1".into(),
+            next_sync_seq: Some(0),
+            catalogue_state_hash: None,
+        };
+        *controller.handshake_response.lock().unwrap() = Some(frame_encode(
+            &serde_json::to_vec(&response).expect("encode handshake response"),
+        ));
+        let mut stream = TestStreamAdapter {
+            controller,
+            handshake_delivered: false,
+        };
+
+        let result =
+            TransportManager::<TestStreamAdapter, CountingTick>::do_handshake(&mut stream, vec![])
+                .await;
+
+        match result {
+            HandshakeResult::NetworkError(message) => {
+                assert!(message.contains("incompatible Jazz sync protocol"));
+                assert!(message.contains("server sent 3"));
+            }
+            HandshakeResult::Connected(_) => panic!("fixed v3 response must be rejected"),
+            HandshakeResult::AuthFailure(_) => panic!("protocol mismatch is not an auth failure"),
         }
     }
 

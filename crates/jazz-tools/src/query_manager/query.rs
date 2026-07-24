@@ -159,6 +159,10 @@ pub enum Condition {
     IsNull { column: String },
     /// Column is not null.
     IsNotNull { column: String },
+    /// Column is one of the provided values.
+    In { column: String, values: Vec<Value> },
+    /// Reserved wire variant; not implemented yet.
+    NotIn { column: String, values: Vec<Value> },
 }
 
 impl Condition {
@@ -224,6 +228,17 @@ impl Condition {
                     value: encode(max),
                 },
             ]),
+            Condition::In { values, .. } => Predicate::Or(
+                values
+                    .iter()
+                    .map(|value| Predicate::RowIdEq {
+                        element_index,
+                        value: encode(value),
+                    })
+                    .collect(),
+            ),
+            // Reserved wire variant: fail closed until NOT IN is implemented.
+            Condition::NotIn { .. } => Predicate::Or(vec![]),
             Condition::Contains { .. } => Predicate::Or(vec![]),
             Condition::IsNull { .. } => Predicate::RowIdIsNull { element_index },
             Condition::IsNotNull { .. } => Predicate::RowIdIsNotNull { element_index },
@@ -234,6 +249,7 @@ impl Condition {
     pub fn raw_column(&self) -> &str {
         match self {
             Condition::Eq { column, .. } => column,
+            Condition::In { column, .. } => column,
             Condition::Ne { column, .. } => column,
             Condition::Lt { column, .. } => column,
             Condition::Le { column, .. } => column,
@@ -243,6 +259,7 @@ impl Condition {
             Condition::Contains { column, .. } => column,
             Condition::IsNull { column } => column,
             Condition::IsNotNull { column } => column,
+            Condition::NotIn { column, .. } => column,
         }
     }
 
@@ -292,6 +309,17 @@ impl Condition {
                     col_index,
                     value: encode_value_with_type(value, col_type),
                 },
+                Condition::In { values, .. } => Predicate::Or(
+                    values
+                        .iter()
+                        .map(|value| Predicate::Eq {
+                            col_index,
+                            value: encode_value_with_type(value, col_type),
+                        })
+                        .collect(),
+                ),
+                // Reserved wire variant: fail closed until NOT IN is implemented.
+                Condition::NotIn { .. } => Predicate::Or(vec![]),
                 Condition::Ne { value, .. } => Predicate::Ne {
                     col_index,
                     value: encode_value_with_type(value, col_type),
@@ -349,6 +377,17 @@ impl Condition {
                     col_index,
                     value: encode_value_with_type(value, col_type),
                 },
+                Condition::In { values, .. } => Predicate::Or(
+                    values
+                        .iter()
+                        .map(|value| Predicate::Eq {
+                            col_index,
+                            value: encode_value_with_type(value, col_type),
+                        })
+                        .collect(),
+                ),
+                // Reserved wire variant: fail closed until NOT IN is implemented.
+                Condition::NotIn { .. } => Predicate::Or(vec![]),
                 Condition::Ne { value, .. } => Predicate::Ne {
                     col_index,
                     value: encode_value_with_type(value, col_type),
@@ -815,6 +854,16 @@ impl QueryBuilder {
         current.add(Condition::Eq {
             column: column.into(),
             value,
+        });
+        self
+    }
+
+    /// Add an in-list filter condition.
+    pub fn filter_in(mut self, column: impl Into<String>, values: Vec<Value>) -> Self {
+        let current = self.query.disjuncts.last_mut().unwrap();
+        current.add(Condition::In {
+            column: column.into(),
+            values,
         });
         self
     }
@@ -1302,6 +1351,15 @@ impl RecursiveBuilder {
         self.filters.push(Condition::Eq {
             column: column.into(),
             value,
+        });
+        self
+    }
+
+    /// Add an in-list filter to each recursive step query.
+    pub fn filter_in(mut self, column: impl Into<String>, values: Vec<Value>) -> Self {
+        self.filters.push(Condition::In {
+            column: column.into(),
+            values,
         });
         self
     }
