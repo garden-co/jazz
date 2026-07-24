@@ -5762,6 +5762,10 @@ fn metric_values(id: u64, bucket: u64, score: u64) -> Vec<Value> {
     vec![Value::U64(id), Value::U64(bucket), Value::U64(score)]
 }
 
+fn nullable_metric(value: Value) -> Value {
+    Value::Nullable(Some(Box::new(value)))
+}
+
 fn metric_aggregate_graph(input: GraphBuilder) -> GraphBuilder {
     GraphBuilder::aggregate(
         input,
@@ -5855,10 +5859,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(12),
-                    Value::F64(6.0),
-                    Value::U64(5),
-                    Value::U64(7),
+                    nullable_metric(Value::U64(12)),
+                    nullable_metric(Value::F64(6.0)),
+                    nullable_metric(Value::U64(5)),
+                    nullable_metric(Value::U64(7)),
                 ],
                 1,
             ),
@@ -5866,10 +5870,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(20),
                     Value::U64(1),
-                    Value::U64(11),
-                    Value::F64(11.0),
-                    Value::U64(11),
-                    Value::U64(11),
+                    nullable_metric(Value::U64(11)),
+                    nullable_metric(Value::F64(11.0)),
+                    nullable_metric(Value::U64(11)),
+                    nullable_metric(Value::U64(11)),
                 ],
                 1,
             ),
@@ -5886,10 +5890,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(12),
-                    Value::F64(6.0),
-                    Value::U64(5),
-                    Value::U64(7),
+                    nullable_metric(Value::U64(12)),
+                    nullable_metric(Value::F64(6.0)),
+                    nullable_metric(Value::U64(5)),
+                    nullable_metric(Value::U64(7)),
                 ],
                 -1,
             ),
@@ -5897,10 +5901,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(8),
-                    Value::F64(4.0),
-                    Value::U64(3),
-                    Value::U64(5),
+                    nullable_metric(Value::U64(8)),
+                    nullable_metric(Value::F64(4.0)),
+                    nullable_metric(Value::U64(3)),
+                    nullable_metric(Value::U64(5)),
                 ],
                 1,
             ),
@@ -5917,10 +5921,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
             vec![
                 Value::U64(10),
                 Value::U64(2),
-                Value::U64(8),
-                Value::F64(4.0),
-                Value::U64(3),
-                Value::U64(5),
+                nullable_metric(Value::U64(8)),
+                nullable_metric(Value::F64(4.0)),
+                nullable_metric(Value::U64(3)),
+                nullable_metric(Value::U64(5)),
             ],
             -1,
         )]
@@ -5950,10 +5954,10 @@ fn aggregate_counts_weighted_multiplicity_from_bag_union() {
             vec![
                 Value::U64(10),
                 Value::U64(4),
-                Value::U64(24),
-                Value::F64(6.0),
-                Value::U64(5),
-                Value::U64(7),
+                nullable_metric(Value::U64(24)),
+                nullable_metric(Value::F64(6.0)),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::U64(7)),
             ],
             1,
         )]
@@ -6033,10 +6037,10 @@ fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
             vec![
                 Value::U64(10),
                 Value::U64(1),
-                Value::U64(5),
-                Value::F64(5.0),
-                Value::U64(5),
-                Value::U64(5),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::F64(5.0)),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::U64(5)),
             ],
             1,
         )]
