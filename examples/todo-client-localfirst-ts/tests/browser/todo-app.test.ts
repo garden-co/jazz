@@ -7,17 +7,22 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
+import { app } from "../../schema.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
-import { DbConfig } from "jazz-tools";
+import { DbConfig, type Db } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  message: string,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`Timeout: ${message}`);
@@ -47,18 +52,18 @@ function addTodoWithParent(container: HTMLElement, title: string, parentTitle: s
 // ---------------------------------------------------------------------------
 
 describe("Vanilla TS Todo App E2E", () => {
-  const instances: Array<{ container: HTMLDivElement; destroy: () => Promise<void> }> = [];
+  const instances: Array<{ container: HTMLDivElement; db: Db; destroy: () => Promise<void> }> = [];
 
   /** Mount the app into a fresh container. */
   async function mount(config?: Partial<DbConfig>): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
-    const { destroy } = await startApp(el, {
+    const { db, destroy } = await startApp(el, {
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...config,
     });
-    instances.push({ container: el, destroy });
+    instances.push({ container: el, db, destroy });
 
     // Wait for the app to render
     await waitFor(() => el.querySelector("#todo-list") !== null, 5000, "App should render");
@@ -245,6 +250,13 @@ describe("Vanilla TS Todo App E2E", () => {
       () => el1.querySelectorAll("#todo-list li").length === 1,
       3000,
       "Todo should appear in first session",
+    );
+
+    const db1 = instances.find((instance) => instance.container === el1)!.db;
+    await waitFor(
+      async () => (await db1.all(app.todos, { tier: "local" })).length === 1,
+      5000,
+      "Todo should be persisted to OPFS before shutdown",
     );
 
     await destroyInstance(el1);
