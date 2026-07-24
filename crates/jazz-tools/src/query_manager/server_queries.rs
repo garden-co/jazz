@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
+use crate::query_manager::graph_nodes::policy_eval::{
+    PolicyContextEvaluator, collect_policy_dependency_tables,
+};
 use crate::row_histories::BatchId;
 use crate::schema_manager::{LensTransformer, transformer::translate_table_name_from_schema};
 use crate::storage::Storage;
@@ -663,6 +665,7 @@ impl QueryManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authorized_scope_from_graph_if_available(
         &mut self,
         storage: &dyn Storage,
@@ -671,12 +674,19 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
+        policy_context_tables: &HashSet<TableName>,
+        branches: &[String],
     ) -> Option<HashSet<(ObjectId, BranchName)>> {
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
             if !self.authorization_schema_required {
-                return Some(graph.sync_scope_object_ids());
+                return Some(Self::scope_with_policy_context_rows_for_tables(
+                    &graph.sync_scope_object_ids(),
+                    policy_context_tables,
+                    branches,
+                    storage,
+                ));
             }
             return None;
         };
@@ -686,7 +696,12 @@ impl QueryManager {
                 .values()
                 .all(|table_schema| table_schema.policies.select.using.is_none())
         {
-            return Some(graph.sync_scope_object_ids());
+            return Some(Self::scope_with_policy_context_rows_for_tables(
+                &graph.sync_scope_object_ids(),
+                policy_context_tables,
+                branches,
+                storage,
+            ));
         }
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
@@ -714,12 +729,68 @@ impl QueryManager {
                 })
         });
 
-        Some(
-            authorized_scope_tuples
-                .into_iter()
-                .flat_map(|tuple| tuple.provenance().clone().into_iter())
-                .collect(),
-        )
+        let mut scope: HashSet<(ObjectId, BranchName)> = authorized_scope_tuples
+            .into_iter()
+            .flat_map(|tuple| tuple.provenance().clone().into_iter())
+            .collect();
+
+        // Policy-context rows let the client evaluate read policies with
+        // exists/join subqueries locally. Each context row must itself pass
+        // its table's read policy, so this never widens what the session
+        // can read.
+        // Expand to the transitive closure: a context table's read policy
+        // may itself depend on further context tables.
+        let mut context_tables: HashSet<TableName> = policy_context_tables.clone();
+        let mut context_worklist: Vec<TableName> = context_tables.iter().copied().collect();
+        while let Some(table) = context_worklist.pop() {
+            let Some(table_schema) = auth_schema.get(&table) else {
+                continue;
+            };
+            let Some(select_policy) = table_schema.policies.select_policy() else {
+                continue;
+            };
+            let dependencies =
+                collect_policy_dependency_tables(select_policy, &table_schema.columns);
+            for dependency in dependencies {
+                let dependency = TableName::new(&dependency);
+                if context_tables.insert(dependency) {
+                    context_worklist.push(dependency);
+                }
+            }
+        }
+        let context_table_names: HashSet<&str> =
+            context_tables.iter().map(|table| table.as_str()).collect();
+        if !context_table_names.is_empty()
+            && let Ok(objects) = storage.scan_row_locators()
+        {
+            let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
+            for (object_id, row_locator) in objects {
+                let table_name = row_locator.table.as_str();
+                if !context_table_names.contains(table_name) {
+                    continue;
+                }
+                for branch_name in &branch_names {
+                    if scope.contains(&(object_id, *branch_name)) {
+                        continue;
+                    }
+                    let authorized = self.provenance_row_matches_current_select_policy(
+                        storage,
+                        settlement_eval_cache,
+                        object_id,
+                        *branch_name,
+                        session,
+                        &auth_schema,
+                        &auth_context,
+                        source_branch_schema_map,
+                    );
+                    if authorized {
+                        scope.insert((object_id, *branch_name));
+                    }
+                }
+            }
+        }
+
+        Some(scope)
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -1088,6 +1159,8 @@ impl QueryManager {
                     &subscription_context,
                     &branch_schema_map,
                     session_for_policy.as_ref(),
+                    &policy_context_tables,
+                    &branches,
                 )
             };
             let settled_once = scope.is_some();
@@ -1345,6 +1418,8 @@ impl QueryManager {
                         &sub.schema_context,
                         &branch_schema_map,
                         sub.session.as_ref(),
+                        &policy_context_tables,
+                        branches,
                     )
                     .map(Cow::Owned)
                 }

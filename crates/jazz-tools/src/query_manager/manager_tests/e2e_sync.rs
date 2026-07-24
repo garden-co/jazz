@@ -498,7 +498,7 @@ fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
 }
 
 #[test]
-fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
+fn e2e_three_tier_downstream_receives_authorized_policy_context_rows() {
     use crate::query_manager::policy::Operation;
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;
@@ -597,10 +597,124 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
         core_server_id_for_edge,
     );
 
+    // The folder row is policy context for the documents select policy, so
+    // the server includes it in the scope.
     let results = client.get_subscription_results(sub_id);
     assert_eq!(
         results.len(),
-        0,
-        "Untrusted downstream should keep current result-only sync behavior"
+        1,
+        "session-authorized policy context rows must sync so entitled rows become visible"
     );
+    assert_eq!(
+        results[0].1[1],
+        Value::Text("Bob doc in Alice folder".into())
+    );
+}
+
+/// Policy context closes transitively: proving access to a document needs
+/// the folder row and the membership row its read policy depends on.
+#[test]
+fn e2e_three_tier_downstream_receives_transitive_policy_context_rows() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("memberships"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("member_id", ColumnType::Text)]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("member_id", vec!["user_id".into()])),
+        ),
+    );
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "memberships".into(),
+                condition: Box::new(PolicyExpr::eq_session("member_id", vec!["user_id".into()])),
+            }),
+        ),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::inherits(Operation::Select, "folder_id")),
+        ),
+    );
+
+    let (mut core, mut core_io) = create_query_manager(SyncManager::new(), schema.clone());
+    core.insert(&mut core_io, "memberships", &[Value::Text("alice".into())])
+        .unwrap();
+    let folder_id = core
+        .insert(&mut core_io, "folders", &[Value::Text("Shared".into())])
+        .unwrap()
+        .row_id;
+    core.insert(
+        &mut core_io,
+        "documents",
+        &[
+            Value::Text("Doc in shared folder".into()),
+            Value::Uuid(folder_id),
+        ],
+    )
+    .unwrap();
+    core.process(&mut core_io);
+
+    let (mut edge, mut edge_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    let edge_server_id_for_client = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id_on_edge = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let core_server_id_for_edge = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let edge_id_on_core = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client
+        .sync_manager_mut()
+        .add_server_with_storage(edge_server_id_for_client, false, &client_io);
+    connect_client(&mut edge, &edge_io, client_id_on_edge);
+    connect_server(&mut edge, &edge_io, core_server_id_for_edge);
+    connect_client(&mut core, &core_io, edge_id_on_core);
+
+    let _ = client.sync_manager_mut().take_outbox();
+    let _ = edge.sync_manager_mut().take_outbox();
+    let _ = core.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    pump_messages_three_tier(
+        &mut client,
+        &mut edge,
+        &mut core,
+        &mut client_io,
+        &mut edge_io,
+        &mut core_io,
+        client_id_on_edge,
+        edge_server_id_for_client,
+        edge_id_on_core,
+        core_server_id_for_edge,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "transitive policy context (folder + membership) must sync so the document becomes visible"
+    );
+    assert_eq!(results[0].1[0], Value::Text("Doc in shared folder".into()));
 }
