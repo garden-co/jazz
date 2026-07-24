@@ -1627,15 +1627,19 @@ impl QueryManager {
             crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
-                let candidate_ids = storage.index_scan_all(
-                    source_table_name.as_str(),
-                    if source_schema.is_indexed_column(col.name.as_str()) {
-                        col.name.as_str()
-                    } else {
-                        "_id"
-                    },
-                    branch,
-                );
+                // Reference-array elements are indexed individually, so an
+                // element lookup narrows the candidates; the content check
+                // below still verifies every hit.
+                let candidate_ids = if source_schema.is_indexed_column(col.name.as_str()) {
+                    storage.index_lookup(
+                        source_table_name.as_str(),
+                        col.name.as_str(),
+                        branch,
+                        &Value::Uuid(target_row_id),
+                    )
+                } else {
+                    storage.index_scan_all(source_table_name.as_str(), "_id", branch)
+                };
                 for source_row_id in candidate_ids {
                     let Some(source_content) =
                         self.load_row_content_on_branch(storage, source_row_id, branch)

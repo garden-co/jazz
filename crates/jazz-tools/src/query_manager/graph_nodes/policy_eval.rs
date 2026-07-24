@@ -158,7 +158,19 @@ impl<'a> PolicyContextEvaluator<'a> {
                 &Value::Uuid(row.id),
             ),
             ColumnType::Array { element } if **element == ColumnType::Uuid => {
-                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), self.branch)
+                // Reference-array elements are indexed individually, so an
+                // element lookup narrows the candidates; the content check
+                // below still verifies every hit.
+                if source_schema.is_indexed_column(col.name.as_str()) {
+                    io.index_lookup(
+                        source_table_name.as_str(),
+                        col.name.as_str(),
+                        self.branch,
+                        &Value::Uuid(row.id),
+                    )
+                } else {
+                    io.index_scan_all(source_table_name.as_str(), "_id", self.branch)
+                }
             }
             _ => return false,
         };
