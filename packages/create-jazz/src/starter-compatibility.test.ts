@@ -3,25 +3,42 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../");
-const BETTER_AUTH_STARTERS = [
-  "next-betterauth",
-  "next-hybrid",
-  "sveltekit-betterauth",
-  "sveltekit-hybrid",
-  "react-betterauth",
-  "react-hybrid",
-  "ts-betterauth",
-  "ts-hybrid",
+const BETTER_AUTH_DECLARATIONS = [
+  ...[
+    "next-betterauth",
+    "next-hybrid",
+    "sveltekit-betterauth",
+    "sveltekit-hybrid",
+    "react-betterauth",
+    "react-hybrid",
+    "ts-betterauth",
+    "ts-hybrid",
+  ].map((starter) => ({
+    path: path.join("starters", starter, "package.json"),
+    section: "dependencies",
+  })),
+  {
+    path: "examples/auth-betterauth-chat/package.json",
+    section: "dependencies",
+  },
+  {
+    path: "packages/jazz-tools/package.json",
+    section: "devDependencies",
+  },
+  {
+    path: "packages/jazz-tools/package.json",
+    section: "peerDependencies",
+  },
 ] as const;
 
-describe("Better Auth starter compatibility", () => {
-  it("requires every Better Auth starter to use the current stable release line", () => {
-    for (const starter of BETTER_AUTH_STARTERS) {
+describe("Better Auth workspace compatibility", () => {
+  it("requires every Better Auth workspace declaration to use the exact tested release", () => {
+    for (const declaration of BETTER_AUTH_DECLARATIONS) {
       const packageJson = JSON.parse(
-        fs.readFileSync(path.join(repoRoot, "starters", starter, "package.json"), "utf8"),
-      ) as { dependencies?: Record<string, string> };
+        fs.readFileSync(path.join(repoRoot, declaration.path), "utf8"),
+      ) as Record<string, Record<string, string>>;
 
-      expect(packageJson.dependencies?.["better-auth"], starter).toBe("^1.6.24");
+      expect(packageJson[declaration.section]?.["better-auth"], declaration).toBe("1.6.24");
     }
   });
 });
