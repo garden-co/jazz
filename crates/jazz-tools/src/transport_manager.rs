@@ -452,6 +452,13 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     /// Shared with `TransportHandle::declared_schema_hash`. Read at each
     /// handshake attempt so the server sees the client's structural schema.
     declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Edge-fallback redirect state. `redirect_requested` is a transient signal
+    /// set by `dispatch_server_event` when a `Redirect` event should be honored;
+    /// the connected loop observes it and returns `ConnectedExit::Redirect`, so
+    /// the next connect targets the (already-updated) `url`. `redirect_count`
+    /// caps consecutive redirects and resets on real sync traffic.
+    redirect_requested: bool,
+    redirect_count: u32,
     _stream: std::marker::PhantomData<W>,
 }
 
@@ -507,9 +514,34 @@ pub fn create_with_retry_config<W: StreamAdapter, T: TickNotifier>(
         control_rx,
         catalogue_state_hash,
         declared_schema_hash,
+        redirect_requested: false,
+        redirect_count: 0,
         _stream: std::marker::PhantomData,
     };
     (handle, manager)
+}
+
+/// Rebase a redirect onto the live transport URL: keep the path + query from
+/// `current` (so `/apps/<id>/ws` and any query survive), take the authority
+/// (host[:port]) from `target`, and normalize the scheme to `ws`/`wss`. The
+/// server advertises only a base origin (`JAZZ_PUBLIC_URL`), so its path, if
+/// any, is intentionally ignored. Returns `None` if either URL lacks a scheme
+/// separator or the target scheme isn't http(s)/ws(s). String-based on purpose
+/// — this runs in the wasm transport, which has no URL crate.
+fn rebase_ws_url(current: &str, target: &str) -> Option<String> {
+    let current_rest = current.split_once("://")?.1; // host[:port]/path?query
+    let current_path = match current_rest.find('/') {
+        Some(i) => &current_rest[i..],
+        None => "/",
+    };
+    let (target_scheme, target_rest) = target.split_once("://")?;
+    let target_authority = target_rest.split('/').next().filter(|a| !a.is_empty())?;
+    let scheme = match target_scheme {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => return None,
+    };
+    Some(format!("{scheme}://{target_authority}{current_path}"))
 }
 
 pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
@@ -718,25 +750,55 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     fn dispatch_server_event(&mut self, event: crate::transport_protocol::ServerEvent) {
         match event {
             crate::transport_protocol::ServerEvent::SyncUpdate { seq, payload } => {
+                // Real sync traffic from the current endpoint: it is serving us,
+                // so clear the consecutive-redirect guard.
+                self.redirect_count = 0;
                 self.dispatch_sync_update(seq, *payload);
             }
             crate::transport_protocol::ServerEvent::SyncUpdateBatch { updates } => {
+                self.redirect_count = 0;
                 self.dispatch_sync_update_batch(updates);
             }
             crate::transport_protocol::ServerEvent::Heartbeat => {}
+            crate::transport_protocol::ServerEvent::Subscribed { .. } => {
+                tracing::debug!("received Subscribed ServerEvent; skipping");
+            }
             crate::transport_protocol::ServerEvent::Connected { .. } => {
                 tracing::warn!("unexpected Connected frame mid-stream; ignoring");
             }
             crate::transport_protocol::ServerEvent::Error { message, code } => {
                 tracing::warn!(message, ?code, "server reported error");
             }
-            other => {
-                tracing::debug!(
-                    variant = other.variant_name(),
-                    "received non-sync ServerEvent; skipping"
-                );
+            crate::transport_protocol::ServerEvent::Redirect { url } => {
+                self.handle_redirect(url);
             }
         }
+    }
+
+    /// Honor a server `Redirect`: re-point the transport's target URL to the
+    /// advertised origin (keeping our existing `/apps/<id>/ws` path + query) and
+    /// signal the connected loop to reconnect there. Capped at
+    /// `MAX_CONSECUTIVE_REDIRECTS` bounces with no intervening sync traffic, as a
+    /// loop guard; the cap resets whenever the current endpoint actually serves
+    /// us (see the `SyncUpdate` arms above).
+    fn handle_redirect(&mut self, target: String) {
+        const MAX_CONSECUTIVE_REDIRECTS: u32 = 2;
+        if self.redirect_count >= MAX_CONSECUTIVE_REDIRECTS {
+            tracing::warn!(target, "ignoring redirect: consecutive redirect cap reached");
+            return;
+        }
+        let Some(new_url) = rebase_ws_url(&self.url, &target) else {
+            tracing::warn!(target, "ignoring redirect: could not parse target URL");
+            return;
+        };
+        if new_url == self.url {
+            // Already pointed here — don't churn the connection.
+            return;
+        }
+        tracing::info!(from = %self.url, to = %new_url, "honoring server redirect");
+        self.url = new_url;
+        self.redirect_count += 1;
+        self.redirect_requested = true;
     }
 
     fn trace_sync_payload(
@@ -824,6 +886,8 @@ enum ConnectedExit {
     NetworkError,
     Shutdown,
     UpdateAuth(AuthConfig),
+    /// Server asked us to reconnect elsewhere; `self.url` already points there.
+    Redirect,
 }
 
 enum ControlOrPhase<T> {
@@ -990,6 +1054,18 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             self.reconnect.reset();
                             continue;
                         }
+                        ConnectedExit::Redirect => {
+                            // `self.url` already points at the redirect target.
+                            // Close, signal a disconnect, and reconnect promptly
+                            // (no backoff) so the session lands on the new origin.
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
+                            ws.close().await;
+                            self.reconnect.reset();
+                            continue;
+                        }
                     }
                 }
                 ControlOrPhase::Phase(HandshakeResult::AuthFailure(reason)) => {
@@ -1055,6 +1131,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             let Some(payload) = frame_decode(&data) else { continue; };
                             let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(&payload) else { continue; };
                             self.dispatch_server_event(event);
+                            if self.redirect_requested {
+                                self.redirect_requested = false;
+                                return ConnectedExit::Redirect;
+                            }
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
                     }
@@ -1077,6 +1157,8 @@ enum WasmConnectedExit {
     NetworkError,
     Shutdown,
     UpdateAuth(AuthConfig),
+    /// Server asked us to reconnect elsewhere; `self.url` already points there.
+    Redirect,
 }
 
 #[cfg(not(feature = "runtime-tokio"))]
@@ -1178,6 +1260,16 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             self.reconnect.reset();
                             continue;
                         }
+                        WasmConnectedExit::Redirect => {
+                            // `self.url` already points at the redirect target.
+                            let _ = self
+                                .inbound_tx
+                                .unbounded_send(TransportInbound::Disconnected);
+                            self.tick.notify();
+                            ws.close().await;
+                            self.reconnect.reset();
+                            continue;
+                        }
                     }
                 }
                 ControlOrPhase::Phase(HandshakeResult::AuthFailure(reason)) => {
@@ -1243,6 +1335,10 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                             let Some(payload) = frame_decode(&data) else { continue; };
                             let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(&payload) else { continue; };
                             self.dispatch_server_event(event);
+                            if self.redirect_requested {
+                                self.redirect_requested = false;
+                                return WasmConnectedExit::Redirect;
+                            }
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
                     }
@@ -1284,6 +1380,38 @@ mod tests {
             frame_decode_capped(&ok, cap).as_deref(),
             Some(&b"handshake"[..])
         );
+    }
+
+    #[test]
+    fn rebase_ws_url_keeps_app_path_swaps_origin() {
+        // https origin → wss, keep /apps/<id>/ws path
+        assert_eq!(
+            rebase_ws_url(
+                "wss://internal.eu-central-1.preprod.v2.aws.cloud.jazz.tools/apps/abc/ws",
+                "https://us-east-2.preprod.v2.aws.cloud.jazz.tools",
+            )
+            .as_deref(),
+            Some("wss://us-east-2.preprod.v2.aws.cloud.jazz.tools/apps/abc/ws"),
+        );
+    }
+
+    #[test]
+    fn rebase_ws_url_preserves_query_and_port() {
+        assert_eq!(
+            rebase_ws_url("ws://old.host:1625/apps/x/ws?foo=1", "http://new.host:8080")
+                .as_deref(),
+            Some("ws://new.host:8080/apps/x/ws?foo=1"),
+        );
+    }
+
+    #[test]
+    fn rebase_ws_url_rejects_bad_input() {
+        // No scheme separator on target.
+        assert!(rebase_ws_url("wss://h/apps/x/ws", "us-east-2.example").is_none());
+        // Unsupported scheme.
+        assert!(rebase_ws_url("wss://h/apps/x/ws", "ftp://h").is_none());
+        // Empty target authority.
+        assert!(rebase_ws_url("wss://h/apps/x/ws", "https:///path").is_none());
     }
 
     struct MockStream {

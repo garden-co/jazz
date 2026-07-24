@@ -146,6 +146,13 @@ enum Commands {
         #[arg(long, env = "JAZZ_UPSTREAM_URL")]
         upstream_url: Option<String>,
 
+        /// Public base URL this region advertises to forwarded clients, so they
+        /// reconnect directly instead of being proxied (edge-fallback redirect).
+        /// When set, a connection carrying `x-jazz-forwarded` is told to
+        /// reconnect here. Unset → redirect disabled.
+        #[arg(long, env = "JAZZ_PUBLIC_URL")]
+        public_url: Option<String>,
+
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
             long,
@@ -201,6 +208,7 @@ async fn main() {
             backend_secret,
             admin_secret,
             upstream_url,
+            public_url,
             shutdown_timeout_secs,
             bound_port_file,
         } => {
@@ -245,6 +253,7 @@ async fn main() {
                 in_memory,
                 auth_config,
                 upstream_url,
+                public_url,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
             )

@@ -70,6 +70,7 @@ pub struct ServerBuilder {
     storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
     upstream_url: Option<String>,
+    public_url: Option<String>,
     shutdown_timeout: Duration,
 }
 
@@ -87,6 +88,7 @@ impl ServerBuilder {
             },
             sync_tracer: None,
             upstream_url: None,
+            public_url: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
         }
     }
@@ -108,6 +110,13 @@ impl ServerBuilder {
 
     pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
         self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
+    /// Public base URL advertised to forwarded clients for the edge-fallback
+    /// redirect (env `JAZZ_PUBLIC_URL`). Unset → redirect disabled.
+    pub fn with_public_url(mut self, public_url: impl Into<String>) -> Self {
+        self.public_url = Some(public_url.into());
         self
     }
 
@@ -162,6 +171,7 @@ impl ServerBuilder {
             connection_event_hub,
             auth_config,
             upstream_http_url,
+            public_url: self.public_url.clone(),
             topology,
             jwt_verifier,
             http_client,

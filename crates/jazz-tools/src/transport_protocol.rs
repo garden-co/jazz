@@ -102,6 +102,13 @@ pub enum ServerEvent {
 
     /// Heartbeat to keep connection alive.
     Heartbeat,
+
+    /// Server offers the client a direct URL to reconnect to (edge-fallback
+    /// redirect). Sent only on a forwarded, redirect-capable connection; the
+    /// server keeps serving normally, and the client reconnects to `url` and
+    /// closes its own old socket. The URL comes entirely from deployment config
+    /// (JAZZ_PUBLIC_URL) — the protocol carries no topology of its own.
+    Redirect { url: String },
 }
 
 impl ServerEvent {
@@ -114,6 +121,7 @@ impl ServerEvent {
             ServerEvent::SyncUpdateBatch { .. } => "SyncUpdateBatch",
             ServerEvent::Error { .. } => "Error",
             ServerEvent::Heartbeat => "Heartbeat",
+            ServerEvent::Redirect { .. } => "Redirect",
         }
     }
 }
@@ -266,6 +274,7 @@ const SERVER_SYNC_UPDATE: u8 = 2;
 const SERVER_SYNC_UPDATE_BATCH: u8 = 3;
 const SERVER_ERROR: u8 = 4;
 const SERVER_HEARTBEAT: u8 = 5;
+const SERVER_REDIRECT: u8 = 6;
 
 const CLIENT_OUTBOX_ENTRY: u8 = 1;
 const CLIENT_SYNC_BATCH_REQUEST: u8 = 2;
@@ -504,6 +513,10 @@ impl ServerEvent {
             ServerEvent::Heartbeat => {
                 push_u8(&mut out, SERVER_HEARTBEAT);
             }
+            ServerEvent::Redirect { url } => {
+                push_u8(&mut out, SERVER_REDIRECT);
+                push_string(&mut out, url)?;
+            }
         }
         Ok(out)
     }
@@ -541,6 +554,9 @@ impl ServerEvent {
                 message: reader.read_string()?,
             },
             SERVER_HEARTBEAT => ServerEvent::Heartbeat,
+            SERVER_REDIRECT => ServerEvent::Redirect {
+                url: reader.read_string()?,
+            },
             tag => return Err(DecodeError::InvalidTag(tag)),
         };
         reader.finish()?;
@@ -672,6 +688,33 @@ mod tests {
 
         let decoded = ServerEvent::decode_frame(&frame).unwrap();
         assert!(matches!(decoded, ServerEvent::Heartbeat));
+    }
+
+    #[test]
+    fn test_redirect_frame_roundtrip() {
+        let event = ServerEvent::Redirect {
+            url: "https://us-east-2.preprod.v2.aws.cloud.jazz.tools".to_string(),
+        };
+        let frame = event.encode_frame();
+        match ServerEvent::decode_frame(&frame).unwrap() {
+            ServerEvent::Redirect { url } => {
+                assert_eq!(url, "https://us-east-2.preprod.v2.aws.cloud.jazz.tools");
+            }
+            other => panic!("Expected Redirect event, got {:?}", other.variant_name()),
+        }
+    }
+
+    #[test]
+    fn test_redirect_json_roundtrip() {
+        // The handshake path uses JSON; ensure the variant serdes there too.
+        let event = ServerEvent::Redirect {
+            url: "https://host.example".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        match serde_json::from_str::<ServerEvent>(&json).unwrap() {
+            ServerEvent::Redirect { url } => assert_eq!(url, "https://host.example"),
+            other => panic!("Expected Redirect, got {:?}", other.variant_name()),
+        }
     }
 
     #[test]

@@ -413,6 +413,10 @@ pub struct ServerState {
     pub auth_config: AuthConfig,
     /// Upstream HTTP base URL used by edge servers to forward catalogue HTTP requests.
     pub upstream_http_url: Option<String>,
+    /// Public base URL this region advertises to forwarded clients so they can
+    /// reconnect directly (edge-fallback redirect). `None` disables the redirect.
+    /// Topology comes entirely from deployment config — never hardcoded.
+    pub public_url: Option<String>,
     /// Whether this process is the core/global node or an edge syncing upstream.
     pub topology: ServerTopology,
     /// Shared HTTP client for forwarding admin requests to a remote authority.
@@ -737,6 +741,7 @@ mod tests {
             connection_event_hub: Arc::new(ConnectionEventHub::default()),
             auth_config: AuthConfig::default(),
             upstream_http_url: None,
+            public_url: None,
             topology: ServerTopology::Core,
             http_client: reqwest::Client::builder()
                 .build()
