@@ -69,6 +69,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }));
         batch_ids.sort();
         batch_ids.dedup();
+        // Keep the scanning fallback: replicas that predate the batch row
+        // index hold batches only the history scan can find.
         batch_ids.retain(|batch_id| !self.local_batch_rows(*batch_id).is_empty());
         batch_ids
     }

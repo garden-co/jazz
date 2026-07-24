@@ -944,3 +944,37 @@ fn seal_batch_rejection_stops_when_settlement_persistence_fails() {
     );
     assert!(sm.take_outbox().is_empty());
 }
+
+/// A re-delivered identical batch fate must not be reprocessed: the first
+/// delivery queues it, the unchanged replay is dropped. Guards the hot-path
+/// dedup from upstream #1127.
+#[test]
+fn redelivered_identical_batch_fate_is_not_requeued() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    let fate = BatchFate::DurableDirect {
+        batch_id: BatchId([7; 16]),
+        confirmed_tier: DurabilityTier::GlobalServer,
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::BatchFate { fate: fate.clone() },
+    });
+    sm.process_inbox(&mut io);
+    assert_eq!(sm.take_pending_batch_fates().len(), 1);
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::BatchFate { fate },
+    });
+    sm.process_inbox(&mut io);
+    assert!(
+        sm.take_pending_batch_fates().is_empty(),
+        "an unchanged re-delivered fate must not be requeued"
+    );
+}

@@ -191,7 +191,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         })
     }
 
-    pub(crate) fn local_batch_rows(&self, batch_id: BatchId) -> Vec<LocalBatchRow> {
+    /// Load a batch's rows from the tracked member sources only, without
+    /// the full-store scan fallback. A batch no tracked source knows is
+    /// treated as row-less.
+    pub(crate) fn local_batch_rows_from_tracked_sources(
+        &self,
+        batch_id: BatchId,
+    ) -> Vec<LocalBatchRow> {
         let member_sources: [fn(&Self, BatchId) -> Vec<LocalBatchMember>; 4] = [
             Self::sealed_submission_batch_members,
             Self::cached_local_batch_members,
@@ -206,13 +212,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 break;
             }
         }
+        Self::sort_local_batch_rows(&mut rows);
+        rows
+    }
+
+    pub(crate) fn local_batch_rows(&self, batch_id: BatchId) -> Vec<LocalBatchRow> {
+        let mut rows = self.local_batch_rows_from_tracked_sources(batch_id);
         if rows.is_empty() {
             // Last-resort fallback if the batchId->rows index is not found.
             // This is extremely inefficient, as we're scanning across all tables' rows.
             rows = self.scan_local_batch_rows(batch_id);
+            Self::sort_local_batch_rows(&mut rows);
         }
-
-        Self::sort_local_batch_rows(&mut rows);
         rows
     }
 
@@ -303,7 +314,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.schema_manager
                 .query_manager_mut()
                 .mark_subscriptions_visibility_recompute_for_tier(acked_tier);
-            for (member, row_locator, _) in self.local_batch_rows(batch_id) {
+            // Tracked sources only: servers re-deliver settled fates for
+            // batches this node never tracked, and the scanning fallback
+            // would pay a store-wide history scan per re-delivered fate.
+            for (member, row_locator, _) in self.local_batch_rows_from_tracked_sources(batch_id) {
                 self.schema_manager
                     .query_manager_mut()
                     .mark_local_row_updated_in_subscriptions(

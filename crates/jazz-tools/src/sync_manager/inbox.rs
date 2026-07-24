@@ -1372,16 +1372,19 @@ impl SyncManager {
                 };
                 if changed {
                     self.pending_batch_fates.push(fate.clone());
-                    if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
-                        let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
-                        self.apply_transactional_batch_fate_to_rows(
-                            storage,
-                            None,
-                            Some(server_id),
-                            &fate,
-                            &rows,
-                        );
-                    }
+                }
+                // Apply transactional fates even when unchanged: a crash
+                // between fate persistence and row application leaves rows
+                // staging, and the replayed fate is the only repair signal.
+                if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
+                    let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
+                    self.apply_transactional_batch_fate_to_rows(
+                        storage,
+                        None,
+                        Some(server_id),
+                        &fate,
+                        &rows,
+                    );
                 }
                 // Keep forwarding downstream: another connected client may not know it.
                 let interested = self.interested_clients_for_batch_fate(&fate);
