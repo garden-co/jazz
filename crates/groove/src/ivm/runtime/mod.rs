@@ -5901,10 +5901,6 @@ where
         let arrangement_key =
             self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
-        let mut arrangement = self
-            .arrangement_states
-            .remove(&arrangement_key)
-            .unwrap_or_default();
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -5914,50 +5910,56 @@ where
                 .or_default()
                 .push(delta.clone());
         }
+        let current_arrangement = self.arrangement_states.get(&arrangement_key);
+        let current_as_of = current_arrangement.and_then(AsOf::as_of);
+        let should_apply_arrangement = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || current_as_of != Some(sub_tick);
+        let replace_within_same_tick = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            && current_as_of.is_some_and(|current| current.tick == sub_tick.tick);
+        if !replace_within_same_tick && current_as_of.is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", current_as_of.expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
+        }
         let before_groups =
             if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
                 BTreeMap::new()
             } else {
                 touched_groups
                     .keys()
-                    .map(|group| (group.clone(), arrangement.value().records_for_key(group)))
+                    .map(|group| {
+                        (
+                            group.clone(),
+                            current_arrangement
+                                .map(|arrangement| arrangement.value().records_for_key(group))
+                                .unwrap_or_default(),
+                        )
+                    })
                     .collect::<BTreeMap<_, _>>()
             };
-        let should_apply_arrangement = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || arrangement.as_of() != Some(sub_tick);
+        let mut staged_arrangement =
+            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+                ArrangementState::default()
+            } else {
+                current_arrangement
+                    .map(|arrangement| arrangement.value().clone_keys(touched_groups.keys()))
+                    .unwrap_or_default()
+            };
         if should_apply_arrangement {
-            let replace_within_same_tick = self.context.arrangement_update_mode
-                == ArrangementUpdateMode::Replace
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current.tick == sub_tick.tick);
-            if !replace_within_same_tick
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current > sub_tick)
-            {
-                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
-                    next: format!("{sub_tick:?}"),
-                });
-            }
-            arrangement.value_mut().apply_record_deltas(
+            staged_arrangement.apply_record_deltas(
                 input_desc,
                 group_fields.as_ref(),
                 &input.deltas,
                 self.context.arrangement_update_mode,
             )?;
-            if replace_within_same_tick {
-                arrangement.replace_as_of_at_least(sub_tick);
-            } else {
-                arrangement.mark_forward_as_of(sub_tick)?;
-            }
         }
 
         let mut output = Vec::new();
         for group_prefix in touched_groups.keys() {
-            let after_records = arrangement.value().records_for_key(group_prefix);
+            let after_records = staged_arrangement.records_for_key(group_prefix);
             let after =
                 aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
             let before_records = if let Some(records) = before_groups
@@ -5986,7 +5988,29 @@ where
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
-        self.arrangement_states.insert(arrangement_key, arrangement);
+        if should_apply_arrangement {
+            match self.context.arrangement_update_mode {
+                ArrangementUpdateMode::Accumulate => {
+                    let arrangement = self.arrangement_states.entry(arrangement_key).or_default();
+                    arrangement.mark_forward_as_of(sub_tick)?;
+                    arrangement
+                        .value_mut()
+                        .replace_keys(touched_groups.keys(), staged_arrangement);
+                }
+                ArrangementUpdateMode::Replace => {
+                    let mut arrangement = AsOf {
+                        value: staged_arrangement,
+                        as_of: current_as_of,
+                    };
+                    if replace_within_same_tick {
+                        arrangement.replace_as_of_at_least(sub_tick);
+                    } else {
+                        arrangement.mark_forward_as_of(sub_tick)?;
+                    }
+                    self.arrangement_states.insert(arrangement_key, arrangement);
+                }
+            }
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,
