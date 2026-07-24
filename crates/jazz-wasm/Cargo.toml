@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
   "transport",
 ] }
+jazz-browser-broker = { path = "../jazz-browser-broker", version = "0.1.0" }
 
 ws_stream_wasm = "0.7"
 futures = "0.3"

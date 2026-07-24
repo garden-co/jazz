@@ -93,6 +93,8 @@ importers:
 
   crates: {}
 
+  crates/jazz-broker-wasm: {}
+
   crates/jazz-napi:
     devDependencies:
       '@napi-rs/cli':
@@ -1564,6 +1566,9 @@ importers:
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
+      jazz-broker-wasm:
+        specifier: workspace:*
+        version: link:../../crates/jazz-broker-wasm
       jazz-rn:
         specifier: workspace:*
         version: link:../../crates/jazz-rn

@@ -1711,6 +1711,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jazz-broker-wasm"
+version = "0.1.0"
+dependencies = [
+ "jazz-browser-broker",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "jazz-browser-broker"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
@@ -1835,6 +1854,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
+ "jazz-browser-broker",
  "jazz-tools",
  "jazz-wasm-tracing",
  "js-sys",

@@ -52,6 +52,7 @@ export default defineConfig({
     alias: {
       // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
+      "jazz-broker-wasm": resolve(__dirname, "../../crates/jazz-broker-wasm/pkg"),
       "jazz-wasm": resolve(__dirname, "../../crates/jazz-wasm/pkg"),
     },
   },

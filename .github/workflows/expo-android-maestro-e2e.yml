@@ -111,7 +111,7 @@ jobs:
 
       - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
         with:
-          tool: wasm-pack@0.13.1
+          tool: wasm-pack@0.14.0
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -121,6 +121,7 @@ jobs:
       - name: Build Expo E2E JS dependencies
         run: |
           pnpm --filter jazz-wasm run build
+          pnpm --filter jazz-broker-wasm run build
           pnpm --filter jazz-tools run build:runtime
 
       - name: Validate Expo app schema and types

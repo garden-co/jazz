@@ -43,6 +43,7 @@
 
 #![allow(clippy::new_without_default)]
 
+pub mod broker_client;
 pub mod driver_bridge;
 pub mod query;
 pub mod runtime;
@@ -56,6 +57,7 @@ pub mod worker_protocol;
 pub mod ws_stream;
 
 // Re-export main types for JavaScript
+pub use broker_client::WasmTabBrokerCore;
 pub use driver_bridge::JsStorageDriver;
 pub use query::WasmQueryBuilder;
 pub use runtime::WasmRuntime;

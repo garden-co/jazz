@@ -44,6 +44,26 @@
       ],
       "outputs": ["pkg/**"]
     },
+    "jazz-broker-wasm#build": {
+      "dependsOn": ["@jazz/rust#build:crates"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
+      "outputs": ["pkg/**"]
+    },
+    "jazz-tools#build": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/crates/**/*.rs",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock"
+      ],
+      "outputs": ["dist/**"]
+    },
     "build:crates": {
       "dependsOn": ["^build:crates"],
       "inputs": [

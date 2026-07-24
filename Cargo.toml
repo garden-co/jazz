@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
   "crates/jazz-tools",
+  "crates/jazz-browser-broker",
+  "crates/jazz-broker-wasm",
   "crates/jazz-wasm",
   "crates/jazz-napi",
   "crates/jazz-rn/rust",
@@ -14,3 +16,11 @@ members = [
 ]
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
+
+[profile.broker-wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
