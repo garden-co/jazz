@@ -11,13 +11,13 @@
 //! 6. Signed `I64` inputs are supported by `SUM`, `AVG`, `MIN`, and `MAX`.
 //! 7. A failed aggregate update leaves maintained state unchanged, so a later
 //!    valid update emits a delta from the last successfully committed state.
-//! 8. A one-row aggregate update has allocation cost independent of the number
-//!    of rows already maintained by the aggregate.
+//! 8. A one-row aggregate update has allocation cost independent of unrelated
+//!    groups already maintained by the aggregate.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use groove::db::{Database, Error, GraphBuilder};
+use groove::db::{Database, Error, GraphBuilder, PrimaryKeyValue};
 use groove::ivm::{AggregateExpr, AggregateFunction, IvmRuntimeError, PlanExpr};
 use groove::records::{Value, ValueType};
 use groove::schema::{
@@ -320,6 +320,260 @@ fn aggregate_subscription_recovers_after_sum_overflow() {
     );
 }
 
+#[test]
+fn aggregate_subscription_preserves_empty_group_after_failed_update() {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [aggregate(
+            AggregateFunction::Sum,
+            Some("score"),
+            "sum_score",
+        )],
+    );
+    let subscription = database.subscribe_one_sink(graph).unwrap();
+
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U8(250)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(10), some(Value::U8(250))], 1,)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("metrics", PrimaryKeyValue::U64(1));
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(10), some(Value::U8(250))], -1,)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U8(250)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(3), Value::U64(10), Value::U8(10)],
+    );
+
+    assert!(matches!(
+        database.commit_batch(batch),
+        Err(Error::IvmRuntime(IvmRuntimeError::UnsupportedOperator))
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("metrics", vec![Value::U64(4), Value::U64(10), Value::U8(5)]);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(vec![Value::U64(10), some(Value::U8(5))], 1,)]
+    );
+}
+
+fn sum_and_extreme_graph(function: AggregateFunction, output_name: &str) -> GraphBuilder {
+    GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [
+            aggregate(AggregateFunction::Sum, Some("score"), "sum_score"),
+            aggregate(function, Some("score"), output_name),
+        ],
+    )
+}
+
+/// A delta batch is a multiset of weighted changes, so assertions on it must not
+/// depend on emission order. Groove's window operators happen to emit retractions
+/// before insertions while the aggregate path does the reverse; neither order is
+/// specified, so compare as sorted multisets.
+fn assert_same_delta_multiset(
+    actual: Vec<(Vec<Value>, i64)>,
+    expected: impl IntoIterator<Item = (Vec<Value>, i64)>,
+) {
+    let mut actual = actual;
+    let mut expected: Vec<(Vec<Value>, i64)> = expected.into_iter().collect();
+    actual.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn aggregate_subscription_recomputes_min_after_extreme_retraction_and_failed_update() {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(sum_and_extreme_graph(AggregateFunction::Min, "min_score"))
+        .unwrap();
+
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U8(10)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U8(20)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(3), Value::U64(10), Value::U8(100)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(
+            vec![Value::U64(10), some(Value::U8(130)), some(Value::U8(10))],
+            1,
+        )],
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("metrics", PrimaryKeyValue::U64(1));
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![Value::U64(10), some(Value::U8(130)), some(Value::U8(10))],
+                -1,
+            ),
+            (
+                vec![Value::U64(10), some(Value::U8(120)), some(Value::U8(20))],
+                1,
+            ),
+        ],
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(4), Value::U64(10), Value::U8(200)],
+    );
+
+    assert!(matches!(
+        database.commit_batch(batch),
+        Err(Error::IvmRuntime(IvmRuntimeError::UnsupportedOperator))
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("metrics", vec![Value::U64(5), Value::U64(10), Value::U8(5)]);
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![Value::U64(10), some(Value::U8(120)), some(Value::U8(20))],
+                -1,
+            ),
+            (
+                vec![Value::U64(10), some(Value::U8(125)), some(Value::U8(5))],
+                1,
+            ),
+        ],
+    );
+}
+
+#[test]
+fn aggregate_subscription_recomputes_max_after_extreme_retraction_and_failed_update() {
+    let storage = MemoryStorage::new(&["metrics"]);
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(sum_and_extreme_graph(AggregateFunction::Max, "max_score"))
+        .unwrap();
+
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::U8(10)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::U8(20)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(3), Value::U64(10), Value::U8(100)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(
+            vec![Value::U64(10), some(Value::U8(130)), some(Value::U8(100))],
+            1,
+        )],
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("metrics", PrimaryKeyValue::U64(3));
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![Value::U64(10), some(Value::U8(130)), some(Value::U8(100))],
+                -1,
+            ),
+            (
+                vec![Value::U64(10), some(Value::U8(30)), some(Value::U8(20))],
+                1,
+            ),
+        ],
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(4), Value::U64(10), Value::U8(250)],
+    );
+
+    assert!(matches!(
+        database.commit_batch(batch),
+        Err(Error::IvmRuntime(IvmRuntimeError::UnsupportedOperator))
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(5), Value::U64(10), Value::U8(30)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_same_delta_multiset(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (
+                vec![Value::U64(10), some(Value::U8(30)), some(Value::U8(20))],
+                -1,
+            ),
+            (
+                vec![Value::U64(10), some(Value::U8(60)), some(Value::U8(30))],
+                1,
+            ),
+        ],
+    );
+}
+
 fn measure_single_row_aggregate_update(existing_rows: usize) -> u64 {
     let storage = MemoryStorage::new(&["metrics"]);
     let mut database = Database::new(metric_schema(ColumnType::U64), storage).unwrap();
@@ -360,7 +614,7 @@ fn measure_single_row_aggregate_update(existing_rows: usize) -> u64 {
 }
 
 #[test]
-fn aggregate_single_row_update_allocations_are_scale_independent() {
+fn aggregate_single_row_update_allocations_are_unrelated_group_scale_independent() {
     let small = measure_single_row_aggregate_update(1_000);
     let large = measure_single_row_aggregate_update(20_000);
     let ratio = large as f64 / small.max(1) as f64;
@@ -369,7 +623,7 @@ fn aggregate_single_row_update_allocations_are_scale_independent() {
     // it tolerates allocator/runtime noise while catching full-state rebuilds.
     assert!(
         ratio <= 3.0,
-        "one-row aggregate update allocation scaled with maintained state: \
+        "one-row aggregate update allocation scaled with unrelated groups/total maintained arrangement size: \
          small={small}, large={large}, ratio={ratio:.2}"
     );
 }
