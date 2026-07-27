@@ -932,10 +932,14 @@ fn apply_delta(current: u128, delta: i128) -> Result<u128, WindowCodecError> {
     }
 }
 
+fn order_preserving_i64_bits(value: i64) -> u64 {
+    (value as u64) ^ (1_u64 << 63)
+}
+
 fn is_integer_type(value_type: &ValueType) -> bool {
     matches!(
         value_type,
-        ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64
+        ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 | ValueType::I64
     )
 }
 
@@ -945,6 +949,7 @@ fn integer_value(value: &Value, value_type: &ValueType) -> Option<u128> {
         (Value::U16(value), ValueType::U16) => Some(u128::from(*value)),
         (Value::U32(value), ValueType::U32) => Some(u128::from(*value)),
         (Value::U64(value), ValueType::U64) => Some(u128::from(*value)),
+        (Value::I64(value), ValueType::I64) => Some(u128::from(order_preserving_i64_bits(*value))),
         _ => None,
     }
 }
@@ -963,6 +968,9 @@ fn integer_to_value(value: u128, value_type: &ValueType) -> Result<Value, Window
         ValueType::U64 => u64::try_from(value)
             .map(Value::U64)
             .map_err(|_| WindowCodecError::Invalid("u64 delta value out of range")),
+        ValueType::I64 => u64::try_from(value)
+            .map(|value| Value::I64((value ^ (1_u64 << 63)) as i64))
+            .map_err(|_| WindowCodecError::Invalid("i64 delta value out of range")),
         _ => Err(WindowCodecError::Invalid("non-integer delta column")),
     }
 }
@@ -1047,6 +1055,7 @@ mod tests {
                 ("u16", ValueType::U16),
                 ("u32", ValueType::U32),
                 ("u64", ValueType::U64),
+                ("i64", ValueType::I64),
                 ("f64", ValueType::F64),
                 ("bool", ValueType::Bool),
                 ("string", ValueType::String),
@@ -1152,6 +1161,34 @@ mod tests {
                 ColumnEncodingKind::Verbatim,
                 ColumnEncodingKind::Verbatim,
                 ColumnEncodingKind::Verbatim,
+            ]
+        );
+        assert_round_trip(&schema, &records);
+    }
+
+    #[test]
+    fn i64_columns_use_delta_varint_encoding() {
+        let schema = WindowSchema::new(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            RecordDescriptor::new([("score", ValueType::I64)]),
+        );
+        let records = (-8..8)
+            .enumerate()
+            .map(|(idx, score)| {
+                WindowRecord::new(
+                    owned(schema.key_descriptor(), &[Value::U64(idx as u64)]),
+                    owned(schema.value_descriptor(), &[Value::I64(score)]),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let encoded = encode_window(&schema, &records).unwrap();
+        let summary = summarize_window(&encoded).unwrap();
+        assert_eq!(
+            summary.column_encodings,
+            vec![
+                ColumnEncodingKind::DeltaVarint,
+                ColumnEncodingKind::DeltaVarint
             ]
         );
         assert_round_trip(&schema, &records);
@@ -1286,6 +1323,7 @@ mod tests {
                 Value::U16(rng.next() as u16),
                 Value::U32(rng.next() as u32),
                 Value::U64(rng.next()),
+                Value::I64((rng.next() % 20_000) as i64 - 10_000),
                 Value::F64((rng.next() % 10_000) as f64 / 10.0),
                 Value::Bool(rng.next().is_multiple_of(2)),
                 Value::String(format!("s-{}-{}", idx, rng.next() % 97)),
