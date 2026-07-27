@@ -38,7 +38,10 @@ describe("Better Auth workspace compatibility", () => {
         fs.readFileSync(path.join(repoRoot, declaration.path), "utf8"),
       ) as Record<string, Record<string, string>>;
 
-      expect(packageJson[declaration.section]?.["better-auth"], declaration).toBe("1.6.24");
+      expect(
+        packageJson[declaration.section]?.["better-auth"],
+        `${declaration.path} (${declaration.section})`,
+      ).toBe("1.6.24");
     }
   });
 });
