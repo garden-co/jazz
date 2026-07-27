@@ -28,6 +28,11 @@ use support::{
     publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
     wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
 };
+use uuid::Uuid;
+
+fn test_user_id(subject: &str) -> String {
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes()).to_string()
+}
 
 fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
@@ -527,16 +532,18 @@ struct PermissionsHeadHttpResponse {
 }
 
 async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz_tools::Schema) {
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        std::slice::from_ref(schema),
-        &[],
-    )
-    .await
-    .expect("push schema catalogue");
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/schemas",
+            server.base_url(),
+            server.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", server.admin_secret())
+        .json(&json!({ "schema": schema }))
+        .send()
+        .await
+        .expect("publish schema catalogue");
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 async fn assert_edge_query_does_not_include_row(
@@ -585,6 +592,12 @@ async fn assert_edge_query_does_not_include_row(
 // core, and reads sent to the edge return the core catalogue state.
 #[tokio::test]
 async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
+    tokio::task::LocalSet::new()
+        .run_until(edge_catalogue_http_reads_and_writes_forward_to_real_core_impl())
+        .await
+}
+
+async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
     let app_id = JazzServer::default_app_id();
     let core = JazzServer::builder().with_app_id(app_id).start().await;
     let edge = JazzServer::builder()
@@ -715,6 +728,12 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
 // becomes observable both directly on core and through the edge.
 #[tokio::test]
 async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge() {
+    tokio::task::LocalSet::new()
+        .run_until(edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge_impl())
+        .await
+}
+
+async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge_impl() {
     let app_id = JazzServer::default_app_id();
     let core = JazzServer::builder().with_app_id(app_id).start().await;
     let edge = JazzServer::builder()
@@ -826,11 +845,18 @@ async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_ed
 /// published, then expose rows once an explicit head is installed.
 #[tokio::test]
 async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
+    tokio::task::LocalSet::new()
+        .run_until(dynamic_server_denies_reads_until_permissions_head_is_published_impl())
+        .await
+}
+
+async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() {
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
 
-    let mut reader_context = server.make_client_context_for_user(schema.clone(), "reader-dynamic");
+    let mut reader_context =
+        server.make_client_context_for_user(schema.clone(), test_user_id("reader-dynamic"));
     reader_context.backend_secret = None;
     reader_context.admin_secret = None;
     let reader = JazzClient::connect(reader_context)
@@ -860,10 +886,11 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 
     wait_for_edge_query_ready(&reader, "users", Duration::from_secs(30)).await;
 
-    let admin =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-dynamic"))
-            .await
-            .expect("connect admin");
+    let admin = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), test_user_id("admin-dynamic")),
+    )
+    .await
+    .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
@@ -902,6 +929,12 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 
 #[tokio::test]
 async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() {
+    tokio::task::LocalSet::new()
+        .run_until(dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_impl())
+        .await
+}
+
+async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_impl() {
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
@@ -909,13 +942,13 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("observer-queued-write")
+        .with_user_id(test_user_id("observer-queued-write"))
         .connect()
         .await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("writer-queued-write")
+        .with_user_id(test_user_id("writer-queued-write"))
         .as_user()
         .connect()
         .await;
@@ -1070,6 +1103,12 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
 
 #[tokio::test]
 async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
+    tokio::task::LocalSet::new()
+        .run_until(dynamic_server_rejects_user_write_after_permissions_timeout_impl())
+        .await
+}
+
+async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
@@ -1077,13 +1116,13 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
     let observer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("observer-timeout-write")
+        .with_user_id(test_user_id("observer-timeout-write"))
         .connect()
         .await;
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("writer-timeout-write")
+        .with_user_id(test_user_id("writer-timeout-write"))
         .as_user()
         .connect()
         .await;
@@ -1158,6 +1197,11 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
 
 #[tokio::test]
 async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening() {
+    tokio::task::LocalSet::new().run_until(dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening_impl()).await
+}
+
+async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening_impl()
+{
     let server = JazzServer::start().await;
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
@@ -1166,7 +1210,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     let reader = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("reader-subscribe")
+        .with_user_id(test_user_id("reader-subscribe"))
         .as_user()
         .connect()
         .await;
@@ -1197,10 +1241,11 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     )
     .await;
 
-    let admin =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-subscribe"))
-            .await
-            .expect("connect admin");
+    let admin = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), test_user_id("admin-subscribe")),
+    )
+    .await
+    .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let user_id_value = jazz_tools::ObjectId::new();
@@ -1276,6 +1321,12 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 /// ```
 #[tokio::test]
 async fn column_addition_new_client_can_read_old_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(column_addition_new_client_can_read_old_rows_impl())
+        .await
+}
+
+async fn column_addition_new_client_can_read_old_rows_impl() {
     let server = JazzServer::start().await;
     let target_schema = schema_v2();
 
@@ -1299,10 +1350,11 @@ async fn column_addition_new_client_can_read_old_rows() {
     .await;
 
     // === Alice connects with v1, creates a user after permissions publish ===
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-catalogue"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(schema_v1(), test_user_id("alice-catalogue")),
+    )
+    .await
+    .expect("connect alice");
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
@@ -1316,10 +1368,11 @@ async fn column_addition_new_client_can_read_old_rows() {
         .expect("alice user reaches edge after permissions publish");
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(target_schema, "bob-catalogue"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(target_schema, test_user_id("bob-catalogue")),
+    )
+    .await
+    .expect("connect bob");
 
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
@@ -1360,6 +1413,12 @@ async fn column_addition_new_client_can_read_old_rows() {
 
 #[tokio::test]
 async fn cannot_read_from_old_schema_until_lens_is_added() {
+    tokio::task::LocalSet::new()
+        .run_until(cannot_read_from_old_schema_until_lens_is_added_impl())
+        .await
+}
+
+async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     let server = JazzServer::start().await;
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
@@ -1382,11 +1441,13 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
     )
     .await;
 
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema.clone(), "alice-schema-before-lens"),
-    )
-    .await
-    .expect("connect alice");
+    let alice =
+        JazzClient::connect(server.make_client_context_for_user(
+            v1_schema.clone(),
+            test_user_id("alice-schema-before-lens"),
+        ))
+        .await
+        .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz_tools::ObjectId::new();
@@ -1416,11 +1477,13 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
     )
     .await;
 
-    let bob = JazzClient::connect(
-        server.make_client_context_for_user(v2_schema.clone(), "bob-schema-before-lens"),
-    )
-    .await
-    .expect("connect bob");
+    let bob =
+        JazzClient::connect(server.make_client_context_for_user(
+            v2_schema.clone(),
+            test_user_id("bob-schema-before-lens"),
+        ))
+        .await
+        .expect("connect bob");
     let query = QueryBuilder::new("users").build();
     assert_edge_query_does_not_include_row(
         &bob,
@@ -1483,6 +1546,12 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_additions_new_client_can_read_old_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(multi_hop_column_additions_new_client_can_read_old_rows_impl())
+        .await
+}
+
+async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     let server = JazzServer::start().await;
     let v3_schema = schema_v3();
 
@@ -1504,10 +1573,11 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-multi-hop"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(schema_v1(), test_user_id("alice-multi-hop")),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     let alice_user_id = jazz_tools::ObjectId::new();
     let (alice_row_id, _, alice_batch_id) = alice
@@ -1518,10 +1588,11 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
         .await
         .expect("alice user reaches edge");
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-multi-hop"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(schema_v2(), test_user_id("bob-multi-hop")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
     let bob_user_id = jazz_tools::ObjectId::new();
     let (bob_row_id, _, bob_batch_id) = bob
@@ -1534,10 +1605,11 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
         .await
         .expect("bob user reaches edge");
 
-    let charlie =
-        JazzClient::connect(server.make_client_context_for_user(v3_schema, "charlie-multi-hop"))
-            .await
-            .expect("connect charlie");
+    let charlie = JazzClient::connect(
+        server.make_client_context_for_user(v3_schema, test_user_id("charlie-multi-hop")),
+    )
+    .await
+    .expect("connect charlie");
     wait_for_edge_query_ready(&charlie, "users", Duration::from_secs(30)).await;
     let charlie_user_id = jazz_tools::ObjectId::new();
     let (charlie_row_id, _, charlie_batch_id) = charlie
@@ -1633,6 +1705,12 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_renames_new_client_can_read_old_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(multi_hop_column_renames_new_client_can_read_old_rows_impl())
+        .await
+}
+
+async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     let server = JazzServer::start().await;
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
@@ -1656,10 +1734,11 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(v1_schema, "alice-rename-chain"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain")),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz_tools::ObjectId::new();
@@ -1674,10 +1753,11 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
         .await
         .expect("alice user reaches edge");
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v3_schema, "bob-rename-chain"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v3_schema, test_user_id("bob-rename-chain")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
@@ -1715,6 +1795,12 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
 /// ```
 #[tokio::test]
 async fn multi_hop_column_renames_old_client_can_read_new_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(multi_hop_column_renames_old_client_can_read_new_rows_impl())
+        .await
+}
+
+async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     let server = JazzServer::start().await;
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
@@ -1738,10 +1824,11 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
     )
     .await;
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v3_schema, "bob-rename-chain-new"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v3_schema, test_user_id("bob-rename-chain-new")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz_tools::ObjectId::new();
@@ -1753,7 +1840,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
         .expect("bob user reaches edge");
 
     let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema, "alice-rename-chain-old"),
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain-old")),
     )
     .await
     .expect("connect alice");
@@ -1794,6 +1881,12 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
 /// ```
 #[tokio::test]
 async fn table_rename_new_client_can_read_old_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(table_rename_new_client_can_read_old_rows_impl())
+        .await
+}
+
+async fn table_rename_new_client_can_read_old_rows_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
@@ -1816,10 +1909,11 @@ async fn table_rename_new_client_can_read_old_rows() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(v1_schema, "alice-table-rename"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename")),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let user_id = jazz_tools::ObjectId::new();
@@ -1834,10 +1928,11 @@ async fn table_rename_new_client_can_read_old_rows() {
         .await
         .expect("alice user reaches edge");
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-table-rename"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
@@ -1868,6 +1963,12 @@ async fn table_rename_new_client_can_read_old_rows() {
 /// rename lens.
 #[tokio::test]
 async fn table_rename_subscription_reacts_to_old_branch_updates() {
+    tokio::task::LocalSet::new()
+        .run_until(table_rename_subscription_reacts_to_old_branch_updates_impl())
+        .await
+}
+
+async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
@@ -1890,10 +1991,11 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
     )
     .await;
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-table-rename-sub"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-sub")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let query = QueryBuilder::new("people").build();
@@ -1916,7 +2018,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
     );
 
     let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema, "alice-table-rename-sub"),
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename-sub")),
     )
     .await
     .expect("connect alice");
@@ -1966,6 +2068,14 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
 /// Alice's old subscription receives the row through the table rename lens.
 #[tokio::test]
 async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
+    tokio::task::LocalSet::new()
+        .run_until(
+            table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution_impl(),
+        )
+        .await
+}
+
+async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
@@ -1988,9 +2098,10 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     )
     .await;
 
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema.clone(), "alice-table-rename-evolve-sub"),
-    )
+    let alice = JazzClient::connect(server.make_client_context_for_user(
+        v1_schema.clone(),
+        test_user_id("alice-table-rename-evolve-sub"),
+    ))
     .await
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
@@ -2034,7 +2145,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let bob = JazzClient::connect(
-        server.make_client_context_for_user(v2_schema, "bob-table-rename-evolve-sub"),
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-evolve-sub")),
     )
     .await
     .expect("connect bob");
@@ -2081,6 +2192,12 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
 
 #[tokio::test]
 async fn table_rename_update_and_delete_copy_on_write() {
+    tokio::task::LocalSet::new()
+        .run_until(table_rename_update_and_delete_copy_on_write_impl())
+        .await
+}
+
+async fn table_rename_update_and_delete_copy_on_write_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
@@ -2104,9 +2221,10 @@ async fn table_rename_update_and_delete_copy_on_write() {
     )
     .await;
 
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema.clone(), "alice-table-rename-copy-on-write"),
-    )
+    let alice = JazzClient::connect(server.make_client_context_for_user(
+        v1_schema.clone(),
+        test_user_id("alice-table-rename-copy-on-write"),
+    ))
     .await
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
@@ -2123,11 +2241,13 @@ async fn table_rename_update_and_delete_copy_on_write() {
         .await
         .expect("alice user reaches edge");
 
-    let bob = JazzClient::connect(
-        server.make_client_context_for_user(v2_schema, "bob-table-rename-copy-on-write"),
-    )
-    .await
-    .expect("connect bob");
+    let bob =
+        JazzClient::connect(server.make_client_context_for_user(
+            v2_schema,
+            test_user_id("bob-table-rename-copy-on-write"),
+        ))
+        .await
+        .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let batch_id = bob
@@ -2188,6 +2308,12 @@ async fn table_rename_update_and_delete_copy_on_write() {
 
 #[tokio::test]
 async fn table_rename_join_query_translates_join_target_on_old_branch() {
+    tokio::task::LocalSet::new()
+        .run_until(table_rename_join_query_translates_join_target_on_old_branch_impl())
+        .await
+}
+
+async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
@@ -2210,10 +2336,11 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(v1_schema, "alice-join-rename"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-join-rename")),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
@@ -2238,10 +2365,11 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
         .await
         .expect("alice post reaches edge");
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-join-rename"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-join-rename")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
@@ -2277,6 +2405,12 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
 
 #[tokio::test]
 async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
+    tokio::task::LocalSet::new()
+        .run_until(table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl())
+        .await
+}
+
+async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
@@ -2299,10 +2433,11 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(v1_schema, "alice-array-rename"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-array-rename")),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
@@ -2327,10 +2462,11 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
         .await
         .expect("alice post reaches edge");
 
-    let bob =
-        JazzClient::connect(server.make_client_context_for_user(v2_schema, "bob-array-rename"))
-            .await
-            .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-array-rename")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
@@ -2369,6 +2505,11 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
 
 #[tokio::test]
 async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
+    tokio::task::LocalSet::new().run_until(local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform_impl()).await
+}
+
+async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform_impl()
+{
     let server = JazzServer::start().await;
     let legacy_schema = legacy_join_provenance_schema();
     let current_schema = current_join_provenance_permission_schema();
@@ -2401,7 +2542,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(legacy_schema)
-        .with_user_id("join-provenance-admin")
+        .with_user_id(test_user_id("join-provenance-admin"))
         .as_admin()
         .ready_on("users", Duration::from_secs(30))
         .connect()
@@ -2430,7 +2571,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(current_schema.clone())
-        .with_user_id("alice")
+        .with_user_id(test_user_id("alice"))
         .as_user()
         .ready_on("users", Duration::from_secs(30))
         .connect()
@@ -2440,7 +2581,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let bob = TestingClient::builder()
         .with_server(&server)
         .with_schema(current_schema)
-        .with_user_id("bob")
+        .with_user_id(test_user_id("bob"))
         .as_user()
         .ready_on("users", Duration::from_secs(30))
         .connect()
@@ -2501,6 +2642,12 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 /// mallory --spoof owner-----> server --row policy--x rejected
 #[tokio::test]
 async fn large_blob_values_follow_ordinary_row_permissions() {
+    tokio::task::LocalSet::new()
+        .run_until(large_blob_values_follow_ordinary_row_permissions_impl())
+        .await
+}
+
+async fn large_blob_values_follow_ordinary_row_permissions_impl() {
     let server = JazzServer::start().await;
     let schema = large_blob_assets_schema();
 
@@ -2528,19 +2675,26 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
     )
     .await;
 
-    let alice = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice"))
-        .await
-        .expect("connect alice");
+    let alice_user_id = test_user_id("alice");
+    let bob_user_id = test_user_id("bob");
+    let mallory_user_id = test_user_id("mallory");
+
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(schema.clone(), alice_user_id.clone()),
+    )
+    .await
+    .expect("connect alice");
     wait_for_edge_query_ready(&alice, "assets", Duration::from_secs(30)).await;
 
-    let bob = JazzClient::connect(server.make_client_context_for_user(schema.clone(), "bob"))
+    let bob = JazzClient::connect(server.make_client_context_for_user(schema.clone(), bob_user_id))
         .await
         .expect("connect bob");
     wait_for_edge_query_ready(&bob, "assets", Duration::from_secs(30)).await;
 
-    let mallory = JazzClient::connect(server.make_client_context_for_user(schema, "mallory"))
-        .await
-        .expect("connect mallory");
+    let mallory =
+        JazzClient::connect(server.make_client_context_for_user(schema, mallory_user_id.clone()))
+            .await
+            .expect("connect mallory");
     wait_for_edge_query_ready(&mallory, "assets", Duration::from_secs(30)).await;
 
     let blob = b"file-like payload stored as an ordinary row value".repeat(64);
@@ -2607,6 +2761,12 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
 
 #[tokio::test]
 async fn multi_hop_table_renames_and_column_rename() {
+    tokio::task::LocalSet::new()
+        .run_until(multi_hop_table_renames_and_column_rename_impl())
+        .await
+}
+
+async fn multi_hop_table_renames_and_column_rename_impl() {
     let server = JazzServer::start().await;
     let v1_schema = multi_hop_table_rename_schema_v1();
     let v2_schema = multi_hop_table_rename_schema_v2();
@@ -2634,7 +2794,7 @@ async fn multi_hop_table_renames_and_column_rename() {
     )
     .await;
     let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema, "alice-multi-table-rename"),
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-multi-table-rename")),
     )
     .await
     .expect("connect alice");
@@ -2659,7 +2819,7 @@ async fn multi_hop_table_renames_and_column_rename() {
     )
     .await;
     let bob = JazzClient::connect(
-        server.make_client_context_for_user(v2_schema, "bob-multi-table-rename"),
+        server.make_client_context_for_user(v2_schema, test_user_id("bob-multi-table-rename")),
     )
     .await
     .expect("connect bob");
@@ -2682,11 +2842,13 @@ async fn multi_hop_table_renames_and_column_rename() {
         &v3_schema,
     )
     .await;
-    let carol = JazzClient::connect(
-        server.make_client_context_for_user(v3_schema.clone(), "carol-multi-table-rename"),
-    )
-    .await
-    .expect("connect carol");
+    let carol =
+        JazzClient::connect(server.make_client_context_for_user(
+            v3_schema.clone(),
+            test_user_id("carol-multi-table-rename"),
+        ))
+        .await
+        .expect("connect carol");
     wait_for_edge_query_ready(&carol, "members", Duration::from_secs(30)).await;
     let carol_id = jazz_tools::ObjectId::new();
     let (carol_row_id, _, batch_id) = carol
@@ -2747,6 +2909,12 @@ async fn multi_hop_table_renames_and_column_rename() {
 /// removed in v2.
 #[tokio::test]
 async fn removed_table_then_readded_does_not_resurface_old_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(removed_table_then_readded_does_not_resurface_old_rows_impl())
+        .await
+}
+
+async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     let server = JazzServer::start().await;
     let v1_schema = removed_readded_schema_v1();
     let v2_schema = removed_readded_schema_v2();
@@ -2775,7 +2943,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
     .await;
 
     let alice = JazzClient::connect(
-        server.make_client_context_for_user(v1_schema, "alice-removed-readded-v1"),
+        server.make_client_context_for_user(v1_schema, test_user_id("alice-removed-readded-v1")),
     )
     .await
     .expect("connect alice");
@@ -2802,7 +2970,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
     .await;
 
     let bob = JazzClient::connect(
-        server.make_client_context_for_user(v3_schema, "bob-removed-readded-v3"),
+        server.make_client_context_for_user(v3_schema, test_user_id("bob-removed-readded-v3")),
     )
     .await
     .expect("connect bob");
@@ -2863,6 +3031,12 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
 /// ```
 #[tokio::test]
 async fn column_addition_old_client_can_read_new_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(column_addition_old_client_can_read_new_rows_impl())
+        .await
+}
+
+async fn column_addition_old_client_can_read_new_rows_impl() {
     let server = JazzServer::start().await;
     let target_schema = schema_v2();
 
@@ -2886,9 +3060,11 @@ async fn column_addition_old_client_can_read_new_rows() {
     .await;
 
     // === Bob connects with v2, creates a user with the new email column ===
-    let bob = JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-backward"))
-        .await
-        .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(schema_v2(), test_user_id("bob-backward")),
+    )
+    .await
+    .expect("connect bob");
 
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
@@ -2912,10 +3088,11 @@ async fn column_addition_old_client_can_read_new_rows() {
     .await;
 
     // === Alice connects with v1, queries — should see Bob's row without email ===
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-backward"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(schema_v1(), test_user_id("alice-backward")),
+    )
+    .await
+    .expect("connect alice");
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
@@ -2956,6 +3133,12 @@ async fn column_addition_old_client_can_read_new_rows() {
 
 #[tokio::test]
 async fn keeps_authorization_through_v1_head() {
+    tokio::task::LocalSet::new()
+        .run_until(keeps_authorization_through_v1_head_impl())
+        .await
+}
+
+async fn keeps_authorization_through_v1_head_impl() {
     let server = JazzServer::start().await;
     let query = QueryBuilder::new("users").build();
     let v1_schema = schema_v1();
@@ -2977,10 +3160,11 @@ async fn keeps_authorization_through_v1_head() {
     )
     .await;
 
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-v1-head"))
-            .await
-            .expect("connect alice");
+    let alice = JazzClient::connect(
+        server.make_client_context_for_user(schema_v1(), test_user_id("alice-v1-head")),
+    )
+    .await
+    .expect("connect alice");
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
@@ -3022,9 +3206,11 @@ async fn keeps_authorization_through_v1_head() {
     .await
     .expect("push catalogue after v1 permissions head");
 
-    let bob = JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-v2-head"))
-        .await
-        .expect("connect bob");
+    let bob = JazzClient::connect(
+        server.make_client_context_for_user(schema_v2(), test_user_id("bob-v2-head")),
+    )
+    .await
+    .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let bob_rows = wait_for_query(
