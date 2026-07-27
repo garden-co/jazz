@@ -355,7 +355,8 @@ can be updated by weighted deltas:
 
 - `count(*)`: signed total input multiplicity for the group.
 - `count(expr)`: signed total multiplicity where `expr` is non-null.
-- `sum(expr)`: weighted sum over numeric values.
+- `sum(expr)`: weighted sum over numeric values, including signed `I64`.
+- `avg(expr)`: mean over non-null values, returned as `F64`.
 - `min(expr)` / `max(expr)`: extremum over positive-multiplicity values, backed
   by an ordered value index with deterministic full-record tie accounting.
 - `any_value(expr)`: the value from the deterministic least ordered witness,
@@ -365,9 +366,19 @@ can be updated by weighted deltas:
 retractable extrema or ordered witnesses, the value-to-record counts required to
 find the next winner after a deletion. A group exists in the output only while
 its input multiplicity is positive, unless the aggregate spec explicitly asks
-for an SQL-style empty global aggregate row. For maintained subscriptions,
-empty-group output should be capability-gated until the output null/default
-semantics are represented in the descriptor.
+for an SQL-style empty global aggregate row.
+
+Non-count aggregate outputs are nullable, which is what lets empty and all-null
+inputs follow SQL: an empty global aggregate row reports `NULL` for `sum`, `avg`,
+`min` and `max` while `count` reports `0`, and an input group whose values are
+all `NULL` reports the same. `count` is never null. Nullable INPUT columns are
+accepted for every aggregate function — `NULL` values are skipped rather than
+rejected — which is the case these semantics exist to serve.
+
+Not in scope: distinct aggregates (`sum(distinct expr)` and friends) are
+rejected, and floating-point replay determinism is deliberately outside the
+maintained contract until specified, since summation order is not guaranteed
+across replays.
 
 Each input delta updates the affected group state. The operator computes the
 group's old output row and new output row and emits the minimal consolidated
