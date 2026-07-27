@@ -28,7 +28,7 @@ describe("TS Insert API", () => {
 
     const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
-      done: true,
+      done: false,
       tags: ["tag1", "tag2"],
       projectId: project.id,
       ownerId: owner.id,
@@ -38,7 +38,7 @@ describe("TS Insert API", () => {
     expect(todo).toEqual({
       id: expect.any(String),
       title: "Test Todo",
-      done: true,
+      done: false,
       tags: ["tag1", "tag2"],
       projectId: project.id,
       ownerId: owner.id,
@@ -57,7 +57,7 @@ describe("TS Insert API", () => {
     const todo = await db
       .insert(app.todos, {
         title: "Test Todo",
-        done: true,
+        done: false,
         tags: ["tag1", "tag2"],
         projectId: project.id,
         ownerId: owner.id,
@@ -67,7 +67,7 @@ describe("TS Insert API", () => {
     expect(todo).toEqual({
       id: expect.any(String),
       title: "Test Todo",
-      done: true,
+      done: false,
       tags: ["tag1", "tag2"],
       projectId: project.id,
       ownerId: owner.id,
@@ -183,6 +183,25 @@ describe("TS Insert API", () => {
 
     const queried = await db.one(app.table_with_defaults.where({ id: { eq: rowWithDefaults.id } }));
     expect(queried).toEqual(rowWithDefaults);
+  });
+
+  it("fails synchronously if any required fields are missing", () => {
+    // @ts-expect-error `name` is missing
+    expect(() => db.insert(app.projects, {})).toThrow("missing required column name");
+  });
+
+  it("fails synchronously if a permission rejects the insert", () => {
+    const project = insertProject(db);
+    const owner = insertUser(db);
+    expect(() =>
+      db.insert(app.todos, {
+        title: "Test Todo",
+        projectId: project.id,
+        ownerId: owner.id,
+        // Rows can only be inserted with `done: false`
+        done: true,
+      }),
+    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
   });
 
   it("stores explicit values for defaulted columns instead of replacing them", async () => {

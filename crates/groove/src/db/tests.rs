@@ -7,12 +7,14 @@
 //! runtime module.
 
 use super::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, IvmRuntimeError, LiteralValue, PlanExpr, PredicateExpr,
-    ProjectField, StaticScanSpec, TopByOrder,
+    ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -23,7 +25,10 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
-use crate::storage::{MemoryStorage, RocksDbStorage, StorageLayout};
+use crate::storage::{
+    ColumnFamilyName, Error as StorageError, Key, KeyValue, MemoryStorage, OrderedKvStorage,
+    RocksDbStorage, ScanVisitor, StorageLayout, Value as StorageValue, WriteOperation,
+};
 use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
 
 fn albums_schema() -> DatabaseSchema {
@@ -208,36 +213,36 @@ fn history_arg_min() -> GraphBuilder {
     GraphBuilder::arg_min_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
 }
 
-fn history_top_by_stamp_asc(limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_asc(limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::asc("stamp")],
         ["node"],
         0,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
-fn history_top_by_stamp_desc(limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_desc(limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::desc("stamp")],
         ["node"],
         0,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
-fn history_top_by_stamp_asc_offset(offset: usize, limit: usize) -> GraphBuilder {
+fn history_top_by_stamp_asc_offset(offset: u64, limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),
         ["row"],
         [TopByOrder::asc("stamp")],
         ["node"],
         offset,
-        limit,
+        TopByLimit::Finite(limit),
     )
 }
 
@@ -1894,6 +1899,51 @@ fn history_consolidation_visits_direct_record_stores() {
     );
 }
 
+#[test]
+fn partial_history_tail_is_marked_converged_until_dirtied() {
+    let schema = jazz_docs_history_schema();
+    let layout = StorageLayout::jazz_class_v1();
+    let physical_cfs = layout.physical_column_families(schema.column_families());
+    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = ScanCountingStorage::new(&physical_cf_refs);
+    let counter = storage.clone();
+    let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
+
+    seed_jazz_docs_history(&mut database, 0, 3);
+    let scans_after_seed = counter.scan_range_count();
+
+    let first = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(first, WindowConsolidation::default());
+    assert!(counter.scan_range_count() > scans_after_seed);
+
+    let scans_after_first = counter.scan_range_count();
+    let second = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(second, WindowConsolidation::default());
+    assert_eq!(counter.scan_range_count(), scans_after_first);
+
+    seed_jazz_docs_history(&mut database, 3, 1);
+    let scans_after_dirty = counter.scan_range_count();
+    let after_dirty = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(
+        after_dirty,
+        WindowConsolidation {
+            windows: 1,
+            records: 4
+        }
+    );
+    assert!(counter.scan_range_count() > scans_after_dirty);
+
+    let scans_after_reconverge = counter.scan_range_count();
+    let after_reconverge = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(after_reconverge, WindowConsolidation::default());
+    assert!(counter.scan_range_count() > scans_after_reconverge);
+
+    let scans_after_tail_converged = counter.scan_range_count();
+    let skipped = database.consolidate_history_windows(4, 2).unwrap();
+    assert_eq!(skipped, WindowConsolidation::default());
+    assert_eq!(counter.scan_range_count(), scans_after_tail_converged);
+}
+
 fn jazz_docs_history_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "jazz_docs_history",
@@ -1924,7 +1974,107 @@ fn jazz_docs_history_database() -> Database<MemoryStorage> {
     Database::new_with_storage_layout(schema, storage, layout).unwrap()
 }
 
-fn seed_jazz_docs_history(database: &mut Database<MemoryStorage>, start_idx: u64, row_count: u64) {
+#[derive(Clone)]
+struct ScanCountingStorage {
+    inner: MemoryStorage,
+    scan_range_count: Rc<Cell<usize>>,
+}
+
+impl ScanCountingStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            scan_range_count: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn scan_range_count(&self) -> usize {
+        self.scan_range_count.get()
+    }
+}
+
+impl OrderedKvStorage for ScanCountingStorage {
+    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<StorageValue>, StorageError> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), StorageError> {
+        self.inner.delete(cf, key)
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, StorageError> {
+        self.inner.approximate_class_bytes(cf)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.scan_range_count
+            .set(self.scan_range_count.get().saturating_add(1));
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        self.inner.scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, StorageError> {
+        self.inner.last_with_prefix(cf, prefix)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, StorageError> {
+        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), StorageError> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+fn seed_jazz_docs_history<S: OrderedKvStorage>(
+    database: &mut Database<S>,
+    start_idx: u64,
+    row_count: u64,
+) {
     let mut batch = database.open_batch();
     for idx in start_idx..start_idx + row_count {
         batch.insert(
@@ -4347,6 +4497,27 @@ fn top_by_hydrates_limit_two() {
 }
 
 #[test]
+fn top_by_finite_zero_stays_empty() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let mut database = Database::new(history_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(0))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
+#[test]
 fn top_by_boundary_insert_and_delete_updates_window() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
@@ -4506,7 +4677,7 @@ fn top_by_orders_nullable_sort_keys_null_first() {
             [TopByOrder::asc("score")],
             ["id"],
             0,
-            1,
+            TopByLimit::Finite(1),
         ))
         .unwrap();
     assert_eq!(
@@ -4549,6 +4720,278 @@ fn top_by_uses_stable_tie_field() {
         [
             (history_values(1, 10, 1, "stable tie"), -1),
             (history_values(1, 10, 0, "earlier tie"), 1),
+        ]
+    );
+}
+
+fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
+    GraphBuilder::top_by(
+        GraphBuilder::union([
+            GraphBuilder::table("history"),
+            GraphBuilder::table("history_shadow"),
+        ]),
+        ["row"],
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        offset,
+        TopByLimit::Finite(limit),
+    )
+}
+
+#[test]
+fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 2))
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 10, 1, "first"), 2)]
+    );
+}
+
+#[test]
+fn top_by_offset_splits_duplicate_copies_across_boundary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match values[1] {
+        Value::U64(stamp) => stamp,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+}
+
+#[test]
+fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match values[1] {
+        Value::U64(stamp) => stamp,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 20, 1, "second"), -1),
+            (history_values(1, 10, 1, "first"), 1),
+        ]
+    );
+}
+
+#[test]
+fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "alpha"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "beta"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(0, 1))
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 10, 1, "alpha"), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "alpha"), -1),
+            (history_values(1, 10, 1, "beta"), 1),
+        ]
+    );
+}
+
+#[test]
+fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
+
+    // Row-1 partition starts as first×2, second×1, third×1; the offset-1,
+    // limit-2 window over the ordinal stream `f f s t` retains one copy of
+    // first (straddling the offset) plus second.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history_shadow", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    batch.insert("history", history_values(1, 30, 1, "third"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut initial = subscription.recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(values, _)| match (&values[0], &values[1]) {
+        (Value::U64(row), Value::U64(stamp)) => (*row, *stamp),
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        initial,
+        [
+            (history_values(1, 10, 1, "first"), 1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    // A second partition gets its own window; row-1 must stay silent.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(2, 5, 1, "r2a"));
+    batch.insert("history", history_values(2, 6, 1, "r2b"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(2, 6, 1, "r2b"), 1)]
+    );
+
+    // A duplicate copy of second lands on the window's outer edge: the stream
+    // becomes `f f s s t` but the retained ordinals [1, 3) still hold one
+    // first and one second, so nothing may emit.
+    let mut batch = database.open_batch();
+    batch.insert("history_shadow", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    // Dropping one copy of first shifts the straddle: `f s s t` retains
+    // second twice, so first leaves and second gains a copy.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "first"), -1),
+            (history_values(1, 20, 1, "second"), 1),
+        ]
+    );
+
+    // A third partition with two distinct records tied on (stamp, node):
+    // record bytes order alpha before beta, so [1, 3) retains beta and gamma.
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(3, 10, 1, "alpha"));
+    batch.insert("history_shadow", history_values(3, 10, 1, "beta"));
+    batch.insert("history", history_values(3, 20, 1, "gamma"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(3, 10, 1, "beta"), 1),
+            (history_values(3, 20, 1, "gamma"), 1),
+        ]
+    );
+
+    // Deleting alpha rebuilds the tie group's before-window from records that
+    // share its sort key; beta slides into the offset and leaves the window.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(3, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(3, 10, 1, "beta"), -1)]
+    );
+
+    // Deleting first's last copy resurrects it in the before-window from the
+    // delta alone; second drops to one retained copy and third re-enters.
+    let mut batch = database.open_batch();
+    batch.delete("history_shadow", history_key(1, 10, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 20, 1, "second"), -1),
+            (history_values(1, 30, 1, "third"), 1),
+        ]
+    );
+
+    // Shrinking below offset + limit: `s s` retains one second only.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 30, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 30, 1, "third"), -1)]
+    );
+
+    // Removing both copies of second in one tick empties the partition.
+    let mut batch = database.open_batch();
+    batch.delete("history", history_key(1, 20, 1));
+    batch.delete("history_shadow", history_key(1, 20, 1));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.try_recv().unwrap().to_values().unwrap(),
+        [(history_values(1, 20, 1, "second"), -1)]
+    );
+
+    // The maintained end state must equal a fresh hydration of the same graph.
+    let rehydrated = database
+        .subscribe_one_sink(union_history_top_by(1, 2))
+        .unwrap();
+    let mut rehydrated_initial = rehydrated.recv().unwrap().to_values().unwrap();
+    rehydrated_initial.sort_by_key(|(values, _)| match &values[0] {
+        Value::U64(row) => *row,
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        rehydrated_initial,
+        [
+            (history_values(2, 6, 1, "r2b"), 1),
+            (history_values(3, 20, 1, "gamma"), 1),
         ]
     );
 }

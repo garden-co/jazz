@@ -143,7 +143,15 @@ impl ServerShellHandle {
                 .tick()
                 .and_then(|()| shell.take_frames(session))
                 .map_err(|error| error.to_string());
-            if result.is_ok() {
+            // Progress-based re-arm: a tick that yielded frames may have more
+            // behind it (large resets span many ticks), so schedule another.
+            // Empty ticks do NOT re-arm — that unconditional re-arm was the
+            // consolidation-spin feeder. One notification must never buy an
+            // unbounded loop, and delivery must never stall mid-reset; frames
+            // produced is exactly the signal that separates the two.
+            if let Ok(frames) = &result
+                && !frames.is_empty()
+            {
                 notify_shell_activity(&activity_tx);
             }
             result
