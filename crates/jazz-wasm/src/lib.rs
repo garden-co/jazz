@@ -430,14 +430,20 @@ impl WireTransport for WasmWireTransport {
     }
 }
 
+macro_rules! with_wasm_db {
+    ($inner:expr, |$db:ident| $body:expr) => {
+        match $inner {
+            WasmDbInner::Memory($db) => $body,
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser($db) => $body,
+            WasmDbInner::Closed => panic!("WasmDb is closed"),
+        }
+    };
+}
+
 impl WasmDbInner {
     fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.prepare_query(query),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.prepare_query(query),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.prepare_query(query))
     }
 
     fn all(
@@ -445,12 +451,7 @@ impl WasmDbInner {
         query: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.all(query, opts)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.all(query, opts)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(db.all(query, opts)))
     }
 
     fn all_for_identity(
@@ -459,21 +460,13 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.all_for_identity(query, opts, author)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.all_for_identity(query, opts, author)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.all_for_identity(query, opts, author)
+        ))
     }
 
     fn begin_exclusive(&self) -> Result<OpenTxId, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.begin_exclusive(),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.begin_exclusive(),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.begin_exclusive())
     }
 
     fn exclusive_all_for_identity(
@@ -482,12 +475,8 @@ impl WasmDbInner {
         query: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.exclusive_all_for_identity(tx_id, query, author),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.exclusive_all_for_identity(tx_id, query, author),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db
+            .exclusive_all_for_identity(tx_id, query, author))
     }
 
     fn exclusive_all(
@@ -495,21 +484,11 @@ impl WasmDbInner {
         tx_id: OpenTxId,
         query: &PreparedQuery,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.exclusive_all(tx_id, query),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.exclusive_all(tx_id, query),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.exclusive_all(tx_id, query))
     }
 
     fn abandon_exclusive(&self, tx_id: OpenTxId) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.abandon_exclusive_handle(tx_id),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.abandon_exclusive_handle(tx_id),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.abandon_exclusive_handle(tx_id))
     }
 
     fn exclusive_write(
@@ -519,12 +498,7 @@ impl WasmDbInner {
         row_id: RowUuid,
         cells: RowCells,
     ) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.exclusive_write(tx_id, table, row_id, cells),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.exclusive_write(tx_id, table, row_id, cells),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.exclusive_write(tx_id, table, row_id, cells))
     }
 
     fn exclusive_update(
@@ -534,12 +508,7 @@ impl WasmDbInner {
         row_id: RowUuid,
         patch: RowCells,
     ) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.exclusive_update(tx_id, table, row_id, patch),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.exclusive_update(tx_id, table, row_id, patch),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.exclusive_update(tx_id, table, row_id, patch))
     }
 
     fn exclusive_delete(
@@ -548,21 +517,11 @@ impl WasmDbInner {
         table: &str,
         row_id: RowUuid,
     ) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.exclusive_delete(tx_id, table, row_id),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.exclusive_delete(tx_id, table, row_id),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.exclusive_delete(tx_id, table, row_id))
     }
 
     fn commit_exclusive(&self, tx_id: OpenTxId) -> Result<TxId, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.commit_exclusive_handle(tx_id),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.commit_exclusive_handle(tx_id),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.commit_exclusive_handle(tx_id))
     }
 
     fn all_relation_snapshot(
@@ -570,12 +529,7 @@ impl WasmDbInner {
         query: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.all_relation_snapshot(query, opts)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.all_relation_snapshot(query, opts)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(db.all_relation_snapshot(query, opts)))
     }
 
     fn all_relation_snapshot_for_identity(
@@ -584,16 +538,9 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => {
-                block_on(db.all_relation_snapshot_for_identity(query, opts, author))
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                block_on(db.all_relation_snapshot_for_identity(query, opts, author))
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.all_relation_snapshot_for_identity(query, opts, author)
+        ))
     }
 
     fn all_relation_query(
@@ -601,12 +548,7 @@ impl WasmDbInner {
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.all_relation_query(query, opts)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.all_relation_query(query, opts)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(db.all_relation_query(query, opts)))
     }
 
     fn all_relation_query_for_identity(
@@ -615,21 +557,13 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.all_relation_query_for_identity(query, opts, author)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.all_relation_query_for_identity(query, opts, author)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.all_relation_query_for_identity(query, opts, author)
+        ))
     }
 
     fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
-        match self {
-            Self::Memory(db) => db.set_identity_claims(author, claims),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.set_identity_claims(author, claims),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.set_identity_claims(author, claims))
     }
 
     fn subscribe(
@@ -637,14 +571,9 @@ impl WasmDbInner {
         query: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.subscribe(query, opts))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.subscribe(query, opts))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(db.subscribe(query, opts)).map(
+            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
+        ))
     }
 
     fn subscribe_for_identity(
@@ -653,14 +582,12 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.subscribe_for_identity(query, opts, author))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.subscribe_for_identity(query, opts, author))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.subscribe_for_identity(query, opts, author)
+        )
+        .map(
+            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
+        ))
     }
 
     fn subscribe_relation_query(
@@ -668,14 +595,12 @@ impl WasmDbInner {
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(db.subscribe_relation_query(query, opts))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(db.subscribe_relation_query(query, opts))
-                .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.subscribe_relation_query(query, opts)
+        )
+        .map(
+            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
+        ))
     }
 
     fn subscribe_relation_query_for_identity(
@@ -684,18 +609,12 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => block_on(
-                db.subscribe_relation_query_for_identity(query, opts, author),
-            )
-            .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => block_on(
-                db.subscribe_relation_query_for_identity(query, opts, author),
-            )
-            .map(|stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| block_on(
+            db.subscribe_relation_query_for_identity(query, opts, author),
+        )
+        .map(
+            |stream| Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>
+        ))
     }
 
     fn attach_query(
@@ -703,12 +622,7 @@ impl WasmDbInner {
         query: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<QueryAttachment, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.attach_query_with_opts(query, opts),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.attach_query_with_opts(query, opts),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.attach_query_with_opts(query, opts))
     }
 
     fn attach_query_for_identity(
@@ -717,40 +631,21 @@ impl WasmDbInner {
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<QueryAttachment, jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.attach_query_with_opts_for_identity(query, opts, author),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.attach_query_with_opts_for_identity(query, opts, author),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db
+            .attach_query_with_opts_for_identity(query, opts, author))
     }
 
     fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
-        match self {
-            Self::Memory(db) => db.query_attachment_is_covered(attachment),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.query_attachment_is_covered(attachment),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.query_attachment_is_covered(attachment))
     }
 
     fn detach_query(&self, attachment: QueryAttachment) {
-        match self {
-            Self::Memory(db) => db.detach_query(attachment),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.detach_query(attachment),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.detach_query(attachment))
     }
 
     fn set_tick_scheduler(&self, callback: js_sys::Function) {
         let scheduler = Rc::new(WasmTickScheduler { callback });
-        match self {
-            Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.set_tick_scheduler(Some(scheduler)),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
     fn insert(&self, table: &str, cells: RowCells) -> Result<WasmWrite, JsValue> {
@@ -1110,12 +1005,7 @@ impl WasmDbInner {
     }
 
     fn tick(&self) -> Result<(), jazz::db::Error> {
-        match self {
-            Self::Memory(db) => db.tick(),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.tick(),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
+        with_wasm_db!(self, |db| db.tick())
     }
 }
 

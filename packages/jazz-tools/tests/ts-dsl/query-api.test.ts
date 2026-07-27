@@ -1,4 +1,4 @@
-import { createDb, type Db } from "../../src/runtime/db.js";
+import { createDb, type Db, type QueryBuilder, type QueryOptions } from "../../src/runtime/db.js";
 import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
@@ -16,7 +16,10 @@ function makeFriends(db: Db, user1: User, user2: User) {
   user2.friendsIds = user2Friends;
 }
 
-describe("TS Query API", () => {
+const readModes = ["direct", "mergeable-tx", "exclusive-tx"] as const;
+type ReadMode = (typeof readModes)[number];
+
+describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
   let db: Db;
 
   beforeEach(async () => {
@@ -30,11 +33,37 @@ describe("TS Query API", () => {
     await db.shutdown();
   });
 
+  async function readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    if (readMode === "direct") {
+      return db.all(query, options);
+    }
+
+    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    try {
+      return await tx.all(query, options);
+    } finally {
+      tx.rollback();
+    }
+  }
+
+  async function readOne<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    if (readMode === "direct") {
+      return db.one(query, options);
+    }
+
+    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    try {
+      return await tx.one(query, options);
+    } finally {
+      tx.rollback();
+    }
+  }
+
   describe("filtering", () => {
     it("queries by id", async () => {
       const { id } = insertProject(db, "Project A");
 
-      const results = await db.all(app.projects.where({ id: { eq: id } }));
+      const results = await readAll(app.projects.where({ id: { eq: id } }));
       expect(results.length).toBe(1);
 
       expectTypeOf(results[0]!).branded.toEqualTypeOf<Project>();
@@ -46,10 +75,10 @@ describe("TS Query API", () => {
       const project = insertProject(db, "Deleted Project");
       db.delete(app.projects, project.id);
 
-      const defaultResult = await db.one(app.projects.where({ id: { eq: project.id } }));
+      const defaultResult = await readOne(app.projects.where({ id: { eq: project.id } }));
       expect(defaultResult).toBeNull();
 
-      const deletedResult = await db.one(
+      const deletedResult = await readOne(
         app.projects.includeDeleted().where({ id: { eq: project.id } }),
       );
 
@@ -68,7 +97,7 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: { isNull: true } }));
+      const results = await readAll(app.todos.where({ ownerId: { isNull: true } }));
 
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
@@ -83,7 +112,7 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: { isNull: false } }));
+      const results = await readAll(app.todos.where({ ownerId: { isNull: false } }));
 
       expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
     });
@@ -99,8 +128,8 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const resultsNullMatch = await db.all(app.todos.where({ ownerId: null }));
-      const resultsEqNull = await db.all(app.todos.where({ ownerId: { eq: null } }));
+      const resultsNullMatch = await readAll(app.todos.where({ ownerId: null }));
+      const resultsEqNull = await readAll(app.todos.where({ ownerId: { eq: null } }));
       expect(resultsNullMatch.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
       expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
@@ -119,7 +148,7 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: undefined }));
+      const results = await readAll(app.todos.where({ ownerId: undefined }));
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
     });
 
@@ -129,7 +158,7 @@ describe("TS Query API", () => {
         const projectB = insertProject(db, "Project B");
         const _projectC = insertProject(db, "Project C");
 
-        const results = await db.all(
+        const results = await readAll(
           app.projects.where({ id: { in: [projectA.id, projectB.id] } }),
         );
 
@@ -141,7 +170,7 @@ describe("TS Query API", () => {
       it("returns no rows for an empty in list", async () => {
         insertProject(db, "Project A");
 
-        const results = await db.all(app.projects.where({ id: { in: [] } }));
+        const results = await readAll(app.projects.where({ id: { in: [] } }));
 
         expect(results).toEqual([]);
       });
@@ -151,7 +180,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
         db.insert(app.table_with_defaults, { enum: "c" });
 
-        const results = await db.all(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
+        const results = await readAll(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
 
         expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
       });
@@ -164,7 +193,7 @@ describe("TS Query API", () => {
         const todoB = insertTodo(db, { title: "B", projectId: projectB.id });
         const _todoC = insertTodo(db, { title: "C", projectId: projectC.id });
 
-        const results = await db.all(
+        const results = await readAll(
           app.todos.where({ projectId: { in: [projectA.id, projectB.id] } }),
         );
 
@@ -176,7 +205,7 @@ describe("TS Query API", () => {
         const todoWithOwner = insertTodo(db, { title: "Owned", ownerId: owner.id });
         const _todoWithoutOwner = insertTodo(db, { title: "Unowned", ownerId: null });
 
-        const results = await db.all(app.todos.where({ ownerId: { in: [owner.id] } }));
+        const results = await readAll(app.todos.where({ ownerId: { in: [owner.id] } }));
 
         expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
       });
@@ -186,7 +215,7 @@ describe("TS Query API", () => {
         const todoB = insertTodo(db, { title: "Walk dog" });
         const _todoC = insertTodo(db, { title: "Write code" });
 
-        const results = await db.all(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
+        const results = await readAll(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
 
         expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
       });
@@ -195,7 +224,7 @@ describe("TS Query API", () => {
         const { value: rowA } = db.insert(app.table_with_defaults, { boolean: true });
         db.insert(app.table_with_defaults, { boolean: false });
 
-        const results = await db.all(app.table_with_defaults.where({ boolean: { in: [true] } }));
+        const results = await readAll(app.table_with_defaults.where({ boolean: { in: [true] } }));
 
         expect(results.map((row) => row.id)).toEqual([rowA.id]);
       });
@@ -205,7 +234,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { integer: 10, float: 2.5 });
         db.insert(app.table_with_defaults, { integer: 15, float: 3.5 });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ integer: { in: [5, 10] }, float: { in: [1.5, 2.5] } }),
         );
 
@@ -220,7 +249,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { timestampDate: second });
         db.insert(app.table_with_defaults, { timestampDate: third });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ timestampDate: { in: [first, second] } }),
         );
 
@@ -233,7 +262,7 @@ describe("TS Query API", () => {
         });
         db.insert(app.table_with_defaults, { bytes: new Uint8Array([4, 5, 6]) });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ bytes: { in: [new Uint8Array([1, 2, 3])] } }),
         );
 
@@ -245,7 +274,7 @@ describe("TS Query API", () => {
         db.insert(app.table_with_defaults, { array: ["a"] });
         db.insert(app.table_with_defaults, { array: ["b", "a"] });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ array: { in: [["a", "b"]] } }),
         );
 
@@ -259,7 +288,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
       db.insert(app.table_with_defaults, { integer: 20 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ integer: { gt: 5, lt: 20 } })
           .select("integer")
@@ -278,7 +307,7 @@ describe("TS Query API", () => {
       db.insert(app.table_with_defaults, { nullableInteger: 10 });
       db.insert(app.table_with_defaults, { nullableInteger: 15 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ nullableInteger: { lt: 10, ne: null } })
           .select("nullableInteger")
@@ -294,7 +323,7 @@ describe("TS Query API", () => {
       db.insert(app.table_with_defaults, { nullableInteger: 10 });
       db.insert(app.table_with_defaults, { nullableInteger: 15 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ nullableInteger: { lt: 10, eq: null } })
           .select("nullableInteger")
@@ -310,7 +339,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { float: 3.5 });
       db.insert(app.table_with_defaults, { float: 4.5 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ float: { gt: 1.5, lt: 4.5 } })
           .select("float")
@@ -336,7 +365,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { timestampDate: bobDueAt });
       db.insert(app.table_with_defaults, { timestampDate: upperBound });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ timestampDate: { gt: lowerBound, lt: upperBound } })
           .select("timestampDate")
@@ -355,7 +384,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
       const { value: carolTask } = db.insert(app.table_with_defaults, { integer: 20 });
 
-      const duplicateLowerBoundResults = await db.all(
+      const duplicateLowerBoundResults = await readAll(
         app.table_with_defaults
           .where({ integer: { gt: 10, gte: 5 } })
           .select("integer")
@@ -367,7 +396,7 @@ describe("TS Query API", () => {
         { id: carolTask.id, integer: 20 },
       ]);
 
-      const duplicateUpperBoundResults = await db.all(
+      const duplicateUpperBoundResults = await readAll(
         app.table_with_defaults
           .where({ integer: { lt: 20, lte: 15 } })
           .select("integer")
@@ -380,7 +409,7 @@ describe("TS Query API", () => {
         { id: bobTask.id, integer: 15 },
       ]);
 
-      const eqInsideRangeResults = await db.all(
+      const eqInsideRangeResults = await readAll(
         app.table_with_defaults
           .where({ integer: { eq: 15, gte: 5, lt: 20 } })
           .select("integer")
@@ -389,7 +418,7 @@ describe("TS Query API", () => {
 
       expect(eqInsideRangeResults).toEqual([{ id: bobTask.id, integer: 15 }]);
 
-      const impossibleRangeResults = await db.all(
+      const impossibleRangeResults = await readAll(
         app.table_with_defaults
           .where({ integer: { eq: 10, lt: 10 } })
           .select("integer")
@@ -414,7 +443,7 @@ describe("TS Query API", () => {
           tags: ["tag1", "tag2"],
         });
 
-        const todosWithTags = await db.all(app.todos.where({ tags: { eq: ["tag1"] } }));
+        const todosWithTags = await readAll(app.todos.where({ tags: { eq: ["tag1"] } }));
         expect(todosWithTags.length).toBe(1);
         expect(todosWithTags[0]!.id).toEqual(id1);
       });
@@ -433,7 +462,7 @@ describe("TS Query API", () => {
           tags: ["tag1", "tag2"],
         });
 
-        const todosWithTags = await db.all(app.todos.where({ tags: { contains: "tag1" } }));
+        const todosWithTags = await readAll(app.todos.where({ tags: { contains: "tag1" } }));
         expect(todosWithTags.length).toBe(2);
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id1 }));
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id3 }));
@@ -451,7 +480,7 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const results = await db.all(
+      const results = await readAll(
         app.todos.where({ id: { eq: todoId } }).include({ project: true }),
       );
 
@@ -472,7 +501,7 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos
           .select("ownerId")
           .where({ id: { eq: todoId } })
@@ -492,7 +521,7 @@ describe("TS Query API", () => {
         ownerId: undefined,
       });
 
-      const result = await db.one(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
+      const result = await readOne(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
 
       assert(result, "Result is not defined");
       expectTypeOf(result.owner).toEqualTypeOf<User | null>();
@@ -509,10 +538,10 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const baseline = await db.all(app.todos.where({ id: { eq: todoId } }));
+      const baseline = await readAll(app.todos.where({ id: { eq: todoId } }));
       expect(baseline[0]!.title).toBe("Hello world");
 
-      const withInclude = await db.all(
+      const withInclude = await readAll(
         app.todos.where({ id: { eq: todoId } }).include({ project: true }),
       );
 
@@ -530,7 +559,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.projects, project.id);
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos.where({ id: { eq: todo.id } }).include({ project: true }),
       );
       assert(result, "Result is not defined");
@@ -547,7 +576,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.users, assignee1.id);
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
       );
       assert(result, "Result is not defined");
@@ -566,7 +595,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.todos, todoId);
 
-      const result = await db.one(
+      const result = await readOne(
         app.users
           .where({ id: { eq: owner.id } })
           .include({ todosViaOwner: app.todos.select("id") }),
@@ -585,7 +614,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.projects, project.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ project: true })
@@ -603,7 +632,7 @@ describe("TS Query API", () => {
           ownerId: undefined,
         });
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ owner: true })
@@ -625,7 +654,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.users, assignee1.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ assignees: app.users.select("id") })
@@ -646,7 +675,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.todos, todoId);
 
-        const result = await db.one(
+        const result = await readOne(
           app.users
             .where({ id: { eq: owner.id } })
             .include({ todosViaOwner: app.todos.select("id") })
@@ -666,7 +695,7 @@ describe("TS Query API", () => {
 
         db.delete(app.users, deletedUser.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.users
             .where({ id: { eq: alice.id } })
             .include({ friends: app.users.include({ friends: true }).requireIncludes() }),
@@ -688,7 +717,7 @@ describe("TS Query API", () => {
 
         db.delete(app.users, deletedUser.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.users
             .where({ id: { eq: alice.id } })
             .include({ friends: { friends: true } })
@@ -715,14 +744,14 @@ describe("TS Query API", () => {
         makeFriends(db, alice, bob);
         makeFriends(db, bob, deletedUser);
 
-        const results = await db.all(
+        const results = await readAll(
           app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
         expect(results.map((u) => u.id)).toEqual([bob.id]);
 
         await db.delete(app.users, deletedUser.id);
 
-        const results2 = await db.all(
+        const results2 = await readAll(
           app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
         expect(results2).toHaveLength(0);
@@ -740,7 +769,7 @@ describe("TS Query API", () => {
         projectId: projectId,
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos
           .select("title")
           .where({ id: { eq: todoId } })
@@ -775,7 +804,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(app.todos.select("*").where({ id: { eq: todoId } }));
+      const result = await readOne(app.todos.select("*").where({ id: { eq: todoId } }));
 
       assert(result, "Result is not defined");
       expectTypeOf(result).branded.toEqualTypeOf<Todo>();
@@ -801,7 +830,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const projected = await db.one(
+      const projected = await readOne(
         app.todos.select("title", "$createdAt", "$updatedAt").where({ id: { eq: todoId } }),
       );
 
@@ -817,7 +846,7 @@ describe("TS Query API", () => {
       expect(projected.$updatedAt.getTime()).toBeLessThanOrEqual(Date.now() + 60_000);
 
       const upperBound = new Date(Date.now() + 60_000);
-      const withinUpperBound = await db.all(
+      const withinUpperBound = await readAll(
         app.todos
           .where({ $updatedAt: { lte: upperBound } })
           .select("title", "$updatedAt")
@@ -845,7 +874,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({ todosViaProject: app.todos.select("title") }),
@@ -880,7 +909,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({
@@ -913,7 +942,7 @@ describe("TS Query API", () => {
         assigneesIds: [assigneeId],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({

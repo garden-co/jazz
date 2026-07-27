@@ -142,12 +142,15 @@ describe("Db transactions", () => {
     ]);
   });
 
-  it("uses core ordering and default ordering for in-transaction reads", async () => {
+  it("orders in-transaction reads by explicit orderBy and by implicit row id when omitted", async () => {
     const result = await db.transaction(async (tx) => {
       tx.insert(app.todos, { title: "b", done: false });
       tx.insert(app.todos, { title: "a", done: false });
       tx.insert(app.todos, { title: "c", done: false });
 
+      // The deleted TS read overlay used to sort transaction reads itself. These
+      // assertions pin the observable behavior: explicit title ordering here,
+      // and SPEC 6.4.1's implicit ascending row_uuid ordering below.
       await expect(
         tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local" }),
       ).resolves.toMatchObject([{ title: "a" }, { title: "b" }, { title: "c" }]);
