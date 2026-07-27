@@ -4125,6 +4125,30 @@ where
         Ok(())
     }
 
+    pub(crate) fn validate_shape_ast_for_registration(
+        &self,
+        shape_id: ShapeId,
+        ast: &ShapeAst,
+    ) -> Result<Option<ValidatedQuery>, Error> {
+        if ast.version != ShapeAst::VERSION {
+            return Err(Error::InvalidStoredValue("unsupported query AST version"));
+        }
+        let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
+            return Ok(None);
+        };
+        let shape = match &ast.body {
+            ShapeBody::Query(query) => {
+                query.validate_with_schema_version(&schema.schema, ast.schema_version)?
+            }
+            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
+                .validate_with_schema_version(&schema.schema, ast.schema_version)?,
+        };
+        if shape.shape_id() != shape_id {
+            return Err(Error::InvalidStoredValue("shape id does not match AST"));
+        }
+        Ok(Some(shape))
+    }
+
     pub(super) fn drain_parked_shape_registrations(&mut self) -> Result<(), Error> {
         let ready = self
             .parking
@@ -7788,6 +7812,25 @@ where
             std::sync::Arc::new(self.prepared_query_plan_from_program(&program, shape, binding)?);
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
+    }
+
+    pub(crate) fn ensure_peer_maintained_subscription_view_supported(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<(), Error> {
+        self.compile_current_query_program_for_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn mark_peer_maintained_query_shape_cache(

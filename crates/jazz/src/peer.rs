@@ -3867,6 +3867,9 @@ mod tests {
             .unwrap();
         accept_global(&mut core, first_tx, 1);
         accept_global(&mut core, second_tx, 2);
+        // Both shapes are unsupported on this branch: unordered limit > 1 is
+        // only lowered once default row-id ordering is injected, which lands
+        // with the default-ordering work, not here.
         let no_order_limit = Query::from("todos").limit(2).validate(&schema()).unwrap();
         let offset_limit_one = Query::from("todos")
             .limit(1)
