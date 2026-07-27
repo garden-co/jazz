@@ -1,5 +1,7 @@
 #![cfg(feature = "test-utils")]
 
+mod support;
+
 use std::time::{Duration, Instant};
 
 use jazz_tools::server::JazzServer;
@@ -7,13 +9,27 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Schema, SchemaBuilder,
     TablePolicies, TableSchema, Value, row_input,
 };
+use support::{TestingClient, wait_for_query};
 use uuid::Uuid;
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+
 fn metrics_schema() -> Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("metrics")
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Integer),
+        )
+        .build()
+}
+
+fn bigint_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .column("score", ColumnType::BigInt),
         )
         .build()
 }
@@ -65,6 +81,44 @@ async fn wait_for_values(
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(last_actual, expected, "{label}");
+}
+
+async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
+    let (_, _, batch) = client
+        .insert("metrics", row_input!("bucket" => bucket, "score" => score))
+        .expect("insert integer metric");
+    client
+        .wait_for_batch(batch, DurabilityTier::Local)
+        .await
+        .expect("integer metric settles");
+}
+
+async fn insert_metric_at_tier(
+    client: &JazzClient,
+    bucket: &str,
+    score: i32,
+    tier: DurabilityTier,
+) {
+    let (_, _, batch) = client
+        .insert("metrics", row_input!("bucket" => bucket, "score" => score))
+        .expect("insert integer metric");
+    client
+        .wait_for_batch(batch, tier)
+        .await
+        .expect("integer metric settles");
+}
+
+async fn insert_bigint_metric(client: &JazzClient, bucket: &str, score: i64) {
+    let (_, _, batch) = client
+        .insert(
+            "metrics",
+            row_input!("bucket" => bucket, "score" => Value::BigInt(score)),
+        )
+        .expect("insert bigint metric");
+    client
+        .wait_for_batch(batch, DurabilityTier::Local)
+        .await
+        .expect("bigint metric settles");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -187,6 +241,218 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 grouped_sum_query.clone(),
                 vec![vec![Value::Text("b".to_owned()), Value::Integer(5)]],
                 "sum after delete a1",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa2"),
+            )
+            .await
+            .expect("connect client");
+
+            insert_metric_at_tier(&client, "positive", 10, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "positive", 7, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "negative", -4, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "negative", -6, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "mixed", -5, DurabilityTier::EdgeServer).await;
+            insert_metric_at_tier(&client, "mixed", 8, DurabilityTier::EdgeServer).await;
+
+            wait_for_values(
+                &client,
+                QueryBuilder::new("metrics")
+                    .sum("score")
+                    .group_by("bucket")
+                    .build(),
+                vec![
+                    vec![Value::Text("mixed".to_owned()), Value::Integer(3)],
+                    vec![Value::Text("negative".to_owned()), Value::Integer(-10)],
+                    vec![Value::Text("positive".to_owned()), Value::Integer(17)],
+                ],
+                "integer grouped sum uses public signed values",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integer_avg_uses_public_signed_values_for_multi_row_groups() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
+            )
+            .await
+            .expect("connect client");
+
+            insert_metric(&client, "positive", 10).await;
+            insert_metric(&client, "positive", 7).await;
+            insert_metric(&client, "negative", -4).await;
+            insert_metric(&client, "negative", -6).await;
+            insert_metric(&client, "mixed", -5).await;
+            insert_metric(&client, "mixed", 8).await;
+
+            wait_for_values(
+                &client,
+                QueryBuilder::new("metrics")
+                    .avg("score")
+                    .group_by("bucket")
+                    .build(),
+                vec![
+                    vec![Value::Text("mixed".to_owned()), Value::Double(1.5)],
+                    vec![Value::Text("negative".to_owned()), Value::Double(-5.0)],
+                    vec![Value::Text("positive".to_owned()), Value::Double(8.5)],
+                ],
+                "integer grouped avg uses public signed values",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn integer_min_max_and_order_by_remain_signed() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4")
+                .ready_on("metrics", QUERY_TIMEOUT)
+                .connect()
+                .await;
+
+            insert_metric(&client, "positive", 10).await;
+            insert_metric(&client, "positive", 7).await;
+            insert_metric(&client, "negative", -4).await;
+            insert_metric(&client, "negative", -6).await;
+            insert_metric(&client, "mixed", -5).await;
+            insert_metric(&client, "mixed", 8).await;
+
+            wait_for_values(
+                &client,
+                QueryBuilder::new("metrics")
+                    .min("score")
+                    .max("score")
+                    .group_by("bucket")
+                    .build(),
+                vec![
+                    vec![
+                        Value::Text("mixed".to_owned()),
+                        Value::Integer(-5),
+                        Value::Integer(8),
+                    ],
+                    vec![
+                        Value::Text("negative".to_owned()),
+                        Value::Integer(-6),
+                        Value::Integer(-4),
+                    ],
+                    vec![
+                        Value::Text("positive".to_owned()),
+                        Value::Integer(7),
+                        Value::Integer(10),
+                    ],
+                ],
+                "integer min/max stay signed",
+            )
+            .await;
+
+            wait_for_query(
+                &client,
+                QueryBuilder::new("metrics")
+                    .select(&["bucket", "score"])
+                    .order_by("score")
+                    .build(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "integer order_by stays signed",
+                |rows| {
+                    let values = rows
+                        .iter()
+                        .map(|(_, values)| values.clone())
+                        .collect::<Vec<_>>();
+                    (values
+                        == vec![
+                            vec![Value::Text("negative".to_owned()), Value::Integer(-6)],
+                            vec![Value::Text("mixed".to_owned()), Value::Integer(-5)],
+                            vec![Value::Text("negative".to_owned()), Value::Integer(-4)],
+                            vec![Value::Text("positive".to_owned()), Value::Integer(7)],
+                            vec![Value::Text("mixed".to_owned()), Value::Integer(8)],
+                            vec![Value::Text("positive".to_owned()), Value::Integer(10)],
+                        ])
+                    .then_some(())
+                },
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bigint_aggregates_keep_signed_value_semantics() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = bigint_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa5"),
+            )
+            .await
+            .expect("connect client");
+
+            insert_bigint_metric(&client, "positive", 10).await;
+            insert_bigint_metric(&client, "positive", 7).await;
+            insert_bigint_metric(&client, "negative", -4).await;
+            insert_bigint_metric(&client, "negative", -6).await;
+            insert_bigint_metric(&client, "mixed", -5).await;
+            insert_bigint_metric(&client, "mixed", 8).await;
+
+            wait_for_values(
+                &client,
+                QueryBuilder::new("metrics")
+                    .sum("score")
+                    .avg("score")
+                    .min("score")
+                    .max("score")
+                    .group_by("bucket")
+                    .build(),
+                vec![
+                    vec![
+                        Value::Text("mixed".to_owned()),
+                        Value::BigInt(3),
+                        Value::Double(1.5),
+                        Value::BigInt(-5),
+                        Value::BigInt(8),
+                    ],
+                    vec![
+                        Value::Text("negative".to_owned()),
+                        Value::BigInt(-10),
+                        Value::Double(-5.0),
+                        Value::BigInt(-6),
+                        Value::BigInt(-4),
+                    ],
+                    vec![
+                        Value::Text("positive".to_owned()),
+                        Value::BigInt(17),
+                        Value::Double(8.5),
+                        Value::BigInt(7),
+                        Value::BigInt(10),
+                    ],
+                ],
+                "bigint aggregates keep signed semantics",
             )
             .await;
         })

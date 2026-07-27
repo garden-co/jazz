@@ -625,6 +625,9 @@ pub struct AggregateOutput {
 pub enum AggregateFunction {
     Count,
     Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -1036,6 +1039,57 @@ impl QueryBuilder {
             .outputs
             .push(AggregateOutput {
                 function: AggregateFunction::Sum,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Avg,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    pub fn min(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Min,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    pub fn max(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Max,
                 column: Some(column.into()),
             });
         self

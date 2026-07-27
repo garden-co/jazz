@@ -556,11 +556,9 @@ fn convert_default_for_column_type(
         (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
         (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
-        (ColumnType::Integer, Value::Integer(value)) => {
-            Ok(GrooveValue::U32(encode_signed_i32_for_core(*value)))
-        }
+        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
         (ColumnType::Integer, Value::BigInt(value)) => i32::try_from(*value)
-            .map(|value| GrooveValue::U32(encode_signed_i32_for_core(value)))
+            .map(|value| GrooveValue::I64(i64::from(value)))
             .map_err(|_| {
                 err(
                     format!("$.{}.{}", table.as_str(), column),
@@ -597,10 +595,10 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        // Core does not currently have signed integer cells. Public
-        // INTEGER columns are therefore represented as U32 and the
-        // core write path rejects negative values.
-        ColumnType::Integer => Ok(GrooveColumnType::U32),
+        // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
+        // Core stores it as I64 so arithmetic aggregates operate on the value
+        // domain while key encoding preserves signed order.
+        ColumnType::Integer => Ok(GrooveColumnType::I64),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
         ColumnType::BatchId => Err(err(
@@ -2171,7 +2169,7 @@ fn convert_policy_literal(
         Value::Null => Ok(GrooveValue::Nullable(None)),
         Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
-        Value::Integer(value) => Ok(GrooveValue::U32(encode_signed_i32_for_core(*value))),
+        Value::Integer(value) => Ok(GrooveValue::I64(i64::from(*value))),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
         other => Err(err(
@@ -2183,10 +2181,6 @@ fn convert_policy_literal(
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
     SchemaConversionError::new(path, message)
-}
-
-fn encode_signed_i32_for_core(value: i32) -> u32 {
-    (value as u32) ^ 0x8000_0000
 }
 
 #[cfg(test)]
@@ -2315,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_core_u32_and_column_defaults() {
+    fn converts_public_integer_as_core_i64_and_column_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
@@ -2332,7 +2326,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::U32
+            GrooveColumnType::I64
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -2356,7 +2350,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::U32.array_of()
+            GrooveColumnType::I64.array_of()
         );
 
         let default_schema = [(

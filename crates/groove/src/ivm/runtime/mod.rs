@@ -6505,6 +6505,7 @@ fn aggregate_output_type(
                 | ValueType::U16
                 | ValueType::U32
                 | ValueType::U64
+                | ValueType::I64
                 | ValueType::F64 => value_type,
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
@@ -7548,6 +7549,7 @@ fn aggregate_sum(
     };
     let mut kind = None;
     let mut u64_sum = 0_u64;
+    let mut i64_sum = 0_i64;
     let mut f64_sum = 0_f64;
     for (record, weight) in records {
         if *weight <= 0 {
@@ -7574,6 +7576,10 @@ fn aggregate_sum(
                 kind.get_or_insert(ValueType::U64);
                 u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
             }
+            Value::I64(value) => {
+                kind.get_or_insert(ValueType::I64);
+                i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
+            }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
                 f64_sum += value * (*weight as f64);
@@ -7592,6 +7598,7 @@ fn aggregate_sum(
             .map(Value::U32)
             .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::I64 => Ok(Value::I64(i64_sum)),
         ValueType::F64 => Ok(Value::F64(f64_sum)),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7674,12 +7681,23 @@ fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRun
         .ok_or(IvmRuntimeError::UnsupportedOperator)
 }
 
+fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
+    current
+        .checked_add(
+            value
+                .checked_mul(weight)
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
     match value {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
         Value::U64(value) => Ok(*value as f64),
+        Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
