@@ -296,14 +296,21 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
   const edits: QueuedRowEdits = {};
 
   for (const column of schemaColumns) {
-    if (getFieldReadOnlyReason(column) !== null || hasColumnDefault(column)) {
+    if (hasColumnDefault(column) || getFieldReadOnlyReason(column) !== null) {
       continue;
     }
 
-    edits[column.name] = {
-      text: column.column_type.type === "Boolean" && !column.nullable ? "false" : "",
-      isNull: column.nullable,
-    };
+    if (column.nullable) {
+      edits[column.name] = {
+        text: "",
+        isNull: true,
+      };
+    } else if (column.column_type.type === "Boolean") {
+      edits[column.name] = {
+        text: "false",
+        isNull: false,
+      };
+    }
   }
 
   return edits;
@@ -329,14 +336,6 @@ function buildQueuedInsertValues(
 
     const edit = queuedInsertEdits[column.name];
     if (!edit) {
-      if (hasColumnDefault(column)) {
-        continue;
-      }
-
-      values[column.name] = parseQueuedEditForColumn(column, {
-        text: "",
-        isNull: column.nullable,
-      });
       continue;
     }
 
@@ -912,7 +911,9 @@ export function TableDataGrid() {
       setQueuedDeletes(new Set());
     } catch (error) {
       setQueuedSaveError(
-        error instanceof Error ? error.message : "Could not persist queued cell edits.",
+        error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
+          ? error.message
+          : "Could not persist queued cell edits.",
       );
     } finally {
       setIsQueuedSavePending(false);
@@ -1454,6 +1455,18 @@ function NullCellMarker() {
   );
 }
 
+function UnsetCellMarker() {
+  return (
+    <i
+      className={`${styles.cellContent} ${styles.nullCellMarker} ${styles.unsetCellMarker}`}
+      title="Unset — this field will be omitted from the insert"
+      data-cell-value-state="unset"
+    >
+      {NULL_CELL_MARKER}
+    </i>
+  );
+}
+
 function RelationCell({
   schema,
   relationTable,
@@ -1784,6 +1797,10 @@ function PlainTableView({
 
           const rawValue = row.row[column.accessorKey];
 
+          if (row.isStagedInsert && rawValue === undefined) {
+            return <UnsetCellMarker />;
+          }
+
           if (rawValue === null) {
             return <NullCellMarker />;
           }
@@ -2068,7 +2085,7 @@ function PlainTableView({
 
         if (schemaColumn.column_type.type === "Boolean") {
           const rawValue = args.row?.row[schemaColumn.name];
-          if (schemaColumn.nullable && (rawValue === null || rawValue === undefined)) {
+          if (rawValue === undefined || (schemaColumn.nullable && rawValue === null)) {
             queueCellEdit(args.row, schemaColumn, {
               text: "false",
               isNull: false,
