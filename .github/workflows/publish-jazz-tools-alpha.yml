@@ -408,7 +408,7 @@ jobs:
       )
     permissions:
       actions: read
-      contents: read
+      contents: write
       id-token: write
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -778,6 +778,18 @@ jobs:
           fi
 
           npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
+
+      - name: Tag published source
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "${TAG} already exists; skipping tag creation."
+          else
+            git tag "${TAG}" "${GITHUB_SHA}"
+            git push origin "${TAG}"
+          fi
 
   deploy-inspector-production:
     name: Promote inspector production

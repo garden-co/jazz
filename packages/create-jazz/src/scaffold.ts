@@ -9,7 +9,13 @@ import {
 } from "./deps.js";
 
 const REPO = "garden-co/jazz";
-const BRANCH = "main";
+const RELEASE_REF = `v${
+  (
+    JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8")) as {
+      version: string;
+    }
+  ).version
+}`;
 const DEFAULT_STARTER = "next-betterauth";
 
 export const KNOWN_STARTERS = [
@@ -77,7 +83,7 @@ async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
     return;
   }
   const tiged = (await import("tiged")).default;
-  const emitter = tiged(`${REPO}/starters/${starter}#${BRANCH}`, { disableCache: true });
+  const emitter = tiged(`${REPO}/starters/${starter}#${RELEASE_REF}`, { disableCache: true });
   await emitter.clone(dir);
 }
 
@@ -89,7 +95,7 @@ async function resolveManifest(
   if (localPath) {
     return resolveLocalDeps(manifest, path.resolve(localPath, "../.."), onProgress);
   }
-  return resolveRemoteDeps(manifest, { repo: REPO, branch: BRANCH }, onProgress);
+  return resolveRemoteDeps(manifest, { repo: REPO, ref: `refs/tags/${RELEASE_REF}` }, onProgress);
 }
 
 export async function scaffold(options: ScaffoldOptions): Promise<void> {

@@ -213,10 +213,10 @@ async function fetchOnce(url: string): Promise<Response> {
 
 export async function resolveRemoteDeps(
   manifest: PackageManifest,
-  repoConfig: { repo: string; branch: string },
+  repoConfig: { repo: string; ref: string },
   onProgress?: ResolveProgressCallback,
 ): Promise<PackageManifest> {
-  const rawBase = `https://raw.githubusercontent.com/${repoConfig.repo}/refs/heads/${repoConfig.branch}`;
+  const rawBase = `https://raw.githubusercontent.com/${repoConfig.repo}/${repoConfig.ref}`;
   const workspaceUrl = `${rawBase}/pnpm-workspace.yaml`;
 
   const wsRes = await fetchOnce(workspaceUrl);
