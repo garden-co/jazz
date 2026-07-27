@@ -15,7 +15,8 @@ use crate::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
 use crate::public_schema::Schema;
 use crate::public_schema::TableName;
 use crate::public_schema::{
-    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
+    ColumnDescriptor, ColumnType, LargeValueHandle, Query, Session, TableSchema, Value,
+    WriteContext,
 };
 use crate::public_schema::{OrderedRowDelta, Row};
 use crate::server::core_websocket_transport::WebSocketTransport;
@@ -1487,6 +1488,29 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     }
 }
 
+fn public_to_core_cell_value(value: Value, column: &ColumnDescriptor) -> Result<CoreValue> {
+    let value = public_to_core_value_for_column_type(value, &column.column_type)?;
+    if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
+        Ok(CoreValue::Nullable(Some(Box::new(value))))
+    } else {
+        Ok(value)
+    }
+}
+
+fn public_to_core_value_for_column_type(
+    value: Value,
+    column_type: &ColumnType,
+) -> Result<CoreValue> {
+    match (value, column_type) {
+        (Value::Array(values), ColumnType::Array { element }) => values
+            .into_iter()
+            .map(|value| public_to_core_value_for_column_type(value, element))
+            .collect::<Result<Vec<_>>>()
+            .map(CoreValue::Array),
+        (value, _) => public_to_core_value(value),
+    }
+}
+
 fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
     match value {
         serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
@@ -2063,11 +2087,37 @@ impl JazzClient {
         };
         Ok(Some(value))
     }
-    fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
+    fn core_cells_for_table(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<jazz::db::RowCells> {
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Write(format!("unknown table {table}")))?;
         values
             .into_iter()
-            .map(|(name, value)| Ok((name, public_to_core_value(value)?)))
+            .map(|(name, value)| {
+                let column = table_schema.columns.column(&name).ok_or_else(|| {
+                    JazzError::Write(format!("unknown column {name} on table {table}"))
+                })?;
+                Ok((name, public_to_core_cell_value(value, column)?))
+            })
             .collect()
+    }
+    fn table_for_row(&self, object_id: ObjectId) -> Result<String> {
+        self.db
+            .inner
+            .borrow()
+            .row_tables
+            .get(&object_id)
+            .cloned()
+            .ok_or_else(|| {
+                JazzError::Write(format!(
+                    "unknown table for row {object_id}; insert or query the row before updating"
+                ))
+            })
     }
     fn core_ordered_values(
         &self,
@@ -2271,7 +2321,7 @@ impl JazzClient {
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         {
             let row_values = self.core_ordered_values(table, &values)?;
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells_for_table(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 let row_id =
                     self.db
@@ -2298,7 +2348,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells_for_table(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
@@ -2315,7 +2365,8 @@ impl JazzClient {
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(updates.into_iter().collect())?;
+            let table = self.table_for_row(object_id)?;
+            let cells = self.core_cells_for_table(&table, updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)
