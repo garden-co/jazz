@@ -86,7 +86,7 @@ describe("reconcileArray", () => {
         return Reflect.get(array, property, receiver);
       },
       deleteProperty(array, property) {
-        staleSignals.delete(property);
+        if (typeof property === "string") staleSignals.delete(property);
         return Reflect.deleteProperty(array, property);
       },
     });
