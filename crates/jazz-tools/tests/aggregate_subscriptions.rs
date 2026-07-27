@@ -58,6 +58,87 @@ fn policy_metrics_schema() -> Schema {
         .build()
 }
 
+#[derive(Clone, Copy)]
+enum AggregateCase {
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggregateCase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Avg => "avg",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+
+    fn query(self) -> jazz_tools::Query {
+        match self {
+            Self::Avg => QueryBuilder::new("metrics").avg("score").build(),
+            Self::Min => QueryBuilder::new("metrics").min("score").build(),
+            Self::Max => QueryBuilder::new("metrics").max("score").build(),
+        }
+    }
+
+    fn grouped_query(self) -> jazz_tools::Query {
+        match self {
+            Self::Avg => QueryBuilder::new("metrics")
+                .avg("score")
+                .group_by("bucket")
+                .build(),
+            Self::Min => QueryBuilder::new("metrics")
+                .min("score")
+                .group_by("bucket")
+                .build(),
+            Self::Max => QueryBuilder::new("metrics")
+                .max("score")
+                .group_by("bucket")
+                .build(),
+        }
+    }
+
+    fn populated_value(self) -> Value {
+        match self {
+            Self::Avg => Value::Double(15.0),
+            Self::Min => Value::Integer(5),
+            Self::Max => Value::Integer(30),
+        }
+    }
+
+    fn grouped_values(self) -> Vec<Vec<Value>> {
+        match self {
+            Self::Avg => vec![
+                vec![Value::Text("a".to_owned()), Value::Double(20.0)],
+                vec![Value::Text("b".to_owned()), Value::Double(5.0)],
+            ],
+            Self::Min => vec![
+                vec![Value::Text("a".to_owned()), Value::Integer(10)],
+                vec![Value::Text("b".to_owned()), Value::Integer(5)],
+            ],
+            Self::Max => vec![
+                vec![Value::Text("a".to_owned()), Value::Integer(30)],
+                vec![Value::Text("b".to_owned()), Value::Integer(5)],
+            ],
+        }
+    }
+
+    fn populated_schema(self) -> Schema {
+        match self {
+            Self::Avg => bigint_metrics_schema(),
+            Self::Min | Self::Max => metrics_schema(),
+        }
+    }
+
+    fn score_input(self, score: i64) -> Value {
+        match self {
+            Self::Avg => Value::BigInt(score),
+            Self::Min | Self::Max => Value::Integer(score.try_into().expect("score fits i32")),
+        }
+    }
+}
+
 async fn wait_for_values(
     client: &JazzClient,
     query: jazz_tools::Query,
@@ -118,6 +199,156 @@ async fn wait_for_subscription_driven_values(
         }
     }
     assert_eq!(last_actual, expected, "{label}");
+}
+
+async fn assert_nullable_empty_and_all_null(case: AggregateCase, subject: &str) {
+    let schema = nullable_metrics_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let client =
+        JazzClient::connect(server.make_client_context_for_user(schema, test_user_id(subject)))
+            .await
+            .expect("connect client");
+    let query = case.query();
+    let mut stream = client
+        .subscribe(query.clone())
+        .await
+        .unwrap_or_else(|err| panic!("subscribe {} aggregate: {err}", case.name()));
+
+    wait_for_values(
+        &client,
+        query.clone(),
+        vec![vec![Value::Null]],
+        &format!("one-shot empty {} is public null", case.name()),
+    )
+    .await;
+    wait_for_subscription_driven_values(
+        &client,
+        &mut stream,
+        query.clone(),
+        vec![vec![Value::Null]],
+        &format!("subscription empty {} is public null", case.name()),
+    )
+    .await;
+
+    let (_null_row, _, batch) = client
+        .insert(
+            "metrics",
+            row_input!("bucket" => "a", "score" => Value::Null),
+        )
+        .expect("insert null score");
+    client
+        .wait_for_batch(batch, DurabilityTier::Local)
+        .await
+        .expect("null score settles");
+    wait_for_values(
+        &client,
+        query.clone(),
+        vec![vec![Value::Null]],
+        &format!("one-shot all-null {} is public null", case.name()),
+    )
+    .await;
+    wait_for_subscription_driven_values(
+        &client,
+        &mut stream,
+        query,
+        vec![vec![Value::Null]],
+        &format!("subscription all-null {} is public null", case.name()),
+    )
+    .await;
+}
+
+async fn assert_populated_and_grouped(case: AggregateCase, subject: &str) {
+    let schema = case.populated_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let client =
+        JazzClient::connect(server.make_client_context_for_user(schema, test_user_id(subject)))
+            .await
+            .expect("connect client");
+    let query = case.query();
+    let grouped_query = case.grouped_query();
+    let mut stream = client
+        .subscribe(query.clone())
+        .await
+        .unwrap_or_else(|err| panic!("subscribe {} aggregate: {err}", case.name()));
+    let mut grouped_stream = client
+        .subscribe(grouped_query.clone())
+        .await
+        .unwrap_or_else(|err| panic!("subscribe grouped {} aggregate: {err}", case.name()));
+
+    for (bucket, score) in [("a", 10), ("a", 30), ("b", 5)] {
+        let (_row, _, batch) = client
+            .insert(
+                "metrics",
+                row_input!("bucket" => bucket, "score" => case.score_input(score)),
+            )
+            .expect("insert score");
+        client
+            .wait_for_batch(batch, DurabilityTier::Local)
+            .await
+            .expect("score settles");
+    }
+
+    wait_for_values(
+        &client,
+        query.clone(),
+        vec![vec![case.populated_value()]],
+        &format!("one-shot populated {}", case.name()),
+    )
+    .await;
+    wait_for_subscription_driven_values(
+        &client,
+        &mut stream,
+        query,
+        vec![vec![case.populated_value()]],
+        &format!("subscription populated {}", case.name()),
+    )
+    .await;
+
+    wait_for_values(
+        &client,
+        grouped_query.clone(),
+        case.grouped_values(),
+        &format!("one-shot grouped {}", case.name()),
+    )
+    .await;
+    wait_for_subscription_driven_values(
+        &client,
+        &mut grouped_stream,
+        grouped_query,
+        case.grouped_values(),
+        &format!("subscription grouped {}", case.name()),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_avg_public_boundary_and_subscription_results() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            assert_nullable_empty_and_all_null(AggregateCase::Avg, "aggregate-avg-null").await;
+            assert_populated_and_grouped(AggregateCase::Avg, "aggregate-avg-populated").await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_min_public_boundary_and_subscription_results() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            assert_nullable_empty_and_all_null(AggregateCase::Min, "aggregate-min-null").await;
+            assert_populated_and_grouped(AggregateCase::Min, "aggregate-min-populated").await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_max_public_boundary_and_subscription_results() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            assert_nullable_empty_and_all_null(AggregateCase::Max, "aggregate-max-null").await;
+            assert_populated_and_grouped(AggregateCase::Max, "aggregate-max-populated").await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

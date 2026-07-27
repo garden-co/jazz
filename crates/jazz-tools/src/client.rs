@@ -1670,6 +1670,22 @@ fn core_query_condition(
     Ok(vec![predicate])
 }
 
+fn aggregate_output_column(output: &crate::public_api::query::AggregateOutput) -> String {
+    let column = || {
+        output
+            .column
+            .as_deref()
+            .expect("column aggregate has an input column")
+    };
+    match output.function {
+        crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
+        crate::public_api::query::AggregateFunction::Sum => format!("sum_{}", column()),
+        crate::public_api::query::AggregateFunction::Avg => format!("avg_{}", column()),
+        crate::public_api::query::AggregateFunction::Min => format!("min_{}", column()),
+        crate::public_api::query::AggregateFunction::Max => format!("max_{}", column()),
+    }
+}
+
 fn aggregate_public_values(query: &Query, row: &jazz::node::CurrentRow) -> Result<Vec<Value>> {
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
@@ -1678,23 +1694,7 @@ fn aggregate_public_values(query: &Query, row: &jazz::node::CurrentRow) -> Resul
     if let Some(group_by) = &aggregate.group_by {
         columns.push(group_by.clone());
     }
-    columns.extend(
-        aggregate
-            .outputs
-            .iter()
-            .map(|output| match output.function {
-                crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
-                crate::public_api::query::AggregateFunction::Sum => {
-                    format!(
-                        "sum_{}",
-                        output
-                            .column
-                            .as_deref()
-                            .expect("sum aggregate has an input column")
-                    )
-                }
-            }),
-    );
+    columns.extend(aggregate.outputs.iter().map(aggregate_output_column));
     let (descriptor, raw) = row.encoded_record();
     let borrowed = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
     columns
@@ -1801,6 +1801,30 @@ impl JazzClient {
                                 .column
                                 .as_deref()
                                 .expect("sum aggregate has an input column"),
+                        )
+                    }
+                    crate::public_api::query::AggregateFunction::Avg => {
+                        jazz::query::Aggregate::avg(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("avg aggregate has an input column"),
+                        )
+                    }
+                    crate::public_api::query::AggregateFunction::Min => {
+                        jazz::query::Aggregate::min(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("min aggregate has an input column"),
+                        )
+                    }
+                    crate::public_api::query::AggregateFunction::Max => {
+                        jazz::query::Aggregate::max(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("max aggregate has an input column"),
                         )
                     }
                 });

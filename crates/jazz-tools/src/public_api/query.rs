@@ -622,13 +622,13 @@ pub struct AggregateOutput {
 }
 
 /// Public client aggregate functions.
-///
-/// The public client surface supports COUNT and SUM today. Core Jazz and Groove
-/// also support AVG, MIN, and MAX; widening this enum is tracked separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateFunction {
     Count,
     Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -1011,7 +1011,7 @@ impl QueryBuilder {
         self
     }
 
-    /// Add COUNT(*). Public client aggregates are COUNT and SUM today.
+    /// Add COUNT(*).
     pub fn count(mut self) -> Self {
         self.query.aggregate.get_or_insert_with(|| AggregateSpec {
             group_by: None,
@@ -1029,7 +1029,7 @@ impl QueryBuilder {
         self
     }
 
-    /// Add SUM(column). Core Jazz/Groove also support AVG/MIN/MAX separately.
+    /// Add SUM(column).
     pub fn sum(mut self, column: impl Into<String>) -> Self {
         self.query.aggregate.get_or_insert_with(|| AggregateSpec {
             group_by: None,
@@ -1042,6 +1042,60 @@ impl QueryBuilder {
             .outputs
             .push(AggregateOutput {
                 function: AggregateFunction::Sum,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add AVG(column).
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Avg,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MIN(column).
+    pub fn min(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Min,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MAX(column).
+    pub fn max(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Max,
                 column: Some(column.into()),
             });
         self
