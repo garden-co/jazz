@@ -18,6 +18,26 @@ fn metrics_schema() -> Schema {
         .build()
 }
 
+fn nullable_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .nullable_column("score", ColumnType::Integer),
+        )
+        .build()
+}
+
+fn bigint_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .column("score", ColumnType::BigInt),
+        )
+        .build()
+}
+
 fn test_user_id(subject: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes()).to_string()
 }
@@ -63,6 +83,39 @@ async fn wait_for_values(
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(last_actual, expected, "{label}");
+}
+
+async fn wait_for_subscription_driven_values(
+    client: &JazzClient,
+    stream: &mut jazz_tools::SubscriptionStream,
+    query: jazz_tools::Query,
+    expected: Vec<Vec<Value>>,
+    label: &str,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let last_actual;
+    loop {
+        tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("{label}: timed out waiting for subscription delta"))
+            .unwrap_or_else(|| panic!("{label}: subscription ended"));
+        let mut actual = client
+            .query(query.clone(), None)
+            .await
+            .unwrap_or_else(|err| panic!("{label}: query after subscription event failed: {err}"))
+            .into_iter()
+            .map(|(_, values)| values)
+            .collect::<Vec<_>>();
+        actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+        if actual == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            last_actual = actual;
+            break;
+        }
     }
     assert_eq!(last_actual, expected, "{label}");
 }
@@ -187,6 +240,130 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 grouped_sum_query.clone(),
                 vec![vec![Value::Text("b".to_owned()), Value::Integer(5)]],
                 "sum after delete a1",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_sum_public_boundary_preserves_nullable_results() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = nullable_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
+            )
+            .await
+            .expect("connect client");
+            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+            let mut stream = client
+                .subscribe(sum_query.clone())
+                .await
+                .expect("subscribe sum aggregate");
+
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "one-shot empty sum is public null",
+            )
+            .await;
+            wait_for_subscription_driven_values(
+                &client,
+                &mut stream,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "subscription empty sum is public null",
+            )
+            .await;
+
+            let (_null_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::Null),
+                )
+                .expect("insert null score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("null score settles");
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "one-shot all-null sum is public null",
+            )
+            .await;
+            wait_for_subscription_driven_values(
+                &client,
+                &mut stream,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "subscription all-null sum is public null",
+            )
+            .await;
+
+            // The mixed null/non-null case is NOT covered here: writing a
+            // non-null value into a nullable column through the public client
+            // currently fails with `value does not match type Nullable(U32)`,
+            // because public_to_core_value maps Value::Integer to a bare
+            // CoreValue::U32 with no schema-aware wrapping. That is a gap in the
+            // public WRITE path, independent of aggregate semantics, so it is
+            // recorded rather than worked around here. The empty-input and
+            // all-NULL cases above are the ones this PR's semantics own.
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_sum_bigint_survives_public_client_boundary() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = bigint_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4"),
+            )
+            .await
+            .expect("connect client");
+            let sum_query = QueryBuilder::new("metrics").sum("score").build();
+
+            wait_for_values(
+                &client,
+                sum_query.clone(),
+                vec![vec![Value::Null]],
+                "empty bigint sum is public null",
+            )
+            .await;
+
+            let (_negative_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::BigInt(-3)),
+                )
+                .expect("insert negative bigint score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("negative bigint score settles");
+            let (_positive_row, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "a", "score" => Value::BigInt(5)),
+                )
+                .expect("insert positive bigint score");
+            client
+                .wait_for_batch(batch, DurabilityTier::Local)
+                .await
+                .expect("positive bigint score settles");
+
+            wait_for_values(
+                &client,
+                sum_query,
+                vec![vec![Value::BigInt(2)]],
+                "bigint sum decodes exact signed public value",
             )
             .await;
         })
