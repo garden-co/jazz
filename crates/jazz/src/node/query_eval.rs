@@ -11846,6 +11846,16 @@ mod tests {
         ])
     }
 
+    fn signed_metric_schema() -> JazzSchema {
+        JazzSchema::new([TableSchema::new(
+            "metrics",
+            [
+                ColumnSchema::new("bucket", ColumnType::String),
+                ColumnSchema::new("score", ColumnType::I64),
+            ],
+        )])
+    }
+
     fn owner_policy_schema() -> JazzSchema {
         JazzSchema::new([TableSchema::new(
             "issues",
@@ -12352,6 +12362,23 @@ mod tests {
                 ])),
         )
         .expect("commit issue");
+    }
+
+    fn commit_signed_metric(
+        node: &mut NodeState<RocksDbStorage>,
+        idx: usize,
+        bucket: &str,
+        score: i64,
+    ) {
+        node.commit_mergeable_unit(
+            MergeableCommit::new("metrics", row(idx), 1_000 + idx as u64)
+                .made_by(AuthorId::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                    ("score".to_owned(), Value::I64(score)),
+                ])),
+        )
+        .expect("commit signed metric");
     }
 
     fn commit_global_issue(
@@ -13495,6 +13522,46 @@ mod tests {
         assert_eq!(
             cells["max_priority"],
             Value::Nullable(Some(Box::new(Value::U64(4))))
+        );
+    }
+
+    #[test]
+    fn aggregate_sum_avg_min_max_support_signed_i64_inputs() {
+        let schema = signed_metric_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xb5; 16]), schema.clone());
+        commit_signed_metric(&mut node, 0x10, "a", -3);
+        commit_signed_metric(&mut node, 0x11, "a", 2);
+        let shape = Query::from("metrics")
+            .aggregate([
+                Aggregate::sum("score"),
+                Aggregate::avg("score"),
+                Aggregate::min("score"),
+                Aggregate::max("score"),
+            ])
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        let rows = node
+            .query_rows(&shape, &binding, DurabilityTier::Local)
+            .unwrap();
+        let cells = rows[0].test_cells_by_descriptor();
+        assert_eq!(
+            cells["sum_score"],
+            Value::Nullable(Some(Box::new(Value::I64(-1))))
+        );
+        assert_eq!(
+            cells["avg_score"],
+            Value::Nullable(Some(Box::new(Value::F64(-0.5))))
+        );
+        assert_eq!(
+            cells["min_score"],
+            Value::Nullable(Some(Box::new(Value::I64(-3))))
+        );
+        assert_eq!(
+            cells["max_score"],
+            Value::Nullable(Some(Box::new(Value::I64(2))))
         );
     }
 
