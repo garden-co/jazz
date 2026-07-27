@@ -3412,8 +3412,13 @@ fn non_null_column_type(column_type: &ColumnType) -> ColumnType {
 }
 
 fn is_numeric(column_type: &ColumnType) -> bool {
+    // Unwrap nullability like is_orderable does: SUM/AVG over a nullable column
+    // is the canonical SQL case (NULLs are skipped), so rejecting it here would
+    // make the all-NULL and empty-input semantics unreachable for exactly the
+    // column type where NULLs occur.
+    let column_type = non_null_column_type(column_type);
     matches!(
-        column_type,
+        &column_type,
         ColumnType::U8
             | ColumnType::U16
             | ColumnType::U32
