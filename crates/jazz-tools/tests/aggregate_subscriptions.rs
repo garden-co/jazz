@@ -4,7 +4,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use jazz_tools::public_schema::{AggregateFunction, AggregateOutput, AggregateSpec};
+use jazz_tools::public_schema::AggregateFunction;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder,
@@ -153,18 +153,17 @@ async fn insert_bigint_metric(client: &JazzClient, bucket: &str, score: i64) {
 fn aggregate_query(
     outputs: impl IntoIterator<Item = (AggregateFunction, &'static str)>,
 ) -> jazz_tools::Query {
-    let mut query = QueryBuilder::new("metrics").build();
-    query.aggregate = Some(AggregateSpec {
-        group_by: Some("bucket".to_owned()),
-        outputs: outputs
-            .into_iter()
-            .map(|(function, column)| AggregateOutput {
-                function,
-                column: Some(column.to_owned()),
-            })
-            .collect(),
-    });
-    query
+    let mut builder = QueryBuilder::new("metrics");
+    for (function, column) in outputs {
+        builder = match function {
+            AggregateFunction::Count => builder.count(),
+            AggregateFunction::Sum => builder.sum(column),
+            AggregateFunction::Avg => builder.avg(column),
+            AggregateFunction::Min => builder.min(column),
+            AggregateFunction::Max => builder.max(column),
+        };
+    }
+    builder.group_by("bucket").build()
 }
 
 #[tokio::test(flavor = "current_thread")]

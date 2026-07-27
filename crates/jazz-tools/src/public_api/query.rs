@@ -1044,6 +1044,60 @@ impl QueryBuilder {
         self
     }
 
+    /// Add AVG(column).
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Avg,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MIN(column).
+    pub fn min(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Min,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MAX(column).
+    pub fn max(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Max,
+                column: Some(column.into()),
+            });
+        self
+    }
+
     pub fn group_by(mut self, column: impl Into<String>) -> Self {
         self.query.aggregate.get_or_insert_with(|| AggregateSpec {
             group_by: None,
