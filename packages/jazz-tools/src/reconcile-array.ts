@@ -64,7 +64,10 @@ export function reconcileArray<T extends { id: string }>(target: T[], source: T[
     }
   }
   if (target.length > result.length) {
-    target.length = result.length;
+    // splice, not `length =`: reactive proxies (e.g. deepsignal) leave the
+    // dropped per-index signals stale on a length truncation, so reads past
+    // the new length would return old rows.
+    target.splice(result.length);
   }
 }
 
