@@ -212,6 +212,10 @@ required-features = ["test"]
 name = "policy_branch_closure"
 required-features = ["test"]
 
+[[test]]
+name = "query_membership_filters"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

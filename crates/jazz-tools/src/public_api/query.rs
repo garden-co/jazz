@@ -229,6 +229,8 @@ pub enum Condition {
         min: Value,
         max: Value,
     },
+    /// Column equals one of the listed values.
+    In { column: String, values: Vec<Value> },
     /// Array column contains value.
     Contains { column: String, value: Value },
     /// Column is null.
@@ -300,6 +302,16 @@ impl Condition {
                     value: encode(max),
                 },
             ]),
+            Condition::In { values, .. } if values.is_empty() => Predicate::Or(vec![]),
+            Condition::In { values, .. } => Predicate::Or(
+                values
+                    .iter()
+                    .map(|value| Predicate::RowIdEq {
+                        element_index,
+                        value: encode(value),
+                    })
+                    .collect(),
+            ),
             Condition::Contains { .. } => Predicate::Or(vec![]),
             Condition::IsNull { .. } => Predicate::RowIdIsNull { element_index },
             Condition::IsNotNull { .. } => Predicate::RowIdIsNotNull { element_index },
@@ -316,6 +328,7 @@ impl Condition {
             Condition::Gt { column, .. } => column,
             Condition::Ge { column, .. } => column,
             Condition::Between { column, .. } => column,
+            Condition::In { column, .. } => column,
             Condition::Contains { column, .. } => column,
             Condition::IsNull { column } => column,
             Condition::IsNotNull { column } => column,
@@ -347,6 +360,7 @@ impl Condition {
             | Condition::Gt { value, .. }
             | Condition::Ge { value, .. } => !value.is_null(),
             Condition::Between { min, max, .. } => !min.is_null() && !max.is_null(),
+            Condition::In { values, .. } => values.len() == 1 && !values[0].is_null(),
             _ => false,
         }
     }
@@ -394,6 +408,16 @@ impl Condition {
                         value: encode_value_with_type(max, col_type),
                     },
                 ]),
+                Condition::In { values, .. } if values.is_empty() => Predicate::Or(vec![]),
+                Condition::In { values, .. } => Predicate::Or(
+                    values
+                        .iter()
+                        .map(|value| Predicate::Eq {
+                            col_index,
+                            value: encode_value_with_type(value, col_type),
+                        })
+                        .collect(),
+                ),
                 Condition::Contains { value, .. } => Predicate::Contains {
                     col_index,
                     value: value.clone(),
@@ -881,6 +905,16 @@ impl QueryBuilder {
             column: column.into(),
             min,
             max,
+        });
+        self
+    }
+
+    /// Add an in-list filter condition.
+    pub fn filter_in(mut self, column: impl Into<String>, values: Vec<Value>) -> Self {
+        let current = self.query.disjuncts.last_mut().unwrap();
+        current.add(Condition::In {
+            column: column.into(),
+            values,
         });
         self
     }

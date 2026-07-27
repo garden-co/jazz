@@ -4324,7 +4324,7 @@ fn lower_contains(
     let needle = lower_value_ref(needle, source_id, source, request)?;
     match (value, needle) {
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
-            let value = coerce_literal_for_source_field(value, source, &field);
+            let value = coerce_literal_for_source_array_element(value, source, &field);
             Ok(GroovePredicateExpr::Contains { field, value })
         }
         (LoweredValueRef::Field(field), LoweredValueRef::Field(needle_field)) => {
@@ -4353,6 +4353,20 @@ fn lower_contains(
     }
 }
 
+fn coerce_literal_for_source_array_element(
+    value: LiteralValue,
+    source: &ResolvedSource,
+    field: &str,
+) -> LiteralValue {
+    let Some(value_type) = source_field_type(source, field) else {
+        return value;
+    };
+    match non_null_value_type(value_type) {
+        ValueType::Array(member) => coerce_literal_for_value_type(value, member),
+        _ => value,
+    }
+}
+
 fn coerce_literal_for_source_field(
     value: LiteralValue,
     source: &ResolvedSource,
@@ -4371,6 +4385,13 @@ fn coerce_literal_for_source_field(
         return value;
     };
     coerce_literal_for_value_type(value, &column.column_type.value_type())
+}
+
+fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
+    while let ValueType::Nullable(inner) = value_type {
+        value_type = inner.as_ref();
+    }
+    value_type
 }
 
 fn coerce_literal_for_value_type(value: LiteralValue, value_type: &ValueType) -> LiteralValue {
