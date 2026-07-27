@@ -17,7 +17,7 @@ semantic scan.
 Invariant digest:
 
 - `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
-- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `INV-LOWER-1`: Jazz schemas MUST be lowered into a groove::schema::DatabaseSchema before opening the node's groove::db::Database.
 - `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key (rowuuid, txtime, txnodeid).
 - `INV-LOWER-3`: Node-local aliases in jazznodes.id and jazzschemaversions.id MUST NOT be wire identities; wire tx/schema references MUST use NodeUuid and SchemaVersionId.
@@ -201,7 +201,8 @@ than more facade rewrites:
   an equivalent path edge operator. Rewriting them as scalar equality joins is
   unsound and would miss multi-valued membership changes.
 
-Maintained subscriptions for those operators must preserve `INV-INC-1`: relation
+Maintained subscriptions for those operators must preserve
+`groove/SPEC/INVARIANTS.md::INV-INC-1`: relation
 membership changes must be scale-independent in unrelated rows. In practice that
 means union alternatives, distinct groups, recursive frontier rows, and
 array-membership path edges all need terminal facts with enough identity to
