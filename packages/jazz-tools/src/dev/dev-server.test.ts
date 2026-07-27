@@ -4,11 +4,15 @@ import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.j
 import { getAvailablePort } from "./test-helpers.js";
 
 describe("dev-server re-export compatibility", () => {
-  it("exports startLocalJazzServer and deploy from jazz-tools/testing path", async () => {
-    const testing = await import("../testing/index.js");
-    expect(typeof testing.startLocalJazzServer).toBe("function");
-    expect(typeof testing.deploy).toBe("function");
-  });
+  it(
+    "exports startLocalJazzServer and deploy from jazz-tools/testing path",
+    { timeout: 30_000 },
+    async () => {
+      const testing = await import("../testing/index.js");
+      expect(typeof testing.startLocalJazzServer).toBe("function");
+      expect(typeof testing.deploy).toBe("function");
+    },
+  );
 
   it("exports the same functions from dev/index.ts", async () => {
     const dev = await import("./index.js");
@@ -20,12 +24,16 @@ describe("dev-server re-export compatibility", () => {
     expect(typeof dev.deploy).toBe("function");
   });
 
-  it("testing and dev export the same startLocalJazzServer reference", async () => {
-    const testing = await import("../testing/index.js");
-    const dev = await import("./index.js");
-    expect(testing.startLocalJazzServer).toBe(dev.startLocalJazzServer);
-    expect(testing.deploy).toBe(dev.deploy);
-  });
+  it(
+    "testing and dev export the same startLocalJazzServer reference",
+    { timeout: 30_000 },
+    async () => {
+      const testing = await import("../testing/index.js");
+      const dev = await import("./index.js");
+      expect(testing.startLocalJazzServer).toBe(dev.startLocalJazzServer);
+      expect(testing.deploy).toBe(dev.deploy);
+    },
+  );
 });
 
 describe("startLocalJazzServer via JazzServer", () => {

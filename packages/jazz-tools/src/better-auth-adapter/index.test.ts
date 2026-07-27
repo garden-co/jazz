@@ -1144,7 +1144,7 @@ describe("jazzAdapter", () => {
       ).resolves.toHaveLength(1);
     });
 
-    test.fails("rejects duplicate emails after a restart before local sync catches up", async () => {
+    test("rejects duplicate emails after a restart", async () => {
       const firstAdapter = jazzAdapter({
         db: () => context.db(wasmSchemaExample),
         schema: wasmSchemaExample,
@@ -1167,6 +1167,7 @@ describe("jazzAdapter", () => {
         appId: server.appId,
         driver: { type: "memory" },
         serverUrl: server.url,
+        backendSecret: server.backendSecret,
       });
 
       const restartedAdapter = jazzAdapter({
@@ -1188,7 +1189,7 @@ describe("jazzAdapter", () => {
           limit: 10,
           offset: 0,
         }),
-      ).resolves.toHaveLength(0);
+      ).resolves.toHaveLength(1);
 
       await expect(
         restartedAdapter.create({

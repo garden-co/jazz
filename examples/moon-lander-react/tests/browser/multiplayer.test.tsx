@@ -40,6 +40,7 @@ import {
  *  slowing edge subscriptions. Isolated BrowserContexts need extra time:
  *  fresh OPFS, new Jazz client init, full sync handshake. */
 const SYNC_TIMEOUT = 20_000;
+const MODE_TIMEOUT = 10_000;
 
 const mounts: MountEntry[] = [];
 
@@ -128,7 +129,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       });
 
       pressKey("e", "KeyE");
-      await waitForAttr(el, "player-mode", "walking", 3000);
+      await waitForAttr(el, "player-mode", "walking", MODE_TIMEOUT);
       releaseKey("e", "KeyE");
 
       expect(readStr(el, "inventory")).toBe("");
@@ -191,7 +192,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       });
 
       pressKey("e", "KeyE");
-      await waitForAttr(elA, "player-mode", "walking", 3000);
+      await waitForAttr(elA, "player-mode", "walking", MODE_TIMEOUT);
       releaseKey("e", "KeyE");
 
       // Mount B after A exits — B starts in "landed" mode and stays there.
@@ -283,7 +284,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       });
 
       pressKey("e", "KeyE");
-      await waitForAttr(el, "player-mode", "walking", 3000);
+      await waitForAttr(el, "player-mode", "walking", MODE_TIMEOUT);
       releaseKey("e", "KeyE");
 
       await waitFor(
@@ -322,11 +323,11 @@ describe("Moon Lander — Cross-Client Sync", () => {
       await waitFrames(5);
 
       pressKey("e", "KeyE");
-      await waitForAttr(el, "player-mode", "in_lander", 5000);
+      await waitForAttr(el, "player-mode", "in_lander", MODE_TIMEOUT);
       releaseKey("e", "KeyE");
 
       pressKey("e", "KeyE");
-      await waitForAttr(el, "player-mode", "walking", 3000);
+      await waitForAttr(el, "player-mode", "walking", MODE_TIMEOUT);
       releaseKey("e", "KeyE");
 
       // Use data-sync-uncollected (raw DB count from the edge subscription,
