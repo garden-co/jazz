@@ -111,6 +111,11 @@ impl QueryManager {
         indexed_columns: Option<&[ColumnName]>,
         column: &ColumnDescriptor,
     ) -> bool {
+        // Blob equality stays supported through the id-scan fallback;
+        // indexing would copy a prefix of every payload into index keys.
+        if matches!(column.column_type, ColumnType::Bytea) {
+            return false;
+        }
         indexed_columns.is_none_or(|columns| columns.contains(&column.name))
     }
 
