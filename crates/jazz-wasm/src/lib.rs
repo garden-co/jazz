@@ -2497,6 +2497,21 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         SubscriptionEvent::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;
         }
+        SubscriptionEvent::Rejected { reason } => {
+            let reason_object = js_sys::Object::new();
+            match reason {
+                jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
+                    set_prop(
+                        &reason_object,
+                        "type",
+                        JsValue::from_str("UnsupportedShapeCapability"),
+                    )?;
+                    set_prop(&reason_object, "detail", JsValue::from_str(&detail))?;
+                }
+            }
+            set_prop(&object, "type", JsValue::from_str("rejected"))?;
+            set_prop(&object, "reason", reason_object.into())?;
+        }
     };
     Ok(object.into())
 }
