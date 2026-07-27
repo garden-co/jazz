@@ -193,13 +193,11 @@ Maintained-lowering gaps:
 
 - aggregate lowering is not yet represented as a groove-maintained graph
   fragment for subscription deltas;
-- `array_subqueries` have one-shot and local-tier relation snapshot
-  materialization, but maintained subscriptions do not yet emit relation-edge
-  terminal deltas across all tiers. A subscription shape with
-  `array_subqueries` must be rejected at subscription open until unified
-  relation/path lowering or relation-edge terminal deltas are represented in
-  groove. Serving code must not compensate by recursively subscribing to
-  coarse child shapes for sync coverage;
+- `array_subqueries` in live subscriptions must be maintained as part of the
+  lowered query program: parent membership, child relation material, relation
+  edges, ordering/limit boundaries, and policy visibility must converge with the
+  corresponding one-shot relation snapshot, and serving code must not compensate
+  by recursively subscribing to coarse child shapes for sync coverage;
 - relation delivery is covered by the active `INV-INC-1` mechanism canary in
   `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
   `Db` facade level because the current `jazz-tools::JazzClient` subscription
@@ -230,6 +228,48 @@ Each gap should either become a groove-maintained graph fragment, surface as a
 maintained subscription error/reset, or remain documented as an explicit
 non-subscription/read-only surface. Production peers must not mask these gaps
 with semantic full-recompute repairs.
+
+Implementation status for `array_subqueries`:
+
+- Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
+  and sync registration surfaces, covered by
+  `array_subquery_live_subscription_tracks_child_edges` and
+  `subscriber_connection_accepts_array_subquery_register_shape_for_serving_subscription`.
+- Direct child maintenance: child insert, update, delete, correlation-key moves,
+  zero-child arrays, and parent removal are verified by
+  `array_subquery_live_subscription_tracks_child_edges` and
+  `array_subquery_subscription_reflects_child_mutations_and_parent_removal`.
+- Ordering and slicing inside the subquery: an ordered child relation with a
+  finite limit boundary is verified by
+  `array_subquery_subscription_updates_child_order_limit_boundary`; other
+  ordering/slicing combinations are not yet separately named as maintained
+  coverage.
+- One-shot equivalence: the maintained first delivery matches the one-shot
+  relation snapshot for the covered ordered direct shape in
+  `array_subquery_one_shot_and_maintained_subscription_are_equivalent`.
+- RLS interaction on the nested table: policy filtering of child array contents
+  per identity is verified for relation snapshots by
+  `array_subquery_policy_oracle_filters_child_array_contents_per_identity`; live
+  maintained policy-change deltas on child policy dependencies need explicit
+  named coverage before being advertised more broadly.
+- Nesting depth: nested `array_subqueries` are validated and registered for
+  upstream coverage by `global_subscription_registers_array_subquery_upstream_coverage`
+  and `array_subquery_attachment_registers_upstream_coverage`; maintained
+  materialization and delta semantics beyond the direct child level are not yet
+  separately verified by a named black-box subscription test.
+- Include/requirement mode: optional array subqueries are covered by the direct
+  maintained subscription tests. `AtLeastOne` and
+  `MatchCorrelationCardinality` are covered for relation snapshots by
+  `relation_snapshot_filters_unreadable_children_and_required_parents` and
+  `array_subquery_match_correlation_cardinality_requires_every_referenced_member`;
+  live maintained subscription coverage for those requirement modes is not yet
+  separately named.
+- Tier: local/default `Db` subscriptions are covered by the direct maintained
+  subscription tests. Global/remote registration and hydration coverage is
+  covered by `global_subscription_registers_array_subquery_upstream_coverage`,
+  `array_subquery_attachment_registers_upstream_coverage`, and
+  `array_subquery_remote_subscription_hydrates_edge_referenced_child_rows`.
+  Edge-tier maintained array-subquery semantics are not yet separately named.
 
 ### 16.6 Aggressive maintained support: ordered windows and `Aggregate`
 
