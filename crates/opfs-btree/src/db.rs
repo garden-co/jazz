@@ -22,6 +22,11 @@ const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
+// Larger WAL tails reduce checkpoint frequency, but make browser files larger
+// during long sessions and increase replay work on open. 1024 pages is 16 MiB
+// at the default 16 KiB page size, enough to amortize checkpoints without
+// allowing the unbounded tail growth seen in long browser ingests.
+const WAL_CHECKPOINT_THRESHOLD_PAGES: u64 = 1024;
 
 type OpfsMap<K, V> = FxHashMap<K, V>;
 type OpfsSet<T> = FxHashSet<T>;
@@ -578,6 +583,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.total_pages,
         );
         self.freelist_dirty = false;
+        self.checkpoint_wal_tail_if_needed()?;
         Ok(())
     }
 
@@ -1513,6 +1519,17 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.flush_for_write()?;
         self.persisted_pages = self.total_pages;
         Ok(())
+    }
+
+    fn checkpoint_wal_tail_if_needed(&mut self) -> Result<(), BTreeError> {
+        if self.wal_tail_pages() >= WAL_CHECKPOINT_THRESHOLD_PAGES {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn wal_tail_pages(&self) -> u64 {
+        self.persisted_pages.saturating_sub(self.total_pages)
     }
 
     fn flush_for_write(&self) -> Result<(), BTreeError> {
@@ -2885,6 +2902,50 @@ mod tests {
                     checkpoint
                 );
             }
+        }
+    }
+
+    #[test]
+    fn flush_wal_checkpoints_when_tail_crosses_threshold() {
+        let file = MemoryFile::new();
+        let options = small_options();
+        let page_size = options.page_size;
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+        let mut saw_auto_checkpoint = false;
+
+        for i in 0..600u32 {
+            let key = format!("k{i:05}");
+            let value = deterministic_bytes(i as u64, 512);
+            tree.put(key.as_bytes(), &value).expect("put");
+            tree.flush_wal().expect("flush wal");
+
+            let file_pages = file.len().expect("file len") / page_size as u64;
+            assert_eq!(
+                file_pages, tree.persisted_pages,
+                "tree should track the physical file length after flush {i}"
+            );
+            assert!(
+                tree.wal_tail_pages() < WAL_CHECKPOINT_THRESHOLD_PAGES,
+                "WAL tail should stay below threshold after flush {i}: persisted_pages={} total_pages={}",
+                tree.persisted_pages,
+                tree.total_pages
+            );
+            saw_auto_checkpoint |= tree.wal_pages.is_empty() && tree.dirty_pages.is_empty();
+        }
+
+        assert!(
+            saw_auto_checkpoint,
+            "test workload should cross the WAL threshold and trigger a checkpoint"
+        );
+
+        let mut reopened = OpfsBTree::open(file, options).expect("reopen tree");
+        for i in 0..600u32 {
+            let key = format!("k{i:05}");
+            assert_eq!(
+                reopened.get(key.as_bytes()).expect("get"),
+                Some(deterministic_bytes(i as u64, 512)),
+                "key {i} should survive automatic checkpointing"
+            );
         }
     }
 
