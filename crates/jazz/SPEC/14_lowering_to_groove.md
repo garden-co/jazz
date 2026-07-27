@@ -40,6 +40,9 @@ Invariant digest:
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation...
 - `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equalit...
+- `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
+  `by_table_global_seq` bounded range path when sound, returning the same rows as the
+  full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the ful...
 
 ## Details
@@ -299,8 +302,11 @@ model or statistics:
    operational surface, ch. 17).
 
 v1 consumers are implemented and tested: one-shot filtered reads;
-position-bounded historical and branch-cut reads (this is what makes branch
-`at()` and historical reachable bounded rather than gated); dry-run policy
+position-bounded historical and branch-cut reads, which take the
+`by_table_global_seq` bounded range path and must agree row-for-row with the
+full-scan currentness oracle while touching only the requested global-sequence
+range (`INV-LOWER-23`; this is what makes branch `at()` and historical reads
+bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
 source resolver still fails loudly when a requested source cannot be represented
 by a sound static path; the fallback is a counted full scan, not a different
