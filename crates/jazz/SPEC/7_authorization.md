@@ -32,6 +32,10 @@ Invariant digest:
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
+  reader only when its target row exists as a current row AND satisfies the target
+  table's read policy for that reader; a parent whose required target is missing or
+  unreadable MUST be dropped from the result set.
 
 ## Details
 
@@ -135,6 +139,16 @@ result-row add/remove, version bundle, rehydrate output, or query update
 (`INV-RLS-5`). A relay link carries `AuthorId::SYSTEM` and therefore does not
 narrow; an edge-client link narrows under its terminated `AuthorId`
 (`INV-RLS-11`, ch. 9).
+
+Include modes participate in this narrowing rather than sitting outside it. A
+required include — an `Include` with `JoinMode::Inner` or `require: true` — counts
+as resolvable for a non-system reader only when the target row both exists as a
+current row and passes the target table's read policy for that reader. A parent
+row whose required target is missing or unreadable is dropped from the result set,
+so required-include membership cannot be used as an existence oracle for a row the
+reader may not read. Optional and `Holes` includes keep the parent and withhold the
+unreadable target instead (`INV-RLS-5`), and `AuthorId::SYSTEM` bypasses the policy
+half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
 revocation removes rows from **future** settled result sets but does **not**
