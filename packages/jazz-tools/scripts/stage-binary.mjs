@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,9 @@ export async function stageBinary({ source, platform, arch }) {
 
   await mkdir(nativeDir, { recursive: true });
   const destination = join(nativeDir, fileName);
+  // Remove first: overwriting in place keeps the vnode, and the macOS
+  // kernel SIGKILLs a cached executable whose content changed under it.
+  await rm(destination, { force: true });
   await copyFile(sourcePath, destination);
 
   if (!fileName.endsWith(".exe")) {
