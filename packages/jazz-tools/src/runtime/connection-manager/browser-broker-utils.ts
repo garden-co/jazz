@@ -63,6 +63,10 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
   const session = resolveClientSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
+    // Pass cookieSession like the other resolver call sites, so
+    // HttpOnly-cookie apps get the per-identity namespace instead of a
+    // store shared across logins.
+    cookieSession: config.cookieSession,
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {

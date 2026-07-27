@@ -238,6 +238,44 @@ describe("react/create-jazz-client unit", () => {
     expect(api?.listLiveStorageNamespaces()).toEqual([]);
   });
 
+  it("RC-U08: scopes window storage by cookie session identity", async () => {
+    (globalThis as { window?: unknown }).window = {} as unknown;
+
+    const config: DbConfig = {
+      appId: "react-client-cookie-scope",
+      driver: { type: "persistent" },
+      cookieSession: {
+        user_id: "alice@example.com",
+        claims: {},
+        authMode: "external",
+      },
+    };
+    const db = createMockDb(null, config);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient(config);
+
+    const api = (
+      window as {
+        __jazz?: {
+          clearStorage(namespace?: string): Promise<void>;
+          listLiveStorageNamespaces(): string[];
+        };
+      }
+    ).__jazz;
+
+    expect(api?.listLiveStorageNamespaces()).toEqual([
+      "react-client-cookie-scope::alice%40example.com",
+    ]);
+
+    await api?.clearStorage();
+
+    expect(db.deleteClientStorage).toHaveBeenCalledTimes(1);
+
+    await client.shutdown();
+    expect(api?.listLiveStorageNamespaces()).toEqual([]);
+  });
+
   it("RC-U07: requires a namespace when multiple live contexts exist", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
