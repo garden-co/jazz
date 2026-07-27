@@ -67,6 +67,35 @@ describe("reconcileArray", () => {
     expect(target[0]!.name).toBe("Alice");
   });
 
+  it("clears removed indexes on reactive array proxies", () => {
+    type Item = { id: string; name: string };
+    const target = [
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+    ];
+    const staleSignals = new Map<string, Item>();
+    const reactiveTarget = new Proxy(target, {
+      get(array, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property)) {
+          if (Number(property) < array.length) {
+            staleSignals.set(property, Reflect.get(array, property, receiver));
+          } else if (staleSignals.has(property)) {
+            return staleSignals.get(property);
+          }
+        }
+        return Reflect.get(array, property, receiver);
+      },
+      deleteProperty(array, property) {
+        staleSignals.delete(property);
+        return Reflect.deleteProperty(array, property);
+      },
+    });
+
+    reconcileArray(reactiveTarget, [{ id: "1", name: "Alice" }]);
+
+    expect(reactiveTarget[1]).toBeUndefined();
+  });
+
   it("skips property writes when values are identical", () => {
     const alice = { id: "1", name: "Alice" };
     const target = [alice];
