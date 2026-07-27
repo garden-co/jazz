@@ -15,7 +15,7 @@ Invariant digest:
 
 - `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
 - `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
-- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
 - `INV-TX-1`: A transaction MUST NOT expose open writes to ordinary reads or subscriptions before commit.
 
 ## Details
@@ -157,8 +157,8 @@ invariant trends toward coverage `✓`; and an untested `now` is visible debt.
 unbuilt or undecided behavior cannot be tested. A CI check can later assert
 every referenced test exists, every chapter id appears, and no `now` row is
 silently untested. A reference to an invariant owned by the other spec is
-written with its spec name. For example, a Groove-owned id is written as groove
-`INV-SHAPE-16`; it points into `groove/SPEC/INVARIANTS.md` and is exempt from
+written with its spec name. For example, a Groove-owned id is written as
+`groove/SPEC/INVARIANTS.md::INV-SHAPE-16`; it points into `groove/SPEC/INVARIANTS.md` and is exempt from
 Jazz's local-row rule.
 
 **Open questions are localized.** Each chapter ends with an `## Open Questions`

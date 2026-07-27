@@ -2,13 +2,13 @@
 
 ## Overview
 
-This chapter is the out-of-band invariant registry for stable `INV-*` anchors. It maps each invariant to its status, coverage, enforcing tests, and implementation anchors.
+This chapter is the out-of-band invariant registry for stable Groove `INV-*` anchors used by `crates/groove/SPEC/`. It maps each Groove-owned invariant to its status, coverage, enforcing tests, and implementation anchors. Jazz-owned invariants are registered in `crates/jazz/SPEC/INVARIANTS.md`.
 
-Invariant digest: the complete one-line-per-invariant registry is the table in Details; duplicating hundreds of rows here would make onboarding worse and risk table drift.
+Invariant digest: the complete one-line-per-Groove-invariant registry is the table in Details; duplicating hundreds of rows here would make onboarding worse and risk table drift.
 
 ## Details
 
-This is the out-of-band spec<->code convergence registry referenced by `SPEC/1_intro.md`: every invariant id used by the chapters has a row.
+This is the out-of-band spec<->code convergence registry referenced by `SPEC/1_intro.md`: every Groove-owned invariant id used by the chapters has a row.
 
 Each row carries the two orthogonal axes defined in `SPEC/1_intro.md` §1.2:
 
@@ -138,7 +138,7 @@ Every `now` invariant trends toward coverage `✓`; an untested `now` is visible
 
 ### Reserved ids (allocated, not yet cited)
 
-These `INV-` ids were allocated during drafting but do not appear in the current chapters or appendices and are not registry rows; they explain gaps in the numbering and are **not** dangling references — each gets a row if and when a chapter cites it: `INV-OK-2`, `INV-OK-4`–`INV-OK-12`, `INV-OK-15`, `INV-STORAGE-3`, `INV-STORAGE-17`.
+Some ids and ranges were allocated during drafting but do not appear in the current Groove chapters or appendices and are not registry rows; they explain gaps in the numbering and are **not** dangling references. Each gets a row if and when a Groove chapter cites it.
 
 ## Open Questions
 

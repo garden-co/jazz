@@ -12,7 +12,7 @@ prepared shapes (ch. 14), and provide the substrate used by authorization
 
 Invariant digest:
 
-- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
 - `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
@@ -35,7 +35,7 @@ Invariant digest:
 - `INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
 - `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
 - `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
-- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
 
 ## Details
 
@@ -246,7 +246,8 @@ when that view's exclusive payload is complete (`INV-QUERY-19`, ch. 3).
 Subscription lifetime is reference-counted, with no TTL: a peer's shape
 registration drops when its binding count hits zero, and re-registration is
 cheap and idempotent. Whether a fully-unreferenced prepared graph is also dropped
-is a groove-side question; see groove `INV-SHAPE-16`, which retains it.
+is a groove-side question; see `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`,
+which retains it.
 
 _Further invariants._ `INV-QUERY-16` — same-drain result churn folds by net
 outcome (enter-then-leave sends no add; leave-then-reenter replaces; same-tx
@@ -315,7 +316,7 @@ plan below records the intended coverage without changing tests now.
   insert one child whose id belongs in the middle of the child relation, assert
   the delivered insert position/order, and keep the existing scale-independent
   allocation/byte expectation so ordered insertion remains covered by
-  `INV-INC-1`.
+  `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 - Keep Rust tests aligned with
   `crates/jazz-tools/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,

@@ -17,7 +17,7 @@ semantic scan.
 Invariant digest:
 
 - `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
-- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `INV-LOWER-1`: Jazz schemas MUST be lowered into a groove::schema::DatabaseSchema before opening the node's groove::db::Database.
 - `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key (rowuuid, txtime, txnodeid).
 - `INV-LOWER-3`: Node-local aliases in jazznodes.id and jazzschemaversions.id MUST NOT be wire identities; wire tx/schema references MUST use NodeUuid and SchemaVersionId.
@@ -40,6 +40,9 @@ Invariant digest:
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation...
 - `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equalit...
+- `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
+  `by_table_global_seq` bounded range path when sound, returning the same rows as the
+  full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the ful...
 
 ## Details
@@ -201,7 +204,8 @@ than more facade rewrites:
   an equivalent path edge operator. Rewriting them as scalar equality joins is
   unsound and would miss multi-valued membership changes.
 
-Maintained subscriptions for those operators must preserve `INV-INC-1`: relation
+Maintained subscriptions for those operators must preserve
+`groove/SPEC/INVARIANTS.md::INV-INC-1`: relation
 membership changes must be scale-independent in unrelated rows. In practice that
 means union alternatives, distinct groups, recursive frontier rows, and
 array-membership path edges all need terminal facts with enough identity to
@@ -298,8 +302,11 @@ model or statistics:
    operational surface, ch. 17).
 
 v1 consumers are implemented and tested: one-shot filtered reads;
-position-bounded historical and branch-cut reads (this is what makes branch
-`at()` and historical reachable bounded rather than gated); dry-run policy
+position-bounded historical and branch-cut reads, which take the
+`by_table_global_seq` bounded range path and must agree row-for-row with the
+full-scan currentness oracle while touching only the requested global-sequence
+range (`INV-LOWER-23`; this is what makes branch `at()` and historical reads
+bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
 source resolver still fails loudly when a requested source cannot be represented
 by a sound static path; the fallback is a counted full scan, not a different
