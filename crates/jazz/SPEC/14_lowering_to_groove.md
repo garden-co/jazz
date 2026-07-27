@@ -233,14 +233,19 @@ owns the identity.
 
 Maintained root windows without explicit `order_by` first inject the ch. 6
 default ascending `row_uuid` order in the lowered plan, then use the same
-`TopBy` machinery as explicit ordered windows. Ordered maintained queries lower
-into groove `TopBy`, preserving user order terms and appending `row_uuid` as the
-stable tie field; `offset` is part of the retained window. When the jazz query
-omits `limit`, lowering represents the unbounded ordered suffix with
-`usize::MAX`, matching ch. 6's promise that maintained ordered subscriptions can
-omit a finite limit while still preserving ordered membership. The older
-unordered `limit(1)` `ArgMinBy` path remains available only for genuinely
-unordered internal shapes where default result ordering has not been injected.
+`TopBy` machinery as explicit ordered windows; this covers zero-offset
+unordered `limit(n)`, whose membership is deterministic once the default order
+is injected. Ordered maintained queries lower into groove `TopBy`, preserving
+user order terms and appending `row_uuid` as the stable tie field; `offset` is
+part of the retained window. When the jazz query omits `limit`, lowering
+represents the unbounded ordered suffix with `TopByLimit::Unbounded`, matching
+ch. 6's promise that maintained ordered subscriptions can omit a finite limit
+while still preserving ordered membership. The older unordered `limit(1)`
+`ArgMinBy` path — empty group, `row_uuid` as comparison key — remains available
+for genuinely unordered internal shapes where default result ordering has not
+been injected; it makes the chosen row deterministic without claiming an
+application-visible order. Unordered nonzero `offset` remains unsupported until
+it either gains explicit order semantics or a separate maintained lowering.
 
 _Further invariants._ `INV-LOWER-13` — aggregation, ordinary read ordering,
 general pagination, and projection are applied by the node _after_ row

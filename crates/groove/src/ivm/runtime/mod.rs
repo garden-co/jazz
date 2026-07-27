@@ -27,7 +27,8 @@ use crate::ivm::{
     IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
     NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp,
 };
 use crate::records::{
     self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
@@ -2075,9 +2076,6 @@ impl IvmRuntime {
                 offset,
                 limit,
             } => {
-                if *limit == 0 {
-                    return Err(IvmRuntimeError::UnsupportedOperator);
-                }
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
@@ -4726,17 +4724,43 @@ type TopByRecordKey = (Vec<TopBySortPart>, Bytes);
 type TopByGroup = BTreeMap<TopByRecordKey, i64>;
 
 impl TopByState {
-    fn window(&self, group: &[u8], offset: usize, limit: usize) -> Vec<RankedRecord> {
-        self.groups
-            .get(group)
-            .into_iter()
-            .flat_map(|records| records.iter())
-            .filter_map(|((sort_key, record), weight)| {
-                (*weight > 0).then_some((sort_key.clone(), record.clone()))
-            })
-            .skip(offset)
-            .take(limit)
-            .collect()
+    fn window(&self, group: &[u8], offset: u64, limit: TopByLimit) -> Vec<WindowedRecord> {
+        let Some(records) = self.groups.get(group) else {
+            return Vec::new();
+        };
+        // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies
+        // m ordinals, and offset/limit consume copies, not distinct records. The
+        // group map is keyed by (sort key, full record bytes), so its iteration
+        // order is already the INV-QUERY-23 total order and needs no re-sort.
+        let mut window = Vec::new();
+        let mut to_skip = offset;
+        let mut remaining = match limit {
+            TopByLimit::Finite(limit) => Some(limit),
+            TopByLimit::Unbounded => None,
+        };
+        for ((_, record), weight) in records {
+            if remaining == Some(0) {
+                break;
+            }
+            if *weight <= 0 {
+                continue;
+            }
+            let copies = *weight as u64;
+            let available = copies.saturating_sub(to_skip);
+            to_skip = to_skip.saturating_sub(copies);
+            let taken = remaining.map_or(available, |remaining| available.min(remaining));
+            if taken > 0 {
+                window.push((
+                    record.clone(),
+                    i64::try_from(taken)
+                        .expect("taken copies cannot exceed positive record weight"),
+                ));
+                if let Some(remaining) = &mut remaining {
+                    *remaining -= taken;
+                }
+            }
+        }
+        window
     }
 
     fn apply_group_delta(
@@ -5880,7 +5904,7 @@ where
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
+        if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -7892,7 +7916,7 @@ fn evaluate_aggregate_expr(
 }
 
 type SourceRecord = (Vec<u8>, Bytes);
-type RankedRecord = (Vec<TopBySortPart>, Bytes);
+type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TopBySortPart {
@@ -7928,6 +7952,134 @@ struct ArgBySpec<'a> {
     direction: ArgByDirection,
 }
 
+// Reference implementations of the window/winner computation, retained as
+// test-only oracles: the production path is the incremental per-group state on
+// TopByState/ArgByState, and these full-recompute forms are what its unit tests
+// pin the semantics against.
+#[cfg(test)]
+fn arg_by_winner_from_records(
+    descriptor: RecordDescriptor,
+    primary_key_field_indices: &[usize],
+    records: Vec<(Bytes, i64)>,
+    direction: ArgByDirection,
+) -> Result<Option<SourceRecord>, IvmRuntimeError> {
+    let mut winner = None;
+    for (record, weight) in records {
+        if weight <= 0 {
+            continue;
+        }
+        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
+        let replaces =
+            winner
+                .as_ref()
+                .is_none_or(|(winner_key, _): &SourceRecord| match direction {
+                    ArgByDirection::Min => key < *winner_key,
+                    ArgByDirection::Max => key > *winner_key,
+                });
+        if replaces {
+            winner = Some((key, record));
+        }
+    }
+    Ok(winner)
+}
+
+#[cfg(test)]
+fn arg_by_winner_before_from_deltas(
+    descriptor: RecordDescriptor,
+    primary_key_field_indices: &[usize],
+    after_records: Vec<(Bytes, i64)>,
+    deltas: Vec<RecordDelta>,
+    direction: ArgByDirection,
+) -> Result<Option<SourceRecord>, IvmRuntimeError> {
+    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+    for (record, weight) in after_records {
+        let key = encoded_record_key_part(descriptor, &record, primary_key_field_indices)?;
+        records.insert(key, (record, weight));
+    }
+    for delta in deltas {
+        let key = encoded_record_key_part(descriptor, delta.raw(), primary_key_field_indices)?;
+        let entry = records
+            .entry(key)
+            .or_insert_with(|| (delta.record.clone(), 0));
+        entry.1 -= delta.weight;
+    }
+    let mut positive = records
+        .into_iter()
+        .filter_map(|(key, (record, weight))| (weight > 0).then_some((key, record)));
+    Ok(match direction {
+        ArgByDirection::Min => positive.next(),
+        ArgByDirection::Max => positive.next_back(),
+    })
+}
+
+#[cfg(test)]
+fn top_by_window_from_records(
+    descriptor: RecordDescriptor,
+    records: Vec<(Bytes, i64)>,
+    top_by: &TopByOp,
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    let mut ranked = Vec::new();
+    for (record, weight) in records {
+        if weight > 0 {
+            ranked.push((
+                top_by_sort_key(descriptor, &record, top_by)?,
+                record,
+                weight,
+            ));
+        }
+    }
+    // Full record bytes are the final tie-breaker (INV-QUERY-23); the total
+    // order must not depend on arrangement iteration order.
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies m
+    // ordinals, and offset/limit consume copies, not distinct records.
+    let mut window = Vec::new();
+    let mut to_skip = top_by.offset;
+    let mut remaining = match top_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
+    for (_, record, weight) in ranked {
+        if remaining == Some(0) {
+            break;
+        }
+        let copies = weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
+        if taken > 0 {
+            window.push((
+                record,
+                i64::try_from(taken).expect("taken copies cannot exceed positive record weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
+        }
+    }
+    Ok(window)
+}
+
+#[cfg(test)]
+fn top_by_window_before_from_deltas(
+    descriptor: RecordDescriptor,
+    after_records: Vec<(Bytes, i64)>,
+    deltas: Vec<RecordDelta>,
+    top_by: &TopByOp,
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    // Reconstruct the pre-tick multiset keyed by record bytes — the same
+    // identity the arrangement consolidates by. Keying by sort key would
+    // collapse distinct records that tie through (order_cols, tie_cols).
+    let mut records = BTreeMap::<Bytes, i64>::new();
+    for (record, weight) in after_records {
+        *records.entry(record).or_default() += weight;
+    }
+    for delta in deltas {
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
+    }
+    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
+}
 fn top_by_sort_key(
     descriptor: RecordDescriptor,
     record: &[u8],
@@ -7946,13 +8098,16 @@ fn top_by_sort_key(
         .collect()
 }
 
-fn diff_record_windows(before: Vec<RankedRecord>, after: Vec<RankedRecord>) -> Vec<RecordDelta> {
+fn diff_record_windows(
+    before: Vec<WindowedRecord>,
+    after: Vec<WindowedRecord>,
+) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (_, record) in before {
-        *weights.entry(record).or_default() -= 1;
+    for (record, copies) in before {
+        *weights.entry(record).or_default() -= copies;
     }
-    for (_, record) in after {
-        *weights.entry(record).or_default() += 1;
+    for (record, copies) in after {
+        *weights.entry(record).or_default() += copies;
     }
     let mut retractions = Vec::new();
     let mut insertions = Vec::new();
@@ -8217,6 +8372,62 @@ mod tests {
             ("src", ColumnType::U64.value_type()),
             ("dst", ColumnType::U64.value_type()),
         ])
+    }
+
+    #[test]
+    fn top_by_distinguishes_finite_max_from_unbounded_limit() {
+        // Direct helper coverage is intentional: constructing more than
+        // u64::MAX derivations through public tables is not feasible, while
+        // synthetic weights exercise the semantic boundary without expanding
+        // multiplicity into individual records.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let records = [1, 2, 3]
+            .into_iter()
+            .map(|id| {
+                (
+                    Bytes::from(descriptor.create(&[Value::U64(id)]).unwrap()),
+                    i64::MAX,
+                )
+            })
+            .collect::<Vec<_>>();
+        let top_by = |limit| TopByOp {
+            group_fields: Vec::new(),
+            group_field_indices: Vec::new(),
+            order_fields: vec![TopByOrderField {
+                field: "id".to_owned(),
+                direction: TopByDirection::Asc,
+            }],
+            tie_fields: Vec::new(),
+            sort_field_indices: vec![0],
+            sort_directions: vec![TopByDirection::Asc],
+            offset: 0,
+            limit,
+        };
+
+        let finite = top_by_window_from_records(
+            descriptor,
+            records.clone(),
+            &top_by(TopByLimit::Finite(u64::MAX)),
+        )
+        .unwrap();
+        assert_eq!(
+            finite
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, 1]
+        );
+
+        let unbounded =
+            top_by_window_from_records(descriptor, records, &top_by(TopByLimit::Unbounded))
+                .unwrap();
+        assert_eq!(
+            unbounded
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, i64::MAX]
+        );
     }
 
     fn recursive_reach_graph() -> GraphBuilder {
