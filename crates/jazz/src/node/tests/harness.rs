@@ -30,6 +30,7 @@ include!("branching.rs");
 include!("time_travel.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
+include!("mergeable_open_transactions.rs");
 include!("policies_rls.rs");
 include!("sync.rs");
 include!("m3_differential.rs");

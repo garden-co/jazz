@@ -2011,6 +2011,147 @@ where
             .map(|schema| schema.schema.clone())
     }
 
+    /// Open an owned mergeable transaction handle over the current local snapshot.
+    pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_mergeable(self.identity.author, None)
+            .map_err(Into::into)
+    }
+
+    /// Open an owned mergeable transaction authored and permission-checked as `author`.
+    pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_mergeable(author, Some(author))
+            .map_err(Into::into)
+    }
+
+    /// Stage a full row value in an owned mergeable transaction.
+    pub fn mergeable_insert(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
+            .map_err(Into::into)
+    }
+
+    /// Stage an update patch in an owned mergeable transaction.
+    pub fn mergeable_update(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
+            .map_err(Into::into)
+    }
+
+    /// Stage a soft delete in an owned mergeable transaction.
+    pub fn mergeable_delete(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable(
+                tx_id,
+                table,
+                row,
+                BTreeMap::new(),
+                Some(DeletionEvent::Deleted),
+                Vec::new(),
+                now_ms,
+                false,
+            )
+            .map_err(Into::into)
+    }
+
+    /// Stage paired content and deletion-register restore writes.
+    pub fn mergeable_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        let content_parents = node
+            .local_content_winner_tx_id(table, row)?
+            .into_iter()
+            .collect();
+        let deletion_parents = node
+            .local_deletion_winner_tx_id(table, row)?
+            .into_iter()
+            .collect();
+        node.tx_write_mergeable(
+            tx_id,
+            table,
+            row,
+            cells,
+            None,
+            content_parents,
+            now_ms,
+            true,
+        )?;
+        node.tx_write_mergeable(
+            tx_id,
+            table,
+            row,
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            deletion_parents,
+            now_ms,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// Commit an owned mergeable transaction handle.
+    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_open(open_tx_id, || self.next_now_ms())?;
+        self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+
+    /// Abandon an owned open transaction handle.
+    pub fn abandon_transaction_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .abandon_tx(open_tx_id)
+            .map_err(Into::into)
+    }
+
     /// Open an exclusive transaction over the current local snapshot.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
         let tx_id = self.open_exclusive_handle()?;
@@ -2150,11 +2291,7 @@ where
 
     /// Abandon an owned exclusive transaction handle.
     pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .abandon_tx(open_tx_id)
-            .map_err(Into::into)
+        self.abandon_transaction_handle(open_tx_id)
     }
 
     pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
