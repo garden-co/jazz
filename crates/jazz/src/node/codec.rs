@@ -1834,29 +1834,27 @@ pub(super) fn positional_cells_from_map(
     table: &TableSchema,
     cells: &BTreeMap<String, Value>,
 ) -> Result<Vec<Option<Value>>, Error> {
-    for column in cells.keys() {
-        if !table
-            .columns
-            .iter()
-            .any(|candidate| &candidate.name == column)
-        {
-            return Err(Error::InvalidMergeableCommit("unknown user cell column"));
-        }
-    }
-    table
+    validate_cells_map(table, cells)?;
+    Ok(table
         .columns
         .iter()
-        .map(|column| {
-            cells
-                .get(&column.name)
-                .cloned()
-                .map(|value| {
-                    validate_cell_value(column, &value)?;
-                    Ok(value)
-                })
-                .transpose()
-        })
-        .collect()
+        .map(|column| cells.get(&column.name).cloned())
+        .collect())
+}
+
+pub(super) fn validate_cells_map(
+    table: &TableSchema,
+    cells: &BTreeMap<String, Value>,
+) -> Result<(), Error> {
+    for (column_name, value) in cells {
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| &candidate.name == column_name)
+            .ok_or(Error::InvalidMergeableCommit("unknown user cell column"))?;
+        validate_cell_value(column, value)?;
+    }
+    Ok(())
 }
 
 pub(super) fn cells_from_positional(

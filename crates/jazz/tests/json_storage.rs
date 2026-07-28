@@ -4,6 +4,7 @@ use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::node::{MergeableCommit, NodeState};
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
 use serde_json::{Value as JsonValue, json};
 
@@ -45,6 +46,21 @@ fn open_db(schema: JazzSchema) -> Db<MemoryStorage> {
         large_value_checkpoint_op_interval: 1024,
     }))
     .expect("open db")
+}
+
+fn open_node(schema: JazzSchema) -> NodeState<MemoryStorage> {
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    NodeState::new(
+        NodeUuid::from_bytes([0x22; 16]),
+        schema,
+        MemoryStorage::new(&column_family_refs),
+    )
+    .expect("open node")
 }
 
 fn row(byte: u8) -> RowUuid {
@@ -116,6 +132,33 @@ fn insert_rejects_invalid_json_text() {
             .to_string()
             .contains("invalid JSON for column `payload`"),
         "unexpected error: {error:?}"
+    );
+}
+
+/// Verifies that the public node-core write API applies logical JSON validation
+/// before it persists a local mergeable commit.
+///
+/// Actor: a Rust caller bypasses the `Db` facade and submits malformed JSON
+/// directly to `NodeState`.
+#[test]
+fn node_commit_mergeable_rejects_invalid_json_before_local_persistence() {
+    let mut node = open_node(documents_schema(None));
+    let document_id = row(2);
+
+    let error = node
+        .commit_mergeable(MergeableCommit::new("documents", document_id, 10).cells(payload("{")))
+        .expect_err("invalid JSON must be rejected by the node core");
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid JSON for column `payload`"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        node.visible_current_cells("documents", document_id)
+            .expect("query local row"),
+        None
     );
 }
 
