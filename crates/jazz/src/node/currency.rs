@@ -50,7 +50,17 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        self.query_layer_winner_from_pk(table, row_uuid, layer)
+        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        self.query_local_layer_winner_in_context(&context, row_uuid, layer)
+    }
+
+    pub(super) fn query_local_layer_winner_in_context(
+        &mut self,
+        context: &CurrencyLookupContext,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
+        self.query_layer_winner_from_pk_in_context(context, row_uuid, layer)
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
@@ -60,42 +70,48 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
-        } else {
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
-        };
-        let current_table = match layer {
-            VersionLayer::Content => {
-                global_current_table_name_for_schema(table, schema_version, base_for_current_names)
+        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        self.query_global_layer_winner_in_context(&context, row_uuid, layer)
+    }
+
+    pub(super) fn query_global_layer_winner_in_context(
+        &mut self,
+        context: &CurrencyLookupContext,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None;
+        for source in self.currency_sources_for_context(context, layer)? {
+            let current_table = self.cached_global_current_table_name_for_schema(
+                &source.identity.source_table,
+                layer,
+                source.identity.storage_schema,
+                self.currency_global_current_base_schema(&source.identity),
+            );
+            let Some(raw) = self
+                .database
+                .primary_key_get_raw(current_table.as_ref(), &[Value::Uuid(row_uuid.0)])?
+            else {
+                continue;
+            };
+            let record = raw.record();
+            let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+            let tx_node_alias = NodeAlias(record.get_u64(
+                GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX,
+            )?);
+            let Some(candidate) = self.query_version_by_alias_from_source(
+                &source,
+                row_uuid,
+                tx_time,
+                tx_node_alias,
+            )? else {
+                continue;
+            };
+            if self.version_wins_currency(&candidate, winner.as_ref())? {
+                winner = Some(candidate);
             }
-            VersionLayer::Deletion => register_global_current_table_name_for_schema(
-                table,
-                schema_version,
-                base_for_current_names,
-            ),
-        };
-        let raw = self
-            .database
-            .primary_key_get_raw(&current_table, &[Value::Uuid(row_uuid.0)])?;
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
-        let record = raw.record();
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-        self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)
+        }
+        Ok(winner)
     }
 
     pub(super) fn query_layer_winner_from_pk(
@@ -104,30 +120,50 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
+        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        self.query_layer_winner_from_pk_in_context(&context, row_uuid, layer)
+    }
+
+    fn query_layer_winner_from_pk_in_context(
+        &mut self,
+        context: &CurrencyLookupContext,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None;
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
+        for source in self.currency_sources_for_context(context, layer)? {
             let Some(raw) = self
                 .database
-                .primary_key_last_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+                .primary_key_last_raw(&source.storage_table, &[Value::Uuid(row_uuid.0)])?
                 .map(|raw| raw.raw().to_vec())
             else {
                 continue;
             };
-            let candidate =
-                self.decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))?;
-            let candidate_tx = self.version_tx_id(&candidate)?;
-            if winner.as_ref().is_none_or(|existing: &VersionRow| {
-                candidate.tx_time().sort_key(candidate_tx.node)
-                    > existing.tx_time().sort_key(
-                        self.version_tx_id(existing)
-                            .expect("valid version tx id")
-                            .node,
-                    )
-            }) {
+            let candidate = self.decode_history_record(
+                &source.identity.source_table,
+                BorrowedRecord::new(&raw, &source.descriptor),
+            )?;
+            if self.version_wins_currency(&candidate, winner.as_ref())? {
                 winner = Some(candidate);
             }
         }
         Ok(winner)
+    }
+
+    pub(super) fn version_wins_currency(
+        &self,
+        candidate: &VersionRow,
+        existing: Option<&VersionRow>,
+    ) -> Result<bool, Error> {
+        let candidate_tx = self.version_tx_id(candidate)?;
+        Ok(existing.is_none_or(|existing| {
+            candidate.tx_time().sort_key(candidate_tx.node)
+                > existing.tx_time().sort_key(
+                    self.version_tx_id(existing)
+                        .expect("valid version tx id")
+                        .node,
+                )
+        }))
     }
 
     #[cfg(test)]
@@ -288,10 +324,6 @@ where
         table: &str,
         layer: VersionLayer,
     ) -> Result<Vec<(String, records::RecordDescriptor)>, Error> {
-        let cache_key = (table.to_owned(), layer);
-        if let Some(sources) = self.query.version_storage_sources_cache.get(&cache_key) {
-            return Ok(sources.clone());
-        }
         let mut sources = Vec::new();
         if let Ok(base_table) =
             self.table_in_schema(table, self.catalogue.current_schema_version_id)
@@ -311,10 +343,156 @@ where
         if sources.is_empty() {
             return Err(Error::TableNotFound(table.to_owned()));
         }
+        Ok(sources)
+    }
+
+    pub(super) fn currency_lookup_context(
+        &mut self,
+        target_schema: SchemaVersionId,
+        target_table: &str,
+    ) -> Result<CurrencyLookupContext, Error> {
+        self.table_in_schema(target_table, target_schema)?;
+        let base_schema = self.catalogue.current_schema_version_id;
+        let mut candidates = self
+            .catalogue
+            .schema
+            .tables
+            .iter()
+            .map(|table| CurrencySourceIdentity {
+                storage_schema: base_schema,
+                source_table: table.name.clone(),
+                storage_kind: CurrencyStorageKind::Base,
+            })
+            .collect::<Vec<_>>();
+        candidates.extend(self.catalogue.partitions.iter().filter_map(
+            |(table, schema)| {
+                (*schema != base_schema).then(|| CurrencySourceIdentity {
+                    storage_schema: *schema,
+                    source_table: table.clone(),
+                    storage_kind: CurrencyStorageKind::Partition,
+                })
+            },
+        ));
+        candidates.sort();
+        candidates.dedup();
+        let mut lineage = Vec::new();
+        for candidate in candidates {
+            if self.currency_source_projects_to(&candidate, target_schema, target_table)? {
+                lineage.push(candidate);
+            }
+        }
+        if lineage.is_empty() {
+            return Err(Error::TableNotFound(target_table.to_owned()));
+        }
+        Ok(CurrencyLookupContext {
+            target_schema,
+            target_table: target_table.to_owned(),
+            base_schema,
+            lineage,
+        })
+    }
+
+    pub(super) fn currency_lookup_context_for_version(
+        &mut self,
+        version: &VersionRow,
+    ) -> Result<CurrencyLookupContext, Error> {
+        let schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue("history schema version alias must exist"))?;
+        self.currency_lookup_context(schema, version.table())
+    }
+
+    fn currency_source_projects_to(
+        &mut self,
+        source: &CurrencySourceIdentity,
+        target_schema: SchemaVersionId,
+        target_table: &str,
+    ) -> Result<bool, Error> {
+        if source.storage_schema == target_schema {
+            return Ok(source.source_table == target_table);
+        }
+        if let Some(path) = self.compiled_lens_path(
+            source.storage_schema,
+            target_schema,
+            LensPathDirection::Forward,
+            &source.source_table,
+        )? {
+            return Ok(path.target_table == target_table);
+        }
+        Ok(self
+            .compiled_lens_path(
+                source.storage_schema,
+                target_schema,
+                LensPathDirection::Reverse,
+                &source.source_table,
+            )?
+            .is_some_and(|path| path.target_table == target_table))
+    }
+
+    pub(super) fn currency_sources_for_context(
+        &mut self,
+        context: &CurrencyLookupContext,
+        layer: VersionLayer,
+    ) -> Result<Vec<CurrencySource>, Error> {
+        let key = CurrencySourceCacheKey {
+            target_schema: context.target_schema,
+            target_table: context.target_table.clone(),
+            layer,
+            base_schema: context.base_schema,
+            lineage: context.lineage.clone(),
+        };
+        if let Some(sources) = self.query.version_storage_sources_cache.get(&key) {
+            return Ok(sources.clone());
+        }
+        let mut sources = Vec::new();
+        for identity in &context.lineage {
+            let table = self.table_in_schema(&identity.source_table, identity.storage_schema)?;
+            let (storage_table, descriptor) = match (identity.storage_kind, layer) {
+                (CurrencyStorageKind::Base, VersionLayer::Content) => (
+                    history_table_name(&identity.source_table),
+                    table.history_storage_table().record_schema(),
+                ),
+                (CurrencyStorageKind::Base, VersionLayer::Deletion) => (
+                    register_table_name(&identity.source_table),
+                    table.register_storage_table().record_schema(),
+                ),
+                (CurrencyStorageKind::Partition, VersionLayer::Content) => (
+                    partition_history_table_name(&identity.source_table, identity.storage_schema),
+                    table
+                        .history_partition_storage_table(identity.storage_schema)
+                        .record_schema(),
+                ),
+                (CurrencyStorageKind::Partition, VersionLayer::Deletion) => (
+                    partition_register_table_name(&identity.source_table, identity.storage_schema),
+                    table
+                        .register_partition_storage_table(identity.storage_schema)
+                        .record_schema(),
+                ),
+            };
+            sources.push(CurrencySource {
+                identity: identity.clone(),
+                storage_table,
+                descriptor,
+            });
+        }
         self.query
             .version_storage_sources_cache
-            .insert(cache_key, sources.clone());
+            .insert(key, sources.clone());
         Ok(sources)
+    }
+
+    pub(super) fn currency_global_current_base_schema(
+        &self,
+        source: &CurrencySourceIdentity,
+    ) -> SchemaVersionId {
+        if self
+            .table_in_schema(&source.source_table, self.catalogue.current_schema_version_id)
+            .is_ok()
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            source.storage_schema
+        }
     }
 
     fn partition_storage_sources_for_layer(
@@ -592,19 +770,43 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
-            if let Some(version) = self.query_version_by_alias_with_storage(
-                table,
-                &storage_table,
-                row_uuid,
-                tx_time,
-                tx_node_alias,
-                &descriptor,
+        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        self.query_version_by_alias_in_context(&context, row_uuid, layer, tx_time, tx_node_alias)
+    }
+
+    pub(super) fn query_version_by_alias_in_context(
+        &mut self,
+        context: &CurrencyLookupContext,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<VersionRow>, Error> {
+        for source in self.currency_sources_for_context(context, layer)? {
+            if let Some(version) = self.query_version_by_alias_from_source(
+                &source, row_uuid, tx_time, tx_node_alias,
             )? {
                 return Ok(Some(version));
             }
         }
         Ok(None)
+    }
+
+    pub(super) fn query_version_by_alias_from_source(
+        &mut self,
+        source: &CurrencySource,
+        row_uuid: RowUuid,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<VersionRow>, Error> {
+        self.query_version_by_alias_with_storage(
+            &source.identity.source_table,
+            &source.storage_table,
+            row_uuid,
+            tx_time,
+            tx_node_alias,
+            &source.descriptor,
+        )
     }
 
     pub(super) fn query_version_by_alias_with_storage(

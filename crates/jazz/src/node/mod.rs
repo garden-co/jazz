@@ -313,12 +313,11 @@ struct QueryServing {
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,
-    /// Version storage source descriptors keyed by logical table and layer.
-    ///
-    /// These descriptors are static catalogue metadata. They are invalidated
-    /// whenever schema partitions or catalogue schemas change.
+    /// Lineage-aware version storage sources keyed by their complete currency
+    /// lookup identity. These descriptors are static catalogue metadata and are
+    /// invalidated whenever schema partitions or catalogue schemas change.
     version_storage_sources_cache:
-        BTreeMap<(String, VersionLayer), Vec<(String, records::RecordDescriptor)>>,
+        BTreeMap<CurrencySourceCacheKey, Vec<CurrencySource>>,
     /// Interned physical table names for hot ingest/current-row paths.
     ///
     /// Keyed by logical table, physical class, and schema-version context. This
@@ -356,6 +355,43 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct CurrencySourceIdentity {
+    storage_schema: SchemaVersionId,
+    source_table: String,
+    storage_kind: CurrencyStorageKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum CurrencyStorageKind {
+    Base,
+    Partition,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct CurrencySourceCacheKey {
+    target_schema: SchemaVersionId,
+    target_table: String,
+    layer: VersionLayer,
+    base_schema: SchemaVersionId,
+    lineage: Vec<CurrencySourceIdentity>,
+}
+
+#[derive(Clone, Debug)]
+struct CurrencySource {
+    identity: CurrencySourceIdentity,
+    storage_table: String,
+    descriptor: records::RecordDescriptor,
+}
+
+#[derive(Clone, Debug)]
+struct CurrencyLookupContext {
+    target_schema: SchemaVersionId,
+    target_table: String,
+    base_schema: SchemaVersionId,
+    lineage: Vec<CurrencySourceIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -1012,10 +1048,14 @@ where
     ) -> Result<Option<TxId>, Error> {
         let table_schema =
             self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-        match self.query_local_layer_winner(&table_schema.name, row_uuid, layer)? {
+        let context = self.currency_lookup_context(
+            self.catalogue.current_write_schema.schema,
+            &table_schema.name,
+        )?;
+        match self.query_local_layer_winner_in_context(&context, row_uuid, layer)? {
             Some(previous) => self.version_tx_id(&previous).map(Some),
             None => self
-                .query_global_layer_winner(&table_schema.name, row_uuid, layer)?
+                .query_global_layer_winner_in_context(&context, row_uuid, layer)?
                 .map(|previous| self.version_tx_id(&previous))
                 .transpose(),
         }
@@ -1072,24 +1112,25 @@ where
         for commit in commits {
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
-            let previous_current =
-                match self.query_local_layer_winner(&table_schema.name, commit.row_uuid, layer)? {
+            let context = self.currency_lookup_context(write_schema_version, &table_schema.name)?;
+            let previous_current = match self
+                .query_local_layer_winner_in_context(&context, commit.row_uuid, layer)? {
                     Some(previous) => Some(previous),
                     None => {
-                        self.query_global_layer_winner(&table_schema.name, commit.row_uuid, layer)?
+                        self.query_global_layer_winner_in_context(&context, commit.row_uuid, layer)?
                     }
                 };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
-                match self.query_local_layer_winner(
-                    &table_schema.name,
+                match self.query_local_layer_winner_in_context(
+                    &context,
                     commit.row_uuid,
                     VersionLayer::Content,
                 )? {
                     Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner(
-                        &table_schema.name,
+                    None => self.query_global_layer_winner_in_context(
+                        &context,
                         commit.row_uuid,
                         VersionLayer::Content,
                     )?,
@@ -1242,14 +1283,18 @@ where
             merge_strategy: None,
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let previous_current = match self.query_local_layer_winner(
+        let context = self.currency_lookup_context(
+            self.catalogue.current_write_schema.schema,
             &table_schema.name,
+        )?;
+        let previous_current = match self.query_local_layer_winner_in_context(
+            &context,
             edit.row_uuid,
             VersionLayer::Content,
         )? {
             Some(previous) => Some(previous),
-            None => self.query_global_layer_winner(
-                &table_schema.name,
+            None => self.query_global_layer_winner_in_context(
+                &context,
                 edit.row_uuid,
                 VersionLayer::Content,
             )?,

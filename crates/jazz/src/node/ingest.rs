@@ -298,14 +298,7 @@ where
             // graph without reopening storage through the old catalogue row.
             self.groove_runtime_token = next_groove_runtime_token();
         }
-        if schema.id != self.catalogue.current_schema_version_id
-            && self.parking.parked_commit_units.values().any(|parked| {
-                parked
-                    .versions
-                    .iter()
-                    .any(|version| version.schema_version() == schema.id)
-            })
-        {
+        if schema.id != self.catalogue.current_schema_version_id {
             let mut added_partition = false;
             for table in &schema.schema.tables {
                 added_partition |= self.persist_partition(table.name.clone(), schema.id)?;
@@ -3351,13 +3344,14 @@ where
         let mut heads = match self.read_merge_heads(version.table(), version.row_uuid())? {
             Some(existing) => existing,
             None => {
-                if let Some(previous) = self.query_local_layer_winner(
-                    version.table(),
+                let context = self.currency_lookup_context_for_version(version)?;
+                if let Some(previous) = self.query_local_layer_winner_in_context(
+                    &context,
                     version.row_uuid(),
                     VersionLayer::Content,
                 )? {
                     let previous_tx = self.version_tx_id(&previous)?;
-                    if previous_tx != new_tx {
+                    if previous_tx != new_tx && previous.table() == version.table() {
                         return Err(Error::InvalidStoredValue(
                             "merge head set missing for existing content row",
                         ));
@@ -3403,13 +3397,14 @@ where
             match self.read_merge_heads_in_batch(batch, version.table(), version.row_uuid())? {
                 Some(existing) => existing,
                 None => {
-                    if let Some(previous) = self.query_local_layer_winner(
-                        version.table(),
+                    let context = self.currency_lookup_context_for_version(version)?;
+                    if let Some(previous) = self.query_local_layer_winner_in_context(
+                        &context,
                         version.row_uuid(),
                         VersionLayer::Content,
                     )? {
                         let previous_tx = self.version_tx_id(&previous)?;
-                        if previous_tx != new_tx {
+                        if previous_tx != new_tx && previous.table() == version.table() {
                             return Err(Error::InvalidStoredValue(
                                 "merge head set missing for existing content row",
                             ));
@@ -3439,74 +3434,58 @@ where
     fn query_global_layer_winner_in_batch(
         &mut self,
         batch: &DatabaseBatch,
-        table: &str,
+        context: &CurrencyLookupContext,
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let (schema_version, base_for_current_names) = if self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            (
-                self.catalogue.current_schema_version_id,
-                self.catalogue.current_schema_version_id,
-            )
-        } else {
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            (
-                self.catalogue.current_write_schema.schema,
-                self.catalogue.current_write_schema.schema,
-            )
-        };
-        let current_table = self.cached_global_current_table_name_for_schema(
-            table,
-            layer,
-            schema_version,
-            base_for_current_names,
-        );
-        let raw = self.database.primary_key_get_raw_in_batch(
-            batch,
-            current_table.as_ref(),
-            &[Value::Uuid(row_uuid.0)],
-        )?;
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
-        let record = raw.record();
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-        self.query_version_by_alias_in_batch(batch, table, row_uuid, layer, tx_time, tx_node_alias)
+        let mut winner = None;
+        for source in self.currency_sources_for_context(context, layer)? {
+            let current_table = self.cached_global_current_table_name_for_schema(
+                &source.identity.source_table,
+                layer,
+                source.identity.storage_schema,
+                self.currency_global_current_base_schema(&source.identity),
+            );
+            let Some(raw) = self.database.primary_key_get_raw_in_batch(
+                batch,
+                current_table.as_ref(),
+                &[Value::Uuid(row_uuid.0)],
+            )? else { continue };
+            let record = raw.record();
+            let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
+            let tx_node_alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let Some(candidate) = self.query_version_by_alias_in_batch_from_source(
+                batch, &source, row_uuid, tx_time, tx_node_alias,
+            )? else { continue };
+            if self.version_wins_currency(&candidate, winner.as_ref())? {
+                winner = Some(candidate);
+            }
+        }
+        Ok(winner)
     }
 
-    fn query_version_by_alias_in_batch(
+    fn query_version_by_alias_in_batch_from_source(
         &mut self,
         batch: &DatabaseBatch,
-        table: &str,
+        source: &CurrencySource,
         row_uuid: RowUuid,
-        layer: VersionLayer,
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        for (storage_table, descriptor) in self.version_storage_sources_for_layer(table, layer)? {
-            let raw = self.database.primary_key_get_raw_in_batch(
-                batch,
-                &storage_table,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )?;
-            let raw = raw.map(|raw| raw.raw().to_vec());
-            let Some(raw) = raw else {
-                continue;
-            };
-            return self
-                .decode_history_record(table, BorrowedRecord::new(&raw, &descriptor))
-                .map(Some);
-        }
-        Ok(None)
+        let raw = self.database.primary_key_get_raw_in_batch(
+            batch,
+            &source.storage_table,
+            &[
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_time.0),
+                Value::U64(tx_node_alias.0),
+            ],
+        )?.map(|raw| raw.raw().to_vec());
+        let Some(raw) = raw else { return Ok(None) };
+        self.decode_history_record(
+            &source.identity.source_table,
+            BorrowedRecord::new(&raw, &source.descriptor),
+        ).map(Some)
     }
 
     fn write_merge_heads_for_bulk_content_versions(
@@ -4277,6 +4256,7 @@ where
         Ok(())
     }
 
+
     fn stage_transaction_and_versions_with_current_indexes(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -4350,10 +4330,14 @@ where
                 )?;
             }
             let table_schema = self.table_in_schema(&target_table, target_schema)?;
+            let currency_context = self.currency_lookup_context(target_schema, &table_schema.name)?;
             let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
             let layer = VersionLayer::for_record(&version);
-            let previous_current =
-                self.query_local_layer_winner(&table_schema.name, version.row_uuid(), layer)?;
+            let previous_current = self.query_local_layer_winner_in_context(
+                &currency_context,
+                version.row_uuid(),
+                layer,
+            )?;
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -4399,7 +4383,7 @@ where
                 if global_seq.is_some() {
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
-                        &table_schema.name,
+                        &currency_context,
                         stored.row_uuid(),
                         stored.layer(),
                     )?;

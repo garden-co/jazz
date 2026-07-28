@@ -357,8 +357,13 @@ where
             }
         }
 
-        if let Some(current_version) =
-            self.query_local_layer_winner(&table.name, version.row_uuid(), VersionLayer::Content)?
+        let policy_schema = self.policy_schema_for_table_name(&table.name);
+        let context = self.currency_lookup_context(policy_schema, &table.name)?;
+        if let Some(current_version) = self.query_local_layer_winner_in_context(
+            &context,
+            version.row_uuid(),
+            VersionLayer::Content,
+        )?
         {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
