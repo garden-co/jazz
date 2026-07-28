@@ -68,7 +68,11 @@ treat that documentation as stale.
 scale harnesses in the same crate. They cover latest-100 team document reads,
 RBAC/direct-ACL policy branches, active-subscription fan-out, write batching,
 and approximate maintained-state sizing. Their dated receipts live beside
-this overview.
+this overview. The evidence-backed implementation sequence is in
+[`plans/PLAN.md`](plans/PLAN.md), with separate plans for correctness, hydration,
+write refresh, maintained Top-K, claim rebinding, and lifecycle cleanup. The
+follow-up probe methodology and caveats are recorded in
+[`SAAS_DEEP_DIVE_RECEIPT_20260729.md`](SAAS_DEEP_DIVE_RECEIPT_20260729.md).
 
 Two things to know before trusting these:
 

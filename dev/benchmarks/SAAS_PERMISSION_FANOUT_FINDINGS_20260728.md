@@ -3,6 +3,15 @@
 This note interprets
 `SAAS_PERMISSION_FANOUT_RECEIPT_20260728.md` and ranks the next work.
 
+Follow-up probing on 2026-07-29 minimized the two correctness failures,
+validated three disposable optimization directions, and split the work into
+implementation-ready documents at [`plans/PLAN.md`](plans/PLAN.md). In
+particular, the 99-row public result is authorization multiplicity reaching
+`TopBy`, and the later zero-row one-shots come from a shared prepared graph that
+embeds the first identity instead of binding its claim value at runtime.
+Methods and qualifications are in
+[`SAAS_DEEP_DIVE_RECEIPT_20260729.md`](SAAS_DEEP_DIVE_RECEIPT_20260729.md).
+
 ## 1. Writes run a Jazz-subscription × Groove-output empty-tick path
 
 This is the largest measured steady-state bottleneck.
@@ -125,12 +134,12 @@ Team membership, organization admin, and direct ACL compose correctly. Adding
 the public/published policy alternative makes a single subscriber return 99
 rows instead of the independently expected 100, with one boundary row missing.
 
-The deterministic result appears to be a Jazz policy-union/window issue rather
-than fixture setup, but it still needs a minimized regression before assigning
-the exact mechanism. Likely areas are authorization-union multiplicity and
-deduplication before TopBy. Add a public black-box regression where rows match
-both membership and public branches, then require exact Top-100 membership and
-later deltas.
+The minimized two-document regression proves the mechanism: overlapping grant
+derivations retain bag multiplicity through inner authorization joins and
+consume weighted `TopBy` slots. Duplicate grants inside one policy branch fail
+the same way. A disposable route-aware semijoin correction makes the minimal
+cases and realistic public/admin tiers exact. See
+[`plans/authorization-correctness/PLAN.md`](plans/authorization-correctness/PLAN.md).
 
 ### Later one-shot policy routes return zero rows
 
@@ -138,24 +147,27 @@ Live subscriptions for multiple identities remain exact, but sampled
 `all_for_identity` reads after opening several policy-bound routes return zero
 rows for non-first routes. The same query with one route passes.
 
-Add a regression with two identities, two teams, a membership policy, two live
-subscriptions, and ordered one-shot reads for both identities before and after
-mutations. This appears related to claim-bound usage routing and is separate
-from the already-fixed team-parameter TopBy partition.
+The minimized case needs no application live subscriptions. Its winner depends
+on call order and requires both a changed identity and an application
+parameter. The outer prepared descriptor contains the user `team` parameter
+but omits built-in claim `sub`, while the graph embeds the first subject UUID
+as a literal and is reused under one stable shape name. Segregating identities
+makes the probe pass but conflicts with the intended sharing model; the plan
+instead propagates the claim path as a runtime binding/route field.
 
 ## What to focus on next
 
 Recommended order:
 
-1. Fix the two correctness issues above; full public/admin policy benchmarks
-   cannot be trusted until exact pages pass.
-2. Move the Groove flush outside the per-subscription refresh loop. This is the
-   highest-leverage performance fix and should collapse unrelated-write cost.
-3. Make local subscription drop detach its Groove output immediately.
-4. Make initial hydration selective and bounded by a composite ordered access
-   path.
-5. Reduce binding-local maintained-state duplication.
-6. Replace full TopBy bucket rebuilding with incremental ordered Top-K state.
+1. Fix existential authorization and complete prepared claim routing.
+2. Rebind or close live subscriptions on claim revision; the minimized
+   revocation case leaks later rows through the stale stream.
+3. Move the Groove flush outside the per-subscription refresh loop.
+4. Make local subscription drop and one-shot completion detach Groove outputs.
+5. Make hydration selective and bounded by a composite ordered access path.
+6. Replace full `TopBy` bucket rebuilding with maintained ordered state.
+7. After authorization deduplication, factor team-wide pages before viewer
+   routing.
 
 The next benchmark extension should mutate permissions directly: membership
 and role revoke/restore, direct ACL grant/revoke, organization/team suspension,
