@@ -11,30 +11,30 @@ rules for tables and indices. Chapters 3–7 build on these guarantees.
 Invariant digest:
 
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
-- `INV-STORAGE-1`: OrderedKvStorage implementations MUST return scan results in lexicographic key order and scanrange/range MUST include keys >= start and exclude keys >= end.
-- `INV-STORAGE-2`: OrderedKvStorage::scanprefix/prefix MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper...
-- `INV-STORAGE-4`: writemany MUST apply all Set/Delete operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid op...
-- `INV-STORAGE-5`: ReopenableStorage::reopen MUST preserve existing data while adding newly requested column families.
-- `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by TableSchema::name, keyed by the encoded primary key derived from the row record.
-- `INV-STORAGE-7`: Public insert/update values MUST be interpreted in TableSchema.columns declaration order, independent of the RecordDescriptor physical encoding order.
-- `INV-STORAGE-8`: RecordDescriptor::fields() and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fi...
-- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian...
-- `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag 0 plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag 0.
-- `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode count: u32, offsets for all but the final...
-- `INV-STORAGE-12`: F64 record and ordered-key values MUST NOT be NaN.
-- `INV-STORAGE-13`: EnumSchema values MUST persist and compare by declaration-order u8 discriminant; appending variants is compatible, but reordering/removing variants changes stored mean...
-- `INV-STORAGE-14`: Primary-key bytes MUST be order-preserving tagged encodings: integer payloads big-endian, Bool as 0|1, Uuid raw bytes, and String/Bytes escaped with embedded NUL 00 ff...
-- `INV-STORAGE-15`: Table writes MUST reject rows whose primary-key values do not match the declared PrimaryKeyColumn.keytype, and MUST reject table writes for tables with no primary key.
-- `INV-STORAGE-16`: Inserts MUST reject an existing primary key, including keys introduced by earlier operations in the same DatabaseBatch.
+- `INV-STORAGE-1`: `OrderedKvStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
+- `INV-STORAGE-2`: `OrderedKvStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
+- `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
+- `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
+- `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
+- `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
+- `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian order-preserving member encoding.
+- `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
+- `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
+- `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
+- `INV-STORAGE-13`: `EnumSchema` values MUST persist and compare by declaration-order `u8` discriminant; appending variants is compatible, but reordering/removing variants changes stored meaning.
+- `INV-STORAGE-14`: Primary-key bytes MUST be order-preserving tagged encodings: integer payloads big-endian, `Bool` as `0|1`, `Uuid` raw bytes, and `String`/`Bytes` escaped with embedded NUL `00 ff` plus terminator `00 00`.
+- `INV-STORAGE-15`: Table writes MUST reject rows whose primary-key values do not match the declared `PrimaryKeyColumn.key_type`, and MUST reject table writes for tables with no primary key.
+- `INV-STORAGE-16`: Inserts MUST reject an existing primary key, including keys introduced by earlier operations in the same `DatabaseBatch`.
 - `INV-STORAGE-18`: Base table writes MUST be staged before the tick and flushed together with durable tick writes only after the tick succeeds.
-- `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable Persist writes.
-- `INV-STORAGE-20`: Directly exposed record stores MUST be typed record stores with record-encoded values and order-preserving typed primary keys, while bypassing table batches, primary-k...
-- `INV-STORAGE-21`: DatabaseSchema::columnfamilies() MUST include the "indices" column family whenever any table declares an IndexSchema, and MUST omit it when no schema index exists.
-- `INV-STORAGE-22`: Non-unique durable index logical keys MUST append a 0xff separator and encoded primary-key bytes; unique index keys MUST omit that suffix.
+- `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable `Persist` writes.
+- `INV-STORAGE-20`: Directly exposed record stores MUST be typed record stores with record-encoded values and order-preserving typed primary keys, while bypassing table batches, primary-key table scans, durable index maintenance, query planning, and IVM ticks. A single trailing variable-width `Bytes` value column MUST encode as exactly the stored bytes.
+- `INV-STORAGE-21`: `DatabaseSchema::column_families()` MUST include the `"indices"` column family whenever any table declares an `IndexSchema`, and MUST omit it when no schema index exists.
+- `INV-STORAGE-22`: Non-unique durable index logical keys MUST append a `0xff` separator and encoded primary-key bytes; unique index keys MUST omit that suffix.
 - `INV-STORAGE-23`: Durable unique indices MUST reject writing a positive delta for an index key already associated with a different record.
-- `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's "value" as primary-key bytes and fetch the current base table record; if the base record is missing for...
-- `INV-STORAGE-25`: Ordered index key encoding via encodekeypart MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
-- `INV-STORAGE-26`: Windowed record encoding (ch. 2 §2.9) MUST be invisible above the record store: decode∘encode is the identity over record sequences, the storage conformance suite pass...
+- `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
+- `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
+- `INV-STORAGE-26`: Windowed record encoding (ch. 2 §2.9) MUST be invisible above the record store: decode∘encode is the identity over record sequences, the storage conformance suite passes identically under windowed and plain representations, and no consumer above the record store can observe which representation is in use.
 
 ## Details
 

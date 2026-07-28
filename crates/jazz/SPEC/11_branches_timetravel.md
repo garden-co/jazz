@@ -10,26 +10,26 @@ ordinary current-state rules while isolating branch overlays.
 
 Invariant digest:
 
-- `INV-BRANCH-1`: A time-travel read at GlobalSeq position MUST consider only globally settled transactions with globalseq <= position and MUST choose row/layer winners using the ordina...
+- `INV-BRANCH-1`: A time-travel read at `GlobalSeq` position MUST consider only globally settled transactions with `global_seq <= position` and MUST choose row/layer winners using the ordinary current-state winner rules over that subset.
 - `INV-BRANCH-2`: A time-travel read MUST evaluate read policy over the historical state at the requested cut, not over current state.
-- `INV-BRANCH-3`: Node::attime(time) MUST resolve to the latest settled global position whose transaction time is <= time, returning GlobalSeq(0) when no such settled transaction exists.
-- `INV-BRANCH-4`: A local historical read handle MUST NOT answer from incomplete local history; if ishistorycompletefor(shape, position) is false it MUST return Error::HistoricalReadReq...
-- `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer Node::at(position).read(...) locally at exactly that position.
+- `INV-BRANCH-3`: `Node::at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when no such settled transaction exists.
+- `INV-BRANCH-4`: A local historical read handle MUST NOT answer from incomplete local history; if `is_history_complete_for(shape, position)` is false it MUST return `Error::HistoricalReadRequiresServer` or route to a history-complete server one-shot.
+- `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer `Node::at(position).read(...)` locally at exactly that position.
 - `INV-BRANCH-6`: A snapshot-base branch MUST freeze its base at creation; later parent/main commits MUST NOT appear in the branch unless represented by branch overlay writes or explicit rebase/merge operations.
-- `INV-BRANCH-7`: A branch read MUST resolve rows overlay-first: for any row with a current branch overlay winner, the branch MUST return the overlay winner and MUST NOT also return the...
+- `INV-BRANCH-7`: A branch read MUST resolve rows overlay-first: for any row with a current branch overlay winner, the branch MUST return the overlay winner and MUST NOT also return the base winner for that row.
 - `INV-BRANCH-8`: Branch overlay writes MUST NOT affect parent/main current reads.
 - `INV-BRANCH-9`: Sibling branch overlays MUST be isolated; a read on one branch MUST NOT observe overlay versions written only to a sibling branch.
-- `INV-BRANCH-10`: Branch metadata MUST be durably recoverable across node reopen, including the frozen baseglobal cut.
+- `INV-BRANCH-10`: Branch metadata MUST be durably recoverable across node reopen, including the frozen `base_global` cut.
 - `INV-BRANCH-11`: Branch creation MUST be O(1)-style metadata creation independent of base row count; it MUST NOT copy base rows into the branch overlay.
 - `INV-BRANCH-12`: Branch overlay partitions MUST be created lazily on first branch write, not at branch creation.
 - `INV-BRANCH-13`: A branch-scoped exclusive transaction MUST NOT be accepted unless its authority, validation, and serialization semantics are explicitly specified.
 - `INV-BRANCH-14`: Writes to non-open or unknown branches MUST fail rather than creating/using an implicit branch.
-- `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
+- `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy checks inside the branch view, and branch writes MUST pass branch-row write policy before table write policy evaluated inside the branch view.
 - `INV-BRANCH-16`: A branch-scoped subscription MUST include BranchId in its identity.
-- `INV-BRANCH-17`: Merge-back MUST commit an open branch's net effects to its parent as one atomic mergeable squash with typed provenance (Transaction.sourcebranch) and then transition t...
+- `INV-BRANCH-17`: Merge-back MUST commit an open branch's net effects to its parent as one atomic mergeable squash with typed provenance (`Transaction.source_branch`) and then transition the branch to `merged` with overlay retained.
 - `INV-BRANCH-18`: Discarding or merging a branch MUST make that branch read-only while retaining overlay history for audit.
-- `INV-BRANCH-19`: Rebase MUST move a branch's frozen base by three-way per-column reconcile between the old base, the new base, and the branch overlay, using the same merge engine and s...
-- `INV-BRANCH-20`: Rebase MUST preserve overlay TxIds and original write provenance; it MUST NOT replay overlay writes, remint transaction identities, or treat rebased overlay versions a...
+- `INV-BRANCH-19`: Rebase MUST move a branch's frozen base by three-way per-column reconcile between the old base, the new base, and the branch overlay, using the same merge engine and strategies as merge-back, including large-value op-merge.
+- `INV-BRANCH-20`: Rebase MUST preserve overlay `TxId`s and original write provenance; it MUST NOT replay overlay writes, remint transaction identities, or treat rebased overlay versions as newly written.
 - `INV-BRANCH-21`: Rebase-then-merge-back MUST converge with merge-directly under the same merge oracle and per-column merge strategies.
 
 ## Details

@@ -11,29 +11,29 @@ the schema (ch. 2), history/merge (ch. 4), and the sync content lane (ch. 8).
 
 Invariant digest:
 
-- `INV-API-25`: TextEdit operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to LargeValueEditOp::Insert/LargeValueEditOp::Delete.
+- `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, un...
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
 - `INV-HIST-15`: Merge strategy behavior MUST be deterministic, grouping-insensitive over the parent/head set, and non-wedging at merge time: registered strategy failure degrades to th...
 - `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold t...
-- `INV-LVAL-1`: text and blob columns MUST be represented as Jazz-level LargeValueKind::{Text, Blob} and MUST lower to groove ColumnType::Bytes, not to a groove text/blob type.
-- `INV-LVAL-2`: Changing a column between plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob MUST change the Jazz schema identity.
-- `INV-LVAL-3`: A large-value column MUST NOT use MergeStrategy::Counter.
+- `INV-LVAL-1`: `text` and `blob` columns MUST be represented as Jazz-level `LargeValueKind::{Text, Blob}` and MUST lower to groove `ColumnType::Bytes`, not to a groove text/blob type.
+- `INV-LVAL-2`: Changing a column between plain `Bytes`, `LargeValueKind::Text`, and `LargeValueKind::Blob` MUST change the Jazz schema identity.
+- `INV-LVAL-3`: A large-value column MUST NOT use `MergeStrategy::Counter`.
 - `INV-LVAL-4`: A stored large-value version payload MUST be a deterministic ordered batch of insert and delete operations.
 - `INV-LVAL-5`: Stored insert operations for locally authored large-value commits MUST store inserted bytes in the content store and reference those bytes from the version payload.
-- `INV-LVAL-6`: Content streams MUST be append-only per (writer,row,column), and appended extents MUST be assigned monotonically increasing offsets.
+- `INV-LVAL-6`: Content streams MUST be append-only per `(writer,row,column)`, and appended extents MUST be assigned monotonically increasing offsets.
 - `INV-LVAL-7`: Re-ingesting an already-present extent with identical bytes MUST be idempotent, and conflicting bytes for the same extent MUST be rejected.
 - `INV-LVAL-8`: A content extent read MUST fail closed if any byte range in the requested extent is missing or gapped.
 - `INV-LVAL-9`: A whole-value write to a large-value column MUST be stored as the diff from the materialized parent value, not as app-visible bytes verbatim in the history cell.
-- `INV-LVAL-10`: Explicit large-value edits MUST reject empty op batches and MUST target a text or blob column.
+- `INV-LVAL-10`: Explicit large-value edits MUST reject empty op batches and MUST target a `text` or `blob` column.
 - `INV-LVAL-11`: Explicit large-value edit positions MUST be byte offsets valid against the current parent value.
 - `INV-LVAL-12`: Query/sync result rows MAY carry large-value handles, but a value-returning API MUST materialize a handle into application-visible bytes; encoded operation payloads and raw extent handles MUST NOT escape as returned cell bytes.
 - `INV-LVAL-13`: Large-value materialization MUST follow a single primary-parent chain; for a multi-parent merge version, the primary parent MUST be the highest-sort-key parent.
 - `INV-LVAL-14`: A node MUST park or refuse to drain commit units whose large-value op payloads reference content extents not present locally.
-- `INV-LVAL-15`: Content fetch responses MUST NOT return bytes unless the requested Extent.row matches the request row and the extent is visible/member-authorized for that row.
-- `INV-LVAL-16`: Local checkpoints MUST be versioned by (table,row,column,TxId) and survive reopen without becoming canonical replicated row state.
-- `INV-LVAL-17`: text/blob columns MUST NOT be accepted in filters, joins, ordering, or other query-planner predicates.
-- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
+- `INV-LVAL-15`: Content fetch responses MUST NOT return bytes unless the requested `Extent.row` matches the request row and the extent is visible/member-authorized for that row.
+- `INV-LVAL-16`: Local checkpoints MUST be versioned by `(table,row,column,TxId)` and survive reopen without becoming canonical replicated row state.
+- `INV-LVAL-17`: `text`/`blob` columns MUST NOT be accepted in filters, joins, ordering, or other query-planner predicates.
+- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to the merged value.
 - `INV-LVAL-19`: Large-value checkpoint placement MUST be opportunistic local derived state: after accepted ingestion or materialization reaches the configured replay-work threshold, it MUST write a checkpoint at the materialized version, and later reads MAY replay only the suffix while returning the same value as full replay.
 
 ## Details

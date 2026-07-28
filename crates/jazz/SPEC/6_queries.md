@@ -15,27 +15,47 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
-- `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
-- `INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
-- `INV-QUERY-3`: FilterOp MUST emit exactly the input deltas whose records satisfy its PredicateExpr, preserving record bytes and weights, for the supported predicate surface including...
-- `INV-QUERY-4`: SQL predicate lowering MUST reject unsupported or ill-typed predicate expressions instead of lowering them approximately.
-- `INV-QUERY-5`: MapProjectOp MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
-- `INV-QUERY-6`: UnwrapNullableOp MUST drop Nullable(None) input deltas, unwrap Nullable(Some()) to the inner value, and preserve the original delta weight.
-- `INV-QUERY-7`: Union MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (UNION ALL semantics).
-- `INV-QUERY-8`: An inner JoinOp MUST require equal-length left and right key vectors.
-- `INV-QUERY-9`: An inner JoinOp MUST emit joined records with weight leftweight \* rightweight for matching keys, including matches produced by changes arriving on either side.
-- `INV-QUERY-10`: An inner JoinOp MUST NOT double-count pairs where both matching sides changed in the same logical tick.
-- `INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
-- `INV-QUERY-12`: AntiJoin MUST output left rows only when the total right-side multiplicity for the join key is zero.
-- `INV-QUERY-13`: AntiJoin MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
-- `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as t...
-- `INV-QUERY-15`: SQL planquery MUST reject query parameters; parameterized SQL MUST go through planpreparedshape/prepared binding flow.
-- `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form column = $parameter or $parameter = column as binding predicates.
-- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
-- `INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
-- `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
-- `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-3`: FilterOp MUST emit exactly the input deltas whose records satisfy its PredicateExpr, preserving record bytes and weights, for the supported predicate surface including...
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-4`: SQL predicate lowering MUST reject unsupported or ill-typed predicate expressions instead of lowering them approximately.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-5`: MapProjectOp MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-6`: UnwrapNullableOp MUST drop Nullable(None) input deltas, unwrap Nullable(Some()) to the inner value, and preserve the original delta weight.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-7`: Union MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (UNION ALL semantics).
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-8`: An inner JoinOp MUST require equal-length left and right key vectors.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-9`: An inner JoinOp MUST emit joined records with weight leftweight \* rightweight for matching keys, including matches produced by changes arriving on either side.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-10`: An inner JoinOp MUST NOT double-count pairs where both matching sides changed in the same logical tick.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-12`: AntiJoin MUST output left rows only when the total right-side multiplicity for the join key is zero.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-13`: AntiJoin MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as t...
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-15`: SQL planquery MUST reject query parameters; parameterized SQL MUST go through planpreparedshape/prepared binding flow.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form column = $parameter or $parameter = column as binding predicates.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
+- `groove/SPEC/INVARIANTS.md::INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
 - `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `INV-QUERY-1`: `Query::validate` MUST stamp a shape with the schema version it validated against, and `ShapeId` MUST include both canonical query bytes and `SchemaVersionId`.
+- `INV-QUERY-2`: Semantically identical commutative query forms MUST produce the same `ShapeId`; semantic predicate changes MUST produce a different `ShapeId`.
+- `INV-QUERY-3`: `BindingId` MUST be derived from canonical binding bytes in parameter-name order, and bindings MUST reject missing, unknown, or type-mismatched params.
+- `INV-QUERY-4`: Shape registration MUST reject an AST whose content-addressed id does not match `shape_id`, and MUST park registrations naming an unknown schema version until the schema catalogue arrives.
+- `INV-QUERY-5`: `Subscribe` MUST name a registered shape and match inferred parameter arity; the supplied usage-site subscription id is independent from the binding id, and `Unsubscribe` MUST drop that usage subscription's settled result set.
+- `INV-QUERY-6`: `RegisterShape` followed by `Subscribe` MUST cause the serving side to attach the usage-site subscription to the matching canonical program instance `(ShapeId, ResolvedReadKey, PolicySharingKey, BindingId)` and respond with a reset-result-set `ViewUpdate`.
+- `INV-QUERY-7`: A reset-result-set `ViewUpdate` MUST replace the subscription result set while retaining per-peer version dedup state.
+- `INV-QUERY-8`: Query `ViewUpdate` result sets MUST be addressed by a canonical program instance and carry typed result membership with enough version/read-view context to distinguish content versions, deletion-register visibility, branch/historic membership, synthetic rows, and path tuples. Real-row members MUST expose the ordinary current-row `(table, row_uuid, content_tx_id)` projection only as a compatibility/payload-bundling projection, not as the complete identity.
+- `INV-QUERY-9`: Result-set material MUST include output rows plus matched include-reference and join/junction contribution rows, MUST exclude traversed non-matches and failed include paths from subscription payloads, and MUST apply read-policy/policy-atomic filtering before emission.
+- `INV-QUERY-10`: Include missing-target semantics MUST be local view/API behavior: `JoinMode::Inner` drops parents with unresolvable include targets, `JoinMode::Holes` keeps them, and `require_includes` tightens holes mode by requiring include matches without broadening payload material; sync MUST NOT drop readable parents solely because included targets are absent.
+- `INV-QUERY-11`: Local/unsettled query reads MUST return rows complete only relative to node-local visible-current knowledge.
+- `INV-QUERY-12`: Settled query reads on a subscriber MUST be answerable from the subscription's settled subscription result set; unresolvable result-set entries are an invariant violation rather than a degraded answer.
+- `INV-QUERY-13`: `tx_query` inside an open exclusive transaction MUST record a binding-sensitive `PredicateRead { shape_id, shape, binding_id, binding_values }`.
+- `INV-QUERY-14`: Exclusive predicate validation MUST reject an exclusive transaction when the shape/binding output set changed between `base_snapshot.global_base` and validation time, and MUST ignore irrelevant changes outside the shape.
+- `INV-QUERY-15`: Incremental query result-set updates MUST converge to the same typed result-member and program-fact state as a full rehydrate over the same committed state.
+- `INV-QUERY-16`: Same-drain result churn MUST be folded by net output-row outcome: enter-then-leave sends no stale add, leave-then-reenter replaces the old entry, and same-tx retract/assert churn sends no update.
+- `INV-QUERY-17`: When a row remains in a query result but its visible content version changes, result-set entries MUST track the new `TxId` even if projected cell values are identical.
+- `INV-QUERY-19`: Exclusive transaction view shipping MUST be view-atomic, not transport-atomic: a visible exclusive result for a maintained subscription view MUST include every exclusive version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
+- `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
+- `INV-QUERY-21`: Array subqueries MUST be represented separately from forward `Include` paths and MUST emit relation payload edges `(source_table, source_row_uuid, relation, target_table, target_row_uuid)` plus row batches; child filters/select/order/limit affect only child relation material, optional unreadable children are omitted with their edges while readable parents remain, and explicit requirements are the only array-subquery form that can filter root membership.
 
 ## Details
 
