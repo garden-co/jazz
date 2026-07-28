@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-LVAL-15`: Content fetch responses MUST NOT return bytes unless the requested Extent.row matches the request row and the extent is visible/member-authorized for that row.
 - `INV-LVAL-16`: Local checkpoints MUST be versioned by (table,row,column,TxId) and survive reopen without becoming canonical replicated row state.
 - `INV-LVAL-17`: text/blob columns MUST NOT be accepted in filters, joins, ordering, or other query-planner predicates.
-- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
+- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to the merged value.
 - `INV-LVAL-19`: Large-value checkpoint placement MUST be opportunistic local derived state: after accepted ingestion or materialization reaches the configured replay-work threshold, it MUST write a checkpoint at the materialized version, and later reads MAY replay only the suffix while returning the same value as full replay.
 
 ## Details

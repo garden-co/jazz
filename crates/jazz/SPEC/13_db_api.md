@@ -15,9 +15,9 @@ Invariant digest:
 - `INV-API-1`: Db MUST be the high-level runtime-typed client facade, exposing the application API and connection-driving surface without introducing different application or sync semantics; it MUST validate user Query values before executing reads or subscriptions.
 - `INV-API-2`: Db::open MUST construct a non-history-complete client. The history-complete opening path is reserved for core/Node use and MUST NOT make the ordinary application facade a fate authority.
 - `INV-API-3`: Db::read and Db::one MUST be synchronous local reads and MUST NOT wait for upstream sync; Db::all MUST use ReadOpts to choose the effective durability tier.
-- `INV-API-4`: When ReadOpts.localupdates == LocalUpdates::Immediate, the effective read tier MUST be at least DurabilityTier::Local; when it is Deferred, the effective read tier MUS...
+- `INV-API-4`: When `ReadOpts.local_updates == LocalUpdates::Immediate`, the effective read tier MUST be at least `DurabilityTier::Local`; when it is `Deferred`, the effective read tier MUST be exactly `ReadOpts.tier`.
 - `INV-API-5`: ReadOpts::default() MUST be { tier: DurabilityTier::Local, localupdates: LocalUpdates::Immediate, propagation: Propagation::Full }.
-- `INV-API-6`: Db::subscribe MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the no...
+- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes; edge/global subscriptions apply the same query semantics over their accepted-state frontiers. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the edge/global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
 - `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
   events and MUST NOT queue facade-side full-result diffs as the normal live
   subscription mechanism.
@@ -27,8 +27,8 @@ Invariant digest:
 - `INV-API-11`: Db::delete MUST lower to a mergeable commit with DeletionEvent::Deleted and make the row absent from current reads after local application.
 - `INV-API-12`: Db::restore MUST reject empty cell data with ErrorCode::Schema and MUST lower a non-empty restore to content write plus DeletionEvent::Restored.
 - `INV-API-13`: Every local write method MUST return a WriteHandle carrying the affected RowUuid, backing TxId, and local durability tier.
-- `INV-API-14`: A local write on a Db MUST be DurabilityTier::Local and queued for upstream upload; a Db (always a client) MUST NOT self-finalize. Self-finalization to Accepted/Global...
-- `INV-API-15`: WriteHandle::wait(tier) MUST return the handle TxId when the requested tier is locally satisfied, MUST return ErrorCode::WriteRejected for rejected fates, and MUST ret...
+- `INV-API-14`: A local write on a `Db` MUST be `DurabilityTier::Local` and queued for upstream upload; a `Db` (always a client) MUST NOT self-finalize. Self-finalization to `Accepted`/`Global` is a core `Node` behavior (ch. 9).
+- `INV-API-15`: `WriteHandle::wait(tier)` MUST return the handle `TxId` when the requested tier is locally satisfied, MUST return `ErrorCode::WriteRejected` for rejected fates, and MUST return `ErrorCode::NotObserved` when the requested tier is not locally observed.
 - `INV-API-16`: Transport implementations MUST be non-blocking; tryrecv() == None MUST mean no inbound message is currently staged and MUST NOT be interpreted by Db as disconnect.
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: Db::subscribe MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
@@ -38,10 +38,10 @@ Invariant digest:
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-25`: TextEdit operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to LargeValueEditOp::Insert/LargeValueEditOp::Delete.
-- `INV-API-26`: Db::mergeabletx() MUST group multiple facade writes under one mergeable TxId, and the produced commit unit MUST set Transaction.ntotalwrites to the number of grouped v...
-- `INV-API-27`: Db::exclusivetx() MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning WriteRejected when authority validation detect...
-- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
-- `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
+- `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
+- `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
+- `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` MUST evaluate permissions under the current `DbIdentity.author` without committing writes, changing local rows, or using caller-supplied identity.
+- `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 
 ## Details
 

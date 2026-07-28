@@ -12,7 +12,7 @@ identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 Invariant digest:
 
 - `INV-LENS-1`: A published SchemaVersion MUST have schema.id == schema.schema.versionid().
-- `INV-LENS-2`: A published MigrationLens MUST have lens.id == lens.contentid() and both lens.source and lens.target MUST be known SchemaVersionIds; contentid() MUST hash the canonica...
+- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload and exclude the embedded id field.
 - `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
 - `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire VersionRecord MUST expose the full SchemaVersionId.
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding SchemaVersion catalogue value arrives.
@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
 - `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
-- `INV-LENS-20`: Per-version tables MUST NOT be automatically garbage-collected; background durable migration may compact current winners but MUST NOT delete historical tables automati...
+- `INV-LENS-20`: Per-version tables MUST NOT be automatically garbage-collected; background durable migration may compact current winners but MUST NOT delete historical tables automatically.
 
 ## Details
 
