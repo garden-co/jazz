@@ -232,6 +232,9 @@ fn subscription_fields(
                 ingest_current_rows(&mut rows, table, &added);
                 ingest_current_rows(&mut rows, table, &updated);
             }
+            SubscriptionEvent::Rejected { reason } => {
+                panic!("subscription rejected unexpectedly: {reason:?}")
+            }
             SubscriptionEvent::Closed => break,
         }
     }

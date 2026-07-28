@@ -13,26 +13,26 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (NodeUuid, RowUuid, SchemaVersionId, MigrationLensId, BranchId, AuthorId) in wire byte order; node-local alias t...
-- `INV-DATA-2`: NodeAlias and SchemaVersionAlias MUST be node-local storage aliases allocated in jazznodes and jazzschemaversions; all egress from stored rows MUST resolve aliases bac...
-- `INV-DATA-3`: AuthorId::SYSTEM MUST equal the UUIDv5 derivation Uuid::newv5(&Uuid::NAMESPACEOID, b"jazz:system-author").
-- `INV-DATA-4`: TxTime MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
-- `INV-DATA-5`: A TxId MUST identify a transaction as (time: TxTime, node: NodeUuid); stored transaction rows MUST use primary key (time, nodeid) where nodeid is the local alias for t...
-- `INV-DATA-6`: SchemaVersionId MUST be UUIDv5 over JazzSchema::canonicalbytes() in namespace SCHEMAVERSIONNAMESPACE.
-- `INV-DATA-7`: Canonical schema identity MUST change when a column's MergeStrategy changes.
-- `INV-DATA-8`: Canonical schema identity MUST distinguish plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob.
-- `INV-DATA-9`: A declared MergeStrategy::Counter MUST be accepted only on non-nullable integer columns of type U8, U16, U32, or U64.
-- `INV-DATA-10`: A declared MergeStrategy::Counter MUST NOT be used with a large-value column.
-- `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing TableSchema.
-- `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete JazzSchema.
-- `INV-DATA-13`: ColumnSchema::text and ColumnSchema::blob MUST lower to nullable groove Bytes user cells in history storage.
-- `INV-DATA-14`: jazz{table}history MUST have primary key (rowuuid, txtime, txnodeid), include schemaversion, parents, nullable user{col} cells, and have bytx(txtime, txnodeid, rowuuid).
-- `INV-DATA-15`: jazz{table}register MUST have primary key (rowuuid, txtime, txnodeid), include schemaversion, parents, and non-null deletion, and have bytx(txtime, txnodeid, rowuuid).
-- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only rowuuid, parents, nullable deletion, and nullable user{col} cells; receiver-local currentness and...
-- `INV-DATA-17`: A stored row version MUST belong to exactly one layer: content versions in jazz{table}history with user cells, deletion-register versions in jazz{table}register with d...
-- `INV-DATA-18`: Per-layer global-current tables MUST be keyed by rowuuid; content global-current MUST carry all user columns and index only references plus explicitly indexed columns.
-- `INV-DATA-19`: jazzglobalchanges MUST be keyed by (tablename, rowuuid, layer, globalseq) and MUST expose index byglobalseq(globalseq, tablename, rowuuid, layer).
-- `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
+- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `BranchId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
+- `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
+- `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
+- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
+- `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
+- `INV-DATA-8`: Canonical schema identity MUST distinguish plain `Bytes`, `LargeValueKind::Text`, and `LargeValueKind::Blob`.
+- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns of type `U8`, `U16`, `U32`, or `U64`.
+- `INV-DATA-10`: A declared `MergeStrategy::Counter` MUST NOT be used with a large-value column.
+- `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing `TableSchema`.
+- `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
+- `INV-DATA-13`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower to nullable groove `Bytes` user cells in history storage.
+- `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
+- `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
+- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.
+- `INV-DATA-17`: A stored row version MUST belong to exactly one layer: content versions in `jazz_{table}_history` with user cells, deletion-register versions in `jazz_{table}_register` with `_deletion` and no user cells.
+- `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
+- `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
+- `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state and change history, and large-value content.
 
 ## Details
 
@@ -97,10 +97,16 @@ Large-value columns are declared as `text` or `blob`
 (`ColumnSchema::text`, `ColumnSchema::blob`). At this layer, they lower to
 nullable groove `Bytes` cells; ch. 12 owns the op-log mechanics for their large
 content bytes. The default merge strategy is column last-writer-wins by HLC
-(`MergeStrategy::Lww`). The one implemented non-LWW strategy is a counter
-(`MergeStrategy::Counter`), and it is constrained: it is accepted only on a
-non-nullable integer column (`U8`/`U16`/`U32`/`U64`) and never on a large-value
-column (`INV-DATA-9`, `INV-DATA-10`).
+(`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
+integer column (`U8`/`U16`/`U32`/`U64`) and never on a large-value column
+(`INV-DATA-9`, `INV-DATA-10`).
+
+**Implementation status.** The reference implementation currently provides
+`MergeStrategy::Counter` as its non-LWW built-in strategy. Its declaration
+constraints are covered by
+`schema::counter_merge_strategy_rejects_string_columns`,
+`schema::counter_merge_strategy_rejects_nullable_integer_columns`, and
+`schema::counter_merge_strategy_rejects_large_value_columns`.
 
 _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
@@ -143,6 +149,10 @@ replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
+**Implementation status.** The reference codec currently requires sender and
+receiver row descriptors to match exactly. Compatibility across differing
+descriptors is not yet a settled contract; see the open question below.
+
 ### 2.6 Storage lowering
 
 Storage lowering gives the logical schema a fixed groove representation
@@ -157,11 +167,12 @@ tables are node-local derived state (§2.1): they are maintained from accepted
 fates and never shipped. The exact table set, primary keys, and indexes are the
 reference in §2.7.
 
-### 2.7 Reference: identity encoding & storage lowering
+### 2.7 Reference implementation: identity encoding & storage lowering
 
-This section is the normative identity and storage-format detail referenced by
-§2.2 and §2.6. It is intended for implementers and for debugging
-identity/storage formats.
+This section records the current reference implementation's identity and storage
+layout. It is useful for implementers and debugging, but exact table names,
+primary keys, and indexes are not the portable data-model contract. The layout
+is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
 **Identity encoding.** `TxTime` packs physical milliseconds in the high 48 bits
 and a logical counter in the low 16; construction rejects values outside those
@@ -215,9 +226,9 @@ and sync machinery.
   is unique, but `schema.rs::nodes_table` declares only the `id` primary key with
   no uniqueness constraint. Decide whether UUID uniqueness is a normative
   invariant with storage-level enforcement, or the README prose is stale.
-- 🔶 **Mixed-version row descriptors.** Mixed-version sync is owned by ch. 8 /
-  ch. 10; the implementation currently requires sender and receiver row
-  descriptors to match exactly.
+- 🔶 **Mixed-version row descriptors.** What compatibility guarantees, if any,
+  must sync provide when sender and receiver row descriptors differ? Ch. 8 /
+  ch. 10 own the answer.
 - 🔶 **Visible-row common-case encoding.** The old visible-row notes and later
   storage TODO both called out duplication between current visible entries and
   retained history. Decide the compact encoding for singleton frontiers, empty

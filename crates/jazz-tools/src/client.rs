@@ -49,7 +49,10 @@ use uuid::Uuid;
 
 #[cfg(feature = "rocksdb")]
 use crate::ClientStorage;
-use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
+use crate::{
+    AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
+    SubscriptionStream, SubscriptionStreamItem,
+};
 
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(feature = "rocksdb")]
@@ -642,7 +645,7 @@ impl ClientDb {
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
-        tx: mpsc::UnboundedSender<OrderedRowDelta>,
+        tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
         ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
@@ -1207,7 +1210,7 @@ impl ClientDbInner {
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
-        tx: mpsc::UnboundedSender<OrderedRowDelta>,
+        tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -1225,41 +1228,57 @@ impl ClientDbInner {
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<jazz::node::CurrentRow> = Vec::new();
-            while let Some(CoreSubscriptionEvent::Delta {
-                reset,
-                added,
-                updated,
-                removed,
-                ..
-            }) = stream.next_event().await
-            {
-                let previous_rows: Vec<ObjectId> = current_rows
-                    .iter()
-                    .map(|row| ObjectId::from_uuid(row.row_uuid().0))
-                    .collect();
-                JazzClient::apply_core_subscription_rows(
-                    &mut current_rows,
-                    reset,
-                    &added,
-                    &updated,
-                    &removed,
-                );
-                inner.borrow_mut().remember_rows(&table, &current_rows);
-                let delta = if reset {
-                    JazzClient::core_subscription_reset_delta(&db, &previous_rows, &current_rows)
-                } else {
-                    JazzClient::core_subscription_change_delta(
-                        &db,
-                        &current_rows,
-                        &added,
-                        &updated,
-                        &removed,
-                    )
-                };
-                let Ok(delta) = delta else {
-                    break;
-                };
-                let _ = tx.send(delta);
+            while let Some(event) = stream.next_event().await {
+                match event {
+                    CoreSubscriptionEvent::Delta {
+                        reset,
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    } => {
+                        let previous_rows: Vec<ObjectId> = current_rows
+                            .iter()
+                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .collect();
+                        JazzClient::apply_core_subscription_rows(
+                            &mut current_rows,
+                            reset,
+                            &added,
+                            &updated,
+                            &removed,
+                        );
+                        inner.borrow_mut().remember_rows(&table, &current_rows);
+                        let delta = if reset {
+                            JazzClient::core_subscription_reset_delta(
+                                &db,
+                                &previous_rows,
+                                &current_rows,
+                            )
+                        } else {
+                            JazzClient::core_subscription_change_delta(
+                                &db,
+                                &current_rows,
+                                &added,
+                                &updated,
+                                &removed,
+                            )
+                        };
+                        let Ok(delta) = delta else {
+                            break;
+                        };
+                        let _ = tx.send(SubscriptionStreamItem::Delta(delta));
+                    }
+                    CoreSubscriptionEvent::Rejected { reason } => {
+                        let reason = match reason {
+                            jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
+                                detail,
+                            } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
+                        };
+                        let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+                    }
+                    CoreSubscriptionEvent::Closed => break,
+                }
             }
         });
         Ok(())
@@ -2381,7 +2400,7 @@ impl JazzClient {
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         {
-            let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
+            let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
             let core_query = self.core_query(&query)?;
             self.db
                 .subscribe(

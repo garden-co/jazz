@@ -27,7 +27,7 @@ Invariant digest:
 - `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
-- `INV-RLS-14`: Policy compilation and claim binding MUST treat unsupported authorization forms and unresolved operands as denial, not allowance.
+- `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
@@ -59,16 +59,21 @@ operand is the authenticated `AuthorId`, not a caller-supplied parameter
 it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
 
-Policy evaluation is **fail-closed**: an unsupported predicate/operator form or
-an unresolved operand denies rather than allows (`INV-RLS-14`). Direct policy
-evaluation supports equality and inequality, membership/containment predicates,
-boolean composition, columns, literals, and authenticated/admission-controlled
-claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over column / literal /
-`claim(...)`. `claim("sub")` resolves to the authenticated `AuthorId`.
-Additional claim names are runtime session claims supplied by the trusted
+Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
+a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
+this is enforced during policy compilation and claim binding: unsupported
+authorization forms compile to no authorized rows in
+`NodeState::policy_filtered_current_source_graph_via_query_engine`, and
+`NodeState::program_binding_for_shape_and_policy` calls `prepared_claim_value`,
+which refuses an unresolved claim rather than binding it as an allowance. The
+compiler currently lowers equality and inequality, membership/containment,
+boolean composition, columns, literals, and authenticated,
+admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
+column / literal / `claim(...)`. `claim("sub")` resolves to the authenticated
+`AuthorId`. Additional claim names are session claims supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
-forms outside the supported direct-evaluation subset, such as range and null
-checks, deny until explicitly supported.
+forms the compiler cannot authorize, such as range and null checks, deny until
+explicitly supported.
 
 At the public policy DSL boundary, scalar session-claim checks lower into that
 same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers

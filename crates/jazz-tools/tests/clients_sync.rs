@@ -12,7 +12,7 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 #[cfg(feature = "client")]
-use jazz_tools::{ObjectId, SubscriptionStream};
+use jazz_tools::{ObjectId, SubscriptionStream, SubscriptionStreamItem};
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 
@@ -56,12 +56,15 @@ where
         let now = tokio::time::Instant::now();
         assert!(now < deadline, "timed out waiting for {description}");
 
-        tokio::time::timeout(deadline - now, stream.next())
+        let item = tokio::time::timeout(deadline - now, stream.next())
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for subscription event: {description}"))
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });
+        if let SubscriptionStreamItem::Rejected { reason } = item {
+            panic!("subscription rejected while waiting for {description}: {reason:?}");
+        }
 
         let rows = client
             .query(query.clone(), None)
@@ -201,14 +204,22 @@ async fn jazz_tools_cli_two_clients_sync_values() {
                 .await
                 .expect("subscribe client b");
 
-            tokio::time::timeout(Duration::from_secs(5), stream_a.next())
+            let event_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next())
                 .await
                 .expect("client a subscription should open")
                 .expect("client a subscription stream should stay open");
-            tokio::time::timeout(Duration::from_secs(5), stream_b.next())
+            assert!(
+                matches!(event_a, SubscriptionStreamItem::Delta(_)),
+                "client a subscription should open with a delta, got {event_a:?}"
+            );
+            let event_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
                 .await
                 .expect("client b subscription should open")
                 .expect("client b subscription stream should stay open");
+            assert!(
+                matches!(event_b, SubscriptionStreamItem::Delta(_)),
+                "client b subscription should open with a delta, got {event_b:?}"
+            );
 
             client_a
                 .insert(

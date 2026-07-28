@@ -238,7 +238,9 @@ where
                 self.apply_subscribe(subscribe)?;
                 Ok(Vec::new())
             }
-            SyncMessage::SubscribeRejected { .. } => Ok(Vec::new()),
+            SyncMessage::SubscribeRejected { .. } => Err(Error::UnsupportedSyncMessage(
+                "subscription rejection requires subscription stream context",
+            )),
             SyncMessage::Unsubscribe { subscription } => {
                 self.apply_unsubscribe(subscription);
                 Ok(Vec::new())
