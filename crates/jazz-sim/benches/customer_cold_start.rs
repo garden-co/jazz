@@ -509,7 +509,79 @@ struct RunSummary {
     dominant_child_opened_ms: u128,
     dominant_child_materialized_ms: u128,
     served_view_updates: Vec<ViewUpdateSummary>,
+    attribution: AttributionSummary,
     timelines: Vec<SubscriptionTimeline>,
+}
+
+/// Attribution for the disabled `cold-settle-attribution` bench feature.
+///
+/// `probe_*` is benchmark-only work in the in-memory transport. The real wire
+/// adapter is deliberately not used by this harness; `preflight_*` is the
+/// sender's required sizing work before it can decide whether to chunk.
+#[derive(Clone, Default)]
+struct AttributionSummary {
+    core_tick_ns: u64,
+    relay_tick_ns: u64,
+    client_tick_ns: u64,
+    probe_calls: u64,
+    probe_serialize_ns: u64,
+    probe_total_ns: u64,
+    probe_core_to_relay_calls: u64,
+    probe_core_to_relay_total_ns: u64,
+    probe_relay_to_client_calls: u64,
+    probe_relay_to_client_total_ns: u64,
+    preflight_payload_encodes: u64,
+    preflight_payload_encode_ns: u64,
+    preflight_payload_bytes: u64,
+    preflight_frame_encodes: u64,
+    preflight_frame_encode_ns: u64,
+    preflight_frame_bytes: u64,
+    view_updates_fit: u64,
+    view_updates_split: u64,
+    chunks_emitted: u64,
+    candidate_builds: u64,
+    candidate_build_ns: u64,
+    candidate_encoded_bytes: u64,
+    selected_payloads: u64,
+    selected_payload_bytes: u64,
+    core_operators: OperatorAttribution,
+    relay_operators: OperatorAttribution,
+    client_operators: OperatorAttribution,
+}
+
+#[derive(Clone, Default)]
+struct OperatorAttribution {
+    map_calls: [u64; 4],
+    map_input_records: [u64; 4],
+    map_output_records: [u64; 4],
+    join_calls: [u64; 4],
+    join_left_records: [u64; 4],
+    join_right_records: [u64; 4],
+    join_output_records: [u64; 4],
+}
+
+#[cfg(feature = "cold-settle-attribution")]
+impl OperatorAttribution {
+    fn add_snapshot_delta(
+        &mut self,
+        before: jazz::groove::cold_settle_attribution::Snapshot,
+        after: jazz::groove::cold_settle_attribution::Snapshot,
+    ) {
+        for index in 0..4 {
+            self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
+            self.map_input_records[index] +=
+                after.map_input_records[index] - before.map_input_records[index];
+            self.map_output_records[index] +=
+                after.map_output_records[index] - before.map_output_records[index];
+            self.join_calls[index] += after.join_calls[index] - before.join_calls[index];
+            self.join_left_records[index] +=
+                after.join_left_records[index] - before.join_left_records[index];
+            self.join_right_records[index] +=
+                after.join_right_records[index] - before.join_right_records[index];
+            self.join_output_records[index] +=
+                after.join_output_records[index] - before.join_output_records[index];
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -560,7 +632,32 @@ struct TransportMetrics {
     compress_decode_ns: Cell<u64>,
     known_state_subscribes: Cell<u64>,
     codec_probe: RefCell<CodecProbe>,
+    #[cfg(feature = "cold-settle-attribution")]
+    attribution: RefCell<ProbeAttribution>,
     view_updates_by_subscription: RefCell<BTreeMap<SubscriptionKey, ViewUpdateSummary>>,
+}
+
+#[cfg(feature = "cold-settle-attribution")]
+#[derive(Clone, Default)]
+struct ProbeAttribution {
+    calls: u64,
+    serialize_ns: u64,
+    total_ns: u64,
+}
+
+#[cfg(feature = "cold-settle-attribution")]
+impl ProbeAttribution {
+    fn record(&mut self, measurement: &EncodedMessageMeasurement, total_ns: u64) {
+        self.calls += 1;
+        self.serialize_ns += measurement.serialize_ns;
+        self.total_ns += total_ns;
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.serialize_ns += other.serialize_ns;
+        self.total_ns += other.total_ns;
+    }
 }
 
 #[derive(Default)]
@@ -680,6 +777,8 @@ impl Transport for DuplexTransport {
                     .set(self.metrics.known_state_subscribes.get() + 1);
             }
         }
+        #[cfg(feature = "cold-settle-attribution")]
+        let probe_start = Instant::now();
         let measurement = encoded_message_measurement(&message);
         self.metrics
             .bytes
@@ -693,6 +792,11 @@ impl Transport for DuplexTransport {
         if let Some(payload) = measurement.raw_payload.as_deref() {
             self.metrics.codec_probe.borrow_mut().record(payload);
         }
+        #[cfg(feature = "cold-settle-attribution")]
+        self.metrics
+            .attribution
+            .borrow_mut()
+            .record(&measurement, probe_start.elapsed().as_nanos() as u64);
         self.outbound.borrow_mut().push_back(message);
         Ok(())
     }
@@ -1306,6 +1410,11 @@ fn run_connect_and_subscribe(
     config: &Config,
 ) -> RunSummary {
     alloc_metrics::reset_and_start();
+    #[cfg(feature = "cold-settle-attribution")]
+    {
+        jazz::cold_settle_attribution::reset();
+        jazz::groove::cold_settle_attribution::reset();
+    }
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
@@ -1347,6 +1456,8 @@ fn run_connect_and_subscribe(
 
     let settle_start = Instant::now();
     let mut ticks = 0_usize;
+    #[allow(unused_mut)]
+    let mut attribution = AttributionSummary::default();
     while !subscriptions
         .iter()
         .all(|sub| sub.materialized_ms.is_some() && sub.rows.len() == sub.expected)
@@ -1370,17 +1481,56 @@ fn run_connect_and_subscribe(
         }
         let trace_ticks = std::env::var_os("JAZZ_CUSTOMER_TRACE_TICKS").is_some();
         let before_core_to_relay = relay_core.right_to_left.messages.get();
+        #[cfg(feature = "cold-settle-attribution")]
+        let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
+        #[cfg(feature = "cold-settle-attribution")]
+        let core_tick_start = Instant::now();
         seeded.core.tick().unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
+        }
+        #[cfg(feature = "cold-settle-attribution")]
+        attribution.core_operators.add_snapshot_delta(
+            core_operators_before,
+            jazz::groove::cold_settle_attribution::snapshot(),
+        );
         let after_core_to_relay = relay_core.right_to_left.messages.get();
         let relay_inbound_before = relay_core.right_inbound.borrow().len();
         let relay_to_core_before = relay_core.left_to_right.messages.get();
         let relay_to_client_before = client_relay.right_to_left.messages.get();
+        #[cfg(feature = "cold-settle-attribution")]
+        let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
+        #[cfg(feature = "cold-settle-attribution")]
+        let relay_tick_start = Instant::now();
         relay.db.tick().unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
+        }
+        #[cfg(feature = "cold-settle-attribution")]
+        attribution.relay_operators.add_snapshot_delta(
+            relay_operators_before,
+            jazz::groove::cold_settle_attribution::snapshot(),
+        );
         let relay_to_core_after = relay_core.left_to_right.messages.get();
         let relay_to_client_after = client_relay.right_to_left.messages.get();
         let client_inbound_before = client_relay.right_inbound.borrow().len();
         let client_to_relay_before = client_relay.left_to_right.messages.get();
+        #[cfg(feature = "cold-settle-attribution")]
+        let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
+        #[cfg(feature = "cold-settle-attribution")]
+        let client_tick_start = Instant::now();
         client.db.tick().unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            attribution.client_tick_ns += client_tick_start.elapsed().as_nanos() as u64;
+        }
+        #[cfg(feature = "cold-settle-attribution")]
+        attribution.client_operators.add_snapshot_delta(
+            client_operators_before,
+            jazz::groove::cold_settle_attribution::snapshot(),
+        );
         let client_to_relay_after = client_relay.left_to_right.messages.get();
         if trace_ticks {
             eprintln!(
@@ -1402,8 +1552,34 @@ fn run_connect_and_subscribe(
         // the hot relay declares known state when it reconnects upstream. Drive
         // one post-readiness relay/core cycle so the queued coverage subscribe
         // reaches the core without changing the client readiness condition.
+        #[cfg(feature = "cold-settle-attribution")]
+        let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
+        #[cfg(feature = "cold-settle-attribution")]
+        let relay_tick_start = Instant::now();
         relay.db.tick().unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
+        }
+        #[cfg(feature = "cold-settle-attribution")]
+        attribution.relay_operators.add_snapshot_delta(
+            relay_operators_before,
+            jazz::groove::cold_settle_attribution::snapshot(),
+        );
+        #[cfg(feature = "cold-settle-attribution")]
+        let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
+        #[cfg(feature = "cold-settle-attribution")]
+        let core_tick_start = Instant::now();
         seeded.core.tick().unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
+        }
+        #[cfg(feature = "cold-settle-attribution")]
+        attribution.core_operators.add_snapshot_delta(
+            core_operators_before,
+            jazz::groove::cold_settle_attribution::snapshot(),
+        );
     }
     let materialize_start = Instant::now();
     for sub in &subscriptions {
@@ -1492,6 +1668,42 @@ fn run_connect_and_subscribe(
         alloc_snapshot.bytes as f64 / rows_materialized as f64
     };
     let server_to_client_probe = client_relay.right_to_left.codec_probe.borrow();
+    #[cfg(feature = "cold-settle-attribution")]
+    {
+        let mut all_probe = ProbeAttribution::default();
+        let core_to_relay_probe = relay_core.right_to_left.attribution.borrow().clone();
+        let relay_to_client_probe = client_relay.right_to_left.attribution.borrow().clone();
+        for metrics in [
+            &relay_core.left_to_right,
+            &relay_core.right_to_left,
+            &client_relay.left_to_right,
+            &client_relay.right_to_left,
+        ] {
+            all_probe.add_assign(&metrics.attribution.borrow());
+        }
+        attribution.probe_calls = all_probe.calls;
+        attribution.probe_serialize_ns = all_probe.serialize_ns;
+        attribution.probe_total_ns = all_probe.total_ns;
+        attribution.probe_core_to_relay_calls = core_to_relay_probe.calls;
+        attribution.probe_core_to_relay_total_ns = core_to_relay_probe.total_ns;
+        attribution.probe_relay_to_client_calls = relay_to_client_probe.calls;
+        attribution.probe_relay_to_client_total_ns = relay_to_client_probe.total_ns;
+        let counters = jazz::cold_settle_attribution::snapshot();
+        attribution.preflight_payload_encodes = counters.preflight_payload_encodes;
+        attribution.preflight_payload_encode_ns = counters.preflight_payload_encode_ns;
+        attribution.preflight_payload_bytes = counters.preflight_payload_bytes;
+        attribution.preflight_frame_encodes = counters.preflight_frame_encodes;
+        attribution.preflight_frame_encode_ns = counters.preflight_frame_encode_ns;
+        attribution.preflight_frame_bytes = counters.preflight_frame_bytes;
+        attribution.view_updates_fit = counters.view_updates_fit;
+        attribution.view_updates_split = counters.view_updates_split;
+        attribution.chunks_emitted = counters.chunks_emitted;
+        attribution.candidate_builds = counters.candidate_builds;
+        attribution.candidate_build_ns = counters.candidate_build_ns;
+        attribution.candidate_encoded_bytes = counters.candidate_encoded_bytes;
+        attribution.selected_payloads = counters.selected_payloads;
+        attribution.selected_payload_bytes = counters.selected_payload_bytes;
+    }
     RunSummary {
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -1565,6 +1777,7 @@ fn run_connect_and_subscribe(
         dominant_child_opened_ms,
         dominant_child_materialized_ms,
         served_view_updates: summarized_view_updates(&client_relay.right_to_left),
+        attribution,
         timelines,
     }
 }
@@ -2172,6 +2385,70 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
                 .collect(),
         ),
     );
+    let attribution = &summary.attribution;
+    let operator_json = |operators: &OperatorAttribution| {
+        json!({
+            "map_project": {
+                "calls": operators.map_calls,
+                "input_records": operators.map_input_records,
+                "output_records": operators.map_output_records,
+            },
+            "keyed_join": {
+                "calls": operators.join_calls,
+                "left_records": operators.join_left_records,
+                "right_records": operators.join_right_records,
+                "output_records": operators.join_output_records,
+            },
+        })
+    };
+    fields.insert(
+        "cold_settle_attribution".to_owned(),
+        json!({
+            "semantic_tick": {
+                "core_us": attribution.core_tick_ns / 1_000,
+                "relay_us": attribution.relay_tick_ns / 1_000,
+                "client_us": attribution.client_tick_ns / 1_000,
+            },
+            "probe_only_in_process_transport": {
+                "calls": attribution.probe_calls,
+                "postcard_serialize_us": attribution.probe_serialize_ns / 1_000,
+                "total_us": attribution.probe_total_ns / 1_000,
+                "core_to_relay": {
+                    "calls": attribution.probe_core_to_relay_calls,
+                    "total_us": attribution.probe_core_to_relay_total_ns / 1_000,
+                },
+                "relay_to_client": {
+                    "calls": attribution.probe_relay_to_client_calls,
+                    "total_us": attribution.probe_relay_to_client_total_ns / 1_000,
+                },
+                "real_wire_adapter_encodes": 0,
+            },
+            "sender_preflight_sizing": {
+                "payload_encodes": attribution.preflight_payload_encodes,
+                "payload_encode_us": attribution.preflight_payload_encode_ns / 1_000,
+                "payload_bytes": attribution.preflight_payload_bytes,
+                "frame_encodes": attribution.preflight_frame_encodes,
+                "frame_encode_us": attribution.preflight_frame_encode_ns / 1_000,
+                "frame_bytes": attribution.preflight_frame_bytes,
+            },
+            "oversized_view_update": {
+                "fit_without_split": attribution.view_updates_fit,
+                "split": attribution.view_updates_split,
+                "chunks_emitted": attribution.chunks_emitted,
+                "candidate_builds": attribution.candidate_builds,
+                "candidate_build_us": attribution.candidate_build_ns / 1_000,
+                "candidate_encoded_bytes": attribution.candidate_encoded_bytes,
+                "selected_payloads": attribution.selected_payloads,
+                "selected_payload_bytes": attribution.selected_payload_bytes,
+            },
+            "operator_cardinality": {
+                "bucket_order": ["tick_other", "tick_dominant_child", "hydrate_other", "hydrate_dominant_child"],
+                "core_to_relay": operator_json(&attribution.core_operators),
+                "relay_to_client": operator_json(&attribution.relay_operators),
+                "client": operator_json(&attribution.client_operators),
+            },
+        }),
+    );
     emit_json_line(
         "customer_cold_start",
         &JsonValue::Object(fields).to_string(),
@@ -2180,15 +2457,24 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
 
 struct EncodedMessageMeasurement {
     bytes: u64,
+    #[cfg(feature = "cold-settle-attribution")]
+    serialize_ns: u64,
     compress_encode_ns: u64,
     compress_decode_ns: u64,
     raw_payload: Option<Vec<u8>>,
 }
 
 fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasurement {
-    let Ok(bytes) = postcard::to_allocvec(message) else {
+    #[cfg(feature = "cold-settle-attribution")]
+    let serialize_start = Instant::now();
+    let encoded = postcard::to_allocvec(message);
+    #[cfg(feature = "cold-settle-attribution")]
+    let serialize_ns = serialize_start.elapsed().as_nanos() as u64;
+    let Ok(bytes) = encoded else {
         return EncodedMessageMeasurement {
             bytes: 0,
+            #[cfg(feature = "cold-settle-attribution")]
+            serialize_ns,
             compress_encode_ns: 0,
             compress_decode_ns: 0,
             raw_payload: None,
@@ -2206,6 +2492,8 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
             let decode_ns = decode_start.elapsed().as_nanos() as u64;
             EncodedMessageMeasurement {
                 bytes: compressed.len() as u64,
+                #[cfg(feature = "cold-settle-attribution")]
+                serialize_ns,
                 compress_encode_ns: encode_ns,
                 compress_decode_ns: decode_ns,
                 raw_payload,
@@ -2213,6 +2501,8 @@ fn encoded_message_measurement(message: &SyncMessage) -> EncodedMessageMeasureme
         }
         Err(_) => EncodedMessageMeasurement {
             bytes: 0,
+            #[cfg(feature = "cold-settle-attribution")]
+            serialize_ns,
             compress_encode_ns: encode_ns,
             compress_decode_ns: 0,
             raw_payload,
