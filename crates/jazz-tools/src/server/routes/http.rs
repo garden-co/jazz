@@ -827,7 +827,7 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    let mut schema_with_permissions = match state
+    let target_schema = match state
         .catalogue
         .known_schema(&state.catalogue_store, &schema_hash)
     {
@@ -852,6 +852,7 @@ pub(super) async fn publish_permissions_handler(
                 .into_response();
         }
     };
+    let mut schema_with_permissions = target_schema.clone();
 
     let permissions = request
         .permissions
@@ -873,24 +874,39 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    let public_schema_convert = match state.core_server_shell().is_some()
+    let shell_runtime_schema_convert = match state.core_server_shell().is_some()
         || state.core_server_shell_storage_config.is_some()
     {
         true => {
-            match crate::server::public_schema_convert::convert_public_schema(
-                &schema_with_permissions,
-            ) {
-                Ok(schema) => Some(schema),
-                Err(err) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::bad_request(format!(
-                            "permissions schema is not supported by the server shell: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-            }
+            let raw_schema =
+                match crate::server::public_schema_convert::convert_public_schema(&target_schema) {
+                    Ok(schema) => schema,
+                    Err(err) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::bad_request(format!(
+                                "target schema is not supported by the server shell: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                };
+            let permissions_schema =
+                match crate::server::public_schema_convert::convert_public_schema(
+                    &schema_with_permissions,
+                ) {
+                    Ok(schema) => schema,
+                    Err(err) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::bad_request(format!(
+                                "permissions schema is not supported by the server shell: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                };
+            Some((raw_schema, permissions_schema))
         }
         false => None,
     };
@@ -906,10 +922,10 @@ pub(super) async fn publish_permissions_handler(
             .current_permissions_head(&state.catalogue_store)
         {
             Ok(head) => {
-                if let Some(schema) = public_schema_convert {
+                if let Some((raw_schema, permissions_schema)) = shell_runtime_schema_convert {
                     let core_server_shell = match state.core_server_shell() {
                         Some(core_server_shell) => core_server_shell,
-                        None => match state.start_core_server_shell(schema.clone()) {
+                        None => match state.start_core_server_shell(raw_schema.clone()) {
                             Ok(core_server_shell) => core_server_shell,
                             Err(err) => {
                                 return (
@@ -922,7 +938,16 @@ pub(super) async fn publish_permissions_handler(
                             }
                         },
                     };
-                    if let Err(err) = core_server_shell.publish_schema(schema).await {
+                    if let Err(err) = core_server_shell.publish_schema(raw_schema).await {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse::internal(format!(
+                                "failed to publish target schema to server shell: {err}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                    if let Err(err) = core_server_shell.publish_schema(permissions_schema).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::internal(format!(

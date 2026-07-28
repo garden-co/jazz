@@ -212,6 +212,10 @@ required-features = ["test"]
 name = "policy_branch_closure"
 required-features = ["test"]
 
+[[test]]
+name = "rename_write_authorization"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

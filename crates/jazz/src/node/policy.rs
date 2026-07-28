@@ -60,13 +60,7 @@ where
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
         };
-        self.write_policy_query_allows_insert_candidate(
-            &table,
-            &policy,
-            version.row_uuid(),
-            &cells,
-            author,
-        )
+        self.policy_allows_insert_candidate(&table, &policy, version.row_uuid(), author, &cells)
     }
 
     pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
@@ -193,7 +187,7 @@ where
         _source_table: &TableSchema,
         mut cells: BTreeMap<String, Value>,
     ) -> Result<(TableSchema, BTreeMap<String, Value>), Error> {
-        let target = self.catalogue.current_schema_version_id;
+        let target = self.policy_target_schema_for_source(source, table)?;
         if source == target {
             return Ok((self.table_in_schema(table, target)?, cells));
         }
@@ -229,9 +223,79 @@ where
         tier: DurabilityTier,
     ) -> Result<Option<CurrentRow>, Error> {
         Ok(self
-            .current_rows_for_schema(&table.name, self.catalogue.current_schema_version_id, tier)?
+            .current_rows_for_schema(
+                &table.name,
+                self.policy_schema_for_table_name(&table.name),
+                tier,
+            )?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid))
+    }
+
+    fn policy_write_table(&self, table: &str) -> Result<TableSchema, Error> {
+        self.table_in_schema(table, self.policy_schema_for_table_name(table))
+    }
+
+    fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
+        let write_schema = self.catalogue.current_write_schema.schema;
+        if self
+            .table_in_schema(table, write_schema)
+            .is_ok_and(|table| table.write_policies.any().is_some())
+        {
+            write_schema
+        } else {
+            self.catalogue.current_schema_version_id
+        }
+    }
+
+    fn policy_target_schema_for_source(
+        &mut self,
+        source: SchemaVersionId,
+        table: &str,
+    ) -> Result<SchemaVersionId, Error> {
+        let write_schema = self.catalogue.current_write_schema.schema;
+        if self.source_reaches_write_policy_table(source, write_schema, table)? {
+            Ok(write_schema)
+        } else {
+            Ok(self.catalogue.current_schema_version_id)
+        }
+    }
+
+    fn source_reaches_write_policy_table(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        table: &str,
+    ) -> Result<bool, Error> {
+        if source == target {
+            return Ok(self
+                .table_in_schema(table, target)
+                .is_ok_and(|table| table.write_policies.any().is_some()));
+        }
+
+        if let Some(path) =
+            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
+        {
+            let mut cells = BTreeMap::new();
+            let target_table = apply_compiled_lens_path(&path, &mut cells);
+            return Ok(self
+                .table_in_schema(&target_table, target)
+                .is_ok_and(|table| table.write_policies.any().is_some()));
+        }
+
+        if let Some(path) =
+            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
+        {
+            let mut cells = BTreeMap::new();
+            let target_table = apply_compiled_lens_path(&path, &mut cells);
+            return Ok(self
+                .table_in_schema(&target_table, target)
+                .is_ok_and(|table| table.write_policies.any().is_some()));
+        }
+
+        Ok(self
+            .table_in_schema(table, target)
+            .is_ok_and(|table| table.write_policies.any().is_some()))
     }
 
     fn policy_delete_subject_row(
@@ -249,8 +313,7 @@ where
     ) -> Result<Option<CurrentRow>, Error> {
         for parent in version.parents() {
             for parent_version in self.query_versions_for_tx(parent)? {
-                if parent_version.table() != table.name
-                    || parent_version.row_uuid() != version.row_uuid()
+                if parent_version.row_uuid() != version.row_uuid()
                     || parent_version.layer() != VersionLayer::Content
                 {
                     continue;
@@ -585,7 +648,7 @@ where
         column_value: &mut dyn FnMut(&str) -> Option<Value>,
     ) -> Result<bool, Error> {
         for join in &policy.joins {
-            let join_table = self.table(&join.table)?.clone();
+            let join_table = self.policy_write_table(&join.table)?;
             let target = self.policy_join_target_value(
                 table,
                 join,
@@ -614,7 +677,7 @@ where
             let mut found = false;
             for row in self.current_rows_for_schema(
                 &join.table,
-                self.catalogue.current_schema_version_id,
+                self.catalogue.current_write_schema.schema,
                 DurabilityTier::Local,
             )? {
                 let reaches_row = policy_join_row_value(&row, &join_table, &join.on_column)
@@ -652,7 +715,7 @@ where
             else {
                 return Ok(false);
             };
-            let parent_table = self.table(&parent_table_name)?.clone();
+            let parent_table = self.policy_write_table(&parent_table_name)?;
             let Some(parent_row) =
                 self.policy_current_row(&parent_table, RowUuid(parent_row_uuid), tier)?
             else {
@@ -691,7 +754,7 @@ where
             else {
                 return Ok(false);
             };
-            let parent_table = self.table(&parent_table_name)?.clone();
+            let parent_table = self.policy_write_table(&parent_table_name)?;
             let Some(parent_row) = self.policy_current_row(
                 &parent_table,
                 RowUuid(parent_row_uuid),
@@ -759,7 +822,7 @@ where
             else {
                 return Ok(None);
             };
-            let lookup_table = self.table(&lookup.table)?.clone();
+            let lookup_table = self.policy_write_table(&lookup.table)?;
             let Some(parent_row) =
                 self.policy_current_row(&lookup_table, RowUuid(parent_row_uuid), tier)?
             else {
@@ -792,7 +855,7 @@ where
         for reachable in &policy.reachable {
             let mut reachable_teams = BTreeSet::new();
             if let Some(seed) = &reachable.seed {
-                let seed_table = self.table(&seed.table)?.clone();
+                let seed_table = self.policy_write_table(&seed.table)?;
                 let seed_policy = crate::query::Query {
                     table: seed.table.clone(),
                     filters: seed.filters.clone(),
@@ -810,7 +873,7 @@ where
                 };
                 for seed_row in self.current_rows_for_schema(
                     &seed.table,
-                    self.catalogue.current_schema_version_id,
+                    self.catalogue.current_write_schema.schema,
                     tier,
                 )? {
                     if !self.policy_filters_allow_current_row(
@@ -838,7 +901,7 @@ where
             if reachable_teams.is_empty() {
                 return Ok(false);
             }
-            let edge_table = self.table(&reachable.edge_table)?.clone();
+            let edge_table = self.policy_write_table(&reachable.edge_table)?;
             let edge_policy = crate::query::Query {
                 table: reachable.edge_table.clone(),
                 filters: reachable.edge_filters.clone(),
@@ -856,7 +919,7 @@ where
             };
             let edge_rows = self.current_rows_for_schema(
                 &reachable.edge_table,
-                self.catalogue.current_schema_version_id,
+                self.catalogue.current_write_schema.schema,
                 tier,
             )?;
             for _ in 0..reachable.bound.iteration_cap() {
@@ -890,7 +953,7 @@ where
                 }
             }
 
-            let access_table = self.table(&reachable.access_table)?.clone();
+            let access_table = self.policy_write_table(&reachable.access_table)?;
             let access_policy = crate::query::Query {
                 table: reachable.access_table.clone(),
                 filters: reachable.access_filters.clone(),
@@ -909,7 +972,7 @@ where
             let mut found = false;
             for access_row in self.current_rows_for_schema(
                 &reachable.access_table,
-                self.catalogue.current_schema_version_id,
+                self.catalogue.current_write_schema.schema,
                 tier,
             )? {
                 if !self.policy_filters_allow_current_row(
