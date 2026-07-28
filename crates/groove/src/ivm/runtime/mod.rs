@@ -6505,6 +6505,7 @@ fn aggregate_output_type(
                 | ValueType::U16
                 | ValueType::U32
                 | ValueType::U64
+                | ValueType::I32
                 | ValueType::I64
                 | ValueType::F64 => value_type,
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
@@ -6815,6 +6816,11 @@ fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::I32 => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
+            Ok(())
+        }
         ValueType::I64 => {
             key.push(13);
             key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
@@ -6872,6 +6878,17 @@ fn encode_record_field_key_part(
                     key.push(9);
                     key.push(13);
                     key.extend(order_preserving_i64_bits(value).to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I32) => {
+            match borrowed.get_nullable_i32(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(14);
+                    key.extend(order_preserving_i32_bits(value).to_be_bytes());
                 }
                 None => key.push(8),
             }
@@ -7055,6 +7072,9 @@ fn record_field_literal_ordering(
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
         }
+        (ValueType::I32, LiteralValue::I32(expected)) => {
+            Ok(ordering(&record.get_i32(field_idx)?, expected))
+        }
         (ValueType::I64, LiteralValue::I64(expected)) => {
             Ok(ordering(&record.get_i64(field_idx)?, expected))
         }
@@ -7105,6 +7125,10 @@ fn nullable_record_field_literal_ordering(
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::I64, LiteralValue::I64(expected)) => Ok(record
             .get_nullable_i64(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::I32, LiteralValue::I32(expected)) => Ok(record
+            .get_nullable_i32(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::F64, LiteralValue::F64(expected)) => {
@@ -7208,6 +7232,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
@@ -7271,6 +7296,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -7336,6 +7365,10 @@ fn order_preserving_f64_bits(value: f64) -> u64 {
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -7576,6 +7609,10 @@ fn aggregate_sum(
                 kind.get_or_insert(ValueType::U64);
                 u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
             }
+            Value::I32(value) => {
+                kind.get_or_insert(ValueType::I32);
+                i64_sum = add_weighted_i64(i64_sum, i64::from(value), *weight)?;
+            }
             Value::I64(value) => {
                 kind.get_or_insert(ValueType::I64);
                 i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
@@ -7598,6 +7635,9 @@ fn aggregate_sum(
             .map(Value::U32)
             .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Value::I32)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::I64 => Ok(Value::I64(i64_sum)),
         ValueType::F64 => Ok(Value::F64(f64_sum)),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
@@ -7697,6 +7737,7 @@ fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
         Value::U64(value) => Ok(*value as f64),
+        Value::I32(value) => Ok(f64::from(*value)),
         Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
@@ -7961,6 +8002,10 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);

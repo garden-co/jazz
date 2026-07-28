@@ -1477,6 +1477,7 @@ fn apply_aggregate_value_delta(
         Value::U16(value) => signed_int!(value, U16, u16),
         Value::U32(value) => signed_int!(value, U32, u32),
         Value::U64(value) => signed_int!(value, U64, u64),
+        Value::I32(value) => signed_int!(value, I32, i32),
         Value::I64(value) => signed_int!(value, I64, i64),
         Value::F64(value) => match delta {
             Value::F64(delta) => Value::F64(value + (weight as f64) * delta),
@@ -1492,6 +1493,7 @@ fn zero_aggregate_value(value: Value) -> Value {
         Value::U16(_) => Value::U16(0),
         Value::U32(_) => Value::U32(0),
         Value::U64(_) => Value::U64(0),
+        Value::I32(_) => Value::I32(0),
         Value::I64(_) => Value::I64(0),
         Value::F64(_) => Value::F64(0.0),
         other => other,
@@ -1511,6 +1513,7 @@ fn aggregate_payload_is_empty(
         let value = record.get_idx(field_idx(record, field)?)?;
         match value {
             Value::U8(0) | Value::U16(0) | Value::U32(0) | Value::U64(0) => {}
+            Value::I32(0) => {}
             Value::I64(0) => {}
             Value::F64(0.0) => {}
             _ => return Ok(false),

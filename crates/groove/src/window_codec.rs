@@ -936,10 +936,19 @@ fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
 }
 
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
+}
+
 fn is_integer_type(value_type: &ValueType) -> bool {
     matches!(
         value_type,
-        ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 | ValueType::I64
+        ValueType::U8
+            | ValueType::U16
+            | ValueType::U32
+            | ValueType::U64
+            | ValueType::I32
+            | ValueType::I64
     )
 }
 
@@ -949,6 +958,7 @@ fn integer_value(value: &Value, value_type: &ValueType) -> Option<u128> {
         (Value::U16(value), ValueType::U16) => Some(u128::from(*value)),
         (Value::U32(value), ValueType::U32) => Some(u128::from(*value)),
         (Value::U64(value), ValueType::U64) => Some(u128::from(*value)),
+        (Value::I32(value), ValueType::I32) => Some(u128::from(order_preserving_i32_bits(*value))),
         (Value::I64(value), ValueType::I64) => Some(u128::from(order_preserving_i64_bits(*value))),
         _ => None,
     }
@@ -968,6 +978,9 @@ fn integer_to_value(value: u128, value_type: &ValueType) -> Result<Value, Window
         ValueType::U64 => u64::try_from(value)
             .map(Value::U64)
             .map_err(|_| WindowCodecError::Invalid("u64 delta value out of range")),
+        ValueType::I32 => u32::try_from(value)
+            .map(|value| Value::I32((value ^ (1_u32 << 31)) as i32))
+            .map_err(|_| WindowCodecError::Invalid("i32 delta value out of range")),
         ValueType::I64 => u64::try_from(value)
             .map(|value| Value::I64((value ^ (1_u64 << 63)) as i64))
             .map_err(|_| WindowCodecError::Invalid("i64 delta value out of range")),

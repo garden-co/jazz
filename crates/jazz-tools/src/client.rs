@@ -1465,7 +1465,7 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => Ok(CoreValue::I64(i64::from(value))),
+        Value::Integer(value) => Ok(CoreValue::I32(value)),
         Value::BigInt(value) => Ok(CoreValue::I64(value)),
         Value::Double(value) => Ok(CoreValue::F64(value)),
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
@@ -1549,6 +1549,7 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::U32(value) => Ok(Value::Integer(i32::try_from(value).map_err(|_| {
             JazzError::Query(format!("core U32 value {value} is outside INTEGER range"))
         })?)),
+        CoreValue::I32(value) => Ok(Value::Integer(value)),
         CoreValue::I64(value) => Ok(Value::BigInt(value)),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
@@ -1576,14 +1577,14 @@ fn public_to_core_value_for_column_type(
 ) -> Result<CoreValue> {
     match (value, column_type) {
         (Value::Null, _) => Ok(CoreValue::Nullable(None)),
-        (Value::Integer(value), ColumnType::Integer) => Ok(CoreValue::I64(i64::from(value))),
-        (Value::BigInt(value), ColumnType::Integer) => i32::try_from(value)
-            .map(|value| CoreValue::I64(i64::from(value)))
-            .map_err(|_| {
+        (Value::Integer(value), ColumnType::Integer) => Ok(CoreValue::I32(value)),
+        (Value::BigInt(value), ColumnType::Integer) => {
+            i32::try_from(value).map(CoreValue::I32).map_err(|_| {
                 JazzError::Write(format!(
                     "BIGINT value {value} is outside INTEGER range for core write"
                 ))
-            }),
+            })
+        }
         (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(value))),
         (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(value)),
         (Value::Array(values), ColumnType::Array { element }) => values
@@ -1616,6 +1617,7 @@ fn core_to_public_value_for_column_type(
         (CoreValue::Nullable(Some(value)), column_type) => {
             core_to_public_value_for_column_type(*value, column_type)
         }
+        (CoreValue::I32(value), ColumnType::Integer) => Ok(Value::Integer(value)),
         (CoreValue::I64(value), ColumnType::Integer) => {
             i32::try_from(value).map(Value::Integer).map_err(|_| {
                 JazzError::Query(format!("core I64 value {value} is outside INTEGER range"))
@@ -1654,13 +1656,13 @@ fn public_to_core_literal_for_column(value: &Value, column_type: &ColumnType) ->
     match (value, column_type) {
         (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(*value))),
         (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(*value)),
-        (Value::BigInt(value), ColumnType::Integer) => i32::try_from(*value)
-            .map(|value| CoreValue::I64(i64::from(value)))
-            .map_err(|_| {
+        (Value::BigInt(value), ColumnType::Integer) => {
+            i32::try_from(*value).map(CoreValue::I32).map_err(|_| {
                 JazzError::Query(format!(
                     "BIGINT literal {value} is outside INTEGER range for core query"
                 ))
-            }),
+            })
+        }
         _ => public_to_core_value_for_column_type(value.clone(), column_type),
     }
 }
@@ -2722,7 +2724,7 @@ mod tests {
         let core_value =
             public_to_core_value(Value::Integer(-1)).expect("negative i32 should encode for core");
 
-        assert_eq!(core_value, CoreValue::I64(-1));
+        assert_eq!(core_value, CoreValue::I32(-1));
         assert_eq!(
             core_to_public_value_for_column_type(core_value, &ColumnType::Integer)
                 .expect("decode signed i32"),
@@ -2730,7 +2732,7 @@ mod tests {
         );
         assert_eq!(
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
-            CoreValue::I64(0)
+            CoreValue::I32(0)
         );
     }
 

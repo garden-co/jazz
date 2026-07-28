@@ -322,6 +322,9 @@ fn coerce_literal_for_column_type(
         (GrooveValue::U64(value), GrooveColumnType::I64) => i64::try_from(value)
             .map(GrooveValue::I64)
             .unwrap_or(GrooveValue::U64(value)),
+        (GrooveValue::U64(value), GrooveColumnType::I32) => i32::try_from(value)
+            .map(GrooveValue::I32)
+            .unwrap_or(GrooveValue::U64(value)),
         (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
             GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
                 *value, inner,
@@ -556,15 +559,15 @@ fn convert_default_for_column_type(
         (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
         (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
-        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
-        (ColumnType::Integer, Value::BigInt(value)) => i32::try_from(*value)
-            .map(|value| GrooveValue::I64(i64::from(value)))
-            .map_err(|_| {
+        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I32(*value)),
+        (ColumnType::Integer, Value::BigInt(value)) => {
+            i32::try_from(*value).map(GrooveValue::I32).map_err(|_| {
                 err(
                     format!("$.{}.{}", table.as_str(), column),
                     format!("BIGINT default {value} is outside INTEGER range"),
                 )
-            }),
+            })
+        }
         (ColumnType::BigInt, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
         (ColumnType::BigInt, Value::BigInt(value)) => Ok(GrooveValue::I64(*value)),
         (ColumnType::Array { element }, Value::Array(values)) => values
@@ -596,9 +599,7 @@ fn convert_column_type(
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
-        // Core stores it as I64 so arithmetic aggregates operate on the value
-        // domain while key encoding preserves signed order.
-        ColumnType::Integer => Ok(GrooveColumnType::I64),
+        ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
         ColumnType::BatchId => Err(err(
@@ -2169,7 +2170,7 @@ fn convert_policy_literal(
         Value::Null => Ok(GrooveValue::Nullable(None)),
         Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
-        Value::Integer(value) => Ok(GrooveValue::I64(i64::from(*value))),
+        Value::Integer(value) => Ok(GrooveValue::I32(*value)),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
         other => Err(err(
@@ -2309,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_core_i64_and_column_defaults() {
+    fn converts_public_integer_as_core_i32_and_column_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
@@ -2326,7 +2327,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I64
+            GrooveColumnType::I32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -2350,7 +2351,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I64.array_of()
+            GrooveColumnType::I32.array_of()
         );
 
         let default_schema = [(
@@ -2385,6 +2386,34 @@ mod tests {
                 .unwrap()
                 .default,
             Some(GrooveValue::String("x".to_owned()))
+        );
+    }
+
+    #[test]
+    fn converted_public_integer_records_use_four_core_bytes() {
+        // Public clients cannot observe core row width directly; this focused
+        // conversion/layout check guards the storage-width contract.
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("metrics").column("score", ColumnType::Integer))
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "metrics")
+            .unwrap();
+        let descriptor = jazz::groove::records::RecordDescriptor::new(
+            table
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), column.column_type.value_type())),
+        );
+        let record = descriptor.create(&[GrooveValue::I32(-123)]).unwrap();
+
+        assert_eq!(record.len(), 4);
+        assert_eq!(
+            descriptor.bind(&record).get_idx(0).unwrap(),
+            GrooveValue::I32(-123)
         );
     }
 

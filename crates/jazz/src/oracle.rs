@@ -885,6 +885,7 @@ fn oracle_counter_value(value: &Value) -> i128 {
         Value::U16(value) => i128::from(*value),
         Value::U32(value) => i128::from(*value),
         Value::U64(value) => i128::from(*value),
+        Value::I32(value) => i128::from(*value),
         Value::I64(value) => i128::from(*value),
         other => panic!("counter oracle expected integer, got {other:?}"),
     }
