@@ -27,7 +27,7 @@ Invariant digest:
 - `INV-SYNC-19`: FetchContentExtent handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
 - `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a sin...
 - `INV-SYNC-21`: Wire TxId and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
-- `INV-SYNC-22`: An edge's upstream permission-scope subscriptions MUST be deduplicated at the sync level: identical or covering (policyshape, writerclaim) scopes share one upstream su...
+- `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
 - `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies, never result membership, program facts, or inventory refs; a body may be omitted only under the skip rule — be...
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
@@ -51,10 +51,12 @@ Roles include relay links (`PeerRole::Relay`), edge-client links
 (`PeerRole::EdgeClient { identity }`), fate authority, durability, and eviction.
 
 A relay link represents the system author (`AuthorId::SYSTEM`) and performs no
-read narrowing. It registers each shape upstream **once** and forwards the
-**union** of downstream binding sets, which makes subscription aggregation
-composable at every hop. An edge-client link carries the terminated peer identity
-and narrows reads under that identity (ch. 7, ch. 9).
+read narrowing. An edge-client link carries the terminated peer identity and
+narrows reads under that identity (ch. 7, ch. 9).
+
+**Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
+shape is intended, but the current implementation does not guarantee it. Its
+aggregation and covering-shape semantics remain an open design question below.
 
 The peer wire form is binary-first. `WireFrame` wraps `Hello`,
 `Message(WireEnvelope)`, and `Error`; `WireEnvelope.payload` contains a
@@ -209,20 +211,12 @@ staged batch can change what any downstream subscriber would be served, the
 subscriber connections are marked dirty at the same boundary as cache
 invalidation and applied-global-sequence bookkeeping.
 
-The current receiver direction is no separate bulk/non-bulk correctness mode, no
-eligibility list that decides whether bundles bypass deltas, and no hidden
-preloaded-transaction suppression that can starve maintained views. Bulk
-shortcuts may return only as optimizations on top of the same staged-delta
-semantics. The July 2026 receiver-batch receipts were the forcing function:
-client per-bundle ingest collapsed to one commit/tick per receiver burst, and
-admin 10% cold improved from the 60.7s baseline to about 5.0s once
-staged-overlay point and prefix reads were indexed.
-
-Planned consolidation: delete the remaining reset-specific bulk bypass, delete
-initial-hydration eligibility state that only exists to select a bypass, delete
-preloaded-transaction suppression once all reset snapshots use explicit
-retractions, and move the receiver boundary onto an `OrderedKvStorage`
-transaction once that storage transaction exists.
+**Implementation status (2026-07-27).** The receiver uses the staged-delta path
+for non-reset bundles; `receiver_batch_ingests_non_reset_complete_bundles_once`
+and `cold_reset_bulk_ingest_matches_incremental_ingest`
+(`crates/jazz/src/node/tests/sync.rs`) cover the one-batch/one-tick behavior.
+The remaining reset-specific bypass and the move to an `OrderedKvStorage`
+transaction are implementation work, not protocol invariants.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
@@ -281,7 +275,7 @@ payload required by that view is complete. This is a **view-complete exclusive
 payload**, not necessarily a complete transaction payload. Otherwise the payload
 remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
 
-The implemented peer payload inventory is deliberately narrow:
+**Implementation status (2026-07-27).** The peer payload inventory is deliberately narrow:
 `peer_payload_inventory.complete_tx_payloads: Vec<TxId>` names only complete
 transaction payload coverage, not broad "known versions" and not partial row
 payload coverage. Partial and version-level dedup is the committed known-state
@@ -355,15 +349,15 @@ against core for the policy data required by its acceptance gate. It is keyed by
 to the writer's `claim("sub")`. This hydrates only the policy rows that writer's
 writes can depend on, never a whole table.
 
-Many writers' policies read overlapping data, so permission scopes are
-**deduplicated at the sync level**. Identical `(policy_shape, writer_claim)`
-scopes resolve to a single upstream subscription whose settled result fans out to
-every acceptance gate that needs it. The edge reference-counts gate dependents so
-the upstream subscription is dropped only when the last dependent goes away
-(`INV-SYNC-22`). A broader _covering_ scope can satisfy a narrower one when the
-covering relation says it does. This is the same per-peer payload dedup machinery
-(§8.4) applied to the edge's own upstream reads. The full edge-tier semantics —
-staleness horizon, rehydration, eviction — are chapter 9.
+Permission scopes are shared at the sync level whenever one settled subscription
+can satisfy every dependent acceptance gate (`INV-SYNC-22`).
+
+**Implementation status (verified 2026-07-27).** Exact-key scopes are shared and
+reference-counted by dependent gates; this is covered by
+`edge_deduplicates_scope_subscription_for_repeated_deferred_units` and
+`edge_releases_scope_subscription_after_last_deferred_unit_resolves`
+(`crates/jazz/tests/four_tier.rs`). Whether and how a broader scope can satisfy a
+narrower one remains an open design question below.
 
 ### 8.10 Content extents and catalogue lanes
 
@@ -472,43 +466,23 @@ semantic payload should remain the same wire-frame/SyncMessage envelope used by
 network sync. Transport-local batching, compression, and resume metadata must
 not leak into row/version encoding.
 
+**Implementation status (2026-07-27).** The receiver still uses the core
+staged-batch seam rather than an `OrderedKvStorage` transaction. The wire
+envelope has no portable resume credentials or trace/replay ids, and the
+canonical cross-language fixture set is incomplete. The ordinary committed-unit
+path also remains primarily client-to-core; the client-to-edge-to-core topology
+is being exercised incrementally. Worker bridges have not yet converged on the
+network wire-frame batches.
+
 ## Open Questions
 
 ### Open questions
 
-- 🔶 **Receiver storage transaction surface.** The receiver boundary currently
-  uses the core staged-batch seam. The end state is an `OrderedKvStorage`
-  transaction surface with the same staged read-through and single-commit
-  semantics, so receiver apply does not need a Jazz-side accumulator.
-- 🔶 **Cross-language wire envelope completion.** `WireFrame`/`WireEnvelope`
-  now establish a postcard-first binary frame carrying protocol version, feature
-  bits, optional enforced session metadata, structured errors, and an encoded
-  `SyncMessage` payload. Before TS/WASM/NAPI/server integration treats this as
-  frozen, the remaining envelope work is trace/replay ids, portable resume
-  cursor acceptance/rejection, auth expiry, and unsupported-feature diagnostics.
-  **Alpha compatibility policy (decided 2026-07-02):** alpha releases make no
-  cross-version protocol or storage compatibility promise; version tags exist so
-  mismatch is a clean, diagnosable refusal, never corruption or silent
-  misbehavior. Breaking is permitted but best-effort avoided; compatibility
-  windows are a beta-era policy.
-- 🔶 **Canonical fixtures.** The wire contract needs golden encode/decode
-  fixtures for every message family, including `CommitUnit`, `FateUpdate`,
-  `RegisterShape`/`Subscribe`/`Unsubscribe`, `ViewUpdate`, content extents, and
-  catalogue/lens lanes, with explicit coverage that row/version payload bytes
-  remain custom `Record` payloads under the postcard envelope. Fixtures should
-  be consumable from Rust and TypeScript before the TS API binds to live
-  transports.
 - 🔶 **Transport state.** The current binding-facing send/poll surface can
   express "send" and "no message staged"; it cannot express closed/error/
   backpressure, auth expiry, protocol-version mismatch, or resume-cursor
   rejection. Define the protocol state machine here and expose the ergonomic
   binding surface in ch. 13.
-- 🔶 **Client/edge/core rollout.** The protocol design is the same message
-  vocabulary across UI ↔ worker, worker ↔ edge, and edge ↔ core. Current
-  implementation and simulation are staged toward client ↔ edge ↔ core: the
-  ordinary committed-unit path still often behaves as client ↔ core, while
-  edge-client links, permission-scope deferral, and edge durability are being
-  exercised toward the full topology.
 - 🔶 **Parked-unit persistence.** Authority parking is in-memory and relies on
   client retry after restart; persisted parked units are not implemented. Decide
   whether ch. 8 states this as an implementation limitation or defers to
@@ -523,9 +497,6 @@ not leak into row/version encoding.
 - 🔶 **Covering-scope subsumption** is the design for broader permission scopes
   satisfying narrower ones; the implementation has exact-key sharing only, with
   no covering relation yet.
-- 🔶 **Worker bridge carrier unification.** Replace bespoke worker messages with
-  the same core wire-frame batches carried over WebSockets, while preserving the
-  worker bridge's different disconnect and lifecycle semantics.
 - 🔶 **Upstream-open signaling.** Binding surfaces need an explicit connected /
   handshaking / failed / reconnecting signal before edge/global-tier reads are
   unblocked; a synchronous `connect()` return is not enough.
