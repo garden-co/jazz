@@ -277,6 +277,8 @@ where
                 "schema id does not match schema payload",
             ));
         }
+        let active_schema_changed = schema.id == self.catalogue.current_schema_version_id
+            && self.catalogue.schema != schema.schema;
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
@@ -289,6 +291,13 @@ where
         }
         self.persist_catalogue_schema(&schema)?;
         self.ensure_schema_version_alias(schema.id)?;
+        if active_schema_changed {
+            // Policy declarations are intentionally outside the schema version
+            // identity. Invalidate maintained handles when that same-version
+            // payload changes so live subscriptions rebuild their authorization
+            // graph without reopening storage through the old catalogue row.
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
         if schema.id != self.catalogue.current_schema_version_id
             && self.parking.parked_commit_units.values().any(|parked| {
                 parked
