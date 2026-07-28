@@ -874,16 +874,7 @@ where
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
-            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-                || self
-                    .node
-                    .catalogue
-                    .partitions
-                    .iter()
-                    .any(|(logical, version)| {
-                        logical == &request.source.table
-                            && *version != self.node.catalogue.current_schema_version_id
-                    }))
+            && self.needs_projected_current_source(&request.source.table)
         {
             if !request.requirements.metadata.is_empty() {
                 let source = self.projected_maintained_visible_current_source_graph(
@@ -1275,10 +1266,10 @@ where
             .ensure_schema_version_alias(self.read_view.read_schema)
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             .0;
-        let inputs = partitions
+        let content_inputs = partitions
             .iter()
             .map(|partition| {
-                let graph = current_content_with_version_graph_for_schema(
+                let graph = content_current_with_version_graph_for_schema(
                     &partition.table,
                     partition.schema_version,
                     partition.base_for_current_names,
@@ -1294,7 +1285,7 @@ where
                 ))
             })
             .collect::<Vec<_>>();
-        let graph = match inputs.as_slice() {
+        let content = match content_inputs.as_slice() {
             [] => {
                 return Err(source_resolution_error(
                     request,
@@ -1302,12 +1293,36 @@ where
                 ));
             }
             [single] => single.clone(),
-            _ => GraphBuilder::union(inputs),
+            _ => GraphBuilder::union(content_inputs),
         };
+        let fields = global_current_storage_fields(read_table, true, include_global_seq);
+        let content = GraphBuilder::arg_max_by(content, ["row_uuid"], ["tx_time", "tx_node_id"])
+            .project(fields.clone());
+
+        let deletion_inputs = partitions
+            .iter()
+            .map(|partition| {
+                deletion_register_current_source_graph_for_schema(
+                    &partition.table.name,
+                    partition.schema_version,
+                    partition.base_for_current_names,
+                    tier,
+                )
+            })
+            .collect::<Vec<_>>();
+        let deletions = match deletion_inputs.as_slice() {
+            [] => unreachable!("projected current source has at least one partition"),
+            [single] => single.clone(),
+            _ => GraphBuilder::union(deletion_inputs),
+        };
+        let deleted_winners =
+            GraphBuilder::arg_max_by(deletions, ["row_uuid"], ["tx_time", "tx_node_id"])
+                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+                .project(["row_uuid"]);
+
         Ok(
-            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"]).project(
-                global_current_storage_fields(read_table, true, include_global_seq),
-            ),
+            GraphBuilder::anti_join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
+                .project(fields),
         )
     }
 
@@ -1493,7 +1508,7 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
     .project_fields(register_storage_fields_for_query_engine("left."))
 }
 
-fn current_content_with_version_graph_for_schema(
+fn content_current_with_version_graph_for_schema(
     table: &TableSchema,
     schema_version: SchemaVersionId,
     base_schema_version: SchemaVersionId,
@@ -1501,14 +1516,7 @@ fn current_content_with_version_graph_for_schema(
     include_global_seq: bool,
 ) -> GraphBuilder {
     let fields = global_current_storage_fields(table, true, include_global_seq);
-    let deleted_winners = deletion_register_current_keys_graph_for_schema(
-        &table.name,
-        schema_version,
-        base_schema_version,
-        tier,
-        true,
-    );
-    let content_current = if tier == DurabilityTier::Global {
+    if tier == DurabilityTier::Global {
         GraphBuilder::table(global_current_table_name_for_schema(
             &table.name,
             schema_version,
@@ -1547,9 +1555,7 @@ fn current_content_with_version_graph_for_schema(
             ["tx_time", "tx_node_id"],
         )
         .project(fields.clone())
-    };
-    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
-        .project(fields)
+    }
 }
 
 fn deletion_register_current_source_graph_for_schema(

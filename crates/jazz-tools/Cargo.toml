@@ -197,6 +197,10 @@ name = "catalogue_sync_integration"
 required-features = ["test"]
 
 [[test]]
+name = "currency_lineage_integration"
+required-features = ["test"]
+
+[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
