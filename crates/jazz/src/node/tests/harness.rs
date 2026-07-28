@@ -4,6 +4,7 @@
 //! model comparisons use [`crate::oracle`].
 
 use super::*;
+use crate::node::policy::WritePolicyDifferentialOperation;
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerMetrics, PeerState};
 use crate::protocol::{
@@ -31,6 +32,7 @@ include!("time_travel.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("policies_rls.rs");
+include!("write_policy_differential.rs");
 include!("sync.rs");
 include!("m3_differential.rs");
 include!("counter_merge.rs");
