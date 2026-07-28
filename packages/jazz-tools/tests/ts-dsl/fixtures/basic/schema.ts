@@ -69,7 +69,7 @@ export const permissions = s.definePermissions(baseApp, ({ policy }) => {
   policy.projects.allowDelete.where({});
 
   policy.todos.allowRead.where({});
-  policy.todos.allowInsert.where({});
+  policy.todos.allowInsert.where({ done: false });
   policy.todos.allowUpdate.whereOld({ done: false }).whereNew({});
   policy.todos.allowDelete.where({ done: false });
 });

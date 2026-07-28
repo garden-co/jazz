@@ -1892,6 +1892,9 @@ fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: Subs
                 visible_rows.insert(row.row_uuid());
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }

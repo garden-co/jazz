@@ -276,8 +276,9 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
         serde_json::Value::Number(value) => value
             .as_u64()
             .map(CoreValue::U64)
+            .or_else(|| value.as_i64().map(CoreValue::I64))
             .or_else(|| value.as_f64().map(CoreValue::F64))
-            .ok_or_else(|| "claims only support unsigned integers and f64 numbers".to_owned()),
+            .ok_or_else(|| "claim number is not representable".to_owned()),
         serde_json::Value::String(value) => Ok(CoreValue::String(value)),
         serde_json::Value::Array(values) => values
             .into_iter()
@@ -661,8 +662,8 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
-                    if !outbound.is_empty() {
-                        if let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
+                    if !outbound.is_empty()
+                        && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await {
                             send_ws_error(
                                 &mut socket,
                                 WireError::new(
@@ -674,8 +675,6 @@ async fn handle_ws_connection(
                             .await;
                             break;
                         }
-                        core_server_shell.notify_activity();
-                    }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Ping(payload))) => {
@@ -719,7 +718,6 @@ async fn drain_ws_outbound(
     send_ws_encoded_frames(socket, &outbound)
         .await
         .map_err(|error| error.to_string())?;
-    core_server_shell.notify_activity();
     Ok(())
 }
 

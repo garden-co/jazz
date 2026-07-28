@@ -49,7 +49,10 @@ use uuid::Uuid;
 
 #[cfg(feature = "rocksdb")]
 use crate::ClientStorage;
-use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
+use crate::{
+    AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
+    SubscriptionStream, SubscriptionStreamItem,
+};
 
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
 #[cfg(feature = "rocksdb")]
@@ -642,7 +645,7 @@ impl ClientDb {
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
-        tx: mpsc::UnboundedSender<OrderedRowDelta>,
+        tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
         ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
@@ -1207,7 +1210,7 @@ impl ClientDbInner {
         query: jazz::query::Query,
         opts: CoreReadOpts,
         table: String,
-        tx: mpsc::UnboundedSender<OrderedRowDelta>,
+        tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
         let (db, prepared) = {
             let inner = inner.borrow();
@@ -1225,41 +1228,57 @@ impl ClientDbInner {
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<jazz::node::CurrentRow> = Vec::new();
-            while let Some(CoreSubscriptionEvent::Delta {
-                reset,
-                added,
-                updated,
-                removed,
-                ..
-            }) = stream.next_event().await
-            {
-                let previous_rows: Vec<ObjectId> = current_rows
-                    .iter()
-                    .map(|row| ObjectId::from_uuid(row.row_uuid().0))
-                    .collect();
-                JazzClient::apply_core_subscription_rows(
-                    &mut current_rows,
-                    reset,
-                    &added,
-                    &updated,
-                    &removed,
-                );
-                inner.borrow_mut().remember_rows(&table, &current_rows);
-                let delta = if reset {
-                    JazzClient::core_subscription_reset_delta(&db, &previous_rows, &current_rows)
-                } else {
-                    JazzClient::core_subscription_change_delta(
-                        &db,
-                        &current_rows,
-                        &added,
-                        &updated,
-                        &removed,
-                    )
-                };
-                let Ok(delta) = delta else {
-                    break;
-                };
-                let _ = tx.send(delta);
+            while let Some(event) = stream.next_event().await {
+                match event {
+                    CoreSubscriptionEvent::Delta {
+                        reset,
+                        added,
+                        updated,
+                        removed,
+                        ..
+                    } => {
+                        let previous_rows: Vec<ObjectId> = current_rows
+                            .iter()
+                            .map(|row| ObjectId::from_uuid(row.row_uuid().0))
+                            .collect();
+                        JazzClient::apply_core_subscription_rows(
+                            &mut current_rows,
+                            reset,
+                            &added,
+                            &updated,
+                            &removed,
+                        );
+                        inner.borrow_mut().remember_rows(&table, &current_rows);
+                        let delta = if reset {
+                            JazzClient::core_subscription_reset_delta(
+                                &db,
+                                &previous_rows,
+                                &current_rows,
+                            )
+                        } else {
+                            JazzClient::core_subscription_change_delta(
+                                &db,
+                                &current_rows,
+                                &added,
+                                &updated,
+                                &removed,
+                            )
+                        };
+                        let Ok(delta) = delta else {
+                            break;
+                        };
+                        let _ = tx.send(SubscriptionStreamItem::Delta(delta));
+                    }
+                    CoreSubscriptionEvent::Rejected { reason } => {
+                        let reason = match reason {
+                            jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
+                                detail,
+                            } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
+                        };
+                        let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+                    }
+                    CoreSubscriptionEvent::Closed => break,
+                }
             }
         });
         Ok(())
@@ -1465,7 +1484,7 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     match value {
         Value::Boolean(value) => Ok(CoreValue::Bool(value)),
         Value::Text(value) => Ok(CoreValue::String(value)),
-        Value::Integer(value) => Ok(CoreValue::U32(encode_signed_i32_for_core(value))),
+        Value::Integer(value) => Ok(CoreValue::I32(value)),
         Value::BigInt(value) => Ok(CoreValue::I64(value)),
         Value::Double(value) => Ok(CoreValue::F64(value)),
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
@@ -1499,7 +1518,7 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
                     .or(Ok(CoreValue::U64(value)))
             } else if let Some(value) = value.as_i64() {
                 i32::try_from(value)
-                    .map(|value| CoreValue::U32(encode_signed_i32_for_core(value)))
+                    .map(|value| CoreValue::I64(i64::from(value)))
                     .or(Ok(CoreValue::I64(value)))
             } else if let Some(value) = value.as_f64() {
                 Ok(CoreValue::F64(value))
@@ -1542,38 +1561,14 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     Ok(core_claims)
 }
 
-fn auth_mode_claim_value(auth_mode: crate::public_api::session::AuthMode) -> &'static str {
-    match auth_mode {
-        crate::public_api::session::AuthMode::External => "external",
-        crate::public_api::session::AuthMode::LocalFirst => "local-first",
-        crate::public_api::session::AuthMode::Anonymous => "anonymous",
-    }
-}
-
-fn core_row_provenance_to_public(
-    provenance: jazz::node::RowProvenance,
-) -> crate::metadata::RowProvenance {
-    crate::metadata::RowProvenance {
-        created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at.physical_ms(),
-        updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.physical_ms(),
-    }
-}
-
-fn encode_signed_i32_for_core(value: i32) -> u32 {
-    u32::from_ne_bytes(value.to_ne_bytes()) ^ 0x8000_0000
-}
-
-fn decode_signed_i32_from_core(value: u32) -> i32 {
-    i32::from_ne_bytes((value ^ 0x8000_0000).to_ne_bytes())
-}
-
 fn core_to_public_value(value: CoreValue) -> Result<Value> {
     match value {
         CoreValue::Bool(value) => Ok(Value::Boolean(value)),
         CoreValue::String(value) => Ok(Value::Text(value)),
-        CoreValue::U32(value) => Ok(Value::Integer(decode_signed_i32_from_core(value))),
+        CoreValue::U32(value) => Ok(Value::Integer(i32::try_from(value).map_err(|_| {
+            JazzError::Query(format!("core U32 value {value} is outside INTEGER range"))
+        })?)),
+        CoreValue::I32(value) => Ok(Value::Integer(value)),
         CoreValue::I64(value) => Ok(Value::BigInt(value)),
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
@@ -1595,18 +1590,99 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
     }
 }
 
+fn public_to_core_value_for_column_type(
+    value: Value,
+    column_type: &ColumnType,
+) -> Result<CoreValue> {
+    match (value, column_type) {
+        (Value::Null, _) => Ok(CoreValue::Nullable(None)),
+        (Value::Integer(value), ColumnType::Integer) => Ok(CoreValue::I32(value)),
+        (Value::BigInt(value), ColumnType::Integer) => {
+            i32::try_from(value).map(CoreValue::I32).map_err(|_| {
+                JazzError::Write(format!(
+                    "BIGINT value {value} is outside INTEGER range for core write"
+                ))
+            })
+        }
+        (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(value))),
+        (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(value)),
+        (Value::Array(values), ColumnType::Array { element }) => values
+            .into_iter()
+            .map(|value| public_to_core_value_for_column_type(value, element))
+            .collect::<Result<Vec<_>>>()
+            .map(CoreValue::Array),
+        (value, _) => public_to_core_value(value),
+    }
+}
+
+fn public_to_core_value_for_column(
+    value: Value,
+    column: &crate::public_schema::ColumnDescriptor,
+) -> Result<CoreValue> {
+    let value = public_to_core_value_for_column_type(value, &column.column_type)?;
+    if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
+        Ok(CoreValue::Nullable(Some(Box::new(value))))
+    } else {
+        Ok(value)
+    }
+}
+
+fn core_to_public_value_for_column_type(
+    value: CoreValue,
+    column_type: &ColumnType,
+) -> Result<Value> {
+    match (value, column_type) {
+        (CoreValue::Nullable(None), _) => Ok(Value::Null),
+        (CoreValue::Nullable(Some(value)), column_type) => {
+            core_to_public_value_for_column_type(*value, column_type)
+        }
+        (CoreValue::I32(value), ColumnType::Integer) => Ok(Value::Integer(value)),
+        (CoreValue::I64(value), ColumnType::Integer) => {
+            i32::try_from(value).map(Value::Integer).map_err(|_| {
+                JazzError::Query(format!("core I64 value {value} is outside INTEGER range"))
+            })
+        }
+        (CoreValue::I64(value), ColumnType::BigInt) => Ok(Value::BigInt(value)),
+        (CoreValue::Array(values), ColumnType::Array { element }) => values
+            .into_iter()
+            .map(|value| core_to_public_value_for_column_type(value, element))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        (value, _) => core_to_public_value(value),
+    }
+}
+
+fn auth_mode_claim_value(auth_mode: crate::public_api::session::AuthMode) -> &'static str {
+    match auth_mode {
+        crate::public_api::session::AuthMode::External => "external",
+        crate::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::public_api::session::AuthMode::Anonymous => "anonymous",
+    }
+}
+
+fn core_row_provenance_to_public(
+    provenance: jazz::node::RowProvenance,
+) -> crate::metadata::RowProvenance {
+    crate::metadata::RowProvenance {
+        created_by: provenance.created_by.0.to_string(),
+        created_at: provenance.created_at.physical_ms(),
+        updated_by: provenance.updated_by.0.to_string(),
+        updated_at: provenance.updated_at.physical_ms(),
+    }
+}
+
 fn public_to_core_literal_for_column(value: &Value, column_type: &ColumnType) -> Result<CoreValue> {
     match (value, column_type) {
         (Value::Integer(value), ColumnType::BigInt) => Ok(CoreValue::I64(i64::from(*value))),
         (Value::BigInt(value), ColumnType::BigInt) => Ok(CoreValue::I64(*value)),
-        (Value::BigInt(value), ColumnType::Integer) => i32::try_from(*value)
-            .map(|value| CoreValue::U32(encode_signed_i32_for_core(value)))
-            .map_err(|_| {
+        (Value::BigInt(value), ColumnType::Integer) => {
+            i32::try_from(*value).map(CoreValue::I32).map_err(|_| {
                 JazzError::Query(format!(
                     "BIGINT literal {value} is outside INTEGER range for core query"
                 ))
-            }),
-        _ => public_to_core_value(value.clone()),
+            })
+        }
+        _ => public_to_core_value_for_column_type(value.clone(), column_type),
     }
 }
 
@@ -1670,43 +1746,116 @@ fn core_query_condition(
     Ok(vec![predicate])
 }
 
-fn aggregate_public_values(query: &Query, row: &jazz::node::CurrentRow) -> Result<Vec<Value>> {
+fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> String {
+    match output.function {
+        crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
+        crate::public_api::query::AggregateFunction::Sum => {
+            format!(
+                "sum_{}",
+                output
+                    .column
+                    .as_deref()
+                    .expect("sum aggregate has an input column")
+            )
+        }
+        crate::public_api::query::AggregateFunction::Avg => {
+            format!(
+                "avg_{}",
+                output
+                    .column
+                    .as_deref()
+                    .expect("avg aggregate has an input column")
+            )
+        }
+        crate::public_api::query::AggregateFunction::Min => {
+            format!(
+                "min_{}",
+                output
+                    .column
+                    .as_deref()
+                    .expect("min aggregate has an input column")
+            )
+        }
+        crate::public_api::query::AggregateFunction::Max => {
+            format!(
+                "max_{}",
+                output
+                    .column
+                    .as_deref()
+                    .expect("max aggregate has an input column")
+            )
+        }
+    }
+}
+
+fn aggregate_output_column_type(
+    output: &crate::public_api::query::AggregateOutput,
+    table_schema: &TableSchema,
+    table: &str,
+) -> Result<Option<ColumnType>> {
+    match output.function {
+        crate::public_api::query::AggregateFunction::Count => Ok(Some(ColumnType::Timestamp)),
+        crate::public_api::query::AggregateFunction::Avg => Ok(Some(ColumnType::Double)),
+        crate::public_api::query::AggregateFunction::Sum
+        | crate::public_api::query::AggregateFunction::Min
+        | crate::public_api::query::AggregateFunction::Max => {
+            let column = output
+                .column
+                .as_deref()
+                .expect("aggregate has an input column");
+            let idx = table_schema.columns.column_index(column).ok_or_else(|| {
+                JazzError::Query(format!(
+                    "unknown aggregate column {column} on table {table}"
+                ))
+            })?;
+            Ok(Some(table_schema.columns.columns[idx].column_type.clone()))
+        }
+    }
+}
+
+fn aggregate_public_values(
+    query: &Query,
+    table_schema: &TableSchema,
+    row: &jazz::node::CurrentRow,
+) -> Result<Vec<Value>> {
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
     };
-    let mut columns = Vec::new();
+    let mut columns: Vec<(String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
-        columns.push(group_by.clone());
+        let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
+            JazzError::Query(format!(
+                "unknown group_by column {group_by} on table {}",
+                query.table.as_str()
+            ))
+        })?;
+        columns.push((
+            group_by.clone(),
+            Some(table_schema.columns.columns[idx].column_type.clone()),
+        ));
     }
-    columns.extend(
-        aggregate
-            .outputs
-            .iter()
-            .map(|output| match output.function {
-                crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
-                crate::public_api::query::AggregateFunction::Sum => {
-                    format!(
-                        "sum_{}",
-                        output
-                            .column
-                            .as_deref()
-                            .expect("sum aggregate has an input column")
-                    )
-                }
-            }),
-    );
+    for output in &aggregate.outputs {
+        columns.push((
+            aggregate_output_name(output),
+            aggregate_output_column_type(output, table_schema, query.table.as_str())?,
+        ));
+    }
     let (descriptor, raw) = row.encoded_record();
     let borrowed = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
     columns
         .into_iter()
-        .map(|column| {
+        .map(|(column, column_type)| {
             let idx = descriptor.field_index(&column).ok_or_else(|| {
                 JazzError::Query(format!("aggregate row missing column {column}"))
             })?;
             let value = borrowed
                 .get_idx(idx)
                 .map_err(|error| JazzError::Query(error.to_string()))?;
-            core_to_public_value(value)
+            if let Some(column_type) = column_type {
+                core_to_public_value_for_column_type(value, &column_type)
+            } else {
+                core_to_public_value(value)
+            }
         })
         .collect()
 }
@@ -1803,6 +1952,30 @@ impl JazzClient {
                                 .expect("sum aggregate has an input column"),
                         )
                     }
+                    crate::public_api::query::AggregateFunction::Avg => {
+                        jazz::query::Aggregate::avg(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("avg aggregate has an input column"),
+                        )
+                    }
+                    crate::public_api::query::AggregateFunction::Min => {
+                        jazz::query::Aggregate::min(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("min aggregate has an input column"),
+                        )
+                    }
+                    crate::public_api::query::AggregateFunction::Max => {
+                        jazz::query::Aggregate::max(
+                            output
+                                .column
+                                .as_deref()
+                                .expect("max aggregate has an input column"),
+                        )
+                    }
                 });
             core_query = core_query.aggregate(outputs);
             if let Some(group_by) = &aggregate.group_by {
@@ -1831,21 +2004,21 @@ impl JazzClient {
         query: &Query,
         rows: Vec<jazz::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        if query.aggregate.is_some() {
-            return rows
-                .into_iter()
-                .map(|row| {
-                    let row_id = ObjectId::from_uuid(row.row_uuid().0);
-                    let values = aggregate_public_values(query, &row)?;
-                    Ok((row_id, values))
-                })
-                .collect();
-        }
         let table = query.table.as_str();
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(table))
             .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
+        if query.aggregate.is_some() {
+            return rows
+                .into_iter()
+                .map(|row| {
+                    let row_id = ObjectId::from_uuid(row.row_uuid().0);
+                    let values = aggregate_public_values(query, table_schema, &row)?;
+                    Ok((row_id, values))
+                })
+                .collect();
+        }
         let columns = query.select_columns.clone().unwrap_or_else(|| {
             table_schema
                 .columns
@@ -1875,7 +2048,12 @@ impl JazzClient {
                             })?;
                         row.cell_at(position)
                             .ok_or_else(|| JazzError::Query(format!("row missing column {column}")))
-                            .and_then(core_to_public_value)
+                            .and_then(|value| {
+                                core_to_public_value_for_column_type(
+                                    value,
+                                    &table_schema.columns.columns[position].column_type,
+                                )
+                            })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok((row_id, values))
@@ -2063,10 +2241,23 @@ impl JazzClient {
         };
         Ok(Some(value))
     }
-    fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
+    fn core_cells(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<jazz::db::RowCells> {
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Write(format!("unknown table {table}")))?;
         values
             .into_iter()
-            .map(|(name, value)| Ok((name, public_to_core_value(value)?)))
+            .map(|(name, value)| {
+                let column = table_schema.columns.column(&name).ok_or_else(|| {
+                    JazzError::Write(format!("unknown column {name} on table {table}"))
+                })?;
+                Ok((name, public_to_core_value_for_column(value, column)?))
+            })
             .collect()
     }
     fn core_ordered_values(
@@ -2209,7 +2400,7 @@ impl JazzClient {
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         {
-            let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
+            let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
             let core_query = self.core_query(&query)?;
             self.db
                 .subscribe(
@@ -2271,7 +2462,7 @@ impl JazzClient {
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         {
             let row_values = self.core_ordered_values(table, &values)?;
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 let row_id =
                     self.db
@@ -2298,7 +2489,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
@@ -2315,7 +2506,19 @@ impl JazzClient {
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(updates.into_iter().collect())?;
+            let table = self
+                .db
+                .inner
+                .borrow()
+                .row_tables
+                .get(&object_id)
+                .cloned()
+                .ok_or_else(|| {
+                    JazzError::Write(
+                        "update requires a row created or observed by this client".to_string(),
+                    )
+                })?;
+            let cells = self.core_cells(&table, updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)
@@ -2536,18 +2739,19 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
     #[test]
-    fn core_integer_bridge_preserves_signed_i32_bits() {
+    fn core_integer_bridge_uses_signed_value_domain() {
         let core_value =
             public_to_core_value(Value::Integer(-1)).expect("negative i32 should encode for core");
 
-        assert_eq!(core_value, CoreValue::U32(0x7fff_ffff));
+        assert_eq!(core_value, CoreValue::I32(-1));
         assert_eq!(
-            core_to_public_value(core_value).expect("decode signed i32"),
+            core_to_public_value_for_column_type(core_value, &ColumnType::Integer)
+                .expect("decode signed i32"),
             Value::Integer(-1)
         );
         assert_eq!(
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
-            CoreValue::U32(0x8000_0000)
+            CoreValue::I32(0)
         );
     }
 

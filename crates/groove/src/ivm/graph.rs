@@ -213,8 +213,8 @@ pub enum GraphBuilder {
         group_cols: Vec<FieldRef>,
         order_cols: Vec<TopByOrder>,
         tie_cols: Vec<FieldRef>,
-        offset: usize,
-        limit: usize,
+        offset: u64,
+        limit: TopByLimit,
     },
     Aggregate {
         input: Box<GraphBuilder>,
@@ -411,8 +411,8 @@ impl GraphBuilder {
         group_cols: impl IntoIterator<Item = impl Into<String>>,
         order_cols: impl IntoIterator<Item = TopByOrder>,
         tie_cols: impl IntoIterator<Item = impl Into<String>>,
-        offset: usize,
-        limit: usize,
+        offset: u64,
+        limit: TopByLimit,
     ) -> Self {
         Self::TopBy {
             input: Box::new(input),

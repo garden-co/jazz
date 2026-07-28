@@ -241,6 +241,9 @@ fn event_trace(
                 removed,
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => panic!("subscription closed unexpectedly"),
     }
 }

@@ -826,7 +826,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             order_cols,
             tie_cols,
             offset: 1,
-            limit: 2,
+            limit: groove::ivm::TopByLimit::Finite(2),
         } if group_cols.is_empty()
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
                 field: groove::ivm::FieldRef::Name(field),
@@ -941,7 +941,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             ref order_cols,
             ref tie_cols,
             offset: 2,
-            limit: 3,
+            limit: groove::ivm::TopByLimit::Finite(3),
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
             && order_cols.is_empty()

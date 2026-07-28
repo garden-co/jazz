@@ -852,20 +852,20 @@ where
         if !self.windowed {
             return self.storage.range(self.column_family, start, end);
         }
-        self.run_aware_records(
-            |key| key >= start && key < end,
-            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
-        )
+        self.run_aware_bounded_records(start, Some(end), |key| key >= start && key < end)
     }
 
     pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
         if !self.windowed {
             return self.storage.prefix(self.column_family, prefix);
         }
-        self.run_aware_records(
-            |key| key.starts_with(prefix),
-            |visit| self.storage.scan_prefix(self.column_family, b"", visit),
-        )
+        self.run_aware_prefix_records(prefix)
+    }
+
+    pub fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        let mut records = self.range(start, end)?;
+        records.reverse();
+        Ok(records)
     }
 
     pub fn scan_range(
@@ -994,7 +994,7 @@ where
         let mut consolidated = WindowConsolidation::default();
         let mut cursor = None;
         for (key, value) in raw {
-            if key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY {
+            if is_window_meta_key(&key) {
                 continue;
             }
             if decode_window_value(&value)?.is_some() {
@@ -1006,10 +1006,10 @@ where
                     max_windows,
                     &mut consolidated,
                 )?;
+                cursor = Some(key);
                 if consolidated.windows >= max_windows {
                     break;
                 }
-                cursor = Some(key);
                 continue;
             }
             plain_run.push((key, value));
@@ -1023,10 +1023,10 @@ where
                     max_windows,
                     &mut consolidated,
                 )?;
+                cursor = next_cursor;
                 if consolidated.windows >= max_windows {
                     break;
                 }
-                cursor = next_cursor;
             }
         }
         if consolidate_tail && consolidated.windows < max_windows {
@@ -1041,9 +1041,6 @@ where
             )?;
             cursor = next_cursor;
         }
-        if owned_operations.is_empty() {
-            return Ok(WindowConsolidation::default());
-        }
         if consolidated.records > 0 && !self.window_marker_present()? {
             owned_operations.push(OwnedWriteOperation::Set {
                 cf: self.column_family.to_owned(),
@@ -1051,15 +1048,22 @@ where
                 value: Vec::new(),
             });
         }
-        if use_cursor
-            && consolidated.records > 0
-            && let Some(cursor) = cursor
-        {
-            owned_operations.push(OwnedWriteOperation::Set {
-                cf: self.column_family.to_owned(),
-                key: WINDOW_CURSOR_KEY.to_vec(),
-                value: cursor,
-            });
+        if use_cursor && let Some(last_seen) = cursor {
+            let cursor = cursor_after_last_seen(last_seen.as_slice());
+            let current_cursor = self.window_consolidation_cursor()?;
+            if cursor.as_slice() > current_cursor.as_slice() {
+                owned_operations.push(OwnedWriteOperation::Set {
+                    cf: self.column_family.to_owned(),
+                    key: WINDOW_CURSOR_KEY.to_vec(),
+                    value: cursor,
+                });
+            }
+        }
+        if consolidated.records > 0 {
+            self.append_window_range_index_operations(&mut owned_operations)?;
+        }
+        if owned_operations.is_empty() {
+            return Ok(WindowConsolidation::default());
         }
         let operations = owned_operations
             .iter()
@@ -1082,6 +1086,22 @@ where
         if !self.window_marker_present()? {
             return Ok(None);
         }
+        if let Some(value) = self.get_raw_from_window_range_index(key)? {
+            return Ok(value);
+        }
+        if self
+            .storage
+            .get(self.column_family, WINDOW_RANGE_INDEX_KEY)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let value = self.get_raw_run_aware_legacy_walk(key)?;
+        self.write_window_range_index()?;
+        Ok(value)
+    }
+
+    fn get_raw_run_aware_legacy_walk(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
         let mut upper = key.to_vec();
         while let Some((raw_key, raw_value)) =
             self.storage
@@ -1112,6 +1132,32 @@ where
             upper = previous;
         }
         Ok(None)
+    }
+
+    fn get_raw_from_window_range_index(&self, key: &Key) -> Result<Option<Option<Vec<u8>>>, Error> {
+        let Some(index) = self.window_range_index()? else {
+            return Ok(None);
+        };
+        for entry in index
+            .entries
+            .iter()
+            .filter(|entry| entry.window_key.as_slice() <= key && key <= entry.max_key.as_slice())
+            .rev()
+        {
+            let Some(raw_value) = self.storage.get(self.column_family, &entry.window_key)? else {
+                continue;
+            };
+            let Some(window) = decode_window_value(&raw_value)? else {
+                continue;
+            };
+            if key <= window.max_key
+                && let Some(value) =
+                    self.lookup_window_record(&entry.window_key, window.codec, key)?
+            {
+                return Ok(Some(Some(value)));
+            }
+        }
+        Ok(Some(None))
     }
 
     fn last_logical_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
@@ -1175,6 +1221,105 @@ where
         Ok(records.into_iter().collect())
     }
 
+    fn run_aware_prefix_records(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
+        if let Some(end) = key_codec::prefix_upper_bound(prefix) {
+            self.run_aware_bounded_records(prefix, Some(&end), |key| key.starts_with(prefix))
+        } else {
+            self.run_aware_bounded_records(prefix, None, |key| key.starts_with(prefix))
+        }
+    }
+
+    fn run_aware_bounded_records(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        include: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<KeyValue>, Error> {
+        if !self.window_marker_present()? {
+            return self.scan_plain_bounded_records(start, end, include);
+        }
+        let Some(index) = self.window_range_index()? else {
+            let records = self.run_aware_records(include, |visit| {
+                self.storage.scan_prefix(self.column_family, b"", visit)
+            })?;
+            self.write_window_range_index()?;
+            return Ok(records);
+        };
+
+        let mut physical_records = Vec::<(Vec<u8>, Vec<KeyValue>)>::new();
+        self.scan_raw_bounded(start, end, &mut |raw_key, raw_value| {
+            if is_window_meta_key(raw_key) || decode_window_value(raw_value)?.is_some() {
+                return Ok(());
+            }
+            if include(raw_key) {
+                physical_records.push((
+                    raw_key.to_vec(),
+                    vec![(raw_key.to_vec(), raw_value.to_vec())],
+                ));
+            }
+            Ok(())
+        })?;
+
+        for entry in index.entries.iter().filter(|entry| {
+            entry.max_key.as_slice() >= start
+                && end.is_none_or(|end| entry.window_key.as_slice() < end)
+        }) {
+            let Some(raw_value) = self.storage.get(self.column_family, &entry.window_key)? else {
+                continue;
+            };
+            let Some(window) = decode_window_value(&raw_value)? else {
+                continue;
+            };
+            let records = self
+                .decode_window_records_cached(&entry.window_key, window.codec)?
+                .into_iter()
+                .filter(|(key, _)| include(key))
+                .collect::<Vec<_>>();
+            if !records.is_empty() {
+                physical_records.push((entry.window_key.clone(), records));
+            }
+        }
+
+        physical_records.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut records = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        for (_, logical_records) in physical_records {
+            for (key, value) in logical_records {
+                records.insert(key, value);
+            }
+        }
+        Ok(records.into_iter().collect())
+    }
+
+    fn scan_plain_bounded_records(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        include: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<KeyValue>, Error> {
+        let mut records = Vec::new();
+        self.scan_raw_bounded(start, end, &mut |key, value| {
+            if !is_window_meta_key(key) && include(key) {
+                records.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(())
+        })?;
+        Ok(records)
+    }
+
+    fn scan_raw_bounded(
+        &self,
+        start: &Key,
+        end: Option<&Key>,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        if let Some(end) = end {
+            self.storage
+                .scan_range(self.column_family, start, end, visit)
+        } else {
+            self.storage.scan_prefix(self.column_family, start, visit)
+        }
+    }
+
     fn window_marker_present(&self) -> Result<bool, Error> {
         Ok(self
             .storage
@@ -1187,6 +1332,67 @@ where
             .storage
             .get(self.column_family, WINDOW_CURSOR_KEY)?
             .unwrap_or_default())
+    }
+
+    fn window_range_index(&self) -> Result<Option<WindowRangeIndex>, Error> {
+        self.storage
+            .get(self.column_family, WINDOW_RANGE_INDEX_KEY)?
+            .map(|value| decode_window_range_index(&value))
+            .transpose()
+    }
+
+    fn append_window_range_index_operations(
+        &self,
+        operations: &mut Vec<OwnedWriteOperation>,
+    ) -> Result<(), Error> {
+        let mut index = match self.window_range_index()? {
+            Some(index) => index,
+            None => self.build_window_range_index()?,
+        };
+        for operation in operations.iter() {
+            match operation {
+                OwnedWriteOperation::Set { key, value, .. } => {
+                    if let Some(window) = decode_window_value(value)? {
+                        index.upsert(key.clone(), window.max_key.to_vec());
+                    }
+                }
+                OwnedWriteOperation::Delete { key, .. } => {
+                    index.remove(key);
+                }
+                OwnedWriteOperation::Delta { .. } => {}
+            }
+        }
+        operations.push(OwnedWriteOperation::Set {
+            cf: self.column_family.to_owned(),
+            key: WINDOW_RANGE_INDEX_KEY.to_vec(),
+            value: encode_window_range_index(&index)?,
+        });
+        Ok(())
+    }
+
+    fn write_window_range_index(&self) -> Result<(), Error> {
+        let index = self.build_window_range_index()?;
+        let value = encode_window_range_index(&index)?;
+        self.storage.write_many(&[WriteOperation::set(
+            self.column_family,
+            WINDOW_RANGE_INDEX_KEY,
+            &value,
+        )])
+    }
+
+    fn build_window_range_index(&self) -> Result<WindowRangeIndex, Error> {
+        let mut index = WindowRangeIndex::default();
+        self.storage
+            .scan_prefix(self.column_family, b"", &mut |key, value| {
+                if is_window_meta_key(key) {
+                    return Ok(());
+                }
+                if let Some(window) = decode_window_value(value)? {
+                    index.upsert(key.to_vec(), window.max_key.to_vec());
+                }
+                Ok(())
+            })?;
+        Ok(index)
     }
 
     fn lookup_window_record(
@@ -1310,9 +1516,10 @@ fn should_decode_full_window_for_probe(key: &DecodedWindowCacheKey) -> bool {
 const WINDOW_VALUE_MAGIC: &[u8] = b"GWIN2\0";
 const WINDOW_MARKER_KEY: &[u8] = b"\xffGWIN2-META";
 const WINDOW_CURSOR_KEY: &[u8] = b"\xffGWIN2-CURSOR";
+const WINDOW_RANGE_INDEX_KEY: &[u8] = b"\xffGWIN2-RANGE-INDEX";
 
 fn is_window_meta_key(key: &[u8]) -> bool {
-    key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY
+    key == WINDOW_MARKER_KEY || key == WINDOW_CURSOR_KEY || key == WINDOW_RANGE_INDEX_KEY
 }
 
 fn lexicographic_predecessor(key: &[u8]) -> Option<Vec<u8>> {
@@ -1326,9 +1533,53 @@ fn lexicographic_predecessor(key: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+fn cursor_after_last_seen(key: &[u8]) -> Vec<u8> {
+    let mut cursor = key.to_vec();
+    cursor.push(0);
+    cursor
+}
+
 struct DecodedWindowValue<'a> {
     max_key: &'a [u8],
     codec: &'a [u8],
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct WindowRangeIndex {
+    entries: Vec<WindowRangeIndexEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WindowRangeIndexEntry {
+    window_key: Vec<u8>,
+    max_key: Vec<u8>,
+}
+
+impl WindowRangeIndex {
+    fn upsert(&mut self, window_key: Vec<u8>, max_key: Vec<u8>) {
+        match self
+            .entries
+            .binary_search_by(|entry| entry.window_key.cmp(&window_key))
+        {
+            Ok(index) => self.entries[index].max_key = max_key,
+            Err(index) => self.entries.insert(
+                index,
+                WindowRangeIndexEntry {
+                    window_key,
+                    max_key,
+                },
+            ),
+        }
+    }
+
+    fn remove(&mut self, window_key: &[u8]) {
+        if let Ok(index) = self
+            .entries
+            .binary_search_by(|entry| entry.window_key.as_slice().cmp(window_key))
+        {
+            self.entries.remove(index);
+        }
+    }
 }
 
 fn encode_window_value(max_key: &[u8], codec_bytes: &[u8]) -> Vec<u8> {
@@ -1360,6 +1611,14 @@ fn decode_window_value(value: &[u8]) -> Result<Option<DecodedWindowValue<'_>>, E
     }
     let (max_key, codec) = remaining.split_at(max_key_len);
     Ok(Some(DecodedWindowValue { max_key, codec }))
+}
+
+fn encode_window_range_index(index: &WindowRangeIndex) -> Result<Vec<u8>, Error> {
+    postcard::to_allocvec(index).map_err(|error| Error::InvalidWindowRecord(error.to_string()))
+}
+
+fn decode_window_range_index(value: &[u8]) -> Result<WindowRangeIndex, Error> {
+    postcard::from_bytes(value).map_err(|error| Error::InvalidWindowRecord(error.to_string()))
 }
 
 fn append_window_operations<S>(
@@ -1443,6 +1702,10 @@ fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> 
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        RecordValue::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
+        }
         RecordValue::I64(value) => {
             key.push(13);
             key.extend(order_preserving_i64_bits(*value).to_be_bytes());
@@ -1509,6 +1772,16 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
                     .expect("slice has u64 length"),
             )))
         }
+        ValueType::I32 => {
+            expect_key_tag(bytes, 14)?;
+            Ok(RecordValue::I32(
+                (u32::from_be_bytes(
+                    take_key_bytes(bytes, 4)?
+                        .try_into()
+                        .expect("slice has i32 length"),
+                ) ^ (1_u32 << 31)) as i32,
+            ))
+        }
         ValueType::I64 => {
             expect_key_tag(bytes, 13)?;
             Ok(RecordValue::I64(
@@ -1560,6 +1833,10 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -2474,6 +2751,7 @@ pub(crate) mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{MeteredStorage, StorageReadMetrics};
     use crate::records::{EnumSchema, Value, ValueType};
     use std::cell::Cell;
 
@@ -2578,6 +2856,26 @@ mod tests {
         count: u64,
     ) -> Vec<KeyValue> {
         (0..count)
+            .map(|idx| {
+                let key = window_key(1, 100 + idx, 7);
+                let value = window_value(
+                    value_descriptor,
+                    &format!("title-{idx}"),
+                    &[idx as u8, (idx + 1) as u8],
+                );
+                storage.set("jazz_docs_history", &key, &value).unwrap();
+                (key, value)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn seed_window_records_from<S: OrderedKvStorage>(
+        storage: &S,
+        value_descriptor: RecordDescriptor,
+        start: u64,
+        count: u64,
+    ) -> Vec<KeyValue> {
+        (start..start + count)
             .map(|idx| {
                 let key = window_key(1, 100 + idx, 7);
                 let value = window_value(
@@ -3638,9 +3936,10 @@ mod tests {
     }
 
     #[test]
-    fn windowed_record_store_exact_get_uses_predecessor_seek_not_prefix_scan() {
+    fn windowed_record_store_exact_get_uses_range_index_not_prefix_scan() {
         struct CountingStorage<S> {
             inner: S,
+            point_reads: Cell<usize>,
             prefix_scans: Cell<usize>,
             reverse_prefix_scans: Cell<usize>,
             last_calls: Cell<usize>,
@@ -3651,6 +3950,7 @@ mod tests {
             fn new(inner: S) -> Self {
                 Self {
                     inner,
+                    point_reads: Cell::new(0),
                     prefix_scans: Cell::new(0),
                     reverse_prefix_scans: Cell::new(0),
                     last_calls: Cell::new(0),
@@ -3664,6 +3964,7 @@ mod tests {
             S: OrderedKvStorage,
         {
             fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+                self.point_reads.set(self.point_reads.get() + 1);
                 self.inner.get(cf, key)
             }
 
@@ -3741,6 +4042,7 @@ mod tests {
                 records: 12
             }
         );
+        storage.point_reads.set(0);
         storage.prefix_scans.set(0);
         storage.reverse_prefix_scans.set(0);
         storage.last_calls.set(0);
@@ -3750,10 +4052,12 @@ mod tests {
             store.get_raw(&expected[8].0).unwrap(),
             Some(expected[8].1.clone())
         );
-        assert_eq!(storage.last_before_calls.get(), 1);
+        assert!(storage.point_reads.get() <= 4);
+        assert_eq!(storage.last_before_calls.get(), 0);
         assert_eq!(storage.prefix_scans.get(), 0);
         assert_eq!(storage.reverse_prefix_scans.get(), 0);
 
+        storage.point_reads.set(0);
         storage.prefix_scans.set(0);
         storage.reverse_prefix_scans.set(0);
         storage.last_calls.set(0);
@@ -3763,9 +4067,259 @@ mod tests {
             expected.last().cloned()
         );
         assert_eq!(storage.last_calls.get(), 1);
-        assert_eq!(storage.last_before_calls.get(), 1);
+        assert_eq!(storage.last_before_calls.get(), 2);
         assert_eq!(storage.prefix_scans.get(), 0);
         assert_eq!(storage.reverse_prefix_scans.get(), 0);
+    }
+
+    #[test]
+    fn windowed_absent_get_uses_range_index_instead_of_plain_tail_walk() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let mut expected = Vec::new();
+        expected.extend(seed_window_records_from(&storage, descriptor, 0, 9));
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        expected.extend(seed_window_records_from(
+            &storage, descriptor, 10_000, 5_000,
+        ));
+
+        let present_in_window = expected[4].0.clone();
+        let present_plain = expected.last().unwrap().0.clone();
+        let absent_in_window_range = window_key(1, 104, 8);
+        let absent_after_plain_tail = window_key(1, 20_000, 7);
+        for key in [
+            present_in_window,
+            present_plain,
+            absent_in_window_range,
+            absent_after_plain_tail.clone(),
+        ] {
+            let indexed = store
+                .get_raw_from_window_range_index(&key)
+                .unwrap()
+                .unwrap_or(None);
+            assert_eq!(
+                indexed,
+                store.get_raw_run_aware_legacy_walk(&key).unwrap(),
+                "indexed and legacy paths must agree for key {key:?}"
+            );
+        }
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        assert_eq!(
+            metered_store.get_raw(&absent_after_plain_tail).unwrap(),
+            None
+        );
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 4,
+            "absent lookup should not walk the plain tail; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        for tail in [1_000, 5_000, 20_000] {
+            let (legacy_reads, indexed_reads) = absent_lookup_reads_for_plain_tail(tail);
+            eprintln!(
+                "windowed_absent_lookup_scaling tail={tail} legacy_reads={legacy_reads} indexed_reads={indexed_reads}"
+            );
+            assert!(
+                indexed_reads <= 4,
+                "indexed absent lookup should stay constant; tail={tail}, reads={indexed_reads}"
+            );
+        }
+    }
+
+    fn absent_lookup_reads_for_plain_tail(tail: u64) -> (usize, usize) {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        seed_window_records_from(&storage, descriptor, 0, 9);
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        seed_window_records_from(&storage, descriptor, 10_000, tail);
+        let absent_after_plain_tail = window_key(1, 40_000, 7);
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        assert_eq!(
+            metered_store
+                .get_raw_run_aware_legacy_walk(&absent_after_plain_tail)
+                .unwrap(),
+            None
+        );
+        let legacy_reads = metrics.borrow().history_rows.reads;
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        assert_eq!(
+            metered_store.get_raw(&absent_after_plain_tail).unwrap(),
+            None
+        );
+        let indexed_reads = metrics.borrow().history_rows.reads;
+        (legacy_reads, indexed_reads)
+    }
+
+    #[test]
+    fn windowed_run_aware_ranges_use_bounded_plain_and_candidate_window_reads() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        let mut expected = Vec::new();
+        expected.extend(seed_window_records_from(&storage, descriptor, 0, 9));
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        expected.extend(seed_window_records_from(
+            &storage, descriptor, 10_000, 5_000,
+        ));
+
+        let cases = [
+            (
+                "plain-only",
+                window_key(1, 10_150, 7),
+                window_key(1, 10_153, 7),
+            ),
+            ("window-only", window_key(1, 103, 7), window_key(1, 106, 7)),
+            ("mixed", window_key(1, 106, 7), window_key(1, 10_002, 7)),
+            ("empty", window_key(1, 9_000, 7), window_key(1, 9_003, 7)),
+        ];
+        for (name, start, end) in cases {
+            let indexed_forward = store.range(&start, &end).unwrap();
+            storage
+                .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+                .unwrap();
+            let legacy_forward = store.range(&start, &end).unwrap();
+            assert_eq!(
+                indexed_forward, legacy_forward,
+                "forward range mismatch for {name}"
+            );
+
+            let indexed_reverse = store.range_reverse(&start, &end).unwrap();
+            storage
+                .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+                .unwrap();
+            let legacy_reverse = store.range_reverse(&start, &end).unwrap();
+            assert_eq!(
+                indexed_reverse, legacy_reverse,
+                "reverse range mismatch for {name}"
+            );
+        }
+
+        let prefix_key = window_key(1, 10_250, 7);
+        let indexed_prefix = store.prefix(&prefix_key).unwrap();
+        storage
+            .delete("jazz_docs_history", WINDOW_RANGE_INDEX_KEY)
+            .unwrap();
+        let legacy_prefix = store.prefix(&prefix_key).unwrap();
+        assert_eq!(indexed_prefix, legacy_prefix);
+        assert_eq!(
+            indexed_prefix,
+            expected
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix_key))
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        let narrow_start = window_key(1, 10_300, 7);
+        let narrow_end = window_key(1, 10_303, 7);
+        let rows = metered_store.range(&narrow_start, &narrow_end).unwrap();
+        assert_eq!(rows.len(), 3);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 8,
+            "narrow range should read only bounded plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let rows = metered_store.prefix(&prefix_key).unwrap();
+        assert_eq!(rows.len(), 1);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 6,
+            "narrow prefix should read only matching plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let rows = metered_store
+            .range_reverse(&narrow_start, &narrow_end)
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        let reads = metrics.borrow().history_rows.reads;
+        assert!(
+            reads <= 8,
+            "narrow reverse range should read only bounded plain rows and metadata; reads={reads}, metrics={:?}",
+            metrics.borrow()
+        );
+
+        for tail in [1_000, 5_000, 20_000] {
+            let (legacy_reads, indexed_reads) = reverse_range_reads_for_plain_tail(tail);
+            eprintln!(
+                "windowed_reverse_range_scaling tail={tail} legacy_reads={legacy_reads} indexed_reads={indexed_reads}"
+            );
+            assert!(
+                indexed_reads <= 8,
+                "indexed reverse range should stay bounded; tail={tail}, reads={indexed_reads}"
+            );
+        }
+    }
+
+    fn reverse_range_reads_for_plain_tail(tail: u64) -> (usize, usize) {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        seed_window_records_from(&storage, descriptor, 0, 9);
+        let store = window_store(&storage, &descriptor);
+        assert_eq!(
+            store.consolidate_windows(3).unwrap(),
+            WindowConsolidation {
+                windows: 3,
+                records: 9
+            }
+        );
+        seed_window_records_from(&storage, descriptor, 10_000, tail);
+        let start = window_key(1, 10_300, 7);
+        let end = window_key(1, 10_303, 7);
+
+        let metrics = RefCell::new(StorageReadMetrics::default());
+        let metered = MeteredStorage::new(&storage, &metrics);
+        let metered_store = window_store(&metered, &descriptor);
+        let mut legacy = metered_store
+            .run_aware_records(
+                |key| key >= start.as_slice() && key < end.as_slice(),
+                |visit| metered.scan_prefix("jazz_docs_history", b"", visit),
+            )
+            .unwrap();
+        legacy.reverse();
+        assert_eq!(legacy.len(), 3);
+        let legacy_reads = metrics.borrow().history_rows.reads;
+
+        *metrics.borrow_mut() = StorageReadMetrics::default();
+        let indexed = metered_store.range_reverse(&start, &end).unwrap();
+        assert_eq!(indexed, legacy);
+        let indexed_reads = metrics.borrow().history_rows.reads;
+        (legacy_reads, indexed_reads)
     }
 
     #[test]
@@ -3793,6 +4347,67 @@ mod tests {
         assert_eq!(
             store.get_raw(&expected[8].0).unwrap(),
             Some(expected[8].1.clone())
+        );
+    }
+
+    #[test]
+    fn full_window_consolidation_cursor_advances_past_encoded_windows() {
+        let storage = MemoryStorage::new(&["jazz_docs_history"]);
+        let descriptor = window_value_descriptor();
+        seed_window_records(&storage, descriptor, 12);
+        let store = window_store(&storage, &descriptor);
+
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 1).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 3
+            }
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 1).unwrap(),
+            WindowConsolidation {
+                windows: 1,
+                records: 3
+            }
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation {
+                windows: 2,
+                records: 6
+            }
+        );
+
+        let cursor_before = storage
+            .get("jazz_docs_history", WINDOW_CURSOR_KEY)
+            .unwrap()
+            .expect("cursor should be persisted");
+        let remaining = storage
+            .range("jazz_docs_history", &cursor_before, WINDOW_MARKER_KEY)
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .all(|(key, _)| key == WINDOW_CURSOR_KEY || key == WINDOW_MARKER_KEY),
+            "cursor should sit past all already encoded windows"
+        );
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation::default()
+        );
+        let cursor_after = storage
+            .get("jazz_docs_history", WINDOW_CURSOR_KEY)
+            .unwrap()
+            .expect("cursor should still be persisted");
+        assert_eq!(cursor_after, cursor_before);
+        assert_eq!(
+            store.consolidate_full_windows_bounded(3, 10).unwrap(),
+            WindowConsolidation::default()
+        );
+        assert_eq!(
+            storage.get("jazz_docs_history", WINDOW_CURSOR_KEY).unwrap(),
+            Some(cursor_after)
         );
     }
 

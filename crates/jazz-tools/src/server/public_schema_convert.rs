@@ -322,6 +322,9 @@ fn coerce_literal_for_column_type(
         (GrooveValue::U64(value), GrooveColumnType::I64) => i64::try_from(value)
             .map(GrooveValue::I64)
             .unwrap_or(GrooveValue::U64(value)),
+        (GrooveValue::U64(value), GrooveColumnType::I32) => i32::try_from(value)
+            .map(GrooveValue::I32)
+            .unwrap_or(GrooveValue::U64(value)),
         (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
             GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
                 *value, inner,
@@ -556,17 +559,15 @@ fn convert_default_for_column_type(
         (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
         (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
-        (ColumnType::Integer, Value::Integer(value)) => {
-            Ok(GrooveValue::U32(encode_signed_i32_for_core(*value)))
-        }
-        (ColumnType::Integer, Value::BigInt(value)) => i32::try_from(*value)
-            .map(|value| GrooveValue::U32(encode_signed_i32_for_core(value)))
-            .map_err(|_| {
+        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I32(*value)),
+        (ColumnType::Integer, Value::BigInt(value)) => {
+            i32::try_from(*value).map(GrooveValue::I32).map_err(|_| {
                 err(
                     format!("$.{}.{}", table.as_str(), column),
                     format!("BIGINT default {value} is outside INTEGER range"),
                 )
-            }),
+            })
+        }
         (ColumnType::BigInt, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
         (ColumnType::BigInt, Value::BigInt(value)) => Ok(GrooveValue::I64(*value)),
         (ColumnType::Array { element }, Value::Array(values)) => values
@@ -597,10 +598,8 @@ fn convert_column_type(
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
-        // Core does not currently have signed integer cells. Public
-        // INTEGER columns are therefore represented as U32 and the
-        // core write path rejects negative values.
-        ColumnType::Integer => Ok(GrooveColumnType::U32),
+        // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
+        ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
         ColumnType::BatchId => Err(err(
@@ -2171,7 +2170,7 @@ fn convert_policy_literal(
         Value::Null => Ok(GrooveValue::Nullable(None)),
         Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
-        Value::Integer(value) => Ok(GrooveValue::U32(encode_signed_i32_for_core(*value))),
+        Value::Integer(value) => Ok(GrooveValue::I32(*value)),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
         other => Err(err(
@@ -2183,10 +2182,6 @@ fn convert_policy_literal(
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
     SchemaConversionError::new(path, message)
-}
-
-fn encode_signed_i32_for_core(value: i32) -> u32 {
-    (value as u32) ^ 0x8000_0000
 }
 
 #[cfg(test)]
@@ -2315,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_integer_as_core_u32_and_column_defaults() {
+    fn converts_public_integer_as_core_i32_and_column_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))
             .build();
@@ -2332,7 +2327,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::U32
+            GrooveColumnType::I32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -2356,7 +2351,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::U32.array_of()
+            GrooveColumnType::I32.array_of()
         );
 
         let default_schema = [(
@@ -2392,6 +2387,61 @@ mod tests {
                 .default,
             Some(GrooveValue::String("x".to_owned()))
         );
+    }
+
+    #[test]
+    fn converted_public_integer_records_use_four_core_bytes() {
+        // Public clients cannot observe core row width directly; this focused
+        // conversion/layout check guards the storage-width contract.
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("metrics").column("score", ColumnType::Integer))
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "metrics")
+            .unwrap();
+        let descriptor = table.history_storage_table().record_schema();
+        let values = descriptor
+            .fields()
+            .iter()
+            .map(|field| sample_groove_value(&field.value_type))
+            .collect::<Vec<_>>();
+        let record = descriptor.create(&values).unwrap();
+        let score_idx = descriptor.field_index("user_score").unwrap();
+        let score_span = descriptor.field_span(&record, score_idx).unwrap();
+
+        assert_eq!(
+            descriptor.bind(&record).get_idx(score_idx).unwrap(),
+            GrooveValue::Nullable(Some(Box::new(GrooveValue::I32(-5))))
+        );
+        assert_eq!(score_span.end - score_span.start, 5);
+        assert_eq!(score_span.end - score_span.start - 1, 4);
+    }
+
+    fn sample_groove_value(value_type: &jazz::groove::records::ValueType) -> GrooveValue {
+        match value_type {
+            jazz::groove::records::ValueType::U8 => GrooveValue::U8(1),
+            jazz::groove::records::ValueType::U16 => GrooveValue::U16(2),
+            jazz::groove::records::ValueType::U32 => GrooveValue::U32(3),
+            jazz::groove::records::ValueType::U64 => GrooveValue::U64(4),
+            jazz::groove::records::ValueType::I32 => GrooveValue::I32(-5),
+            jazz::groove::records::ValueType::I64 => GrooveValue::I64(-6),
+            jazz::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
+            jazz::groove::records::ValueType::Bool => GrooveValue::Bool(true),
+            jazz::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
+            jazz::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            jazz::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
+            jazz::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            jazz::groove::records::ValueType::Tuple(members) => {
+                GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
+            }
+            jazz::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            jazz::groove::records::ValueType::Nullable(inner) => {
+                GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
+            }
+        }
     }
 
     #[test]

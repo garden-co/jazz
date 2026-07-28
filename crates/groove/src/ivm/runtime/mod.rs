@@ -27,7 +27,8 @@ use crate::ivm::{
     IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
     NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp,
 };
 use crate::records::{
     self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
@@ -2075,9 +2076,6 @@ impl IvmRuntime {
                 offset,
                 limit,
             } => {
-                if *limit == 0 {
-                    return Err(IvmRuntimeError::UnsupportedOperator);
-                }
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
@@ -5749,7 +5747,7 @@ where
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
+        if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -6507,6 +6505,8 @@ fn aggregate_output_type(
                 | ValueType::U16
                 | ValueType::U32
                 | ValueType::U64
+                | ValueType::I32
+                | ValueType::I64
                 | ValueType::F64 => value_type,
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
@@ -6816,6 +6816,11 @@ fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::I32 => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
+            Ok(())
+        }
         ValueType::I64 => {
             key.push(13);
             key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
@@ -6873,6 +6878,17 @@ fn encode_record_field_key_part(
                     key.push(9);
                     key.push(13);
                     key.extend(order_preserving_i64_bits(value).to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I32) => {
+            match borrowed.get_nullable_i32(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(14);
+                    key.extend(order_preserving_i32_bits(value).to_be_bytes());
                 }
                 None => key.push(8),
             }
@@ -7056,6 +7072,9 @@ fn record_field_literal_ordering(
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
         }
+        (ValueType::I32, LiteralValue::I32(expected)) => {
+            Ok(ordering(&record.get_i32(field_idx)?, expected))
+        }
         (ValueType::I64, LiteralValue::I64(expected)) => {
             Ok(ordering(&record.get_i64(field_idx)?, expected))
         }
@@ -7106,6 +7125,10 @@ fn nullable_record_field_literal_ordering(
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::I64, LiteralValue::I64(expected)) => Ok(record
             .get_nullable_i64(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::I32, LiteralValue::I32(expected)) => Ok(record
+            .get_nullable_i32(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::F64, LiteralValue::F64(expected)) => {
@@ -7209,6 +7232,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
@@ -7272,6 +7296,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -7337,6 +7365,10 @@ fn order_preserving_f64_bits(value: f64) -> u64 {
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -7550,6 +7582,7 @@ fn aggregate_sum(
     };
     let mut kind = None;
     let mut u64_sum = 0_u64;
+    let mut i64_sum = 0_i64;
     let mut f64_sum = 0_f64;
     for (record, weight) in records {
         if *weight <= 0 {
@@ -7576,6 +7609,14 @@ fn aggregate_sum(
                 kind.get_or_insert(ValueType::U64);
                 u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
             }
+            Value::I32(value) => {
+                kind.get_or_insert(ValueType::I32);
+                i64_sum = add_weighted_i64(i64_sum, i64::from(value), *weight)?;
+            }
+            Value::I64(value) => {
+                kind.get_or_insert(ValueType::I64);
+                i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
+            }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
                 f64_sum += value * (*weight as f64);
@@ -7594,6 +7635,10 @@ fn aggregate_sum(
             .map(Value::U32)
             .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Value::I32)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::I64 => Ok(Value::I64(i64_sum)),
         ValueType::F64 => Ok(Value::F64(f64_sum)),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7676,12 +7721,24 @@ fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRun
         .ok_or(IvmRuntimeError::UnsupportedOperator)
 }
 
+fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
+    current
+        .checked_add(
+            value
+                .checked_mul(weight)
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
     match value {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
         Value::U64(value) => Ok(*value as f64),
+        Value::I32(value) => Ok(f64::from(*value)),
+        Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7716,7 +7773,7 @@ fn evaluate_aggregate_expr(
 }
 
 type SourceRecord = (Vec<u8>, Bytes);
-type RankedRecord = (Vec<TopBySortPart>, Bytes);
+type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TopBySortPart {
@@ -7810,19 +7867,48 @@ fn top_by_window_from_records(
     descriptor: RecordDescriptor,
     records: Vec<(Bytes, i64)>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
     let mut ranked = Vec::new();
     for (record, weight) in records {
         if weight > 0 {
-            ranked.push((top_by_sort_key(descriptor, &record, top_by)?, record));
+            ranked.push((
+                top_by_sort_key(descriptor, &record, top_by)?,
+                record,
+                weight,
+            ));
         }
     }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(ranked
-        .into_iter()
-        .skip(top_by.offset)
-        .take(top_by.limit)
-        .collect())
+    // Full record bytes are the final tie-breaker (INV-QUERY-23); the total
+    // order must not depend on arrangement iteration order.
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies m
+    // ordinals, and offset/limit consume copies, not distinct records.
+    let mut window = Vec::new();
+    let mut to_skip = top_by.offset;
+    let mut remaining = match top_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
+    for (_, record, weight) in ranked {
+        if remaining == Some(0) {
+            break;
+        }
+        let copies = weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
+        if taken > 0 {
+            window.push((
+                record,
+                i64::try_from(taken).expect("taken copies cannot exceed positive record weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
+        }
+    }
+    Ok(window)
 }
 
 fn top_by_window_before_from_deltas(
@@ -7830,27 +7916,18 @@ fn top_by_window_before_from_deltas(
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    // Reconstruct the pre-tick multiset keyed by record bytes — the same
+    // identity the arrangement consolidates by. Keying by sort key would
+    // collapse distinct records that tie through (order_cols, tie_cols).
+    let mut records = BTreeMap::<Bytes, i64>::new();
     for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
-        records.insert(key, (record, weight));
+        *records.entry(record).or_default() += weight;
     }
     for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), &top_by.sort_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
     }
-    top_by_window_from_records(
-        descriptor,
-        records
-            .into_iter()
-            .map(|(_, (record, weight))| (record, weight))
-            .collect(),
-        top_by,
-    )
+    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
 }
 
 fn top_by_sort_key(
@@ -7871,13 +7948,16 @@ fn top_by_sort_key(
         .collect()
 }
 
-fn diff_record_windows(before: Vec<RankedRecord>, after: Vec<RankedRecord>) -> Vec<RecordDelta> {
+fn diff_record_windows(
+    before: Vec<WindowedRecord>,
+    after: Vec<WindowedRecord>,
+) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (_, record) in before {
-        *weights.entry(record).or_default() -= 1;
+    for (record, copies) in before {
+        *weights.entry(record).or_default() -= copies;
     }
-    for (_, record) in after {
-        *weights.entry(record).or_default() += 1;
+    for (record, copies) in after {
+        *weights.entry(record).or_default() += copies;
     }
     let mut retractions = Vec::new();
     let mut insertions = Vec::new();
@@ -7922,6 +8002,10 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -8142,6 +8226,62 @@ mod tests {
             ("src", ColumnType::U64.value_type()),
             ("dst", ColumnType::U64.value_type()),
         ])
+    }
+
+    #[test]
+    fn top_by_distinguishes_finite_max_from_unbounded_limit() {
+        // Direct helper coverage is intentional: constructing more than
+        // u64::MAX derivations through public tables is not feasible, while
+        // synthetic weights exercise the semantic boundary without expanding
+        // multiplicity into individual records.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let records = [1, 2, 3]
+            .into_iter()
+            .map(|id| {
+                (
+                    Bytes::from(descriptor.create(&[Value::U64(id)]).unwrap()),
+                    i64::MAX,
+                )
+            })
+            .collect::<Vec<_>>();
+        let top_by = |limit| TopByOp {
+            group_fields: Vec::new(),
+            group_field_indices: Vec::new(),
+            order_fields: vec![TopByOrderField {
+                field: "id".to_owned(),
+                direction: TopByDirection::Asc,
+            }],
+            tie_fields: Vec::new(),
+            sort_field_indices: vec![0],
+            sort_directions: vec![TopByDirection::Asc],
+            offset: 0,
+            limit,
+        };
+
+        let finite = top_by_window_from_records(
+            descriptor,
+            records.clone(),
+            &top_by(TopByLimit::Finite(u64::MAX)),
+        )
+        .unwrap();
+        assert_eq!(
+            finite
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, 1]
+        );
+
+        let unbounded =
+            top_by_window_from_records(descriptor, records, &top_by(TopByLimit::Unbounded))
+                .unwrap();
+        assert_eq!(
+            unbounded
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, i64::MAX]
+        );
     }
 
     fn recursive_reach_graph() -> GraphBuilder {

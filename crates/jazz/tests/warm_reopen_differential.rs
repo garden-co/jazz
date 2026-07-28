@@ -249,6 +249,9 @@ fn canonical_event(schema: &JazzSchema, event: &SubscriptionEvent) -> CanonicalE
                 tier: *tier,
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => CanonicalEvent::Closed,
     }
 }
@@ -374,6 +377,9 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                     snapshot.rows.remove(index);
                 }
             }
+        }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
         }
         SubscriptionEvent::Closed => {}
     }

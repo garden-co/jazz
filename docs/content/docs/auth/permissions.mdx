@@ -156,41 +156,6 @@ See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for
 Jazz exposes a small set of system-provided magic columns at query time. They do not exist in your
 schema, and they are omitted from `select("*")`, so opt in explicitly when you want them.
 
-### Permission introspection columns
-
-- `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
-- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's update policy.
-- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's delete policy.
-- Without a session, all three return `null`.
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
-    </include>
-  </Tab>
-</Tabs>
-
-Permission columns work the same way inside `include(...)` subqueries: the booleans are evaluated **per row**, against the policy on the included table, not inherited from the parent. A query that loads a project with its todos can ask whether the current session can edit each individual todo, driving per-row UI affordances like edit buttons or delete confirmations without mirroring your permission policy on the client.
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-include-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-include-rust
-    </include>
-  </Tab>
-</Tabs>
-
 ### Edit metadata columns
 
 Jazz also tracks row authorship and timestamps automatically:

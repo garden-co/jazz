@@ -55,7 +55,8 @@ use crate::protocol_limits::{
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery, relation_query_to_query,
+    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+    relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
@@ -195,6 +196,8 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type UpstreamSubscriptionOwners =
+    Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
@@ -875,7 +878,6 @@ where
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         Ok(QueryAttachment {
@@ -896,7 +898,6 @@ where
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
@@ -980,8 +981,18 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
+        self.validate_prepared_shape_for_registration(prepared)?;
         let read_tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                author,
+                &opts.read_view,
+            )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -1008,7 +1019,7 @@ where
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
-        let mut cleanup = None;
+        let mut upstream_subscription_handles = Vec::new();
         let propagates_upstream = opts.propagation == Propagation::Full;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
@@ -1033,7 +1044,7 @@ where
             remote_read_tier = Some(upstream_opts.tier);
             let upstream_subscriptions =
                 self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
+            upstream_subscription_handles = upstream_subscriptions;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -1045,6 +1056,7 @@ where
         );
         let (sender, receiver) = unbounded();
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
+        let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
@@ -1057,6 +1069,7 @@ where
             remote_read_tier,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
+            snapshot_index,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
@@ -1070,11 +1083,34 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        let cleanup = if upstream_subscription_handles.is_empty() {
+            None
+        } else {
+            let owner = Rc::downgrade(&state);
+            register_upstream_subscription_owner(
+                &self.node.upstream_subscription_owners,
+                &upstream_subscription_handles,
+                &state,
+            );
+            Some(self.upstream_subscription_cleanup(upstream_subscription_handles, owner))
+        };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup,
         })
+    }
+
+    fn validate_prepared_shape_for_registration(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<(), Error> {
+        let ast = ShapeAst::from_validated(&prepared.shape);
+        let validation = {
+            let node = self.node.node.borrow();
+            validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
+        };
+        validation.map(|_| ()).map_err(Error::from)
     }
 
     async fn open_relation_subscription(
@@ -1096,7 +1132,16 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
-        ensure_supported_subscription_shape(shape)?;
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                opts.tier,
+                identity,
+                &opts.read_view,
+            )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node
@@ -1138,14 +1183,21 @@ where
     fn upstream_subscription_cleanup(
         &self,
         upstream_subscriptions: Vec<UpstreamCoverageHandle>,
+        owner: Weak<RefCell<SubscriptionState>>,
     ) -> Box<dyn FnOnce()> {
         let node = Rc::clone(&self.node.node);
         let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
         let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
+        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
         let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
         let scheduler = Rc::clone(&self.node.scheduler);
         Box::new(move || {
             for handle in upstream_subscriptions {
+                unregister_upstream_subscription_owner(
+                    &upstream_subscription_owners,
+                    handle.subscription,
+                    &owner,
+                );
                 let mut refcounts = upstream_coverage_refcounts.borrow_mut();
                 let Some(count) = refcounts.get_mut(&handle.coverage) else {
                     continue;
@@ -2110,6 +2162,31 @@ where
             .map_err(Into::into)
     }
 
+    /// Stage a restore inside an owned exclusive transaction handle, applying defaults for omitted columns.
+    pub fn exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        // Restore needs one content version and one deletion-register version:
+        // `tx_write` rejects a version carrying both. The layers have separate
+        // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
+        // Keep this staged form aligned with the committed restore path.
+        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(
+            tx_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
@@ -2139,7 +2216,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Restore a row locally. Data is required by the public API contract.
+    /// Restore a row locally, applying defaults for omitted columns.
     ///
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
@@ -2160,9 +2237,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
@@ -2206,9 +2280,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
@@ -2275,9 +2346,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2311,9 +2379,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -3132,6 +3197,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
@@ -3154,6 +3220,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -3342,6 +3409,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -3470,6 +3538,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -3741,8 +3810,11 @@ where
                                 (fallback, false)
                             };
                         if let Some(update) = maintained_update {
+                            let mut snapshot_index =
+                                RelationSnapshotIndex::from_snapshot(&snapshot);
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
+                                &mut snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3783,8 +3855,10 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
+                            let state_ref = &mut *state_ref;
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
+                                &mut state_ref.snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3935,6 +4009,7 @@ where
                 subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -3945,6 +4020,85 @@ where
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)
+}
+
+fn register_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    handles: &[UpstreamCoverageHandle],
+    state: &Rc<RefCell<SubscriptionState>>,
+) {
+    let weak = Rc::downgrade(state);
+    let mut owners = owners.borrow_mut();
+    for handle in handles {
+        owners
+            .entry(handle.subscription)
+            .or_default()
+            .push(weak.clone());
+    }
+}
+
+fn unregister_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    state: &Weak<RefCell<SubscriptionState>>,
+) {
+    let mut owners = owners.borrow_mut();
+    let Some(entries) = owners.get_mut(&subscription) else {
+        return;
+    };
+    entries.retain(|entry| !entry.ptr_eq(state) && entry.strong_count() > 0);
+    if entries.is_empty() {
+        owners.remove(&subscription);
+    }
+}
+
+fn route_upstream_subscription_rejection(
+    subscriptions: &SubscriptionList,
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    reason: SubscribeRejectReason,
+) -> usize {
+    let mut delivered = 0;
+    if let Some(entries) = owners.borrow_mut().get_mut(&subscription) {
+        entries.retain(|entry| entry.strong_count() > 0);
+        for state in entries.iter().filter_map(Weak::upgrade) {
+            let event = SubscriptionEvent::Rejected {
+                reason: reason.clone(),
+            };
+            if state.borrow().sender.unbounded_send(event).is_ok() {
+                delivered += 1;
+            }
+        }
+        if delivered > 0 {
+            return delivered;
+        }
+    }
+
+    for state in subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        let state_ref = state.borrow();
+        if !state_ref.propagates_upstream {
+            continue;
+        }
+        let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
+        let read_view =
+            upstream_register_shape_options(state_ref.read_tier, state_ref.read_view.clone())
+                .read_view_key();
+        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+            continue;
+        }
+        if subscription.binding_id != BindingId(uuid::Uuid::nil())
+            && binding.binding_id() != subscription.binding_id
+        {
+            continue;
+        }
+        let event = SubscriptionEvent::Rejected {
+            reason: reason.clone(),
+        };
+        if state_ref.sender.unbounded_send(event).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
 }
 
 /// Binding-supplied transport for one peer link.
@@ -4245,6 +4399,7 @@ where
     transport: Box<dyn Transport>,
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4598,6 +4753,17 @@ where
                                 });
                             }
                         }
+                        SyncMessage::SubscribeRejected {
+                            subscription,
+                            reason,
+                        } => {
+                            stats.subscription_events += route_upstream_subscription_rejection(
+                                &self.subscriptions,
+                                &self.upstream_subscription_owners,
+                                subscription,
+                                reason,
+                            );
+                        }
                         message => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -4660,19 +4826,80 @@ where
                             ast,
                         } => {
                             if let Err(message) = validate_shape_ast_size(&ast) {
-                                let _ = message;
-                                drop_peer_request(&self.node);
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if ensure_supported_register_shape_options(&opts).is_err() {
-                                drop_peer_request(&self.node);
+                            if let Err(error) = ensure_supported_register_shape_options(&opts) {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    error.message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if let Some(query) = ast.query() {
-                                if ensure_supported_maintained_coverage_query_shape(query).is_err()
-                                {
+                            let shape_validation = {
+                                let node = self.node.borrow();
+                                validate_shape_ast_for_registration(&node, shape_id, &ast)
+                            };
+                            let shape = match shape_validation {
+                                Ok(Some(shape)) => Some(shape),
+                                Ok(None) => None,
+                                Err(_) => {
                                     drop_peer_request(&self.node);
                                     continue;
+                                }
+                            };
+                            if let Some(shape) = &shape {
+                                if shape.params().is_empty() {
+                                    let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
+                                    let binding = match binding {
+                                        Ok(binding) => binding,
+                                        Err(_) => {
+                                            drop_peer_request(&self.node);
+                                            continue;
+                                        }
+                                    };
+                                    let supported = self
+                                        .node
+                                        .borrow_mut()
+                                        .ensure_peer_maintained_subscription_view_supported(
+                                            shape,
+                                            &binding,
+                                            opts.tier,
+                                            ingest_context.identity,
+                                            &opts.read_view,
+                                        );
+                                    if let Err(crate::node::Error::QueryCapability(detail)) =
+                                        supported
+                                    {
+                                        let subscription = SubscriptionKey {
+                                            shape_id,
+                                            binding_id: binding.binding_id(),
+                                            read_view: opts.read_view_key(),
+                                        };
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    } else if supported.is_err() {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
                                 }
                             }
                             let registration_key = (shape_id, opts.read_view_key());
@@ -4718,10 +4945,6 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
-                            if ensure_supported_subscription_shape(&shape).is_err() {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
                             let value_map = shape
                                 .params()
                                 .keys()
@@ -4755,6 +4978,28 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let supported = self
+                                .node
+                                .borrow_mut()
+                                .ensure_peer_maintained_subscription_view_supported(
+                                    &shape,
+                                    &binding,
+                                    opts.tier,
+                                    ingest_context.identity,
+                                    &opts.read_view,
+                                );
+                            if let Err(crate::node::Error::QueryCapability(detail)) = supported {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    subscription,
+                                    detail,
+                                )
+                                .map_err(transport_error)?;
+                                continue;
+                            } else if supported.is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
@@ -4778,14 +5023,12 @@ where
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(crate::node::Error::QueryCapability(detail)) => {
-                                        self.transport
-                                            .send(SyncMessage::SubscribeRejected {
-                                                subscription,
-                                                reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                                                    detail,
-                                                },
-                                            })
-                                            .map_err(transport_error)?;
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
                                         continue;
                                     }
                                     Err(error) => return Err(error.into()),
@@ -6155,15 +6398,6 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
     ensure_supported_read_view(opts)
 }
 
-fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
-    ensure_supported_maintained_coverage_query_shape(shape.query())
-}
-
-fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
-    let _ = query;
-    Ok(())
-}
-
 fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
@@ -6181,6 +6415,39 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_shape_ast_for_registration<S>(
+    node: &NodeState<S>,
+    shape_id: ShapeId,
+    ast: &ShapeAst,
+) -> Result<Option<ValidatedQuery>, crate::node::Error>
+where
+    S: OrderedKvStorage,
+{
+    node.validate_shape_ast_for_registration(shape_id, ast)
+}
+
+fn send_unsupported_shape_capability_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    detail: String,
+) -> Result<(), TransportError> {
+    transport.send(SyncMessage::SubscribeRejected {
+        subscription,
+        reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    })
+}
+
+fn register_shape_rejection_subscription(
+    shape_id: ShapeId,
+    read_view: ReadViewKey,
+) -> SubscriptionKey {
+    SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view,
+    }
 }
 
 fn coverage_key(
@@ -6406,12 +6673,12 @@ where
         Ok(())
     }
 
-    /// Stage a restore with explicit row data.
+    /// Stage a restore, applying defaults for omitted columns.
     pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore with explicit row data and millisecond provenance time.
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
     pub fn restore_at_ms(
         &mut self,
         table: &str,
@@ -6429,9 +6696,6 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.db.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.db.node.node.borrow_mut();
@@ -6735,9 +6999,36 @@ struct SubscriptionState {
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
+    snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
     sender: UnboundedSender<SubscriptionEvent>,
+}
+
+#[derive(Clone, Default)]
+struct RelationSnapshotIndex {
+    roots: BTreeMap<(String, RowUuid), usize>,
+    related: BTreeMap<(String, RowUuid), usize>,
+    edges: BTreeSet<RelationEdge>,
+}
+
+impl RelationSnapshotIndex {
+    fn from_snapshot(snapshot: &RelationSnapshot) -> Self {
+        let mut index = Self::default();
+        for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
+            index
+                .roots
+                .insert((row.table().to_owned(), row.row_uuid()), position);
+        }
+        for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
+            index.related.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count + offset,
+            );
+        }
+        index.edges = snapshot.edges.iter().cloned().collect();
+        index
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6798,6 +7089,11 @@ pub enum SubscriptionEvent {
         tier: DurabilityTier,
         /// Core-authoritative root row positions for this delta, when available.
         positioned: Option<PositionedSubscriptionDelta>,
+    },
+    /// The serving peer rejected the propagated upstream subscription.
+    Rejected {
+        /// Stable rejection class plus diagnostic detail from the serving peer.
+        reason: SubscribeRejectReason,
     },
     /// The subscription stream was closed by the producer.
     Closed,
@@ -7066,14 +7362,11 @@ fn subscription_delta_event_with_reset(
 
 fn apply_maintained_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
-    fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
-        row.table() == table && row.row_uuid() == row_uuid
-    }
-
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
         removed: update_removed,
@@ -7091,6 +7384,7 @@ fn apply_maintained_update_to_snapshot(
             snapshot.root_count = update_added.len();
             snapshot.rows.reserve(update_added.len());
             snapshot.rows.extend(update_added.iter().cloned());
+            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
             return SubscriptionEvent::Delta {
                 reset: false,
                 added: update_added,
@@ -7132,6 +7426,7 @@ fn apply_maintained_update_to_snapshot(
             .reserve(event_added.len() + added_related.len());
         snapshot.rows.extend(event_added.iter().cloned());
         snapshot.rows.extend(added_related.iter().cloned());
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
 
         return SubscriptionEvent::Delta {
             reset: false,
@@ -7160,20 +7455,21 @@ fn apply_maintained_update_to_snapshot(
     let previous = root_positioned_delta.then(|| snapshot.clone());
 
     for row in &update_added {
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
                 updated.push(row.clone());
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
+            for position in snapshot_index.related.values_mut() {
+                *position += 1;
+            }
+            snapshot_index.roots.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count,
+            );
             snapshot.root_count += 1;
             added.push(row.clone());
         }
@@ -7181,12 +7477,17 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
+        let row_key = (
+            snapshot.rows[index].table().to_owned(),
+            snapshot.rows[index].row_uuid(),
+        );
         if update_removed
             .iter()
-            .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
+            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
+            snapshot_index.roots.remove(&row_key);
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
@@ -7195,62 +7496,56 @@ fn apply_maintained_update_to_snapshot(
             index += 1;
         }
     }
+    if !update_removed.is_empty() {
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    }
 
-    snapshot
-        .edges
-        .retain(|edge| !update_removed_edges.iter().any(|removed| removed == edge));
+    if !update_removed_edges.is_empty() {
+        snapshot.edges.retain(|edge| {
+            let remove = update_removed_edges.iter().any(|removed| removed == edge);
+            if remove {
+                snapshot_index.edges.remove(edge);
+            }
+            !remove
+        });
+    }
 
     for (edge, row) in &update_added_edges {
-        if !snapshot.edges.iter().any(|current| current == edge) {
+        if snapshot_index.edges.insert(edge.clone()) {
             snapshot.edges.push(edge.clone());
         }
         let Some(row) = row else {
             continue;
         };
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .any(|root| row_matches(root, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if snapshot_index.roots.contains_key(&key) {
             continue;
         }
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .skip(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
-            let position = snapshot.root_count + position;
+        if let Some(position) = snapshot_index.related.get(&key).copied() {
             snapshot.rows[position] = row.clone();
         } else {
+            snapshot_index.related.insert(key, snapshot.rows.len());
             snapshot.rows.push(row.clone());
         }
         added_related.push(row.clone());
     }
 
     for removed_edge in &update_removed_edges {
-        let still_referenced = snapshot.edges.iter().any(|edge| {
+        let still_referenced = snapshot_index.edges.iter().any(|edge| {
             edge.target_table == removed_edge.target_table
                 && edge.target_row == removed_edge.target_row
         });
-        let is_root = snapshot.rows.iter().take(snapshot.root_count).any(|row| {
-            row_matches(
-                row,
-                removed_edge.target_table.as_str(),
-                removed_edge.target_row,
-            )
-        });
+        let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
+        let is_root = snapshot_index.roots.contains_key(&target_key);
         if !still_referenced && !is_root {
-            snapshot.rows.retain(|row| {
-                !row_matches(
-                    row,
-                    removed_edge.target_table.as_str(),
-                    removed_edge.target_row,
-                )
-            });
+            if let Some(position) = snapshot_index.related.remove(&target_key) {
+                snapshot.rows.remove(position);
+                for indexed_position in snapshot_index.related.values_mut() {
+                    if *indexed_position > position {
+                        *indexed_position -= 1;
+                    }
+                }
+            }
         }
     }
 
