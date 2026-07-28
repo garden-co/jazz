@@ -91,8 +91,8 @@ commit write increased from 898 bytes to 943 bytes.
 The main performance levers are the places where repeated work still scales with
 the table, the shape, or a per-call derivation instead of the actual change.
 
-- **S4 post-accept propagation.** Report it as _two_ measurements: settlement
-  throughput and propagation-inclusive throughput. Per-commit fan-out is
+- **S4 post-accept propagation.** The harness emits _two_ measurements:
+  settlement throughput and propagation-inclusive throughput. Per-commit fan-out is
   intended to be O(delta), not O(table). The relay whole-table full recompute case has
   been fixed (degenerate system whole-table views stay incremental);
   filtered/join/edge-client views still take the conservative full-diff full recompute
