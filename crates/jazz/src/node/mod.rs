@@ -989,7 +989,7 @@ where
 
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
-        commit.validate()?;
+        self.validate_local_mergeable_commit(&commit)?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
         let made_at = self.mint_tx_time(commit.now_ms);
         self.commit_mergeable_at(commit, made_at)
@@ -1003,7 +1003,7 @@ where
             ));
         }
         for commit in &commits {
-            commit.validate()?;
+            self.validate_local_mergeable_commit(commit)?;
             if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
                 return Err(Error::InvalidMergeableCommit(
                     "mergeable transaction permission subjects must match",
@@ -1013,6 +1013,14 @@ where
         self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms);
         self.commit_mergeable_many_at(commits, made_at)
+    }
+
+    fn validate_local_mergeable_commit(&self, commit: &MergeableCommit) -> Result<(), Error> {
+        commit.validate()?;
+        let table_schema =
+            self.table_in_schema(&commit.table, self.catalogue.current_write_schema.schema)?;
+        validate_cells_map(&table_schema, &commit.cells)?;
+        Ok(())
     }
 
     /// Commit explicit text/blob edit operations for one large-value column.
