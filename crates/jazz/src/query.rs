@@ -1309,24 +1309,6 @@ impl PolicyBranch {
             .next()
             .expect("length checked above")
     }
-
-    pub(crate) fn as_query(&self, table: &str) -> Query {
-        Query {
-            table: table.to_owned(),
-            filters: self.filters.clone(),
-            joins: self.joins.clone(),
-            policy_branches: Vec::new(),
-            reachable: self.reachable.clone(),
-            inherits: self.inherits.clone(),
-            includes: Vec::new(),
-            array_subqueries: Vec::new(),
-            select: None,
-            order_by: Vec::new(),
-            aggregate: None,
-            limit: None,
-            offset: 0,
-        }
-    }
 }
 
 /// Content-addressed query shape id.
@@ -1788,14 +1770,6 @@ impl RecursionBound {
     /// Legacy/default recursion bound used by old v0 query helpers.
     pub fn default_max_depth() -> Self {
         Self::MaxDepth(8)
-    }
-
-    /// Conservative loop cap for old evaluator paths that are not true fixpoint.
-    pub(crate) fn iteration_cap(self) -> usize {
-        match self {
-            Self::Fixpoint => 128,
-            Self::MaxDepth(max_depth) => max_depth.max(1),
-        }
     }
 }
 

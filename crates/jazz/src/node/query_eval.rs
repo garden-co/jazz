@@ -3786,7 +3786,19 @@ fn normalize_inherited_parent_policy(
         },
     );
     let mut parent_current = parent_source_node;
-    if let Some(policy) = &parent_table.read_policy {
+    let parent_policy = match inherits.operation {
+        crate::query::InheritsOperation::Select => parent_table.read_policy.as_ref(),
+        crate::query::InheritsOperation::Insert => {
+            parent_table.write_policies.insert_check.as_ref()
+        }
+        crate::query::InheritsOperation::Update => {
+            parent_table.write_policies.update_using.as_ref()
+        }
+        crate::query::InheritsOperation::Delete => {
+            parent_table.write_policies.delete_using.as_ref()
+        }
+    };
+    if let Some(policy) = parent_policy {
         parent_current = if !policy.policy_branches.is_empty() {
             normalize_policy_branch_authorization(
                 nodes,
@@ -5687,42 +5699,37 @@ where
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
-    pub(super) fn write_policy_query_allows_insert_candidate(
-        &mut self,
-        table: &TableSchema,
-        policy: &crate::query::Query,
-        row_uuid: RowUuid,
-        cells: &BTreeMap<String, Value>,
-        identity: AuthorId,
-    ) -> Result<bool, Error> {
-        if !policy.inherits.is_empty()
-            || policy
-                .policy_branches
-                .iter()
-                .any(|branch| !branch.inherits.is_empty())
-        {
-            return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
-        }
-        self.write_policy_query_allows_insert_candidate_lowered(
-            table, policy, row_uuid, cells, identity,
-        )
-    }
-
-    /// The query-program half of candidate write-policy evaluation.
+    /// Authorize an inline old/candidate row through the query program.
     ///
-    /// Production callers must retain the `inherits` fallback in
-    /// `write_policy_query_allows_insert_candidate` until inherited write
-    /// authorization is fully lowered. The differential harness invokes this
-    /// primitive directly in test builds so that fallback cannot hide a mismatch.
-    fn write_policy_query_allows_insert_candidate_lowered(
+    /// Insert candidates reinterpret plain `inherits(parent)` as parent
+    /// update-using authorization. Existing/update-check rows retain ordinary
+    /// read inheritance unless the policy names an explicit write operation.
+    pub(super) fn write_policy_query_allows_candidate(
         &mut self,
         table: &TableSchema,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
+        insert_candidate: bool,
+        branch_id: Option<BranchId>,
     ) -> Result<bool, Error> {
-        let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
+        let mut policy = policy.clone();
+        if insert_candidate {
+            for inherits in &mut policy.inherits {
+                if inherits.operation == crate::query::InheritsOperation::Select {
+                    inherits.operation = crate::query::InheritsOperation::Update;
+                }
+            }
+            for branch in &mut policy.policy_branches {
+                for inherits in &mut branch.inherits {
+                    if inherits.operation == crate::query::InheritsOperation::Select {
+                        inherits.operation = crate::query::InheritsOperation::Update;
+                    }
+                }
+            }
+        }
+        let policy_shape = policy.validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
@@ -5761,13 +5768,21 @@ where
             other => other,
         };
         let request = QueryProgramRequest {
-            reads: current_query_read_set(
-                &input.shape,
-                policy_shape.schema_version(),
-                policy_shape.schema_version(),
-                DurabilityTier::Local,
-                None,
-            ),
+            reads: match branch_id {
+                Some(branch_id) => branch_query_read_set(
+                    &input.shape,
+                    policy_shape.schema_version(),
+                    DurabilityTier::Local,
+                    branch_id,
+                ),
+                None => current_query_read_set(
+                    &input.shape,
+                    policy_shape.schema_version(),
+                    policy_shape.schema_version(),
+                    DurabilityTier::Local,
+                    None,
+                ),
+            },
             policy,
             input,
             output: current_query_output_request(
@@ -5777,7 +5792,11 @@ where
         };
         let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
-        let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
+        let access_paths = if branch_id.is_some() {
+            BTreeMap::new()
+        } else {
+            self.current_query_primary_key_access_paths(&policy_shape, &binding)?
+        };
         let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
             request,
             inline_sources,
@@ -5786,17 +5805,24 @@ where
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
-    #[cfg(test)]
-    pub(super) fn write_policy_query_allows_insert_candidate_lowered_for_test(
+    pub(super) fn branch_write_policy_query_allows_candidate(
         &mut self,
+        branch_id: BranchId,
         table: &TableSchema,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
+        insert_candidate: bool,
     ) -> Result<bool, Error> {
-        self.write_policy_query_allows_insert_candidate_lowered(
-            table, policy, row_uuid, cells, identity,
+        self.write_policy_query_allows_candidate(
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            Some(branch_id),
         )
     }
 

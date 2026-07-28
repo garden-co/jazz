@@ -27,7 +27,7 @@ Invariant digest:
 - `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
-- `INV-RLS-14`: Policy predicate direct evaluation in the node policy engine MUST treat unsupported predicate/operator forms and unresolved operands as denial, not allowance.
+- `INV-RLS-14`: Policy compilation and claim binding MUST treat unsupported authorization forms and unresolved operands as denial, not allowance.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
