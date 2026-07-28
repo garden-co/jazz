@@ -16,10 +16,10 @@ Invariant digest:
 - `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_seq <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
 - `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
 - `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
-- `INV-READ-5`: txread MUST record a RowRead for a present snapshot-visible row and an AbsentRead for an absent snapshot-visible row.
+- `INV-READ-5`: `tx_read` MUST record a `RowRead` for a present snapshot-visible row and an `AbsentRead` for an absent snapshot-visible row.
 - `INV-READ-6`: `tx_current_rows` and `tx_query` MUST record predicate reads as `PredicateRead` values carrying `table`, `shape_id`, `shape`, `binding_id`, and `binding_values`; whole-table transaction reads are degenerate query shapes.
-- `INV-READ-7`: Local current-row reads MUST use argmax TxId currency per (rowuuid, VersionLayer) over held non-rejected versions, independent of sender arrival order.
-- `INV-READ-8`: Global current-row reads MUST use per-layer global-current tables and MUST exclude rows whose global-current deletion-register winner is DeletionEvent::Deleted.
+- `INV-READ-7`: Local current-row reads MUST use argmax `TxId` currency per `(row_uuid, VersionLayer)` over held non-rejected versions, independent of sender arrival order.
+- `INV-READ-8`: Global current-row reads MUST use per-layer global-current tables and MUST exclude rows whose global-current deletion-register winner is `DeletionEvent::Deleted`.
 - `INV-READ-9`: Global as-of reads at `GlobalSeq` MUST choose per-layer winners from `jazz_global_changes` at or before the requested `global_base` and apply deletion anti-join before returning visible content.
 - `INV-READ-10`: Current-row visibility MUST be content-layer current rows anti-joined with the current deletion-register winner; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
 - `INV-READ-11`: A local-tier read on the writer node MUST include the node's own pending committed transaction, while a global-tier read MUST exclude it until global fate/current state is applied.

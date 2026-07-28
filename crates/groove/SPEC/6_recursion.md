@@ -13,16 +13,16 @@ Invariant digest:
 - `INV-REC-1`: A recursive graph MUST have a seed child and a step child whose output `RecordDescriptor`s are identical; otherwise subscription/compilation MUST fail with `GraphOutputMismatch`.
 - `INV-REC-2`: `FrontierSourceOp` MUST read only the `RecordDeltas` bound for its `FrontierName` in the current `EvalContext`; when absent it MUST yield an empty weighted record set with the declared output descriptor.
 - `INV-REC-3`: Recursive facts MUST use set semantics: an encoded fact already present in `RecursiveState::accumulated` MUST NOT be emitted again or have its weight increased by duplicate derivations.
-- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight 1; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
-- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with IvmRuntimeError::UnsupportedNonMonotoneRecursion.
+- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight `1`; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
+- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with `IvmRuntimeError::UnsupportedNonMonotoneRecursion`.
 - `INV-REC-6`: A recursive fixpoint MUST stop when the accepted frontier is empty and MUST converge on cyclic inputs by deduplicating against accumulated facts.
-- `INV-REC-7`: Recursive evaluation MUST fail with IvmRuntimeError::RecursiveIterationLimit { node, maxiters } when the number of step iterations exceeds RecursiveOp::maxiters.
+- `INV-REC-7`: Recursive evaluation MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds `RecursiveOp::max_iters`.
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the resulting net recursive delta.
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental use.
 - `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by `ScopePath` and recursive `sub_tick`; root-scope arrangements MUST use `sub_tick = 0` and MUST absorb a public tick's table delta exactly once even when recursive and non-recursive consumers share them.
 - `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for existing subscribers.
 - `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
-- `INV-REC-13`: argmaxby MUST NOT be accepted inside recursive graph seed or step graphs.
+- `INV-REC-13`: `arg_max_by` MUST NOT be accepted inside recursive graph seed or step graphs.
 - `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 

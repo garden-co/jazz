@@ -17,13 +17,13 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A PeerRole::Relay link MUST use AuthorId::SYSTEM as its link identity and MUST NOT terminate a client identity.
-- `INV-EDGE-2`: A relay MUST store/forward TxKind::Mergeable and TxKind::Exclusive commit units as Fate::Pending with DurabilityTier::Local and MUST NOT assign an authority fate.
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorId::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
 - `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::EdgeClient { identity }`, and downstream reads on that link MUST use that identity for policy composition.
 - `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain pending and deferred.
-- `INV-EDGE-5`: Edge-local fate assignment MUST support only TxKind::Mergeable; an edge MUST NOT use the edge mergeable path to assign fate for TxKind::Exclusive.
-- `INV-EDGE-6`: TxKind::Exclusive acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
-- `INV-EDGE-7`: Once a transaction reaches Fate::Accepted, later stale Fate::Pending updates MUST NOT regress its fate.
+- `INV-EDGE-5`: Edge-local fate assignment MUST support only `TxKind::Mergeable`; an edge MUST NOT use the edge mergeable path to assign fate for `TxKind::Exclusive`.
+- `INV-EDGE-6`: `TxKind::Exclusive` acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
+- `INV-EDGE-7`: Once a transaction reaches `Fate::Accepted`, later stale `Fate::Pending` updates MUST NOT regress its fate.
 - `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently after the edge's settled permission basis.
 - `INV-EDGE-9`: A cancelled or missing permission scope MUST NOT satisfy the edge permission gate; after restart, deferred edge-fate gates and retained scope refs are absent until client outbox redelivery reopens the gate, while already edge-accepted units MUST survive from edge storage without redelivery.
 - `INV-EDGE-10`: An edge MAY use a previously settled permission scope to accept a mergeable transaction only as permitted by its configured freshness policy; the default policy MUST permit unbounded freshness.

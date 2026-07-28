@@ -18,15 +18,15 @@ Invariant digest:
 
 - `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
-- `INV-LOWER-1`: Jazz schemas MUST be lowered into a groove::schema::DatabaseSchema before opening the node's groove::db::Database.
-- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key (rowuuid, txtime, txnodeid).
-- `INV-LOWER-3`: Node-local aliases in jazznodes.id and jazzschemaversions.id MUST NOT be wire identities; wire tx/schema references MUST use NodeUuid and SchemaVersionId.
+- `INV-LOWER-1`: Jazz schemas MUST be lowered into a `groove::schema::DatabaseSchema` before opening the node's `groove::db::Database`.
+- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
+- `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
 - `INV-LOWER-4`: Content versions MUST lower to `jazz_{table}_history`; deletion-register versions MUST lower to `jazz_{table}_register`; a single lowered version row MUST NOT contain both user cells and `_deletion`.
-- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where deletion == deleted.
-- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove argmaxby over (txtime, txnodeid) per rowuuid for both content and deletion-register tables.
+- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where `_deletion == deleted`.
+- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove `arg_max_by` over `(tx_time, tx_node_id)` per `row_uuid` for both content and deletion-register tables.
 - `INV-LOWER-7`: Global current-row reads MUST use `jazz_{table}_global_current` and `jazz_{table}_register_global_current`, not scan full history, and MUST exclude rows whose register global-current winner is `Deleted`.
-- `INV-LOWER-8`: jazzglobalchanges MUST be keyed by (tablename, rowuuid, layer, globalseq) and MUST expose index byglobalseq(globalseq, tablename, rowuuid, layer) for global-base probes.
-- `INV-LOWER-9`: Query lowering MUST begin from visiblecurrentgraph and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
+- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(table_name, row_uuid, layer, global_seq)` and MUST expose index `by_global_seq(global_seq, table_name, row_uuid, layer)` for global-base probes.
+- `INV-LOWER-9`: Query lowering MUST begin from `visible_current_graph` and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
 - `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
 - `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST bypass prepared groove lowering; supported root current reads MUST evaluate from projected current source rows, while unsupported joins/reachable shapes MUST fail loudly instead of falling back to the semantic oracle.
@@ -34,7 +34,7 @@ Invariant digest:
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
 - `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
-- `INV-LOWER-17`: ColumnSchema::text and ColumnSchema::blob MUST lower user cell storage to nullable GrooveColumnType::Bytes.
+- `INV-LOWER-17`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower user cell storage to nullable `GrooveColumnType::Bytes`.
 - `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable, non-integer, or large-value columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.

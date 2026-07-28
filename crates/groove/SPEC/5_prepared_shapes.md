@@ -24,20 +24,20 @@ u7's posts are two bound subscriptions sharing that one binding.
 Invariant digest:
 
 - `INV-SHAPE-1`: Graphs containing `BindingSource` MUST NOT be evaluated through ordinary `query_snapshot`, `subscribe`, or `subscribe_query`; they MUST be evaluated only through prepared-shape APIs.
-- `INV-SHAPE-2`: Database::preparequery MUST reject queries without parameters and MUST lower only equality column = parameter / parameter = column predicates into binding joins.
+- `INV-SHAPE-2`: `Database::prepare_query` MUST reject queries without parameters and MUST lower only equality `column = parameter` / `parameter = column` predicates into binding joins.
 - `INV-SHAPE-3`: A prepared-query internal graph output MUST include every binding key column needed for routing, while `PreparedShape::output` and bound subscription rows MUST expose only the public query projection; projected output names that collide with parameter names MUST be rejected except for the same source field.
-- `INV-SHAPE-4`: Graph-level prepare MUST reject any outputkeyfields entry absent from the graph output descriptor.
+- `INV-SHAPE-4`: Graph-level `prepare` MUST reject any `output_key_fields` entry absent from the graph output descriptor.
 - `INV-SHAPE-5`: A binding source weighted record set MUST expose set semantics: for each active `BindingKey`, evaluation snapshots contain exactly one row with weight `+1`, regardless of subscriber refcount.
-- `INV-SHAPE-6`: Binding a key whose refcount transitions 0 -> 1 MUST inject exactly one +1 BindingDelta in a table-delta-free tick before serving the subscriber snapshot.
+- `INV-SHAPE-6`: Binding a key whose refcount transitions 0 -> 1 MUST inject exactly one `+1` `BindingDelta` in a table-delta-free tick before serving the subscriber snapshot.
 - `INV-SHAPE-7`: Binding an already-active key MUST NOT inject another binding-source delta, and MUST serve the new subscriber from the per-key materialized snapshot.
 - `INV-SHAPE-8`: Shape deltas MUST be routed by projecting the prepared output record through `output_key_fields`, or the explicit routing graph output through `routing_key_fields`, into the binding descriptor, and MUST be sent only to subscribers registered for that binding key.
 - `INV-SHAPE-9`: A prepared binding's materialized snapshot MUST be maintained as a weighted multiset where deltas that bring a record weight to zero remove that record.
-- `INV-SHAPE-10`: Unsubscribing a shape subscription MUST decrement the binding refcount and MUST inject a -1 binding delta only when the last reference is removed.
+- `INV-SHAPE-10`: Unsubscribing a shape subscription MUST decrement the binding refcount and MUST inject a `-1` binding delta only when the last reference is removed.
 - `INV-SHAPE-11`: Binding retractions discovered via dropped receivers during notification MUST be queued, then drained before subsequent user table/binding deltas and before prepare/bind hydration snapshots.
 - `INV-SHAPE-12`: Preparing an identical shape over an already-active binding source MUST NOT replace shared arrangements with an empty binding snapshot or otherwise wipe existing bindings.
-- `INV-SHAPE-13`: During shape graph hydration, BindingSource nodes in ArrangementUpdateMode::Replace MUST read current binding snapshots, not pending/incremental binding deltas.
+- `INV-SHAPE-13`: During shape graph hydration, `BindingSource` nodes in `ArrangementUpdateMode::Replace` MUST read current binding snapshots, not pending/incremental binding deltas.
 - `INV-SHAPE-14`: `Database::bind` MUST accept exactly one value for each prepared parameter name, MUST reject missing/duplicate/unknown names, and MUST pass values to `bind_shape` in prepared parameter order.
-- `INV-SHAPE-15`: Binding values MUST conform to the prepared shape's bindingdescriptor; mismatched type/arity MUST fail before subscription hydration.
+- `INV-SHAPE-15`: Binding values MUST conform to the prepared shape's `binding_descriptor`; mismatched type/arity MUST fail before subscription hydration.
 - `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-SHAPE-17`: A `BindingSource` tick in normal accumulate mode MUST emit only `BindingDelta`s whose `shape` matches the source's `BindingSourceOp.shape` and whose descriptor matches the node output.
 - `INV-SHAPE-18`: Prepared recursive shapes MUST route retractions caused by base-table deletes or anti-join changes to the correct bound subscriber result.

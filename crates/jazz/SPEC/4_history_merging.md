@@ -12,15 +12,15 @@ model used by reads (ch. 5) and sync (ch. 8).
 Invariant digest:
 
 - `INV-HIST-1`: A row version that lists a parent MUST dominate that parent for content-current selection when both versions are present in the same layer.
-- `INV-HIST-2`: Among content heads not dominated by known parents, the current content version MUST be the head with the greatest made-at/TxId sort key.
+- `INV-HIST-2`: Among content heads not dominated by known parents, the current content version MUST be the head with the greatest made-at/`TxId` sort key.
 - `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, unless a content version with the same sorted parent set already exists.
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
 - `INV-HIST-7`: A merge version's transaction time MUST be strictly after the maximum made-at time of the observed heads.
 - `INV-HIST-8`: For `MergeStrategy::Lww`, a merged column MUST take the value from the highest made-at/`TxId` head that sets the column, and if no head sets it, from the highest made-at/`TxId` parent-union version that sets it.
-- `INV-HIST-9`: MergeStrategy::Counter MUST be declared only on non-nullable integer user columns and MUST NOT be declared on large-value columns.
-- `INV-HIST-10`: For MergeStrategy::Counter, concurrent integer deltas from their observed parent bases MUST be summed exactly.
+- `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns and MUST NOT be declared on large-value columns.
+- `INV-HIST-10`: For `MergeStrategy::Counter`, concurrent integer deltas from their observed parent bases MUST be summed exactly.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
-- `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in jazz{table}globalcurrent or jazz{table}registerglobalcurrent.
+- `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Merge strategy behavior MUST be deterministic, grouping-insensitive over the parent/head set, and non-wedging at merge time: registered strategy failure degrades to the built-in text merge with that fallback recorded; write-time canonicalization remains validation and rejects loudly.

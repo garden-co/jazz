@@ -11,22 +11,22 @@ identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 
 Invariant digest:
 
-- `INV-LENS-1`: A published SchemaVersion MUST have schema.id == schema.schema.versionid().
+- `INV-LENS-1`: A published `SchemaVersion` MUST have `schema.id == schema.schema.version_id()`.
 - `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload and exclude the embedded id field.
 - `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
-- `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire VersionRecord MUST expose the full SchemaVersionId.
-- `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding SchemaVersion catalogue value arrives.
+- `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
+- `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
-- `INV-LENS-7`: CurrentWriteSchema updates MUST be monotone by revision; stale revisions MUST leave currentwriteschema unchanged.
+- `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, and per-version partitions MUST survive node restart.
 - `INV-LENS-9`: A current-write-schema pointer flip to a schema with new tables MUST create/reopen per-version history and register storage tables before writes/read scans use them.
-- `INV-LENS-10`: New local writes MUST store versions under currentwriteschema.schema, using the base table only when it equals the node's base schema and a partition table otherwise.
+- `INV-LENS-10`: New local writes MUST store versions under `current_write_schema.schema`, using the base table only when it equals the node's base schema and a partition table otherwise.
 - `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema partition at ingest.
 - `INV-LENS-12`: Natural lens reads MUST fan out across registered per-version tables and project rows into the requested schema after schema-agnostic winner selection.
 - `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
-- `INV-LENS-15`: ShapeId MUST include the authored SchemaVersionId; identical canonical query bytes against different schema versions MUST produce different shape ids.
-- `INV-LENS-16`: RejectSourceDelta on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
+- `INV-LENS-15`: `ShapeId` MUST include the authored `SchemaVersionId`; identical canonical query bytes against different schema versions MUST produce different shape ids.
+- `INV-LENS-16`: `RejectSourceDelta` on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
 - `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.

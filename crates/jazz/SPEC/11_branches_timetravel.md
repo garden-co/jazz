@@ -12,14 +12,14 @@ Invariant digest:
 
 - `INV-BRANCH-1`: A time-travel read at `GlobalSeq` position MUST consider only globally settled transactions with `global_seq <= position` and MUST choose row/layer winners using the ordinary current-state winner rules over that subset.
 - `INV-BRANCH-2`: A time-travel read MUST evaluate read policy over the historical state at the requested cut, not over current state.
-- `INV-BRANCH-3`: Node::attime(time) MUST resolve to the latest settled global position whose transaction time is <= time, returning GlobalSeq(0) when no such settled transaction exists.
+- `INV-BRANCH-3`: `Node::at_time(time)` MUST resolve to the latest settled global position whose transaction time is `<= time`, returning `GlobalSeq(0)` when no such settled transaction exists.
 - `INV-BRANCH-4`: A local historical read handle MUST NOT answer from incomplete local history; if `is_history_complete_for(shape, position)` is false it MUST return `Error::HistoricalReadRequiresServer` or route to a history-complete server one-shot.
-- `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer Node::at(position).read(...) locally at exactly that position.
+- `INV-BRANCH-5`: A history-complete node at a sufficient watermark MUST answer `Node::at(position).read(...)` locally at exactly that position.
 - `INV-BRANCH-6`: A snapshot-base branch MUST freeze its base at creation; later parent/main commits MUST NOT appear in the branch unless represented by branch overlay writes or explicit rebase/merge operations.
 - `INV-BRANCH-7`: A branch read MUST resolve rows overlay-first: for any row with a current branch overlay winner, the branch MUST return the overlay winner and MUST NOT also return the base winner for that row.
 - `INV-BRANCH-8`: Branch overlay writes MUST NOT affect parent/main current reads.
 - `INV-BRANCH-9`: Sibling branch overlays MUST be isolated; a read on one branch MUST NOT observe overlay versions written only to a sibling branch.
-- `INV-BRANCH-10`: Branch metadata MUST be durably recoverable across node reopen, including the frozen baseglobal cut.
+- `INV-BRANCH-10`: Branch metadata MUST be durably recoverable across node reopen, including the frozen `base_global` cut.
 - `INV-BRANCH-11`: Branch creation MUST be O(1)-style metadata creation independent of base row count; it MUST NOT copy base rows into the branch overlay.
 - `INV-BRANCH-12`: Branch overlay partitions MUST be created lazily on first branch write, not at branch creation.
 - `INV-BRANCH-13`: A branch-scoped exclusive transaction MUST NOT be accepted unless its authority, validation, and serialization semantics are explicitly specified.

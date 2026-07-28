@@ -15,17 +15,17 @@ Invariant digest:
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
 - `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `BranchId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
-- `INV-DATA-3`: AuthorId::SYSTEM MUST equal the UUIDv5 derivation Uuid::newv5(&Uuid::NAMESPACEOID, b"jazz:system-author").
-- `INV-DATA-4`: TxTime MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
+- `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
+- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
-- `INV-DATA-6`: SchemaVersionId MUST be UUIDv5 over JazzSchema::canonicalbytes() in namespace SCHEMAVERSIONNAMESPACE.
-- `INV-DATA-7`: Canonical schema identity MUST change when a column's MergeStrategy changes.
-- `INV-DATA-8`: Canonical schema identity MUST distinguish plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob.
-- `INV-DATA-9`: A declared MergeStrategy::Counter MUST be accepted only on non-nullable integer columns of type U8, U16, U32, or U64.
-- `INV-DATA-10`: A declared MergeStrategy::Counter MUST NOT be used with a large-value column.
-- `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing TableSchema.
-- `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete JazzSchema.
-- `INV-DATA-13`: ColumnSchema::text and ColumnSchema::blob MUST lower to nullable groove Bytes user cells in history storage.
+- `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
+- `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
+- `INV-DATA-8`: Canonical schema identity MUST distinguish plain `Bytes`, `LargeValueKind::Text`, and `LargeValueKind::Blob`.
+- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns of type `U8`, `U16`, `U32`, or `U64`.
+- `INV-DATA-10`: A declared `MergeStrategy::Counter` MUST NOT be used with a large-value column.
+- `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing `TableSchema`.
+- `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
+- `INV-DATA-13`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower to nullable groove `Bytes` user cells in history storage.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
 - `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.

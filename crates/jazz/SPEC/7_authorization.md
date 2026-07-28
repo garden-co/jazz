@@ -15,7 +15,7 @@ Invariant digest:
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with `Fate::Rejected(RejectionReason::AuthorizationDenied)` and MUST NOT ingest accepted version rows when any version in the unit fails its table write policy evaluated against `Transaction.made_by`.
-- `INV-RLS-2`: AuthorId::SYSTEM MUST bypass both read and write policy checks.
+- `INV-RLS-2`: `AuthorId::SYSTEM` MUST bypass both read and write policy checks.
 - `INV-RLS-3`: `Policy::owner_only(table, column)` MUST compare the named column to `claim("sub")`, where `claim("sub")` is bound from the authenticated `AuthorId`, not from caller-provided query params.
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer identity's read policy.
@@ -24,7 +24,7 @@ Invariant digest:
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read policy for that identity.
 - `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated identity.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen visibility by supplying claim params.
-- `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
+- `INV-RLS-11`: Relay peer links MUST use `AuthorId::SYSTEM`; edge-client peer links MUST use the terminated client `AuthorId` for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or program fact from an exclusive transaction unless all versions required for that view are readable to that recipient.
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
