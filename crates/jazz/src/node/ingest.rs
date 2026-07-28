@@ -3450,13 +3450,24 @@ where
                 batch,
                 current_table.as_ref(),
                 &[Value::Uuid(row_uuid.0)],
-            )? else { continue };
+            )?
+            else {
+                continue;
+            };
             let record = raw.record();
             let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-            let tx_node_alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let tx_node_alias =
+                NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
             let Some(candidate) = self.query_version_by_alias_in_batch_from_source(
-                batch, &source, row_uuid, tx_time, tx_node_alias,
-            )? else { continue };
+                batch,
+                &source,
+                row_uuid,
+                tx_time,
+                tx_node_alias,
+            )?
+            else {
+                continue;
+            };
             if self.version_wins_currency(&candidate, winner.as_ref())? {
                 winner = Some(candidate);
             }
@@ -3472,20 +3483,24 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        let raw = self.database.primary_key_get_raw_in_batch(
-            batch,
-            &source.storage_table,
-            &[
-                Value::Uuid(row_uuid.0),
-                Value::U64(tx_time.0),
-                Value::U64(tx_node_alias.0),
-            ],
-        )?.map(|raw| raw.raw().to_vec());
+        let raw = self
+            .database
+            .primary_key_get_raw_in_batch(
+                batch,
+                &source.storage_table,
+                &[
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_time.0),
+                    Value::U64(tx_node_alias.0),
+                ],
+            )?
+            .map(|raw| raw.raw().to_vec());
         let Some(raw) = raw else { return Ok(None) };
         self.decode_history_record(
             &source.identity.source_table,
             BorrowedRecord::new(&raw, &source.descriptor),
-        ).map(Some)
+        )
+        .map(Some)
     }
 
     fn write_merge_heads_for_bulk_content_versions(
@@ -4256,7 +4271,6 @@ where
         Ok(())
     }
 
-
     fn stage_transaction_and_versions_with_current_indexes(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -4330,7 +4344,8 @@ where
                 )?;
             }
             let table_schema = self.table_in_schema(&target_table, target_schema)?;
-            let currency_context = self.currency_lookup_context(target_schema, &table_schema.name)?;
+            let currency_context =
+                self.currency_lookup_context(target_schema, &table_schema.name)?;
             let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
             let layer = VersionLayer::for_record(&version);
             let previous_current = self.query_local_layer_winner_in_context(

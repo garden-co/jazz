@@ -18,7 +18,8 @@ where
         layer: VersionLayer,
         global_base: GlobalSeq,
     ) -> Result<Option<VersionRow>, Error> {
-        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        let context =
+            self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
         self.global_layer_winner_at_in_context(&context, row_uuid, layer, global_base)
     }
 
@@ -32,30 +33,33 @@ where
         let mut winner = None;
         for source in self.currency_sources_for_context(context, layer)? {
             let prefix = [
-            Value::Bytes(source.identity.source_table.as_bytes().to_vec()),
-            Value::Uuid(row_uuid.0),
-            Value::Bytes(version_layer_string(layer).into_bytes()),
-        ];
+                Value::Bytes(source.identity.source_table.as_bytes().to_vec()),
+                Value::Uuid(row_uuid.0),
+                Value::Bytes(version_layer_string(layer).into_bytes()),
+            ];
             let upper = [
-            Value::Bytes(source.identity.source_table.as_bytes().to_vec()),
-            Value::Uuid(row_uuid.0),
-            Value::Bytes(version_layer_string(layer).into_bytes()),
-            Value::U64(global_base.0),
-        ];
+                Value::Bytes(source.identity.source_table.as_bytes().to_vec()),
+                Value::Uuid(row_uuid.0),
+                Value::Bytes(version_layer_string(layer).into_bytes()),
+                Value::U64(global_base.0),
+            ];
             let Some(raw) = self.database.primary_key_last_before_or_at_raw(
-            "jazz_global_changes",
-            &prefix,
-            &upper,
-        )?
-        else {
+                "jazz_global_changes",
+                &prefix,
+                &upper,
+            )?
+            else {
                 continue;
-        };
-        let record = raw.record();
-        let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            let Some(candidate) = self.query_version_by_alias_from_source(
-                &source, row_uuid, tx_time, tx_node_alias,
-            )? else { continue };
+            };
+            let record = raw.record();
+            let tx_time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+            let tx_node_alias =
+                NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let Some(candidate) =
+                self.query_version_by_alias_from_source(&source, row_uuid, tx_time, tx_node_alias)?
+            else {
+                continue;
+            };
             if self.version_wins_currency(&candidate, winner.as_ref())? {
                 winner = Some(candidate);
             }

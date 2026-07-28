@@ -363,8 +363,7 @@ where
             &context,
             version.row_uuid(),
             VersionLayer::Content,
-        )?
-        {
+        )? {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {

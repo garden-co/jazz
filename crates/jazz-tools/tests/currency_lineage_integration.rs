@@ -167,7 +167,9 @@ async fn exercise_renamed_parent_currency(old_parent_is_partition: bool) {
         .expect("v2 content winner settles over v1 parent");
     let updated = wait_for_query(
         &bob,
-        QueryBuilder::new("people").branch(v2_branch.clone()).build(),
+        QueryBuilder::new("people")
+            .branch(v2_branch.clone())
+            .build(),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "v2 content winner is observable after renamed-parent update",
@@ -175,7 +177,7 @@ async fn exercise_renamed_parent_currency(old_parent_is_partition: bool) {
             (rows.len() == 1
                 && rows[0].0 == row_id
                 && rows[0].1 == vec![Value::Uuid(id), Value::Text("after@example.com".into())])
-                .then_some(rows)
+            .then_some(rows)
         },
     )
     .await;

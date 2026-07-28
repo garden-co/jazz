@@ -50,7 +50,8 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        let context =
+            self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
         self.query_local_layer_winner_in_context(&context, row_uuid, layer)
     }
 
@@ -70,7 +71,8 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        let context =
+            self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
         self.query_global_layer_winner_in_context(&context, row_uuid, layer)
     }
 
@@ -96,15 +98,11 @@ where
             };
             let record = raw.record();
             let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-            let tx_node_alias = NodeAlias(record.get_u64(
-                GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX,
-            )?);
-            let Some(candidate) = self.query_version_by_alias_from_source(
-                &source,
-                row_uuid,
-                tx_time,
-                tx_node_alias,
-            )? else {
+            let tx_node_alias =
+                NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let Some(candidate) =
+                self.query_version_by_alias_from_source(&source, row_uuid, tx_time, tx_node_alias)?
+            else {
                 continue;
             };
             if self.version_wins_currency(&candidate, winner.as_ref())? {
@@ -120,7 +118,8 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        let context =
+            self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
         self.query_layer_winner_from_pk_in_context(&context, row_uuid, layer)
     }
 
@@ -364,15 +363,18 @@ where
                 storage_kind: CurrencyStorageKind::Base,
             })
             .collect::<Vec<_>>();
-        candidates.extend(self.catalogue.partitions.iter().filter_map(
-            |(table, schema)| {
-                (*schema != base_schema).then(|| CurrencySourceIdentity {
-                    storage_schema: *schema,
-                    source_table: table.clone(),
-                    storage_kind: CurrencyStorageKind::Partition,
-                })
-            },
-        ));
+        candidates.extend(
+            self.catalogue
+                .partitions
+                .iter()
+                .filter_map(|(table, schema)| {
+                    (*schema != base_schema).then(|| CurrencySourceIdentity {
+                        storage_schema: *schema,
+                        source_table: table.clone(),
+                        storage_kind: CurrencyStorageKind::Partition,
+                    })
+                }),
+        );
         candidates.sort();
         candidates.dedup();
         let mut lineage = Vec::new();
@@ -398,7 +400,9 @@ where
     ) -> Result<CurrencyLookupContext, Error> {
         let schema = self
             .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue("history schema version alias must exist"))?;
+            .ok_or(Error::InvalidStoredValue(
+                "history schema version alias must exist",
+            ))?;
         self.currency_lookup_context(schema, version.table())
     }
 
@@ -486,7 +490,10 @@ where
         source: &CurrencySourceIdentity,
     ) -> SchemaVersionId {
         if self
-            .table_in_schema(&source.source_table, self.catalogue.current_schema_version_id)
+            .table_in_schema(
+                &source.source_table,
+                self.catalogue.current_schema_version_id,
+            )
             .is_ok()
         {
             self.catalogue.current_schema_version_id
@@ -770,7 +777,8 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
-        let context = self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
+        let context =
+            self.currency_lookup_context(self.catalogue.current_schema_version_id, table)?;
         self.query_version_by_alias_in_context(&context, row_uuid, layer, tx_time, tx_node_alias)
     }
 
@@ -783,9 +791,9 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         for source in self.currency_sources_for_context(context, layer)? {
-            if let Some(version) = self.query_version_by_alias_from_source(
-                &source, row_uuid, tx_time, tx_node_alias,
-            )? {
+            if let Some(version) =
+                self.query_version_by_alias_from_source(&source, row_uuid, tx_time, tx_node_alias)?
+            {
                 return Ok(Some(version));
             }
         }

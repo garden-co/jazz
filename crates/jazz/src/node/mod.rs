@@ -316,8 +316,7 @@ struct QueryServing {
     /// Lineage-aware version storage sources keyed by their complete currency
     /// lookup identity. These descriptors are static catalogue metadata and are
     /// invalidated whenever schema partitions or catalogue schemas change.
-    version_storage_sources_cache:
-        BTreeMap<CurrencySourceCacheKey, Vec<CurrencySource>>,
+    version_storage_sources_cache: BTreeMap<CurrencySourceCacheKey, Vec<CurrencySource>>,
     /// Interned physical table names for hot ingest/current-row paths.
     ///
     /// Keyed by logical table, physical class, and schema-version context. This
@@ -1113,8 +1112,8 @@ where
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
             let context = self.currency_lookup_context(write_schema_version, &table_schema.name)?;
-            let previous_current = match self
-                .query_local_layer_winner_in_context(&context, commit.row_uuid, layer)? {
+            let previous_current =
+                match self.query_local_layer_winner_in_context(&context, commit.row_uuid, layer)? {
                     Some(previous) => Some(previous),
                     None => {
                         self.query_global_layer_winner_in_context(&context, commit.row_uuid, layer)?

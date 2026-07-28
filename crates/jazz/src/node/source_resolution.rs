@@ -16,57 +16,76 @@ where
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id
-            && !self.catalogue.partitions.iter().any(|(logical, version)| {
-                logical == table && *version != self.catalogue.current_schema_version_id
-            })
+        let context = self.currency_lookup_context(read_schema_version, table)?;
+        if context.lineage.as_slice()
+            == [CurrencySourceIdentity {
+                storage_schema: self.catalogue.current_schema_version_id,
+                source_table: table.to_owned(),
+                storage_kind: CurrencyStorageKind::Base,
+            }]
         {
             return self.current_rows(table, tier);
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
-        for version in self.query_table_versions(table)? {
-            let tx_id = self.version_tx_id(&version)?;
-            let Some(tx) = self.query_transaction(tx_id)? else {
-                continue;
-            };
-            let visible_at_tier = match tier {
-                DurabilityTier::Global => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Global
+        for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+            for source in self.currency_sources_for_context(&context, layer)? {
+                let raws = self
+                    .database
+                    .primary_key_scan_raw(&source.storage_table, &[])?
+                    .into_iter()
+                    .map(|raw| raw.raw().to_vec())
+                    .collect::<Vec<_>>();
+                for raw in raws {
+                    let version = self.decode_history_record(
+                        &source.identity.source_table,
+                        BorrowedRecord::new(&raw, &source.descriptor),
+                    )?;
+                    let tx_id = self.version_tx_id(&version)?;
+                    let Some(tx) = self.query_transaction(tx_id)? else {
+                        continue;
+                    };
+                    let visible_at_tier = match tier {
+                        DurabilityTier::Global => {
+                            matches!(tx.fate, Fate::Accepted)
+                                && tx.durability >= DurabilityTier::Global
+                        }
+                        DurabilityTier::Edge => {
+                            matches!(tx.fate, Fate::Accepted)
+                                && tx.durability >= DurabilityTier::Edge
+                        }
+                        DurabilityTier::None | DurabilityTier::Local => {
+                            !matches!(tx.fate, Fate::Rejected(_))
+                        }
+                    };
+                    if !visible_at_tier {
+                        continue;
+                    }
+                    let target = match layer {
+                        VersionLayer::Content => &mut content,
+                        VersionLayer::Deletion => &mut deletions,
+                    };
+                    let replace = target.get(&version.row_uuid()).is_none_or(|existing| {
+                        version.tx_time().sort_key(tx_id.node)
+                            > existing.tx_time().sort_key(
+                                self.version_tx_id(existing)
+                                    .expect("valid version tx id")
+                                    .node,
+                            )
+                    });
+                    if replace {
+                        target.insert(version.row_uuid(), version);
+                    }
                 }
-                DurabilityTier::Edge => {
-                    matches!(tx.fate, Fate::Accepted) && tx.durability >= DurabilityTier::Edge
-                }
-                DurabilityTier::None | DurabilityTier::Local => {
-                    !matches!(tx.fate, Fate::Rejected(_))
-                }
-            };
-            if !visible_at_tier {
-                continue;
-            }
-            let target = match version.layer() {
-                VersionLayer::Content => &mut content,
-                VersionLayer::Deletion => &mut deletions,
-            };
-            let replace = target.get(&version.row_uuid()).is_none_or(|existing| {
-                version.tx_time().sort_key(tx_id.node)
-                    > existing.tx_time().sort_key(
-                        self.version_tx_id(existing)
-                            .expect("valid version tx id")
-                            .node,
-                    )
-            });
-            if replace {
-                target.insert(version.row_uuid(), version);
             }
         }
         let mut rows = Vec::new();
         for (row_uuid, version) in content {
-            if deletions.get(&row_uuid).is_some_and(|deletion| {
-                deletion.deletion() == Some(DeletionEvent::Deleted)
-                    && deletion.tx_time() > version.tx_time()
-            }) {
+            if deletions
+                .get(&row_uuid)
+                .is_some_and(|deletion| deletion.deletion() == Some(DeletionEvent::Deleted))
+            {
                 continue;
             }
             let source_schema = self
