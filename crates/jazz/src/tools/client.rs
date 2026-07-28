@@ -51,7 +51,7 @@ use uuid::Uuid;
 use crate::tools::ClientStorage;
 use crate::tools::{
     AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
-    SubscriptionStream, SubscriptionStreamItem,
+    SubscriptionServerFailureCode, SubscriptionStream, SubscriptionStreamItem,
 };
 
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
@@ -1280,6 +1280,30 @@ impl ClientDbInner {
                             } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
                             crate::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
                                 SubscriptionRejectReason::ShapeRegistrationPendingCatalogueAdmission
+                            }
+                            crate::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                                SubscriptionRejectReason::ServerFailure {
+                                    code: match code {
+                                        crate::protocol::SubscribeServerFailureCode::TableNotFound => {
+                                            SubscriptionServerFailureCode::TableNotFound
+                                        }
+                                        crate::protocol::SubscribeServerFailureCode::SchemaResolution => {
+                                            SubscriptionServerFailureCode::SchemaResolution
+                                        }
+                                        crate::protocol::SubscribeServerFailureCode::QueryValidation => {
+                                            SubscriptionServerFailureCode::QueryValidation
+                                        }
+                                        crate::protocol::SubscribeServerFailureCode::QueryLowering => {
+                                            SubscriptionServerFailureCode::QueryLowering
+                                        }
+                                        crate::protocol::SubscribeServerFailureCode::PolicyEvaluation => {
+                                            SubscriptionServerFailureCode::PolicyEvaluation
+                                        }
+                                        crate::protocol::SubscribeServerFailureCode::Internal => {
+                                            SubscriptionServerFailureCode::Internal
+                                        }
+                                    },
+                                }
                             }
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
