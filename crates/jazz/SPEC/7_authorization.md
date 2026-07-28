@@ -27,7 +27,7 @@ Invariant digest:
 - `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
-- `INV-RLS-14`: Policy predicate direct evaluation in the node policy engine MUST treat unsupported predicate/operator forms and unresolved operands as denial, not allowance.
+- `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
@@ -59,25 +59,18 @@ operand is the authenticated `AuthorId`, not a caller-supplied parameter
 it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
 
-Policy evaluation is **fail-closed**: an unsupported predicate/operator form or
-an unresolved operand denies rather than allows (`INV-RLS-14`). Direct policy
-evaluation supports equality and inequality, membership/containment predicates,
-boolean composition, columns, literals, and authenticated/admission-controlled
-claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over column / literal /
-`claim(...)`. `claim("sub")` resolves to the authenticated `AuthorId`.
-Additional claim names are runtime session claims supplied by the trusted
-admission/session layer and must not be client-supplied query bindings. Predicate
-forms outside the supported direct-evaluation subset, such as range and null
-checks, deny until explicitly supported.
+Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
+a policy predicate is satisfied (`INV-RLS-14`). Policy claims come from the
+trusted admission/session layer, never from client-supplied query bindings.
 
-At the public policy DSL boundary, scalar session-claim checks lower into that
-same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
-to claim/literal equality, and `SessionInList { path: ["claims", "role"],
-values: [...] }` lowers to a scalar claim membership check equivalent to an
-`OR` of claim/literal equality predicates. The core server shell accepts
-`session.user_id` / `session.userId` and one-level `session.claims.<name>` paths
-for these predicates; deeper claim paths and non-scalar session predicates remain
-unsupported at this boundary.
+**Implementation status (verified 2026-07-27).** The direct evaluator currently
+recognizes equality, inequality, membership/containment, boolean composition,
+columns, literals, and `claim(...)`; range and null forms deny. This is covered
+by `unsupported_policy_predicates_deny_instead_of_allowing` and
+`unresolved_policy_operands_deny_instead_of_allowing`
+(`crates/jazz/src/node/tests/policies_rls.rs`). The public DSL currently lowers
+scalar session-claim checks, including `SessionInList`, to this subset; its
+accepted path forms are an implementation boundary, not a policy contract.
 
 ### 7.2 Write authorization
 
@@ -232,9 +225,11 @@ it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested
 cut**. An ownership change across cuts therefore changes visibility at those
-cuts (`INV-RLS-13`, ch. 5, ch. 11).
+cuts (`INV-RLS-13`, ch. 5, ch. 11). This is covered by
+`query_rows_at_for_link_evaluates_read_policy_at_historical_cut`
+(`crates/jazz/src/node/tests/time_travel.rs`).
 
-### 7.9 Subsumed provenance and permission notes
+### 7.9 Implementation status: provenance and permission vocabulary
 
 The former principal-authorship TODO is now part of this chapter's backlog:
 commit provenance must identify the Jazz principal that performed the write, not
@@ -249,6 +244,11 @@ Auth-mode gating belongs in permissions rather than process-global flags. A
 policy should be able to distinguish anonymous/local/authenticated/backend/system
 admission modes through trusted session claims or first-class admission facts;
 client-supplied values must not widen those facts.
+
+Permission introspection is a dry-run API, not magic columns: `$can*` columns
+cannot express can-insert or richer probes. The facade methods (`can_insert`,
+`can_read`, `can_update`, `can_delete`; ch. 13) evaluate policy without ingest
+(`INV-API-28`).
 
 ## Open Questions
 
@@ -272,9 +272,6 @@ client-supplied values must not widen those facts.
   composition. Range/null predicates remain fail-closed. Decide whether to add
   direct support for the remaining query predicates or reject them earlier in
   policy-specific validation.
-- 🔶 **History visibility rule.** Decide whether current-row readability should
-  imply visibility for all historical versions of that row, or whether history
-  sync/read must evaluate read policy per historical cut.
 - 🔶 **Permission subscriptions and TTL.** Edge mergeable authorization uses
   upstream permission-scope subscriptions (ch. 9). The current contract is
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
@@ -299,12 +296,6 @@ client-supplied values must not widen those facts.
   checks are valid policy atoms, how to bound them, and how to lower them
   without creating accidental whole-table authority scans. Exposed by
   `world-tour`'s band-member policy.
-- ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
-  columns cannot express _can-insert_ or richer probes; a dry-run is policy
-  evaluation _without ingest_ — the write-validation machinery applied
-  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
-  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
-  (`INV-API-28`).
 - 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
   representation for commit authorship, how old self-authored commit encodings
   are rejected or migrated, and where backend attribution helpers are permitted.

@@ -38,7 +38,7 @@ Invariant digest:
 - `INV-SHAPE-13`: During shape graph hydration, BindingSource nodes in ArrangementUpdateMode::Replace MUST read current binding snapshots, not pending/incremental binding deltas.
 - `INV-SHAPE-14`: Database::bind MUST accept exactly one value for each prepared parameter name, MUST reject missing/duplicate/unknown names, and MUST pass values to bindshape in prepar...
 - `INV-SHAPE-15`: Binding values MUST conform to the prepared shape's bindingdescriptor; mismatched type/arity MUST fail before subscription hydration.
-- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-SHAPE-17`: A BindingSource tick in normal accumulate mode MUST emit only BindingDeltas whose shape matches the source's BindingSourceOp.shape and whose descriptor matches the nod...
 - `INV-SHAPE-18`: Prepared recursive shapes MUST route retractions caused by base-table deletes or anti-join changes to the correct bound subscriber result.
 
@@ -169,8 +169,13 @@ Because a binding source is just another weighted record set, prepared shapes
 compose with joins, anti-joins, nullable-unwrap, `ArgMaxBy`, and recursion: the
 binding columns participate as data. Recursive fixpoint semantics are chapter 6;
 in this chapter, a binding source is simply another input weighted record set.
-Prepared shapes are retained for the lifetime of the database (`INV-SHAPE-16`);
-the API does not define shape drop.
+Prepared shapes retain their output graph nodes while registered
+(`INV-SHAPE-16`).
+
+**Implementation-status note.** The current API defines no shape-drop
+operation, so registered prepared shapes remain for the database lifetime.
+`prepared_shapes_retain_output_graph_nodes_without_subscribers` covers that
+behavior.
 
 ## Open Questions
 

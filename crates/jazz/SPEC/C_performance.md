@@ -10,15 +10,15 @@ to reason about the numbers_ and what to optimize.
 
 Invariant digest:
 
-- `INV-PERF-1`: INV-PERF-1 benchmark receipts: a performance claim MUST cite a scenario/microbench, workload parameters, dirty-tree status, and before/after numbers. This is from PERF...
-- `INV-PERF-2`: INV-PERF-2 correctness is part of benchmark validity: deterministic counters/oracle checks are hard gates, and a benchmark that gets fast by changing results must fail...
-- `INV-PERF-3`: INV-PERF-3 benchmark numbers MUST be interpreted against declared anchors: latency floor, bytes floor, naive ceiling/reference implementation where applicable, topolog...
-- `INV-PERF-4`: INV-PERF-4 steady-state peer view updates must preserve per-peer complete-tx payload dedup and result-set deltas. Identifiers: PeerState::shippedcompletetxpayloads, Pe...
-- `INV-PERF-5`: INV-PERF-5 incremental subscription state must converge to full rehydrate state for both filtered query bindings and whole-table current-row subscriptions. Identifiers...
-- `INV-PERF-6`: INV-PERF-6 current-row optimization must preserve deletion/restore visibility, including register witnesses. Identifiers: registerglobalcurrenttablename(table), Versio...
-- `INV-PERF-7`: INV-PERF-7 DurabilityTier::Global current-row reads and global current-row query graphs are allowed to use overwrite current tables rather than history argmax graphs,...
-- `INV-PERF-8`: INV-PERF-8 cold current-only subscription hydration and current-view version-witness payload sourcing should be O(current rows), not O(history depth), for degenerate w...
-- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies, never result membership, program facts, or inventory refs; a body may be omitted only under the skip rule — be...
+- `INV-PERF-1`: A performance claim MUST identify its workload, source state, and before/after measurements.
+- `INV-PERF-2`: Correctness is part of benchmark validity: deterministic counters or oracle checks are hard gates, and a benchmark that gets faster by changing results MUST fail.
+- `INV-PERF-3`: Benchmark numbers MUST be interpreted against declared comparison anchors.
+- `INV-PERF-4`: Steady-state peer updates MUST preserve payload deduplication and incremental result delivery.
+- `INV-PERF-5`: Incremental subscription state MUST converge to the equivalent full-rehydrate state.
+- `INV-PERF-6`: Current-row optimizations MUST preserve deletion and restoration visibility, including the evidence needed to establish it.
+- `INV-PERF-7`: Optimized current-row reads and query evaluation MUST remain semantically equivalent to visible current rows.
+- `INV-PERF-8`: Cold current-only hydration and current-view witness sourcing MUST scale with visible current rows rather than history depth.
+- `INV-SYNC-24`: Known-state payload deduplication MUST omit only version bodies and MUST preserve membership, program facts, and inventory references.
 
 ## Details
 
@@ -48,6 +48,12 @@ known-state design (ch. 8 §8.11, `INV-SYNC-24..27`, target): version-granular,
 declaration-seeded, ack-free — it retires `shipped_complete_tx_payloads` when
 it lands.
 
+**Implementation status (verified).**
+`incremental_query_result_sets_match_full_rehydrate_after_seeded_commits`
+covers incremental/full-rehydrate equivalence. The current payload-inventory
+representation is `PeerState::shipped_complete_tx_payloads`; the known-state
+successor remains an implementation transition, not an invariant condition.
+
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
 example, a permission change can make an old exclusive transaction newly
 visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
@@ -68,6 +74,12 @@ cold current-only hydration **O(current rows), not O(history depth)** for
 degenerate whole-table global shapes (`INV-PERF-8`), addressing the S6 cold-load
 memory blowup by routing global current-row subscriptions through the
 global-current tables (receipt: `benches/cold_subscription.rs`).
+
+**Implementation status (verified).**
+`denormalized_current_content_witness_matches_history_payload_bytes` verifies
+the current-sourced witness bytes, and
+`maintained_relation_include_single_row_changes_are_scale_independent` is the
+canonical scale-independence canary.
 
 Winner metadata needed for sync payload witnesses and known-state dedup is also
 part of the compact current representation: current content/register rows carry

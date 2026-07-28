@@ -15,7 +15,7 @@ Invariant digest:
 
 - `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
 - `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
-- `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-TX-1`: A transaction MUST NOT expose open writes to ordinary reads or subscriptions before commit.
 
 ## Details
@@ -23,7 +23,9 @@ Invariant digest:
 ### 1.1 How to read this document
 
 This SPEC is **the contract**, ordered so that the concepts needed to understand
-jazz appear before the mechanisms that rely on them. It has two kinds of file:
+jazz appear before the mechanisms that rely on them. The following document
+conventions are guidance for maintaining that contract, not product semantics.
+The SPEC has two kinds of file:
 
 - **Numbered chapters (`1_`…`N_`) are normative** — they define the data model,
   semantics, protocol, and invariants any conformant implementation must honor.
@@ -34,13 +36,9 @@ jazz appear before the mechanisms that rely on them. It has two kinds of file:
 
 **One home for every decision.** Every chapter uses the same top-level shape:
 `## Overview`, `## Details`, then `## Open Questions`. The overview is the
-team-onboarding entry point; details hold the normative body plus any clearly
-marked in-flight operational material such as benchmark specifics, measured
-findings, or slice plans; open questions hold unresolved decisions. Guidance
-appendices are entirely non-normative. This is the single placement rule for the
-system: as work settles, it moves _upward_ — in-flight detail into the normative
-body, and open questions into resolved prose. A chapter is "done" when it has no
-in-flight detail left. Nothing about the system lives outside the spec.
+team-onboarding entry point. Details hold both normative body text and clearly
+marked implementation-status notes; Open Questions hold unresolved design
+decisions. Guidance appendices are entirely non-normative.
 
 **Chapter map**
 
@@ -122,53 +120,26 @@ behavior described here, which any conformant implementation must honor however
 it spells things.
 
 **Invariants are the unit of convergence.** Each chapter gives every invariant
-a stable id `INV-<AREA>-<n>` (e.g. `INV-TX-1`). Load-bearing invariants are
-stated in the section where the topic is discussed, as ordinary prose with the
-id in parentheses. Finer or edge-case invariants are collected in a short
-_Further invariants_ block at the end of the subsection they belong to, close to
-their context but easy to skip.
+a stable id `INV-<AREA>-<n>` (e.g. `INV-TX-1`). An invariant states the simple,
+timeless behavior required when jazz is working as designed. It does not record
+rollout state, a missing test, or a list of currently supported cases. The id
+appears beside the normative statement; finer or edge-case invariants may appear
+in a short _Further invariants_ block at the end of their subsection.
 
-**Every invariant has a status and a coverage.** These are two orthogonal axes:
-
-- **Status** — the invariant's standing in the design and implementation:
-  `now` (in force in the implementation and the default contract state),
-  `target` (a committed design point, not yet in force), `open` (the design
-  itself is unsettled — see the chapter's _Open questions_), or `prov` (true in
-  the implementation but not a hard requirement; a conformant implementation may
-  differ).
-- **Coverage** — whether an enforcing test exists: `✓` or `untested`.
-
-In the chapters, status appears inline at the id **only when it is not `now`** —
-e.g. "star topology (`INV-EDGE-12`, target)" — so settled prose stays
-clean and not-yet-enforced behavior is visible exactly where you read it.
-Coverage is never shown in the chapters; it changes as tests land.
-
-The id is the anchor; the full mapping of every id to its status, coverage,
-enforcing test, and implementation lives in one out-of-band registry
-(`SPEC/INVARIANTS.md`), never in the chapters. A registry row reads, e.g.:
-
-| id           | invariant                                            | enforced by (test)                                                                         | impl                                                                                                                         | status | coverage |
-| ------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ------ | -------- |
-| `INV-EDGE-8` | edge mergeable fates are final; core never re-judges | `jazz::tests::four_tier::edge_accepted_mergeable_is_final_at_core_after_policy_revocation` | `node/ingest.rs::NodeState::finalize_edge_accepted_mergeable_commit_unit_once`; `peer.rs::ingest_edge_mergeable_commit_unit` | now    | ✓        |
-
-The rule is simple: every id used in a chapter has a registry row; every `now`
-invariant trends toward coverage `✓`; and an untested `now` is visible debt.
-`target` and `open` invariants are coverage-exempt by definition, because
-unbuilt or undecided behavior cannot be tested. A CI check can later assert
-every referenced test exists, every chapter id appears, and no `now` row is
-silently untested. A reference to an invariant owned by the other spec is
-written with its spec name. For example, a Groove-owned id is written as
-`groove/SPEC/INVARIANTS.md::INV-SHAPE-16`; it points into `groove/SPEC/INVARIANTS.md` and is exempt from
-Jazz's local-row rule.
+**Implementation status is separate from the contract.** A clearly marked
+**Implementation status** note in Details records what the current implementation
+does, including a named regression test when one exists. This is where
+implementation-specific case breakdowns and test coverage belong. The
+out-of-band `SPEC/INVARIANTS.md` registry mirrors invariant text and links it to
+implementation anchors and tests; it does not determine the contract.
 
 **Open questions are localized.** Each chapter ends with an `## Open Questions`
-section holding only that chapter's unresolved decisions, each tagged `🔶`.
-There is no central TODO; an open edge lives beside the thing it qualifies. A
-`🔶` bullet flags an open _work item_, which may be an undecided design, an
-unbuilt `target`, or simply a missing test for a `now` invariant. That work-item
-marker is distinct from the design-status axis above: an invariant id appearing
-under `🔶` with no status tag is still `now` (the open work is its coverage or
-enforcement, not its standing).
+section holding only that chapter's unresolved design decisions, each tagged
+`🔶`. There is no central TODO: a missing test or an implementation gap belongs
+in a Details status note, while an unsettled intended contract belongs beside the
+thing it qualifies as an open question. A reference to an invariant owned by the
+other spec is written with its spec name, for example
+`groove/SPEC/INVARIANTS.md::INV-SHAPE-16`.
 
 ### 1.4 Terminology
 

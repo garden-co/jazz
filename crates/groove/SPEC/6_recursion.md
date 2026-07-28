@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for ex...
 - `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
 - `INV-REC-13`: argmaxby MUST NOT be accepted inside recursive graph seed or step graphs.
-- `INV-REC-14`: SQL WITH RECURSIVE queries MUST NOT be lowered until recursive SQL planning is designed; planner MUST return PlannerError::UnsupportedQuery("recursive CTE lowering is...
+- `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 
 ## Details
@@ -35,10 +35,12 @@ node pairs an initial derivation with an iterative derivation, and the iterative
 derivation receives the facts accepted in the previous iteration through a
 scoped frontier source. In the reference API this is built with
 `GraphBuilder::recursive(seed, step, frontier, max_iters)` and
-`GraphBuilder::frontier_source(frontier, output)` inside the step graph. SQL
-`WITH RECURSIVE` is not lowered; the planner rejects it with
-`UnsupportedQuery("recursive CTE lowering is not implemented yet")`
-(`INV-REC-14`).
+`GraphBuilder::frontier_source(frontier, output)` inside the step graph.
+
+**Implementation-status note.** SQL `WITH RECURSIVE` is currently rejected as
+`UnsupportedQuery("recursive CTE lowering is not implemented yet")`; the
+planner test `rejects_recursive_ctes_until_recursive_lowering_exists` verifies
+that explicit rejection (`INV-REC-14`).
 
 The recursive node has exactly two child graphs: the seed graph and the step
 graph. Their compiled output descriptors must be identical (`INV-REC-1`), so
@@ -86,6 +88,12 @@ non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone
 change is handled by recompute (§6.3), not by propagating negative frontiers
 through the loop.
 
+**Implementation-status note.** After recompute hydrates recursive step
+arrangements, the reference implementation resumes positive-incremental
+maintenance for a later insert-only commit. The
+`prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute`
+test verifies that transition.
+
 ### 6.3 Retractions: recompute and diff
 
 Recursive maintenance does not propagate negative frontiers through the loop.
@@ -119,10 +127,6 @@ per-context child operator state in the runtime state maps after it completes.
 
 ### Open questions
 
-- ✅ **Insert-only incrementality.** After a recompute hydrates recursive step
-  arrangements, the next insert-only commit over recursion inputs uses the
-  positive-incremental fixpoint again. Non-positive input deltas still recompute
-  and diff so the emitted result remains the minimal net delta (`INV-REC-8`).
 - 🔶 **Conservative recompute trigger.** A conforming engine MAY recompute more
   often than strictly necessary while still emitting the same minimal diff
   (`INV-REC-8`); the implementation recomputes on any table delta against

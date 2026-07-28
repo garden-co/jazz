@@ -103,6 +103,10 @@ local storage is destroyed (`INV-TX-12`).
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_seq` backward and raises `durability` only monotonically.
 
+**Implementation status.** The reference implementation enforces this
+monotonicity; `fate_regressions::stale_pending_fate_update_cannot_regress_accepted`
+exercises a stale pending update after global acceptance.
+
 ### 3.4 Mergeable transactions
 
 Mergeable transactions are the eventually consistent write path. They give a
@@ -148,8 +152,7 @@ Fate authority is **structural**. A node acts as fate authority exactly when the
 host wires it as one: the core accept path for global authority, or the
 edge-authority ingest entry point for edge-decided mergeable fates. There is no
 row-content inference, topology guess, or ambient `is_authority` flag that turns
-ordinary sync receipt into acceptance authority. This decision was recorded by
-Anselm on 2026-07-03.
+ordinary sync receipt into acceptance authority.
 
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
@@ -227,12 +230,9 @@ atomicity.
 
 ### Open questions
 
-- 🔶 **Monotonicity tests.** `INV-TX-10` (global_seq/durability monotonicity) has
-  implementation but no direct test — `untested` in the registry until covered.
-- 🔶 **Mergeable authority placement.** Edge mergeable authority and
-  permission-subscription gating are the design; the implementation path
-  described by this chapter currently has the core act as the mergeable fate
-  authority before global finalization.
+- 🔶 **Mergeable authority placement.** What deployment and
+  permission-subscription-gating requirements must apply when an edge is wired
+  as a mergeable fate authority, rather than merely relaying commits to core?
 - 🔶 **Opt-in transaction facade.** The former replayable-reconciliation TODO
   defines explicit transactional writes with authority-decided fate, optional
   local pending overlay, schema-family validation, restart persistence, and

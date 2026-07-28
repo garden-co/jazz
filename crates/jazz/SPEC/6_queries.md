@@ -13,7 +13,7 @@ prepared shapes (ch. 14), and provide the substrate used by authorization
 Invariant digest:
 
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
-- `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
+- `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
 - `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
 - `INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
@@ -52,8 +52,9 @@ Lte, Contains, IsNull}` over `Operand`s. Relationship traversal is expressed by
 nested relation payloads are expressed by `array_subqueries`; they are distinct
 from `Include` and must not be represented as include paths. Result shaping is
 expressed by `select`, `order_by`, `aggregate`, `limit`, and `offset`. Every
-form listed here is part of the `Query` contract; a form not yet implemented is
-marked at its definition, and there is no out-of-band gate list.
+form listed here is part of the `Query` contract. The query surface MUST either
+define executable semantics for a form or reject it explicitly; it MUST NOT
+silently substitute an approximate result.
 `order_by`/`aggregate`/general `limit`/`offset` are applied by the node _after_
 row materialization for ordinary reads, rather than pushed into groove lowering
 (ch. 14, `INV-LOWER-13`). Maintained subscription exceptions are unordered
@@ -61,14 +62,21 @@ row materialization for ordinary reads, rather than pushed into groove lowering
 `row_uuid`, and ordered result windows, which lower through groove `TopBy`
 (ch. 14). Ordered windows may be finite (`limit` present) or an unbounded
 ordered suffix (`limit` absent); the latter keeps full ordered membership and is
-not a fallback to one-shot sorting. `!=` against a parameter is rejected until supported
-(`INV-LOWER-11`).
+not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
+semantics of every accepted predicate shape and explicitly reject unsupported
+predicate shapes (`INV-LOWER-11`).
+
+**Implementation status (2026-07-27).** Parameterized `!=` predicates are
+accepted for maintained subscriptions; the behavior is covered by
+`maintained_subscription_view_ne_param_stays_maintained` in
+`crates/jazz/src/peer.rs`.
 
 An `array_subquery` names an output relation (`column_name`), an inner table,
 and a correlation from a parent-scope column to an inner-table column. It may
 carry child-local filters, select columns, ordering, limit, requirement, and
-nested array subqueries. The MVP supports direct correlations and rejects
-subquery joins until their semantics are specified. `array_subqueries` are
+nested array subqueries. Array subqueries support direct correlations. They MUST
+reject subquery joins unless those joins have defined query and
+maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
@@ -112,16 +120,12 @@ query bindings.
 
 ### 6.4 Result sets, include paths, and relation payloads
 
-A result set is the authoritative membership for a canonical
-`ProgramInstanceKey = (ShapeId, ResolvedReadKey, PolicySharingKey, BindingId)`.
-Wire `SubscriptionKey`s are usage-site handles attached to that instance. The
-ordinary current-content row projection remains `(table, row_uuid, tx_id)` for
-current-row payload bundling and compatibility, but the canonical result-set
-shape is a typed result member. A real-row member carries content/deletion
-layer, optional deletion-register transaction, source/read-view identity,
-schema projection, branch/prefix discriminator, batch identity, and optional row
-digest as needed. Synthetic and path-tuple members are peers of real rows, not a
-separate result-set engine (`INV-QUERY-8`).
+A result set is the authoritative membership for a query in a read view.
+Result-set sharing MUST be keyed by every semantic input that can affect
+membership; a wire `SubscriptionKey` is a usage-site handle, not the result-set
+identity. Result members MUST retain the typed membership, source, and version
+information needed to deliver the result correctly; synthetic and path-tuple
+members follow that same result-set contract (`INV-QUERY-8`).
 
 Membership includes more than the projected output rows. Each result set carries
 the matched include-reference targets and join/junction rows that contributed to
@@ -141,10 +145,10 @@ is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
 
 Array subqueries produce relation payload material, not nested row values inside
-core rows. A relation payload is a set of row batches plus typed relation facts. A
-relation fact names source and target rows and can additionally carry edge kind,
-source/target version refs, recursion depth, multipath edge id, branch
-alternative, terminal role, order key, and matched-vs-hole state.
+core rows. A relation payload is a set of row batches plus typed relation facts
+that identify the source and target rows across each relation level. It MUST
+retain the membership, ordering, and visibility information required to apply
+child changes correctly.
 For a reverse relation array, the edge source is the parent row and the target
 is each visible correlated child row. For nested array subqueries, child rows
 become the source for the next relation level. Child filters, select columns,
@@ -153,16 +157,16 @@ root row membership unless the array subquery has an explicit requirement.
 Unreadable child rows and their edges are omitted, while readable parents remain
 visible for optional array subqueries (`INV-QUERY-21`).
 
-Alpha-style relation traversal also has an output-changing query surface.
-Supported single-hop traversal (`hopTo` shapes that project one terminal table)
-is facade syntax: the core normalizes it into the same table-rooted query program
-used by ordinary includes and `join_via`, then evaluates one-shot reads,
-maintained subscriptions, registration, known-state, and chunked snapshot serving
-through that single program family. Relation-query shapes canonicalize through
-the normalized row-set vocabulary and do not get a separate sync, subscription,
-or validation engine. Multi-hop traversal and `gather` remain explicit
-unsupported relation operators until they can be normalized into the same program
-family with matching maintained semantics.
+Alpha-style relation traversal has an output-changing query surface. A
+relation-query facade MUST normalize into the same row-set program vocabulary as
+ordinary queries and MUST use the same validation, identity, one-shot-read,
+subscription, registration, known-state, and snapshot-serving semantics. It MUST
+NOT introduce a separate sync or subscription engine.
+
+**Implementation status (2026-07-27).** The supported single-hop `hopTo` facade
+normalizes into this program family. Multi-hop traversal and `gather` are
+currently rejected because matching maintained semantics have not yet been
+defined.
 
 ### 6.4.1 Default result ordering
 
@@ -210,8 +214,7 @@ position without scanning or diffing the accumulated relation state.
 
 ### 6.5 Query-driven sync
 
-A subscription binds a shape to one binding in one read view and is addressed by
-`SubscriptionKey { shape_id, binding_id, read_view }`. `RegisterShapeOptions`
+A subscription binds a shape to one binding in one read view. `RegisterShapeOptions`
 carry a semantic `ReadViewSpec` describing the requested current, branch,
 merged-branch, owner-qualified historic snapshot, schema-projected, and
 overlay-visible view. The serving/runtime boundary derives the authoritative
@@ -219,10 +222,9 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The serving authority maintains the settled result set for each
-program instance: the result member set plus its matched include paths,
-relation edges, and join witnesses (§6.4). In Rust this server-side state is named
-`maintained_subscription_views`.
+The serving authority maintains the settled result set for each program instance:
+the result member set plus its matched include paths, relation edges, and join
+witnesses (§6.4).
 The subscriber receives and stores its own **settled subscription result set**:
 the rows, typed program facts, and matched include/relation material it can
 answer settled reads from (§6.6).
@@ -234,20 +236,18 @@ result-set updates converge to the same typed result-member and program-fact
 state as a reset `ViewUpdate` over the same committed history (`INV-QUERY-15`).
 Reset `ViewUpdate`s retain
 per-peer complete payload coverage (`INV-QUERY-7`). Payload dedup is per peer for
-complete transaction payloads: an already-shipped complete payload is sent in
-`peer_payload_inventory.complete_tx_payloads`, and a `VersionBundle` is emitted
-at most once per update (`INV-QUERY-20`). Partial payloads, including exclusive
+complete transaction payloads: a complete payload already shipped to a peer is
+emitted at most once per update (`INV-QUERY-20`). Partial payloads, including exclusive
 payloads, do not establish complete-transaction payload coverage unless the peer
 has received all versions for the transaction. Exclusive `ViewUpdate` visibility
 is view-atomic: a bundle may carry the exclusive versions needed for the
 maintained subscription view, and result members for that view are emitted only
 when that view's exclusive payload is complete (`INV-QUERY-19`, ch. 3).
 
-Subscription lifetime is reference-counted, with no TTL: a peer's shape
-registration drops when its binding count hits zero, and re-registration is
-cheap and idempotent. Whether a fully-unreferenced prepared graph is also dropped
-is a groove-side question; see `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`,
-which retains it.
+A subscription MUST remain active until it is explicitly removed; it MUST NOT
+expire solely because a TTL elapses. Registration and re-registration are
+idempotent. Prepared-graph retention is an implementation choice subject to
+`groove/SPEC/INVARIANTS.md::INV-SHAPE-16`.
 
 _Further invariants._ `INV-QUERY-16` — same-drain result churn folds by net
 outcome (enter-then-leave sends no add; leave-then-reenter replaces; same-tx
@@ -290,8 +290,7 @@ required input, such as a row id for a row-id-sensitive insert policy.
 ### 6.7 Conformance test plan
 
 Default result ordering is a conformance requirement for every public query
-surface, but implementation work is deferred until after 2026-07-19. The test
-plan below records the intended coverage without changing tests now.
+surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
   `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
@@ -301,8 +300,8 @@ plan below records the intended coverage without changing tests now.
   each checkpoint.
 - Extend the TS query API coverage in
   `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
-  currently sort ids before comparison become ordered-equality assertions once
-  the two human-decision red buckets are resolved. Add explicit cases for
+  currently sort ids before comparison become ordered-equality assertions. Add
+  explicit cases for
   default root ordering, reverse/forward relation include arrays ordered by
   child id, nested relation payloads, and explicit `orderBy` preserving its
   override with row-id tie-breaks.
@@ -334,9 +333,10 @@ validated shape identity.
 
 Array subqueries remain distinct from include paths. They represent correlated
 one-to-many result fields with parent-column to child-column bindings. One-shot
-materialization may evaluate them directly; maintained subscriptions require
-the relation/path terminal-delta machinery in ch. 16 before they are accepted as
-live shapes.
+and maintained subscriptions use the same relation-payload contract; the
+maintained-vs-one-shot equivalence is covered by
+`array_subquery_one_shot_and_maintained_subscription_are_equivalent` in
+`crates/jazz/src/db/tests.rs`.
 
 SQL is an entry surface, not a second semantic model. A Jazz SQL dialect should
 lower into the same query AST and reject unsupported SQL constructs loudly.
@@ -355,21 +355,12 @@ parallel query identities.
   remote/settled coverage must request a coverage witness explicitly (for
   example by attaching/subscribing to the maintained view) and must error or
   report unsettled state when that witness is absent.
-- 🔶 **Maintained array-subquery subscriptions.** One-shot reads may
-  materialize `array_subqueries` as relation row batches plus edges, but live
-  subscriptions reject array-subquery shapes loudly until unified
-  relation/path lowering or relation-edge terminal deltas can maintain them.
-  Sync coverage must not recursively register coarse child shapes as a
-  production fallback.
-- 🔶 **Output-changing relation queries.** The alpha-compatible `hopTo` and
-  `gather` surfaces produce rows whose output table may differ from the seed
-  table. Current Rust `Query::{joins, reachable}` are fixed-root filters, so
-  they are not a faithful encoding for this API. Relation-query facade syntax
-  should normalize immediately into the unified row-set program vocabulary
-  (`TableScan`, `Filter`, `Project`, `Join`, `Union`, `Gather`, `OrderBy`,
-  `Offset`, and `Limit`) rather than owning a separate validated/cache identity;
-  then route TS/WASM/NAPI
-  `all`/`one`/`subscribeAll` through that single path.
+- 🔶 **Multi-hop output-changing relation queries.** Single-hop `hopTo` uses
+  the normalized relation-query path. Define the semantics for multi-hop
+  traversal and `gather`, including their result identity, ordering, and
+  maintained-subscription behavior. They must normalize into the unified row-set
+  program vocabulary rather than own a separate validated/cache identity before
+  TS/WASM/NAPI route `all`/`one`/`subscribeAll` through them.
 - 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
   coarser covering shapes is a design direction, not a current MUST (ch. 8).
 - 🔶 **Non-uuidv7 id creation-order claims.** Ascending row id is the default
