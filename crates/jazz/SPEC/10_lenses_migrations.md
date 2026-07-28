@@ -5,7 +5,7 @@
 Multiple schema versions coexist in one database, and migration lenses translate
 between them without rewriting history. This is one of jazz's most novel
 properties. This chapter defines the catalogue, per-version storage,
-copy-on-write-into-current writes, and lens-projected reads. It builds on schema
+authored-partition writes, and lens-projected reads. It builds on schema
 identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 (ch. 8).
 
@@ -19,14 +19,14 @@ Invariant digest:
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
 - `INV-LENS-7`: CurrentWriteSchema updates MUST be monotone by revision; stale revisions MUST leave currentwriteschema unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, and per-version partitions MUST survive node restart.
-- `INV-LENS-9`: A current-write-schema pointer flip to a schema with new tables MUST create/reopen per-version history and register storage tables before writes/read scans use them.
+- `INV-LENS-9`: A current-write-schema pointer flip or commit arrival for a known authored schema MUST create/reopen its per-version history and register storage tables before writes/read scans use them.
 - `INV-LENS-10`: New local writes MUST store versions under currentwriteschema.schema, using the base table only when it equals the node's base schema and a partition table otherwise.
-- `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema partition at ingest.
+- `INV-LENS-11`: An incoming commit unit MUST be stored in the partition named by its authored schema, even when that schema is not the current write schema.
 - `INV-LENS-12`: Natural lens reads MUST fan out across registered per-version tables and project rows into the requested schema after schema-agnostic winner selection.
 - `INV-LENS-13`: Natural forward/reverse lens projection MUST implement RenameColumn, CopyColumn, AddColumn, and DropColumn.backwardsdefault deterministically, and MUST reject Transfor...
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
 - `INV-LENS-15`: ShapeId MUST include the authored SchemaVersionId; identical canonical query bytes against different schema versions MUST produce different shape ids.
-- `INV-LENS-16`: RejectSourceDelta on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
+- `INV-LENS-16`: A commit unit MUST NOT be rejected or rewritten solely because its authored schema differs from the current write schema.
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving; the current registry is identity/no-op only.
 - `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
@@ -44,11 +44,11 @@ presenting a coherent view to readers and writers.
 
 Each lens is bidirectional: it defines behavior in **both** directions, forward
 for old→new and backward for new→old. A direction may instead be declared as
-`RejectSourceDelta`, which refuses that translation as a normal transaction
-rejection (§10.4), rather than producing a translated value. Publishing a schema
-or a lens **never rewrites existing history**. Old rows remain in the version
-where they were written, and translation happens either at read time or as
-copy-on-write at ingest (§10.4–10.5).
+`RejectSourceDelta`, which refuses that explicit translation rather than
+producing a translated value. It does not reject a commit merely because its
+authored schema differs from the write pointer (§10.4). Publishing a schema or a
+lens **never rewrites existing history**. Old rows remain in the version where
+they were written, and translation happens at read time (§10.5).
 
 Identity is content-addressed. `SchemaVersionId = JazzSchema::version_id()`
 (ch. 2), and `MigrationLensId = lens.content_id()`. The lens id hashes a
@@ -82,33 +82,39 @@ row stays in the physical table for that version (`INV-LENS-4`, ch. 2).
 
 The base schema uses the base table. Non-base versions live in suffixed tables
 (`jazz_{table}_{schemaHash}_history` / `_register`), tracked in
-`jazz_partitions`. When the current-write pointer flips to a schema with new
-tables, those partition tables are created or reopened before any write or read
-scan uses them (`INV-LENS-9`).
+`jazz_partitions`. A current-write-pointer flip to a schema with new tables, or
+commit arrival for a known authored schema whose partition is absent, creates or
+reopens those partition tables before any write or read scan uses them
+(`INV-LENS-9`).
+
+> **Implementation note (current):** Pointer-flip and commit-arrival
+> provisioning both refresh the live Groove database layout while retaining
+> in-memory parked commit units and shape registrations so a catalogue drain can
+> continue after the refresh.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, and per-version partitions survive node restart
 (recovered in a catalogue stage before the groove database is constructed).
 
-### 10.4 Writes: copy-on-write into current
+### 10.4 Writes: authored partitions
 
-Writes converge on the schema selected by the current write pointer. New local
-writes are stored under `current_write_schema.schema`: the base table when that
-schema equals the node's base schema, and a partition table otherwise
-(`INV-LENS-10`).
+New local writes are authored under `current_write_schema.schema` and stored in
+that schema's partition: the base table when it equals the node's base schema,
+and a partition table otherwise (`INV-LENS-10`).
 
-Incoming work authored against an older schema is not appended to the old
-partition. When a forward lens path exists, the commit unit is
-**forward-translated into the current schema partition at ingest**
-(`INV-LENS-11`). If the selected lens path declares `RejectSourceDelta`, the
-old-schema delta is rejected as a normal `Fate::Rejected(reason)`, not as a
-protocol error (`INV-LENS-16`).
+An incoming commit unit is stored in the partition named by its authored schema,
+regardless of the current-write pointer (`INV-LENS-11`). If that known schema's
+partition is absent, commit arrival provisions it before ingest. An unknown
+schema still parks until its catalogue value arrives; draining that parked commit
+then provisions the authored partition if necessary (`INV-LENS-5`,
+`INV-LENS-9`). No lens inversion or forward translation is required to accept
+such a write, and a pointer difference alone is never a rejection condition
+(`INV-LENS-16`).
 
-The transaction records its author's schema version as **audit metadata with no
-semantic role**. A current-write-pointer flip is a core-ordered, monotone
-catalogue write (§10.2), and it **never invalidates in-flight work**: a
-transaction admitted under the previous pointer translates forward at ingest
-like any other old-schema write.
+A current-write-pointer flip is a core-ordered, monotone catalogue write
+(§10.2) and never invalidates in-flight work. The pointer selects the schema for
+new local authoring; it does not redirect commits another client already
+authored under a different valid schema.
 
 ### 10.5 Reads: fan-out, then project
 
@@ -146,16 +152,15 @@ schema materializations (`INV-LENS-14`).
 
 **Worked example.** A row is first written under schema `v1`, landing in the
 `v1` table with `schema_version = v1`. An admin flips the current-write pointer
-to `v2`, which creates the `v2` partition tables (`INV-LENS-9`). From then on,
-_new_ writes land in the `v2` partition, including an old client's
-`v1`-authored commit, which is forward-translated into the `v2` partition at
-ingest if a forward lens path exists (`INV-LENS-11`). The original `v1` row is
-**not** moved: old partitions stop receiving new rows once the pointer moves but
-keep their existing historical rows. That is exactly why a read fans out: a read
+to `v2`, which creates the `v2` partition tables (`INV-LENS-9`). New local `v2`
+writes land in `v2`; an older client's later `v1`-authored commit remains in
+`v1`, even though the pointer is `v2` (`INV-LENS-11`). Conversely, if a `v2`
+client's commit arrives before the pointer flips and the `v2` partition does not
+exist yet, arrival provisions that partition and stores the commit there. A read
 against `v2` unions the `v1` table and the `v2` partition, picks the winner by
 `(tx_time, node)` first, then projects the winning cells into `v2`
-(`INV-LENS-12`). Writes are single-partition, using the current partition; reads
-are multi-partition, spanning all partitions.
+(`INV-LENS-12`). Writes are single-partition by authored schema; reads are
+multi-partition, spanning all partitions.
 
 ### 10.6 The lens op surface
 

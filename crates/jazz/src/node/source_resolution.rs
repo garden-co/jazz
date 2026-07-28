@@ -17,12 +17,13 @@ where
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
         let context = self.currency_lookup_context(read_schema_version, table)?;
-        if context.lineage.as_slice()
-            == [CurrencySourceIdentity {
-                storage_schema: self.catalogue.current_schema_version_id,
-                source_table: table.to_owned(),
-                storage_kind: CurrencyStorageKind::Base,
-            }]
+        if read_schema_version == self.catalogue.current_schema_version_id
+            && context.lineage.as_slice()
+                == [CurrencySourceIdentity {
+                    storage_schema: self.catalogue.current_schema_version_id,
+                    source_table: table.to_owned(),
+                    storage_kind: CurrencyStorageKind::Base,
+                }]
         {
             return self.current_rows(table, tier);
         }

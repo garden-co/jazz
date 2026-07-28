@@ -195,6 +195,52 @@ fn catalogue_arrival_drains_schema_orphan_commit_units() {
         } if *tx_id == tx.tx_id
     )));
 }
+
+#[test]
+fn commit_arrival_provisions_known_noncurrent_authored_partition() {
+    // Internal because the public read surface cannot distinguish a partition
+    // provisioned by commit arrival from one provisioned by a pointer flip.
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x5a), evolved.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0x5b), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved_payload.clone()),
+    })
+    .unwrap();
+    assert!(!core
+        .partitions()
+        .contains(&("todos".to_owned(), evolved_payload.id)));
+
+    let row = row(0x5c);
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([
+                ("title".to_owned(), v("newer-client")),
+                ("body".to_owned(), v("authored-v2")),
+            ])),
+        )
+        .unwrap();
+    core.apply_sync_message(unit).unwrap();
+
+    assert_eq!(core.current_write_schema().schema, base.version_id());
+    assert!(core
+        .partitions()
+        .contains(&("todos".to_owned(), evolved_payload.id)));
+    let stored = core.query_table_versions("todos").unwrap();
+    assert_eq!(stored.len(), 1);
+    let stored_wire = core.version_record_from_row(&stored[0]).unwrap();
+    assert_eq!(stored_wire.schema_version(), evolved_payload.id);
+    assert_eq!(
+        version_record_cells(&stored_wire, &evolved.tables[0]),
+        BTreeMap::from([
+            ("title".to_owned(), v("newer-client")),
+            ("body".to_owned(), v("authored-v2")),
+        ])
+    );
+}
 #[test]
 fn catalogue_current_write_schema_revision_is_core_ordered() {
     let base = schema();
@@ -709,7 +755,7 @@ fn lens_graph_uses_shortest_path_when_multiple_candidates_exist() {
 }
 
 #[test]
-fn old_schema_commit_units_copy_on_write_into_current_schema_partition() {
+fn old_schema_commit_units_stay_in_authored_partition_after_pointer_flip() {
     let base = schema();
     let evolved = JazzSchema::new([TableSchema::new(
         "todos",
@@ -768,13 +814,10 @@ fn old_schema_commit_units_copy_on_write_into_current_schema_partition() {
     let stored = core.query_table_versions("todos").unwrap();
     assert_eq!(stored.len(), 1);
     let stored_wire = core.version_record_from_row(&stored[0]).unwrap();
-    assert_eq!(stored_wire.schema_version(), evolved_payload.id);
+    assert_eq!(stored_wire.schema_version(), base.version_id());
     assert_eq!(
-        version_record_cells(&stored_wire, &evolved.tables[0]),
-        BTreeMap::from([
-            ("name".to_owned(), v("old-writer")),
-            ("body".to_owned(), v("default-body")),
-        ])
+        version_record_cells(&stored_wire, &base.tables[0]),
+        title_cells("old-writer")
     );
 
     let v2_shape = Query::from("todos").validate(&evolved).unwrap();

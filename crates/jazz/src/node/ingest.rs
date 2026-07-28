@@ -801,19 +801,6 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
-        }
-
         let global_seq = self.clock.next_global_seq;
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
@@ -884,6 +871,7 @@ where
         )? {
             return Ok(());
         }
+        self.provision_authored_partitions_for_commit(&versions)?;
 
         let mut memo = IngestMemo::default();
         if self.park_commit_unit_if_missing_parents(
@@ -977,6 +965,7 @@ where
         )? {
             return Ok(Vec::new());
         }
+        self.provision_authored_partitions_for_commit(&versions)?;
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -1034,18 +1023,6 @@ where
                 global_seq: None,
                 durability: None,
             }]);
-        }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
         }
         if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
@@ -1173,6 +1150,7 @@ where
         )? {
             return Ok(Vec::new());
         }
+        self.provision_authored_partitions_for_commit(&versions)?;
         if self.park_commit_unit_if_missing_parents_with_mode(
             &tx,
             &versions,
@@ -1232,18 +1210,6 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
-            self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
-            let mut updates = vec![SyncMessage::FateUpdate {
-                tx_id: tx.tx_id,
-                fate,
-                global_seq: None,
-                durability: None,
-            }];
-            updates.extend(self.cascade_rejections_from(tx.tx_id)?);
-            return Ok(updates);
-        }
         if !self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)? {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -1279,6 +1245,7 @@ where
     ) -> Result<(), Error> {
         self.merge_tx_time(tx.tx_id.time);
         let versions = canonical_versions(versions);
+        self.provision_authored_partitions_for_commit(&versions)?;
         if let Some(existing) = self.query_transaction(tx.tx_id)? {
             let mut existing_versions = self
                 .query_versions_for_tx(tx.tx_id)?
@@ -1440,6 +1407,12 @@ where
         if eligible.is_empty() {
             return Ok(loaded_tx_ids);
         }
+        let eligible_versions = eligible
+            .iter()
+            .flat_map(|tx_bundles| tx_bundles.iter().flat_map(|bundle| bundle.versions))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.provision_authored_partitions_for_commit(&eligible_versions)?;
         self.sync_metrics.receiver_bulk_ingest_commits += 1;
         self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
 
@@ -1495,70 +1468,20 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let has_forward_lens = author_schema != self.catalogue.current_write_schema.schema
-                    && self.has_forward_lens_path(
-                        author_schema,
-                        self.catalogue.current_write_schema.schema,
-                        version.table(),
-                    );
-                let (table_schema, target_schema, stored) = if has_forward_lens {
-                    let mut target_table = version.table().to_owned();
-                    let mut target_cells = source_table_schema
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, column)| {
-                            version
-                                .optional_cell_at(idx)
-                                .map(|value| (column.name.clone(), value))
-                        })
-                        .collect::<BTreeMap<_, _>>();
-                    let target_schema = self.catalogue.current_write_schema.schema;
-                    target_table = self.translate_cells_forward(
-                        author_schema,
-                        target_schema,
-                        &target_table,
-                        &mut target_cells,
-                    )?;
-                    let table_schema = self.table_in_schema(&target_table, target_schema)?;
-                    let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
-                    let stored = VersionRow::from_parts_with_schema_version(
-                        &table_schema,
-                        VersionRowParts {
-                            table: target_table,
-                            row_uuid: version.row_uuid(),
-                            tx_node_alias,
-                            schema_version_alias,
-                            tx_time: tx.tx_id.time,
-                            parents: version.parents(),
-                            created_by: version.created_by(),
-                            created_at: version.created_at(),
-                            updated_by: version.updated_by(),
-                            updated_at: version.updated_at(),
-                            cells: target_cells,
-                            deletion: version.deletion(),
-                        },
-                        (target_schema != self.catalogue.current_schema_version_id)
-                            .then_some(target_schema),
-                    )?;
-                    (table_schema, target_schema, stored)
-                } else {
-                    let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
-                    let stored = VersionRow::from_wire_with_schema_version(
-                        &source_table_schema,
-                        version,
-                        tx_node_alias,
-                        schema_version_alias,
-                        tx.tx_id.time,
-                        (author_schema != self.catalogue.current_schema_version_id)
-                            .then_some(author_schema),
-                    )?;
-                    (source_table_schema, author_schema, stored)
-                };
+                let schema_version_alias = self.ensure_schema_version_alias(author_schema)?;
+                let stored = VersionRow::from_wire_with_schema_version(
+                    &source_table_schema,
+                    version,
+                    tx_node_alias,
+                    schema_version_alias,
+                    tx.tx_id.time,
+                    (author_schema != self.catalogue.current_schema_version_id)
+                        .then_some(author_schema),
+                )?;
                 let history_table = self.cached_version_storage_table_name_for_schema(
-                    &table_schema.name,
+                    &source_table_schema.name,
                     stored.layer(),
-                    target_schema,
+                    author_schema,
                     self.catalogue.current_schema_version_id,
                 );
                 batch.insert_raw(
@@ -4307,8 +4230,8 @@ where
         for version in versions {
             let author_schema = version.schema_version();
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-            let mut target_table = version.table().to_owned();
-            let mut target_cells = source_table_schema
+            let target_table = version.table().to_owned();
+            let target_cells = source_table_schema
                 .columns
                 .iter()
                 .enumerate()
@@ -4318,23 +4241,8 @@ where
                         .map(|value| (column.name.clone(), value))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let mut target_schema = author_schema;
-            if author_schema != self.catalogue.current_write_schema.schema
-                && self.has_forward_lens_path(
-                    author_schema,
-                    self.catalogue.current_write_schema.schema,
-                    version.table(),
-                )
-            {
-                target_schema = self.catalogue.current_write_schema.schema;
-                target_table = self.translate_cells_forward(
-                    author_schema,
-                    target_schema,
-                    &target_table,
-                    &mut target_cells,
-                )?;
-            }
-            let table_schema = self.table_in_schema(&target_table, target_schema)?;
+            let target_schema = author_schema;
+            let table_schema = source_table_schema;
             let currency_context =
                 self.currency_lookup_context(target_schema, &table_schema.name)?;
             let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
@@ -4513,67 +4421,35 @@ where
         Ok(())
     }
 
-    fn translate_cells_forward(
+    /// Add physical storage for all known authored schemas named by one
+    /// arriving commit. Unknown schemas remain parked until their catalogue
+    /// value arrives, at which point the drain re-enters this path.
+    fn provision_authored_partitions_for_commit(
         &mut self,
-        source: SchemaVersionId,
-        target: SchemaVersionId,
-        table: &str,
-        cells: &mut BTreeMap<String, Value>,
-    ) -> Result<String, Error> {
-        if source == target {
-            return Ok(table.to_owned());
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        if versions.iter().any(|version| {
+            !self
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&version.schema_version())
+        }) {
+            return Ok(());
         }
-        let path = self
-            .compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-            .ok_or(Error::InvalidCatalogueUpdate("lens chain is unknown"))?;
-        Ok(apply_compiled_lens_path(&path, cells))
-    }
 
-    fn reject_source_delta_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
-        for version in versions {
-            let target_schema = self.catalogue.current_write_schema.schema;
-            if version.schema_version() == target_schema {
-                continue;
-            }
-            let mut current_table = version.table().to_owned();
-            let Some(path) = self.shortest_lens_path_ids_cached(
-                version.schema_version(),
-                target_schema,
-                LensPathDirection::Forward,
-            ) else {
-                continue;
-            };
-            for lens_id in path {
-                let lens = self.catalogue.catalogue_lenses.get(&lens_id)?;
-                let table_lens = lens
-                    .table_lenses
-                    .iter()
-                    .find(|candidate| candidate.source_table == current_table)?;
-                for op in &table_lens.ops {
-                    match op {
-                        LensOp::RejectSourceDelta { reason } => return Some(reason.clone()),
-                        LensOp::TransformColumn { transform, .. } => {
-                            if validate_registered_transform(transform).is_err() {
-                                return Some("transform column is not registered".to_owned());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                current_table = table_lens.target_table.clone();
-            }
+        let partitions = versions
+            .iter()
+            .map(|version| (version.table().to_owned(), version.schema_version()))
+            .collect::<BTreeSet<_>>();
+        let mut added_partition = false;
+        for (table, schema_version) in partitions {
+            self.table_in_schema(&table, schema_version)?;
+            added_partition |= self.persist_partition(table, schema_version)?;
         }
-        None
-    }
-
-    fn has_forward_lens_path(
-        &mut self,
-        source: SchemaVersionId,
-        target: SchemaVersionId,
-        table: &str,
-    ) -> bool {
-        self.compiled_lens_path(source, target, LensPathDirection::Forward, table)
-            .is_ok_and(|path| path.is_some())
+        if added_partition {
+            self.rebuild_database_slot()?;
+        }
+        Ok(())
     }
 
     pub(super) fn ingest_rejected_transaction(

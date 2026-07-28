@@ -740,6 +740,10 @@ where
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
+        // Reopening the database refreshes Groove's physical table catalogue.
+        // Parking is in-memory delivery state, not derivable from storage, so a
+        // live refresh must retain it for the caller to drain afterwards.
+        let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
         let database = Self::open_full_database(
@@ -752,6 +756,7 @@ where
         self.database.replace(database);
         self.groove_runtime_token = next_groove_runtime_token();
         self.rederive_restart_state()?;
+        self.parking = parking;
         Ok(())
     }
 
