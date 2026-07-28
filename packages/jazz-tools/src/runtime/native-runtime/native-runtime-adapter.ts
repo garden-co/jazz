@@ -1619,7 +1619,9 @@ export class NativeRuntimeAdapter implements Runtime {
     source: SubscriptionSourceState,
   ): void {
     if (isReadableSubscriptionReader(source.source)) return;
-    for (const event of source.source.readAll()) {
+    const __drained = source.source.readAll();
+    console.log(`[jazz-drain] sub=${handle} events=${Array.isArray(__drained) ? __drained.length : "?"}`);
+    for (const event of __drained) {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
       void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
         subscription.cancelled = true;
