@@ -7204,7 +7204,9 @@ fn value_contains_sql(left: &Value, right: &Value) -> bool {
         (Value::Nullable(Some(left)), right) => value_contains_sql(left, right),
         (left, Value::Nullable(Some(right))) => value_contains_sql(left, right),
         (Value::String(left), Value::String(right)) => left.contains(right),
-        (Value::Array(values), right) => values.iter().any(|value| value == right),
+        (Value::Array(values), right) => values
+            .iter()
+            .any(|value| compare_values_sql(value, right).is_some_and(std::cmp::Ordering::is_eq)),
         _ => false,
     }
 }
@@ -7227,6 +7229,12 @@ fn is_sql_null_value(value: &Value) -> bool {
 }
 
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    if let (Some(left), Some(right)) = (integer_value(left), integer_value(right)) {
+        // i128 represents every supported integer exactly, including U64
+        // values above i64::MAX. Floats deliberately do not participate: a
+        // numeric-width match must never turn into lossy integer/float equality.
+        return left.partial_cmp(&right);
+    }
     match (left, right) {
         (Value::U8(left), Value::U8(right)) => left.partial_cmp(right),
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
@@ -7252,6 +7260,18 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
             .map(|(left, right)| compare_values(left, right))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
+        _ => None,
+    }
+}
+
+fn integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::U8(value) => Some(i128::from(*value)),
+        Value::U16(value) => Some(i128::from(*value)),
+        Value::U32(value) => Some(i128::from(*value)),
+        Value::U64(value) => Some(i128::from(*value)),
+        Value::I32(value) => Some(i128::from(*value)),
+        Value::I64(value) => Some(i128::from(*value)),
         _ => None,
     }
 }

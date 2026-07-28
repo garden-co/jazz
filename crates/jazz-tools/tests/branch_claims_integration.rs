@@ -68,26 +68,18 @@ fn numeric_claims_gated_schema() -> Schema {
         .table(
             TableSchema::builder("integer_claim_rows")
                 .column("access_level", ColumnType::Integer)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session(
-                            "access_level",
-                            vec!["claims".into(), "access_level".into()],
-                        )),
-                ),
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
         )
         .table(
             TableSchema::builder("bigint_claim_rows")
                 .column("access_level", ColumnType::BigInt)
-                .policies(
-                    TablePolicies::new()
-                        .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session(
-                            "access_level",
-                            vec!["claims".into(), "access_level".into()],
-                        )),
-                ),
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
         )
         .build()
 }
@@ -186,41 +178,11 @@ async fn query_applies_claims_select_policy() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn numeric_claims_match_integer_columns_across_core_widths() {
+async fn numeric_claims_authorize_writes_across_core_widths() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = numeric_claims_gated_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-
-            let admin = TestingClient::builder()
-                .with_server(&server)
-                .with_schema(schema.clone())
-                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb1")
-                .as_admin()
-                .ready_on("integer_claim_rows", READY_TIMEOUT)
-                .connect()
-                .await;
-
-            let (integer_row_id, _, integer_batch) = admin
-                .insert(
-                    "integer_claim_rows",
-                    row_input!("access_level" => Value::Integer(-7)),
-                )
-                .expect("admin creates integer claims row");
-            admin
-                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
-                .await
-                .expect("integer row reaches edge");
-            let (bigint_row_id, _, bigint_batch) = admin
-                .insert(
-                    "bigint_claim_rows",
-                    row_input!("access_level" => Value::BigInt(7)),
-                )
-                .expect("admin creates bigint claims row");
-            admin
-                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
-                .await
-                .expect("bigint row reaches edge");
 
             let bigint_claim_user = TestingClient::builder()
                 .with_server(&server)
@@ -231,19 +193,16 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 .ready_on("integer_claim_rows", READY_TIMEOUT)
                 .connect()
                 .await;
-            wait_for_query(
-                &bigint_claim_user,
-                QueryBuilder::new("integer_claim_rows").build(),
-                Some(DurabilityTier::EdgeServer),
-                QUERY_TIMEOUT,
-                "I64 claim matches I32 column",
-                |rows| {
-                    rows.iter()
-                        .any(|(id, _)| *id == integer_row_id)
-                        .then_some(())
-                },
-            )
-            .await;
+            let (_, _, integer_batch) = bigint_claim_user
+                .insert(
+                    "integer_claim_rows",
+                    row_input!("access_level" => Value::Integer(-7)),
+                )
+                .expect("I64 claim creates I32 row");
+            bigint_claim_user
+                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("I64 claim matches I32 write policy");
 
             let integer_claim_user = TestingClient::builder()
                 .with_server(&server)
@@ -254,21 +213,17 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 .ready_on("bigint_claim_rows", READY_TIMEOUT)
                 .connect()
                 .await;
-            wait_for_query(
-                &integer_claim_user,
-                QueryBuilder::new("bigint_claim_rows").build(),
-                Some(DurabilityTier::EdgeServer),
-                QUERY_TIMEOUT,
-                "U32 claim matches I64 column",
-                |rows| {
-                    rows.iter()
-                        .any(|(id, _)| *id == bigint_row_id)
-                        .then_some(())
-                },
-            )
-            .await;
+            let (_, _, bigint_batch) = integer_claim_user
+                .insert(
+                    "bigint_claim_rows",
+                    row_input!("access_level" => Value::BigInt(7)),
+                )
+                .expect("U32 claim creates I64 row");
+            integer_claim_user
+                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("U32 claim matches I64 write policy");
 
-            admin.shutdown().await.expect("shutdown admin");
             bigint_claim_user
                 .shutdown()
                 .await

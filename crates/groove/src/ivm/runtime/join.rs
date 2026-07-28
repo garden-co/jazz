@@ -16,7 +16,7 @@ use crate::records::{RecordDescriptor, ValueType};
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part, encode_record_field_key_part,
+    encode_key_part,
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -620,7 +620,8 @@ fn keyed_join_deltas<'a>(
         for delta in deltas {
             let mut key = Vec::new();
             for field_idx in &field_indices {
-                encode_record_field_key_part(&mut key, descriptor, delta.raw(), *field_idx)?;
+                let value = descriptor.get_idx(delta.raw(), *field_idx)?;
+                encode_join_key_part(&mut key, &value)?;
             }
             keyed.push(KeyedRecordDelta {
                 delta,
@@ -705,14 +706,14 @@ pub(super) fn join_keys(
         }
         if parts.len() == 1 {
             let mut key = Vec::new();
-            encode_key_part(&mut key, &parts[0])?;
+            encode_join_key_part(&mut key, &parts[0])?;
             return Ok(vec![JoinKey::from_vec(key)]);
         }
         let mut keys = Vec::with_capacity(parts.len());
         let mut seen = HashSet::default();
         for value in &parts {
             let mut key = Vec::new();
-            encode_key_part(&mut key, value)?;
+            encode_join_key_part(&mut key, value)?;
             if !seen.contains(&key) {
                 seen.insert(key.clone());
                 keys.push(JoinKey::from_vec(key));
@@ -736,7 +737,7 @@ pub(super) fn join_keys(
         for key in &keys {
             for value in &parts {
                 let mut next = key.clone();
-                encode_key_part(&mut next, value)?;
+                encode_join_key_part(&mut next, value)?;
                 if !seen.contains(&next) {
                     seen.insert(next.clone());
                     next_keys.push(next);
@@ -748,6 +749,74 @@ pub(super) fn join_keys(
     }
 
     Ok(keys.into_iter().map(JoinKey::from_vec).collect())
+}
+
+/// Encode one equality join key using policy comparison semantics.
+///
+/// Joins are implemented with byte-keyed arrangements rather than predicate
+/// evaluation, so their integer representation must normalize widths here.
+/// Keeping this local avoids changing index and primary-key identity.
+fn encode_join_key_part(
+    key: &mut Vec<u8>,
+    value: &crate::records::Value,
+) -> Result<(), IvmRuntimeError> {
+    match value {
+        crate::records::Value::Nullable(Some(value)) => encode_join_key_part(key, value),
+        crate::records::Value::U8(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        crate::records::Value::U16(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        crate::records::Value::U32(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        crate::records::Value::U64(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        crate::records::Value::I32(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        crate::records::Value::I64(value) => Ok(encode_join_integer_key(key, i128::from(*value))),
+        value => encode_key_part(key, value),
+    }
+}
+
+fn encode_join_integer_key(key: &mut Vec<u8>, value: i128) {
+    // This tag is private to arrangement join keys. A fixed-width signed i128
+    // preserves exact equality across all core integer widths and signs.
+    key.push(0xfe);
+    key.extend(value.to_be_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::{RecordDescriptor, Value, ValueType};
+
+    // Internal coverage is necessary because lowered policy correlations become
+    // arrangement keys; that byte-level boundary is not separately observable
+    // through the public client API.
+    #[test]
+    fn join_keys_normalize_integer_widths_without_coercing_floats() {
+        let u32 = RecordDescriptor::new(vec![("value", ValueType::U32)]);
+        let i64 = RecordDescriptor::new(vec![("value", ValueType::I64)]);
+        let u64 = RecordDescriptor::new(vec![("value", ValueType::U64)]);
+        let f64 = RecordDescriptor::new(vec![("value", ValueType::F64)]);
+        let fields = vec!["value".to_owned()];
+
+        let u32_record = u32.create(&[Value::U32(7)]).unwrap();
+        let i64_record = i64.create(&[Value::I64(7)]).unwrap();
+        let large_u64_record = u64.create(&[Value::U64(i64::MAX as u64 + 1)]).unwrap();
+        let max_i64_record = i64.create(&[Value::I64(i64::MAX)]).unwrap();
+        let float_record = f64.create(&[Value::F64(7.0)]).unwrap();
+
+        assert_eq!(
+            join_keys(&u32, &u32_record, &fields).unwrap(),
+            join_keys(&i64, &i64_record, &fields).unwrap(),
+            "lowered join correlations match equal integer values across widths"
+        );
+        assert_ne!(
+            join_keys(&u64, &large_u64_record, &fields).unwrap(),
+            join_keys(&i64, &max_i64_record, &fields).unwrap(),
+            "U64 above i64::MAX remains exact"
+        );
+        assert_ne!(
+            join_keys(&u32, &u32_record, &fields).unwrap(),
+            join_keys(&f64, &float_record, &fields).unwrap(),
+            "integer and float join keys remain type-exact"
+        );
+    }
 }
 
 fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {

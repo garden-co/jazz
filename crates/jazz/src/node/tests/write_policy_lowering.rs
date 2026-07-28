@@ -159,6 +159,93 @@ fn write_policy_child_cells(
 }
 
 #[test]
+fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains() {
+    let identity = user(0x71);
+    let schema = JazzSchema::new([TableSchema::new(
+        "numbers",
+        [
+            ColumnSchema::new("number", ColumnType::U64),
+            ColumnSchema::new("allowed", ColumnType::U32.array_of()),
+            ColumnSchema::new("floating", ColumnType::F64),
+        ],
+    )]);
+    let table = schema.tables[0].clone();
+    let (_dir, mut core) = open_node_with_schema(node(0x72), schema);
+    core.set_session_claims(
+        identity,
+        BTreeMap::from([
+            ("signed_seven".to_owned(), Value::I64(7)),
+            ("large".to_owned(), Value::U64(i64::MAX as u64 + 1)),
+        ]),
+    );
+    let candidate = BTreeMap::from([
+        ("number".to_owned(), Value::U64(7)),
+        ("allowed".to_owned(), Value::Array(vec![Value::U32(7)])),
+        ("floating".to_owned(), Value::F64(7.0)),
+    ]);
+
+    for (label, policy, expected) in [
+        (
+            "equality matches I64 claim against U64 candidate",
+            Query::from("numbers").filter(eq(col("number"), claim("signed_seven"))),
+            true,
+        ),
+        (
+            "IN matches I64 claim against U64 candidate",
+            Query::from("numbers").filter(crate::query::Predicate::In(
+                col("number"),
+                vec![claim("signed_seven")],
+            )),
+            true,
+        ),
+        (
+            "contains matches I64 claim against U32 array member",
+            Query::from("numbers").filter(crate::query::contains(
+                col("allowed"),
+                claim("signed_seven"),
+            )),
+            true,
+        ),
+        (
+            "float and integer remain type-exact",
+            Query::from("numbers").filter(eq(col("floating"), claim("signed_seven"))),
+            false,
+        ),
+    ] {
+        assert_lowered_write_policy_case(
+            &mut core,
+            label,
+            WritePolicyOperation::Insert,
+            &table,
+            &policy,
+            row(0x73),
+            Some(&candidate),
+            None,
+            identity,
+            expected,
+        );
+    }
+
+    let large_candidate = BTreeMap::from([
+        ("number".to_owned(), Value::U64(i64::MAX as u64 + 1)),
+        ("allowed".to_owned(), Value::Array(Vec::new())),
+        ("floating".to_owned(), Value::F64(0.0)),
+    ]);
+    assert_lowered_write_policy_case(
+        &mut core,
+        "U64 above i64::MAX remains exact",
+        WritePolicyOperation::Insert,
+        &table,
+        &Query::from("numbers").filter(eq(col("number"), claim("large"))),
+        row(0x74),
+        Some(&large_candidate),
+        None,
+        identity,
+        true,
+    );
+}
+
+#[test]
 fn lowered_write_policy_operation_matrix() {
     let owner = user(0xa1);
     let other = user(0xb2);
