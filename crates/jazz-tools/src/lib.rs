@@ -159,6 +159,29 @@ pub enum SubscriptionRejectReason {
         /// Human-readable diagnostic. Not part of semantic compatibility.
         detail: String,
     },
+    /// The serving peer failed without exposing internal diagnostic detail.
+    ServerFailure {
+        /// Stable, client-safe server failure classification.
+        code: SubscriptionServerFailureCode,
+    },
+}
+
+/// Client-safe server failure classifications for subscriptions.
+#[cfg(feature = "client")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionServerFailureCode {
+    /// The requested table was absent on the serving peer.
+    TableNotFound,
+    /// The server could not resolve the requested schema or shape.
+    SchemaResolution,
+    /// The server rejected the query during validation.
+    QueryValidation,
+    /// The server could not lower the query.
+    QueryLowering,
+    /// The server could not evaluate the subscription policy.
+    PolicyEvaluation,
+    /// Another server-side failure occurred.
+    Internal,
 }
 
 /// Item yielded by a public subscription stream.

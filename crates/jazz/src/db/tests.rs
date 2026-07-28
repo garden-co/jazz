@@ -10,7 +10,7 @@ use crate::ids::{AuthorId, BranchId, NodeUuid};
 use crate::protocol::{
     BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
     ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscribeRejectReason, TableLens,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
     MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_KNOWN_STATE_EXACT_REFS,
@@ -5851,6 +5851,54 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
             reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
         }) => assert_eq!(detail, "server does not support this maintained shape"),
         other => panic!("expected stream-carried rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
+    let server_schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x53, AuthorId::SYSTEM, &server_schema);
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, owner);
+    let shape_id = ShapeId(uuid::Uuid::from_bytes([0x52; 16]));
+    let subscription = SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    // This must exercise the wire boundary because public query preparation
+    // correctly refuses an unknown table before it can be sent. Previously the
+    // server dropped this registration, so the following Subscribe would have
+    // waited forever; the public stream routing is covered separately above.
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id,
+            ast: ShapeAst::new(Query::from("people"), server_schema.version_id()),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id,
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+
+    match client_transport.try_recv() {
+        Some(SyncMessage::SubscribeRejected {
+            subscription: rejected_subscription,
+            reason:
+                SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::TableNotFound,
+                },
+        }) => assert_eq!(rejected_subscription, subscription),
+        other => panic!("expected table-not-found rejection, got {other:?}"),
     }
 }
 

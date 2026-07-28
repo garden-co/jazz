@@ -1265,6 +1265,12 @@ mod tests {
                     detail: "SourceGap::BranchOverlay".to_owned(),
                 },
             },
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: crate::protocol::SubscribeServerFailureCode::TableNotFound,
+                },
+            },
             SyncMessage::ViewUpdate {
                 subscription,
                 settled_through: GlobalSeq(7),

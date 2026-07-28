@@ -51,7 +51,7 @@ use uuid::Uuid;
 use crate::ClientStorage;
 use crate::{
     AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
-    SubscriptionStream, SubscriptionStreamItem,
+    SubscriptionServerFailureCode, SubscriptionStream, SubscriptionStreamItem,
 };
 
 type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
@@ -1274,6 +1274,30 @@ impl ClientDbInner {
                             jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
                                 detail,
                             } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
+                            jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                                SubscriptionRejectReason::ServerFailure {
+                                    code: match code {
+                                        jazz::protocol::SubscribeServerFailureCode::TableNotFound => {
+                                            SubscriptionServerFailureCode::TableNotFound
+                                        }
+                                        jazz::protocol::SubscribeServerFailureCode::SchemaResolution => {
+                                            SubscriptionServerFailureCode::SchemaResolution
+                                        }
+                                        jazz::protocol::SubscribeServerFailureCode::QueryValidation => {
+                                            SubscriptionServerFailureCode::QueryValidation
+                                        }
+                                        jazz::protocol::SubscribeServerFailureCode::QueryLowering => {
+                                            SubscriptionServerFailureCode::QueryLowering
+                                        }
+                                        jazz::protocol::SubscribeServerFailureCode::PolicyEvaluation => {
+                                            SubscriptionServerFailureCode::PolicyEvaluation
+                                        }
+                                        jazz::protocol::SubscribeServerFailureCode::Internal => {
+                                            SubscriptionServerFailureCode::Internal
+                                        }
+                                    },
+                                }
+                            }
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
                     }
