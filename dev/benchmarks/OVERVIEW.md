@@ -12,11 +12,12 @@ We have plenty of benchmarks. What we don't have is **an answer to "where do we
 stand"** — because results land in three unrelated places, and only one of them
 keeps history.
 
-| harness | output | survives? |
-|---|---|---|
-| `dev/benchmarks/smoke.sh` | JSONL receipts + `SMOKE_LEDGER.md` with previous/delta | **yes, committed** |
-| Criterion (`cargo bench`) | `target/criterion` | no — machine-local, dies on `cargo clean` |
-| realistic native/browser | per-scenario JSON, CI artifacts | no — artifacts expire |
+| harness                            | output                                                 | survives?                                 |
+| ---------------------------------- | ------------------------------------------------------ | ----------------------------------------- |
+| `dev/benchmarks/smoke.sh`          | JSONL receipts + `SMOKE_LEDGER.md` with previous/delta | **yes, committed**                        |
+| SaaS document/permission harnesses | dated Markdown receipts                                | one committed snapshot, no delta series   |
+| Criterion (`cargo bench`)          | `target/criterion`                                     | no — machine-local, dies on `cargo clean` |
+| realistic native/browser           | per-scenario JSON, CI artifacts                        | no — artifacts expire                     |
 
 So Groove, Criterion, browser, storage/OPFS and WASM-ingest numbers exist only as
 whatever the last person happened to run.
@@ -25,13 +26,13 @@ whatever the last person happened to run.
 
 ### Core `jazz` benches — the ones in the smoke gate
 
-| bench | measures | sensitive to |
-|---|---|---|
-| `cold_subscription` | seeds one row at history depths (1k/5k/10k), times global `current_rows_update` and local `current_rows` | historical depth, pending local state, current-row hydration |
-| `validation` | multi-client exclusive transactions, 1–3 reads + 1–2 writes each; compares core ingest acceptance against a simplified model | client/row/commit counts, hot-row rate, OCC and predicate sets |
-| `sync` | mixed mergeable/exclusive/skew/delete commits UI→worker→edge→core, with periodic current-row updates back | commit mix, view cadence, topology, bundle/reference reuse |
-| `large_value_checkpointing` | one-byte text edits to depth ~300, then materialization with interval checkpoints vs full replay | text history depth, checkpoint interval, body size |
-| `merge_back_cost` | branch creation, ~1k mergeable writes, merge-back, current-row count | branch write count. **Not** complete offline sync |
+| bench                       | measures                                                                                                                     | sensitive to                                                   |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `cold_subscription`         | seeds one row at history depths (1k/5k/10k), times global `current_rows_update` and local `current_rows`                     | historical depth, pending local state, current-row hydration   |
+| `validation`                | multi-client exclusive transactions, 1–3 reads + 1–2 writes each; compares core ingest acceptance against a simplified model | client/row/commit counts, hot-row rate, OCC and predicate sets |
+| `sync`                      | mixed mergeable/exclusive/skew/delete commits UI→worker→edge→core, with periodic current-row updates back                    | commit mix, view cadence, topology, bundle/reference reuse     |
+| `large_value_checkpointing` | one-byte text edits to depth ~300, then materialization with interval checkpoints vs full replay                             | text history depth, checkpoint interval, body size             |
+| `merge_back_cost`           | branch creation, ~1k mergeable writes, merge-back, current-row count                                                         | branch write count. **Not** complete offline sync              |
 
 Run: `cargo bench -p jazz --bench <name>`. All five are in `smoke.sh`, so they
 have committed history and delta tracking.
@@ -63,11 +64,17 @@ treat that documentation as stale.
 `observer_write_path`, `db_benchmark`, `authorization_scope_benchmark`,
 `insert`/`update`, `subscription`, and `realistic_phase1` (R1–R13).
 
+`saas_documents` and `saas_permission_fanout` are public-API, JSON-emitting
+scale harnesses in the same crate. They cover latest-100 team document reads,
+RBAC/direct-ACL policy branches, active-subscription fan-out, write batching,
+and approximate maintained-state sizing. Their dated receipts live beside
+this overview.
+
 Two things to know before trusting these:
 
 - **They're all `MemoryStorage`** unless noted, so they don't measure the
   persisted read path at all.
-- The "batch" cases in `insert`/`update` are *serial insert-and-wait calls*, not
+- The "batch" cases in `insert`/`update` are _serial insert-and-wait calls_, not
   atomic transactions. Only `subscription` has a genuinely staged 100-insert
   mergeable transaction.
 
@@ -79,16 +86,19 @@ Two things to know before trusting these:
 - **Native realistic** (W1/W3/W4): `cargo run -p jazz-tools --example realistic_bench -- <scenario>`.
 - **Native storage engines** (SQLite/RocksDB/redb raw KV): `cargo bench -p jazz-storage-native-bench`.
 - **OPFS B-tree hot paths**: `cargo bench -p opfs-btree --bench hot_paths` — note this uses an **in-memory file, not actual OPFS**. The real one is the WASM worker bench (`run-opfs-bench.cjs`).
-- **Jazz WASM probes**: arithmetic, trait dispatch, RefCell, allocation. Runtime characteristics, *not* Jazz data paths.
+- **Jazz WASM probes**: arithmetic, trait dispatch, RefCell, allocation. Runtime characteristics, _not_ Jazz data paths.
 
 ## The gaps that matter
 
 Ranked by how much they'd change a decision:
 
-1. **`INV-INC-1` has no performance receipt.** The mechanism law — maintained delivery work bounded by the change, never by view size — is enforced by an exact functional canary (one parent, 20k children, insert one, allocations within 3×). That proves the property at *one point*. No slope, no curve, no number to set a target against. Given how much recent work is justified against this invariant, it's the first gap to close.
+1. **`INV-INC-1` has no performance receipt.** The mechanism law — maintained delivery work bounded by the change, never by view size — is enforced by an exact functional canary (one parent, 20k children, insert one, allocations within 3×). That proves the property at _one point_. No slope, no curve, no number to set a target against. Given how much recent work is justified against this invariant, it's the first gap to close.
 2. **No end-to-end persisted realistic-scale read receipt.** Legacy suites are in-memory, browser CI runs at 3%, and native R3 reopens its own temp RocksDB without controlling OS cache. We have no honest cold-read number.
 3. **S8 missing** (branch/merge/offline).
-4. **Policy *cost* coverage lags policy *correctness* coverage.** Nothing measures ordinary writes becoming visible to authorized readers at scale, or reconnect during policy churn.
+4. **Policy cost now has only a local in-memory snapshot.** The SaaS fan-out
+   receipt measures ordinary writes reaching authorized readers through team,
+   organization-admin, and direct-ACL paths, but not persisted storage, sync,
+   reconnect, or policy churn.
 5. **S5–S7 missing promised dimensions**: remote resume / evicted prefix (S5), full-history memory (S6), native-vs-lens tax and migration waves (S7).
 6. **No peer-known-state / payload-dedup scale sweep** for normal sync.
 
@@ -97,13 +107,13 @@ Ranked by how much they'd change a decision:
 The spec states performance properties that nothing currently enforces. These
 are the natural source of acceptance targets:
 
-| property | what exists | what's missing |
-|---|---|---|
-| `INV-INC-1` bounded incremental delivery | landing canary, S1 fanout counters | no scale curve, numerical bound, or gate |
-| PERF-4 known-state payload dedup | S1/sync emit bundle and reference counters | no controlled known-state cardinality sweep |
-| PERF-5 maintained converges to rehydrate | correctness/oracle work | no maintained-vs-rehydrate cost/bytes comparison over view scale |
+| property                                   | what exists                                      | what's missing                                                         |
+| ------------------------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------- |
+| `INV-INC-1` bounded incremental delivery   | landing canary, S1 fanout counters               | no scale curve, numerical bound, or gate                               |
+| PERF-4 known-state payload dedup           | S1/sync emit bundle and reference counters       | no controlled known-state cardinality sweep                            |
+| PERF-5 maintained converges to rehydrate   | correctness/oracle work                          | no maintained-vs-rehydrate cost/bytes comparison over view scale       |
 | PERF-7/8 current reads are O(current rows) | `cold_subscription`, `large_value_checkpointing` | no retained baseline or slope threshold; filtered/indexed reads absent |
-| S4 post-acceptance propagation is O(delta) | S4 emits settlement/propagation phases | no fixed-delta / varying-view regression rule |
+| S4 post-acceptance propagation is O(delta) | S4 emits settlement/propagation phases           | no fixed-delta / varying-view regression rule                          |
 
 ## Known documentation rot
 

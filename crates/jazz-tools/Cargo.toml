@@ -43,6 +43,7 @@ transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 test-utils = ["server", "client", "sqlite", "sync-autopsy"]
 test = ["test-utils", "cli"]
+saas-permission-bench = ["jazz/testing"]
 otel-core = [
   "server",
   "dep:opentelemetry",
@@ -175,6 +176,11 @@ harness = false
 [[bench]]
 name = "saas_documents"
 harness = false
+
+[[bench]]
+name = "saas_permission_fanout"
+harness = false
+required-features = ["saas-permission-bench"]
 
 [[test]]
 name = "large_blob_permissions"

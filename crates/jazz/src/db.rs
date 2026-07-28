@@ -2872,6 +2872,12 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test/bench-only timing and write-size split for the most recent commit.
+    pub fn last_commit_metrics_for_test(&self) -> Option<groove::db::CommitMetrics> {
+        self.node.node.borrow().last_commit_metrics().cloned()
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only maintained subscription sizing diagnostics used by
     /// warm-cache performance receipts.
     pub fn maintained_subscription_size_receipts_for_test(

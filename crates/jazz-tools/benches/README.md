@@ -17,6 +17,7 @@ The active bench harness is the explicit `[[bench]]` list in
 - `update_benchmark`
 - `subscription_benchmark`
 - `saas_documents`
+- `saas_permission_fanout`
 
 All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy
@@ -56,6 +57,17 @@ than old helper behavior:
   and emits authorization and simultaneous-binding correctness canaries.
   See the [benchmark receipt](../../../dev/benchmarks/SAAS_DOCUMENTS_500K_RECEIPT_20260728.md)
   and [engine findings](../../../dev/benchmarks/SAAS_DOCUMENTS_ENGINE_FINDINGS_20260728.md).
+- `saas_permission_fanout` independently scales document rows, distinct team
+  bindings, and many viewers of one hot team. It includes cumulative
+  membership/org-admin/direct-ACL/public/admin policies, exact reset/delta
+  membership oracles, sampled one-shot ordering checks, commit phase
+  attribution, private maintained-state estimates, and an opt-in
+  `JAZZ_SAAS_DROP_SUBSCRIPTIONS` lifecycle lane. Run it with
+  `--features saas-permission-bench`. Keep the 2M-row and 1,000-route axes in
+  separate runs; combining both is not a safe developer-machine default. See
+  the
+  [fan-out receipt](../../../dev/benchmarks/SAAS_PERMISSION_FANOUT_RECEIPT_20260728.md)
+  and [findings](../../../dev/benchmarks/SAAS_PERMISSION_FANOUT_FINDINGS_20260728.md).
 
 ## Intended next ports
 
