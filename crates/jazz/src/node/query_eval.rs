@@ -2917,9 +2917,13 @@ fn normalize_reachable(
                     field: "reachable_team".to_owned(),
                 },
                 op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::SourceField {
-                    source: edge_source.clone(),
-                    field: reachable.edge_member_column.clone(),
+                right: if reachable.edge_member_column == "id" {
+                    NormalizedValueRef::RowId(RowIdRef::Source(edge_source.clone()))
+                } else {
+                    NormalizedValueRef::SourceField {
+                        source: edge_source.clone(),
+                        field: reachable.edge_member_column.clone(),
+                    }
                 },
             },
         },
@@ -3262,20 +3266,22 @@ fn normalize_reachable_seed(
             seed_current = seed_filter_node;
         }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
+        let seed_team_value = if seed.team_column == "id" {
+            NormalizedValueRef::RowId(RowIdRef::Source(seed_source.clone()))
+        } else {
+            NormalizedValueRef::SourceField {
+                source: seed_source.clone(),
+                field: seed.team_column.clone(),
+            }
+        };
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value.clone(),
             },
             RowProjection {
                 output: typed_output_field("reachable_team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value,
             },
         ];
         if let Some((_, claim_field)) = &claim_route_field {
@@ -3322,9 +3328,13 @@ fn reachable_seed_frontier_columns(
             seed.table, seed.team_column, team_column_ty
         )));
     }
-    let value = NormalizedValueRef::SourceField {
-        source: source.clone(),
-        field: seed.team_column.clone(),
+    let value = if seed.team_column == "id" {
+        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+    } else {
+        NormalizedValueRef::SourceField {
+            source: source.clone(),
+            field: seed.team_column.clone(),
+        }
     };
     let mut columns = vec![
         ValueSourceColumn {
