@@ -5154,12 +5154,22 @@ where
                 let input = self.update_unary_input(graph_node, node)?;
                 let raw_projection =
                     self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
-                NodeState::update_map_project(
+                let result = NodeState::update_map_project(
                     project,
                     output_desc,
                     &input,
                     raw_projection.as_deref(),
-                )
+                );
+                #[cfg(feature = "cold-settle-attribution")]
+                if let Ok(output) = &result {
+                    crate::cold_settle_attribution::record_map(
+                        self.context.eval_mode == EvalMode::Hydrate,
+                        self.depends_on_dominant_child(node)?,
+                        input.deltas.len(),
+                        output.deltas.len(),
+                    );
+                }
+                result
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -5509,6 +5519,44 @@ where
         Ok(deltas)
     }
 
+    #[cfg(feature = "cold-settle-attribution")]
+    fn depends_on_dominant_child(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if matches!(
+            &graph_node.descriptor.operator,
+            OpType::TableSource(source) if source.table == "res_l_child_3"
+        ) {
+            return Ok(true);
+        }
+        // Policy lowering can replace the direct table source with an indexed
+        // source. The anonymous child shape is unique in this benchmark, so
+        // retain the tag through that lowering as well.
+        if ["parent_id", "value_text", "value_json"]
+            .into_iter()
+            .all(|field| {
+                graph_node
+                    .descriptor
+                    .output
+                    .fields()
+                    .iter()
+                    .any(|candidate| candidate.name.as_deref() == Some(field))
+            })
+        {
+            return Ok(true);
+        }
+        graph_node
+            .descriptor
+            .inputs
+            .iter()
+            .copied()
+            .map(|input| self.depends_on_dominant_child(input))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|dependencies| dependencies.into_iter().any(|dependency| dependency))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn update_join(
         &mut self,
@@ -5579,6 +5627,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -5646,6 +5702,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -5713,6 +5777,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,

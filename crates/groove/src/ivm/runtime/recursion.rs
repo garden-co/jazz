@@ -675,7 +675,17 @@ where
             }
             OpType::MapProject(project) => {
                 let input = self.eval_unary_input(graph_node, node)?;
-                NodeState::update_map_project(project, output_desc, &input, None)
+                let result = NodeState::update_map_project(project, output_desc, &input, None);
+                #[cfg(feature = "cold-settle-attribution")]
+                if let Ok(output) = &result {
+                    crate::cold_settle_attribution::record_map(
+                        true,
+                        self.depends_on_dominant_child(node)?,
+                        input.deltas.len(),
+                        output.deltas.len(),
+                    );
+                }
+                result
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.eval_unary_input(graph_node, node)?;
@@ -801,6 +811,14 @@ where
                         }
                     }
                 }
+                #[cfg(feature = "cold-settle-attribution")]
+                crate::cold_settle_attribution::record_join(
+                    true,
+                    self.depends_on_dominant_child(node)?,
+                    left.deltas.len(),
+                    right.deltas.len(),
+                    deltas.len(),
+                );
                 Ok(RecordDeltas {
                     descriptor: output_desc,
                     deltas,
@@ -839,6 +857,14 @@ where
                     },
                     ArrangementUpdateMode::Accumulate,
                 )?;
+                #[cfg(feature = "cold-settle-attribution")]
+                crate::cold_settle_attribution::record_join(
+                    true,
+                    self.depends_on_dominant_child(node)?,
+                    left.deltas.len(),
+                    right.deltas.len(),
+                    deltas.len(),
+                );
                 Ok(RecordDeltas {
                     descriptor: output_desc,
                     deltas,
@@ -910,6 +936,38 @@ where
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.eval_node(input)
+    }
+
+    #[cfg(feature = "cold-settle-attribution")]
+    fn depends_on_dominant_child(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if matches!(
+            &graph_node.descriptor.operator,
+            OpType::TableSource(source) if source.table == "res_l_child_3"
+        ) || ["parent_id", "value_text", "value_json"]
+            .into_iter()
+            .all(|field| {
+                graph_node
+                    .descriptor
+                    .output
+                    .fields()
+                    .iter()
+                    .any(|candidate| candidate.name.as_deref() == Some(field))
+            })
+        {
+            return Ok(true);
+        }
+        graph_node
+            .descriptor
+            .inputs
+            .iter()
+            .copied()
+            .map(|input| self.depends_on_dominant_child(input))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|dependencies| dependencies.into_iter().any(|dependency| dependency))
     }
 }
 
