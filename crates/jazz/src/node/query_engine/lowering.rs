@@ -3000,6 +3000,7 @@ fn lower_linear_plan_steps(
                     graph,
                     &order,
                     partition_by,
+                    &available_route_fields,
                     *limit,
                     *offset,
                     tie_breaker,
@@ -3031,6 +3032,7 @@ fn lower_linear_plan_steps(
             graph,
             &order,
             &[],
+            &available_route_fields,
             None,
             0,
             &[NormalizedValueRef::RowId(RowIdRef::Source(
@@ -3993,6 +3995,7 @@ fn lower_window(
     graph: GraphBuilder,
     order: &[OrderKey],
     partition_by: &[NormalizedValueRef],
+    binding_route_fields: &BTreeSet<String>,
     limit: Option<u32>,
     offset: u32,
     tie_breaker: &[NormalizedValueRef],
@@ -4000,10 +4003,19 @@ fn lower_window(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<GraphBuilder, UnsupportedReason> {
-    let group_cols = partition_by
+    let mut group_cols = partition_by
         .iter()
         .map(|value| lower_field_ref(value, plan, source, request, "slice partition key"))
         .collect::<Result<Vec<_>, _>>()?;
+    // A maintained graph shares this TopBy across every bound route. The
+    // binding fields therefore define an implicit partition in addition to a
+    // query's explicit `partition_by`: routing after a global window would
+    // otherwise let one binding consume another binding's retained rows.
+    for route_field in binding_route_fields {
+        if !group_cols.contains(route_field) {
+            group_cols.push(route_field.clone());
+        }
+    }
     let tie_cols = if tie_breaker.is_empty() {
         vec![source.row_shape.row_uuid_field.clone()]
     } else {
