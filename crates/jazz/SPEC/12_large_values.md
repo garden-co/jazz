@@ -19,22 +19,22 @@ Invariant digest:
 - `INV-LVAL-1`: text and blob columns MUST be represented as Jazz-level LargeValueKind::{Text, Blob} and MUST lower to groove ColumnType::Bytes, not to a groove text/blob type.
 - `INV-LVAL-2`: Changing a column between plain Bytes, LargeValueKind::Text, and LargeValueKind::Blob MUST change the Jazz schema identity.
 - `INV-LVAL-3`: A large-value column MUST NOT use MergeStrategy::Counter.
-- `INV-LVAL-4`: A stored large-value version payload MUST be a deterministic textoplog op batch containing Op::Insert and/or Op::Delete records.
-- `INV-LVAL-5`: Stored insert ops for locally authored large-value commits MUST store inserted bytes in the content store and encode TextContent::Ref(Extent) in the version payload.
+- `INV-LVAL-4`: A stored large-value version payload MUST be a deterministic ordered batch of insert and delete operations.
+- `INV-LVAL-5`: Stored insert operations for locally authored large-value commits MUST store inserted bytes in the content store and reference those bytes from the version payload.
 - `INV-LVAL-6`: Content streams MUST be append-only per (writer,row,column), and appended extents MUST be assigned monotonically increasing offsets.
 - `INV-LVAL-7`: Re-ingesting an already-present extent with identical bytes MUST be idempotent, and conflicting bytes for the same extent MUST be rejected.
 - `INV-LVAL-8`: A content extent read MUST fail closed if any byte range in the requested extent is missing or gapped.
 - `INV-LVAL-9`: A whole-value write to a large-value column MUST be stored as the diff from the materialized parent value, not as app-visible bytes verbatim in the history cell.
 - `INV-LVAL-10`: Explicit large-value edits MUST reject empty op batches and MUST target a text or blob column.
 - `INV-LVAL-11`: Explicit large-value edit positions MUST be byte offsets valid against the current parent value.
-- `INV-LVAL-12`: Query/sync result rows MAY carry large-value handles, but any value-returning API MUST materialize the handle into Value::Bytes; encoded op payloads and raw extent han...
+- `INV-LVAL-12`: Query/sync result rows MAY carry large-value handles, but a value-returning API MUST materialize a handle into application-visible bytes; encoded operation payloads and raw extent handles MUST NOT escape as returned cell bytes.
 - `INV-LVAL-13`: Large-value materialization MUST follow a single primary-parent chain; for a multi-parent merge version, the primary parent MUST be the highest-sort-key parent.
 - `INV-LVAL-14`: A node MUST park or refuse to drain commit units whose large-value op payloads reference content extents not present locally.
 - `INV-LVAL-15`: Content fetch responses MUST NOT return bytes unless the requested Extent.row matches the request row and the extent is visible/member-authorized for that row.
 - `INV-LVAL-16`: Local checkpoints MUST be versioned by (table,row,column,TxId) and survive reopen without becoming canonical replicated row state.
 - `INV-LVAL-17`: text/blob columns MUST NOT be accepted in filters, joins, ordering, or other query-planner predicates.
 - `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
-- `INV-LVAL-19`: Large-value checkpoint placement MUST be opportunistic local derived state: once accepted ingestion or materialization observes at least the configured replay-op inter...
+- `INV-LVAL-19`: Large-value checkpoint placement MUST be opportunistic local derived state: after accepted ingestion or materialization reaches the configured replay-work threshold, it MUST write a checkpoint at the materialized version, and later reads MAY replay only the suffix while returning the same value as full replay.
 
 ## Details
 
@@ -55,7 +55,12 @@ including edits that intersect multibyte content; whether `text` carries
 Unicode-position semantics is open.
 
 The query carve-out is part of the column contract: `text` and `blob` are not
-filter, join, or order columns. Enforcement status is tracked in Open questions.
+filter, join, or order columns (`INV-LVAL-17`).
+
+**Implementation status (2026-07-27).** Query validation rejects large-value
+columns in filters, joins, and ordering in
+`rejects_large_value_columns_in_filters_joins_and_ordering`
+(`crates/jazz/src/query.rs:4040`).
 
 ### 12.2 The op-log
 
@@ -96,12 +101,11 @@ parent is the highest-sort-key parent.
 
 ### 12.4 Materialization
 
-Query and sync result rows carry **large-value handles**, not bodies. A handle
-names the large-value kind, materialized logical length, and the extent refs
-needed to hydrate the value. Result membership, settlement, and read-frontier
-coverage are independent of whether the handle's body extents are present
-locally; a row can be a settled result member while its large-value bytes are
-still cold.
+Query and sync result rows may carry **large-value handles** rather than bodies.
+A handle names the large-value kind, materialized logical length, and the extent
+refs needed to hydrate the value. A row may be delivered with a handle while its
+large-value bytes are still cold; the relationship between cold content and a
+subscription's settlement/read-frontier guarantee remains open.
 
 Hydration is pull-only at the access layer. To materialize a value-returning API
 result, the node fetches any missing authorized extents, folds op-log extents at
@@ -110,6 +114,11 @@ and extent handles never escape a value-returning API as cell bytes
 (`INV-LVAL-12`). To materialize a value, the node replays the op-log from a
 local checkpoint when one is present, otherwise from origin, along the single
 primary-parent chain (`INV-LVAL-13`).
+
+**Implementation status (2026-07-27).** The sync surface delivers an
+unhydrated large-value handle and hydrates it only after the content response in
+`db_sync_surface_round_trips_blob_large_value_to_reader`
+(`crates/jazz/src/db/tests.rs:7106`).
 
 ### 12.4.1 Authority merge versions
 
@@ -124,8 +133,7 @@ runs are ordered by causal origin
 bytes. For more than two heads, authorities first sort the column heads by that
 causal key and fold in ascending order while tracking the accumulator's greatest
 processed origin; this keeps the large-value cell path deterministic for
-INV-HIST-15. INV-HIST-16 remains target because edge-level merge-of-merges still
-lacks direct topology coverage.
+`INV-HIST-15` and `INV-HIST-16`.
 
 The merge version remains a multi-parent content version for history
 domination/dedup (`INV-HIST-5`, `INV-HIST-6`), but its large-value cell is stored
@@ -135,6 +143,11 @@ existing single-chain materialization and checkpointing continue to work through
 the merge version. Client-side/non-upstream conflict handling is unchanged: it
 argmax/LWW-selects a visible head and does not expose the authority op-merged
 value until it receives such a merge version.
+
+**Implementation status (2026-07-27).** Authority merge output is covered by
+`authority_merge_version_op_merges_concurrent_large_value_edits`
+(`crates/jazz/src/node/tests/content_store.rs:903`). Edge-topology coverage of
+merge-of-merges remains a test-coverage gap, not a different contract.
 
 ### 12.5 The content channel
 
@@ -173,6 +186,11 @@ sees at least the configured checkpoint interval of replayed ops, the node
 writes a checkpoint at the version it materialized (`INV-LVAL-19`). Until a
 checkpoint has been placed, a read may replay the full parent chain; checkpoints
 optimize replay, but they are not required for correctness.
+
+**Implementation status (2026-07-27).** Accepted ingestion places a checkpoint
+at the configured interval in
+`accepted_large_value_ingestion_places_checkpoint_at_interval`
+(`crates/jazz/src/node/tests/content_store.rs:763`).
 
 Large-value columns are materialized for reads, but they are not planner keys:
 `text`/`blob` columns are rejected in filters, joins, ordering, and other
@@ -794,16 +812,10 @@ or bypass row authorization.
 - 🔶 **`text` vs `blob` semantics.** Both are byte-oriented; decide whether
   `text` gains Unicode-position semantics or stays byte-identical to `blob` modulo
   schema identity.
-- 🔶 **Planner enforcement.** The design rejects `text`/`blob` columns in
-  filters, joins, ordering, and other query-planner predicates; the planner path
-  still sees them as `Bytes` in some places, so enforcement is not yet complete.
-- 🔶 **Op-log design status.** §12.2–12.6 specify the op-log design. Byte-offset
-  edits, materialize-by-replay, large-value-aware authority merge semantics
-  (`INV-LVAL-18`), and checkpoint placement paths are built; other detailed
-  mechanisms remain staged as described in In flight.
-- 🔶 **Column-delta status.** A column-delta encoding for keystroke text was
-  prototyped and parked because it pays for large single values, not keystrokes;
-  the measured findings remain in In flight.
+- 🔶 **Cold-content subscription settlement.** Must a subscription's
+  settlement/read-frontier guarantee be independent of whether all large-value
+  body extents have arrived, and if so how is that state exposed to callers?
+  Current handle delivery proves cold hydration, but not this broader contract.
 - 🔶 **Same-`(row, column)` ref scope.** Load-bearing for GC in the design;
   local extent-backing creates same-row/column refs, but inbound ref enforcement
   is visibility-based, not a schema-level same-row/column validator.
