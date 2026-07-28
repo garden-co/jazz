@@ -6,6 +6,7 @@ use jazz::db::{CommitUnitTrust, DbIdentity, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use jazz::node::EdgeCacheBudget;
+use jazz::protocol::MigrationLens;
 use jazz::schema::JazzSchema;
 use jazz_server::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
@@ -131,13 +132,22 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) async fn publish_schema(
+    pub(crate) async fn publish_catalogue_schema(
         &self,
         schema: JazzSchema,
     ) -> Result<SchemaVersionId, String> {
         self.run(move |shell| {
             shell
-                .publish_runtime_schema(schema)
+                .publish_catalogue_schema(schema)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub(crate) async fn publish_lens(&self, lens: MigrationLens) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .publish_runtime_lens(lens)
                 .map_err(|error| error.to_string())
         })
         .await

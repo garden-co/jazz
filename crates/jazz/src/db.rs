@@ -4803,6 +4803,15 @@ where
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                                self.transport
+                                    .send(SyncMessage::SubscribeRejected {
+                                        subscription,
+                                        reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                                            detail: "shape registration is pending runtime catalogue admission"
+                                                .to_owned(),
+                                        },
+                                    })
+                                    .map_err(transport_error)?;
                                 continue;
                             };
                             if ensure_supported_subscription_shape(&shape).is_err() {
