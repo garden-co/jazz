@@ -5703,6 +5703,25 @@ where
         {
             return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
         }
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
+    }
+
+    /// The query-program half of candidate write-policy evaluation.
+    ///
+    /// Production callers must retain the `inherits` fallback in
+    /// `write_policy_query_allows_insert_candidate` until inherited write
+    /// authorization is fully lowered. The differential harness invokes this
+    /// primitive directly in test builds so that fallback cannot hide a mismatch.
+    fn write_policy_query_allows_insert_candidate_lowered(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
         let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
@@ -5765,6 +5784,20 @@ where
             access_paths,
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_policy_query_allows_insert_candidate_lowered_for_test(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
     }
 
     fn write_policy_query_program_allows(
