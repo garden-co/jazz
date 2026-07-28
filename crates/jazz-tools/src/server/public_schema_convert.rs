@@ -2402,19 +2402,46 @@ mod tests {
             .into_iter()
             .find(|table| table.name == "metrics")
             .unwrap();
-        let descriptor = jazz::groove::records::RecordDescriptor::new(
-            table
-                .columns
-                .iter()
-                .map(|column| (column.name.clone(), column.column_type.value_type())),
-        );
-        let record = descriptor.create(&[GrooveValue::I32(-123)]).unwrap();
+        let descriptor = table.history_storage_table().record_schema();
+        let values = descriptor
+            .fields()
+            .iter()
+            .map(|field| sample_groove_value(&field.value_type))
+            .collect::<Vec<_>>();
+        let record = descriptor.create(&values).unwrap();
+        let score_idx = descriptor.field_index("user_score").unwrap();
+        let score_span = descriptor.field_span(&record, score_idx).unwrap();
 
-        assert_eq!(record.len(), 4);
         assert_eq!(
-            descriptor.bind(&record).get_idx(0).unwrap(),
-            GrooveValue::I32(-123)
+            descriptor.bind(&record).get_idx(score_idx).unwrap(),
+            GrooveValue::Nullable(Some(Box::new(GrooveValue::I32(-5))))
         );
+        assert_eq!(score_span.end - score_span.start, 5);
+        assert_eq!(score_span.end - score_span.start - 1, 4);
+    }
+
+    fn sample_groove_value(value_type: &jazz::groove::records::ValueType) -> GrooveValue {
+        match value_type {
+            jazz::groove::records::ValueType::U8 => GrooveValue::U8(1),
+            jazz::groove::records::ValueType::U16 => GrooveValue::U16(2),
+            jazz::groove::records::ValueType::U32 => GrooveValue::U32(3),
+            jazz::groove::records::ValueType::U64 => GrooveValue::U64(4),
+            jazz::groove::records::ValueType::I32 => GrooveValue::I32(-5),
+            jazz::groove::records::ValueType::I64 => GrooveValue::I64(-6),
+            jazz::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
+            jazz::groove::records::ValueType::Bool => GrooveValue::Bool(true),
+            jazz::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
+            jazz::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            jazz::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
+            jazz::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            jazz::groove::records::ValueType::Tuple(members) => {
+                GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
+            }
+            jazz::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            jazz::groove::records::ValueType::Nullable(inner) => {
+                GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
+            }
+        }
     }
 
     #[test]
