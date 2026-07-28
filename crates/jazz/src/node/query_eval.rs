@@ -7731,6 +7731,17 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity(tx_id, shape, binding, AuthorId::SYSTEM)
+    }
+
+    /// Evaluate a validated query inside an open exclusive transaction as `identity`.
+    pub fn tx_query_for_identity(
+        &mut self,
+        tx_id: OpenTxId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table(&query.table)?.clone();
@@ -7738,7 +7749,7 @@ where
             tx_id,
             shape,
             binding,
-            AuthorId::SYSTEM,
+            identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
         let deltas = self

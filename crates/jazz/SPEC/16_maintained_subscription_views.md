@@ -14,8 +14,8 @@ terminology. The intended abstraction is a **maintained subscription view**.
 
 Invariant digest:
 
-- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
-- `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
+- `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
+- `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
 
 ## Details
@@ -46,7 +46,7 @@ subscription by running an independent semantic scan.
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
 and subscriber delivery are bounded by the size of the change and affected keys,
-not by accumulated view state. `INV-MV-1` and the maintained-vs-one-shot
+not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the maintained-vs-one-shot
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
@@ -91,7 +91,7 @@ deltas. If a row leaves a finite `order_by`/`limit` window and another row enter
 because of that boundary movement, the stream emits the corresponding remove
 and add/update changes even when the entering row's stored cells did not change.
 Per-event work is expected to be O(changed rows), not O(result set); this is the
-application-surface form of `INV-INC-1`.
+application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 
 ### 16.2 Policy composition
 
@@ -198,7 +198,8 @@ Maintained-lowering gaps:
   edges, ordering/limit boundaries, and policy visibility must converge with the
   corresponding one-shot relation snapshot, and serving code must not compensate
   by recursively subscribing to coarse child shapes for sync coverage;
-- relation delivery is covered by the active `INV-INC-1` mechanism canary in
+- relation delivery is covered by the active
+  `groove/SPEC/INVARIANTS.md::INV-INC-1` mechanism canary in
   `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
   `Db` facade level because the current `jazz-tools::JazzClient` subscription
   surface rejects relation/include queries as non-simple table queries;

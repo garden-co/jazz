@@ -18,6 +18,9 @@ Invariant digest:
 - `INV-API-4`: When ReadOpts.localupdates == LocalUpdates::Immediate, the effective read tier MUST be at least DurabilityTier::Local; when it is Deferred, the effective read tier MUS...
 - `INV-API-5`: ReadOpts::default() MUST be { tier: DurabilityTier::Local, localupdates: LocalUpdates::Immediate, propagation: Propagation::Full }.
 - `INV-API-6`: Db::subscribe MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the no...
+- `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
+  events and MUST NOT queue facade-side full-result diffs as the normal live
+  subscription mechanism.
 - `INV-API-8`: Db::insert MUST generate the row id using its configured RowIdSource; Db::insertwithid MUST use the caller-supplied RowUuid.
 - `INV-API-9`: Db::update MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
 - `INV-API-10`: Db::upsert MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
@@ -204,7 +207,12 @@ unified with the edge/global path, implementations may keep an explicitly named
 local materialized-row bridge for alpha-compatible local live reads, but that is
 staging debt rather than a semantic exception (`INV-API-6`). Binding ABIs must
 keep subscription delivery as a thin event bridge over the core subscription
-surface (§13.7), not a second facade-side diff engine.
+surface (§13.7), not a second facade-side diff engine. Concretely, the stream
+carries the maintained view's opened, reset, and delta events; queueing
+facade-side diffs of full result sets is not an acceptable implementation of a
+live subscription, because it reintroduces per-change work proportional to the
+result rather than the change (`INV-API-7`, and `groove/SPEC/INVARIANTS.md::INV-INC-1`
+for the mechanism law it serves).
 
 ### 13.4 Writes
 
