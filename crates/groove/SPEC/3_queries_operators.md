@@ -10,32 +10,34 @@ evaluation; chapter 4 specifies the _how_ (the tick, arrangements, propagation).
 
 Invariant digest:
 
-- `INV-QUERY-1`: A query graph node MUST be identified by the full NodeDescriptor consisting of operator, ordered inputs, and output; two incompatible descriptors MUST NOT share a node...
-- `INV-QUERY-2`: A NodeDescriptor MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
-- `INV-QUERY-3`: FilterOp MUST emit exactly the input deltas whose records satisfy its PredicateExpr, preserving record bytes and weights, for the supported predicate surface including...
+- `INV-QUERY-1`: A query graph node MUST be identified by the full `NodeDescriptor` consisting of `operator`, ordered `inputs`, and `output`; two incompatible descriptors MUST NOT share a node silently.
+- `INV-QUERY-1A`: A Groove node descriptor MUST fully encode every input that can affect node output, including authorization-relevant literals such as identity, claims, policy bindings, and read-view source selection. This is the precondition for sharing one live node across multiple retention scopes: retainer tags do not participate in node identity, and sharing is valid only for descriptor-identical graphs with descriptor-identical canonical input refs.
+- `INV-QUERY-2`: A `NodeDescriptor` MUST validate operator input arity, input/output descriptor compatibility, join key arity, and field-index bounds before the runtime accepts the node.
+- `INV-QUERY-3`: `FilterOp` MUST emit exactly the input deltas whose records satisfy its `PredicateExpr`, preserving record bytes and weights, for the supported predicate surface including `And`/`Or`, literal comparisons, field-to-field equality/inequality, and `Contains`/`ContainsField`.
 - `INV-QUERY-4`: SQL predicate lowering MUST reject unsupported or ill-typed predicate expressions instead of lowering them approximately.
-- `INV-QUERY-5`: MapProjectOp MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
-- `INV-QUERY-6`: UnwrapNullableOp MUST drop Nullable(None) input deltas, unwrap Nullable(Some()) to the inner value, and preserve the original delta weight.
-- `INV-QUERY-7`: Union MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (UNION ALL semantics).
-- `INV-QUERY-8`: An inner JoinOp MUST require equal-length left and right key vectors.
+- `INV-QUERY-5`: `MapProjectOp` MUST emit one output delta per input delta, copying only configured fields into the output descriptor and preserving the input weight.
+- `INV-QUERY-6`: `UnwrapNullableOp` MUST drop `Nullable(None)` input deltas, unwrap `Nullable(Some(_))` to the inner value, and preserve the original delta weight.
+- `INV-QUERY-7`: `Union` MUST require all non-empty inputs to have the same output descriptor and MUST preserve duplicate derivations as separate weighted deltas (`UNION ALL` semantics).
+- `INV-QUERY-8`: An inner `JoinOp` MUST require equal-length left and right key vectors.
 - `INV-QUERY-9`: An inner JoinOp MUST emit joined records with weight leftweight \* rightweight for matching keys, including matches produced by changes arriving on either side.
-- `INV-QUERY-10`: An inner JoinOp MUST NOT double-count pairs where both matching sides changed in the same logical tick.
+- `INV-QUERY-10`: An inner `JoinOp` MUST NOT double-count pairs where both matching sides changed in the same logical tick.
 - `INV-QUERY-11`: Shared join arrangements MUST apply a given logical-time delta at most once per arrangement key/scope, even when multiple joins consume the arrangement.
-- `INV-QUERY-12`: AntiJoin MUST output left rows only when the total right-side multiplicity for the join key is zero.
-- `INV-QUERY-13`: AntiJoin MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
-- `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as t...
-- `INV-QUERY-15`: SQL planquery MUST reject query parameters; parameterized SQL MUST go through planpreparedshape/prepared binding flow.
-- `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form column = $parameter or $parameter = column as binding predicates.
-- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
-- `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with AND forming multi-column join keys.
-- `INV-QUERY-19`: BindingSourceOp MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
-- `INV-QUERY-20`: ArgMaxByOp and ArgMinByOp MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly groupcols + ordercols; non-table inputs...
-- `INV-QUERY-21`: ArgMaxByOp and ArgMinByOp MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
+- `INV-QUERY-12`: `AntiJoin` MUST output left rows only when the total right-side multiplicity for the join key is zero.
+- `INV-QUERY-13`: `AntiJoin` MUST retract or restore visible left rows only when the right-side count crosses zero; changes that keep the right count nonzero MUST NOT emit anti-join deltas.
+- `INV-QUERY-14`: Same-tick anti-join updates MUST suppress a left row that arrives with a matching right row and MUST emit a left row exactly once when it arrives in the same tick as the last blocker retracts.
+- `INV-QUERY-15`: SQL `plan_query` MUST reject query parameters; parameterized SQL MUST go through `plan_prepared_shape`/prepared binding flow.
+- `INV-QUERY-16`: SQL prepared-shape lowering MUST accept only equality predicates of the form `column = $parameter` or `$parameter = column` as binding predicates.
+- `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including `SELECT DISTINCT`, grouped/ordered/limited selects, non-inner joins, and non-`UNION ALL` set operations.
+- `INV-QUERY-18`: SQL inner joins MUST lower only equality column predicates, with `AND` forming multi-column join keys.
+- `INV-QUERY-19`: `BindingSourceOp` MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
+- `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly `group_cols + order_cols`; non-table inputs MUST use `group_cols + order_cols` as the comparison key.
+- `INV-QUERY-21`: `ArgMaxByOp` and `ArgMinByOp` MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
 - `INV-QUERY-22`: A query operator MUST NOT be advertised as executable unless
   the runtime can execute that operator for the advertised scope; executable
   support may be narrower than the reserved descriptor vocabulary.
+
 - `INV-QUERY-23`: TopBy MUST order each partition's positive-multiplicity records by order_cols with declared directions, then tie_cols ascending, then encoded full-record bytes ascending; the total order MUST NOT depend on arrival or iteration order.
-- `INV-QUERY-24`: TopBy window occupancy is bag-semantic: a record with positive multiplicity m occupies m consecutive ordinals, the retained window is the ordinal range [offset, offset + limit), and non-positive-multiplicity records are absent.
+- `INV-QUERY-24`: `TopByOp` MUST apply bag semantics to window occupancy: a record with positive multiplicity `m` occupies `m` consecutive ordinals of the partition's ordered stream, the retained window is the ordinal range `[offset, offset + limit)` (all ordinals `>= offset` when unbounded), and records with non-positive multiplicity are absent.
 - `INV-QUERY-25`: A record straddling a window boundary MUST contribute exactly its in-window copies, as one output record whose weight is the in-window copy count.
 - `INV-QUERY-26`: Per touched partition TopBy MUST emit the minimal consolidated weighted diff of retained windows; unchanged in-window copy counts MUST NOT emit, including rank-only moves, unless rank metadata is declared.
 
