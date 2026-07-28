@@ -2112,6 +2112,30 @@ where
             .map_err(Into::into)
     }
 
+    /// Stage a restore inside an owned exclusive transaction handle.
+    pub fn exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        if cells.is_empty() {
+            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
+        }
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(
+            tx_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(

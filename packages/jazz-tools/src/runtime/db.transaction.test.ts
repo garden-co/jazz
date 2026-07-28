@@ -142,6 +142,28 @@ describe("Db transactions", () => {
     ]);
   });
 
+  it("reads a restored row inside a mergeable callback transaction", async () => {
+    const deleted = await db
+      .insert(app.todos, { title: "deleted", done: false })
+      .wait({ tier: "local" });
+    await db.delete(app.todos, deleted.id).wait({ tier: "local" });
+
+    const result = await db.transaction(async (tx) => {
+      const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
+
+      await expect(tx.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+        restored,
+      );
+
+      return restored;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+      result.value,
+    );
+  });
+
   it("orders in-transaction reads by explicit orderBy and by implicit row id when omitted", async () => {
     const result = await db.transaction(async (tx) => {
       tx.insert(app.todos, { title: "b", done: false });
