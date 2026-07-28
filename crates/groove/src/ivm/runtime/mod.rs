@@ -8732,6 +8732,58 @@ mod tests {
     }
 
     #[test]
+    fn project_typed_literal_preserves_nested_nullable_null_type() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage = crate::storage::MemoryStorage::new(&["albums"]);
+        let subscription = runtime
+            .subscribe_one_sink(
+                GraphBuilder::table("albums").project_fields([
+                    ProjectField::renamed("id", "id"),
+                    ProjectField::literal_typed(
+                        "default_value",
+                        LiteralValue::Nullable(Some(Box::new(LiteralValue::Nullable(None)))),
+                        ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(
+                            ValueType::String,
+                        )))),
+                    ),
+                ]),
+                &storage,
+            )
+            .unwrap();
+
+        assert!(subscription.recv().unwrap().is_empty());
+        let albums = schema.table("albums").unwrap().record_schema();
+        runtime
+            .tick(
+                vec![TableDelta {
+                    table: "albums".to_owned(),
+                    descriptor: albums,
+                    deltas: vec![RecordDelta {
+                        record: albums
+                            .create(&[Value::U64(1), Value::String("one".to_owned())])
+                            .unwrap()
+                            .into(),
+                        weight: 1,
+                    }],
+                }],
+                &storage,
+            )
+            .unwrap();
+
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            vec![(
+                vec![
+                    Value::U64(1),
+                    Value::Nullable(Some(Box::new(Value::Nullable(None)))),
+                ],
+                1,
+            )],
+        );
+    }
+
+    #[test]
     fn cold_project_hydration_materializes_literal_and_typed_null_columns() {
         let schema = albums_schema();
         let mut runtime = IvmRuntime::new(schema.clone()).unwrap();

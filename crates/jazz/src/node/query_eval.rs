@@ -1269,7 +1269,7 @@ where
         tier: DurabilityTier,
         include_global_seq: bool,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.same_table_projected_current_partitions(request)?;
+        let partitions = self.projected_current_partitions(request)?;
         let read_schema_alias = self
             .node
             .ensure_schema_version_alias(self.read_view.read_schema)
@@ -1316,12 +1316,12 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
-        let partitions = self.same_table_projected_current_partitions(request)?;
+        let partitions = self.projected_current_partitions(request)?;
         let inputs = partitions
             .iter()
             .map(|partition| {
                 deletion_register_current_source_graph_for_schema(
-                    &request.source.table,
+                    &partition.table.name,
                     partition.schema_version,
                     partition.base_for_current_names,
                     tier,
@@ -1344,25 +1344,19 @@ where
         )
     }
 
-    fn same_table_projected_current_partitions(
+    fn projected_current_partitions(
         &mut self,
         request: &SourceRequest,
     ) -> Result<Vec<ProjectedCurrentPartition>, SourceResolutionError> {
-        let mut schemas = BTreeSet::new();
-        schemas.extend(self.node.catalogue.partitions.iter().filter_map(
-            |(logical_table, schema_version)| {
-                (logical_table == &request.source.table).then_some(*schema_version)
-            },
-        ));
+        let candidates = self.node.catalogue.partitions.clone();
         let mut partitions = Vec::new();
-        for schema_version in schemas {
-            let Ok(source_table) = self
-                .node
-                .table_in_schema(&request.source.table, schema_version)
-            else {
+        for (logical_table, schema_version) in candidates {
+            let Ok(source_table) = self.node.table_in_schema(&logical_table, schema_version) else {
                 continue;
             };
-            let lens_path = if schema_version == self.read_view.read_schema {
+            let lens_path = if schema_version == self.read_view.read_schema
+                && logical_table == request.source.table
+            {
                 None
             } else if let Some(path) = self
                 .node
@@ -1370,7 +1364,7 @@ where
                     schema_version,
                     self.read_view.read_schema,
                     LensPathDirection::Forward,
-                    &request.source.table,
+                    &logical_table,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             {
@@ -1384,7 +1378,7 @@ where
                     schema_version,
                     self.read_view.read_schema,
                     LensPathDirection::Reverse,
-                    &request.source.table,
+                    &logical_table,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
             {
@@ -1398,7 +1392,7 @@ where
             let base_for_current_names = if self
                 .node
                 .table_in_schema(
-                    &request.source.table,
+                    &source_table.name,
                     self.node.catalogue.current_schema_version_id,
                 )
                 .is_ok()
@@ -1442,19 +1436,11 @@ where
         })
     }
 
-    fn uses_current_schema_partition(&self, table: &str) -> bool {
-        self.read_view.read_schema == self.node.catalogue.current_schema_version_id
-            && !self
-                .node
-                .catalogue
-                .partitions
-                .iter()
-                .any(|(logical, version)| {
-                    logical == table && *version != self.node.catalogue.current_schema_version_id
-                })
+    fn uses_current_schema_partition(&mut self, table: &str) -> bool {
+        !self.needs_projected_current_source(table)
     }
 
-    fn needs_projected_current_source(&self, table: &str) -> bool {
+    fn needs_projected_current_source(&mut self, table: &str) -> bool {
         self.read_view.read_schema != self.node.catalogue.current_schema_version_id
             || self
                 .node
@@ -1463,6 +1449,31 @@ where
                 .iter()
                 .any(|(logical, version)| {
                     logical == table && *version != self.node.catalogue.current_schema_version_id
+                })
+            || self
+                .node
+                .catalogue
+                .partitions
+                .clone()
+                .into_iter()
+                .any(|(logical, version)| {
+                    if logical == table {
+                        return false;
+                    }
+                    [LensPathDirection::Forward, LensPathDirection::Reverse]
+                        .into_iter()
+                        .any(|direction| {
+                            self.node
+                                .compiled_lens_path(
+                                    version,
+                                    self.read_view.read_schema,
+                                    direction,
+                                    &logical,
+                                )
+                                .is_ok_and(|path| {
+                                    path.is_some_and(|path| path.target_table == table)
+                                })
+                        })
                 })
     }
 }
@@ -1691,7 +1702,7 @@ fn project_current_content_fields(
                                         candidate.column_type.clone().value_type(),
                                     ))
                                 })
-                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
+                                .expect("compiled add lens must target a read-schema column"),
                         ),
                     );
                 }
@@ -11046,6 +11057,7 @@ fn maintained_view_history_storage_field_names(table: &TableSchema) -> Vec<Strin
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use groove::ivm::{FieldRef, ProjectExpr};
     use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::{Durability, RocksDbStorage};
 
@@ -11063,6 +11075,41 @@ mod tests {
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn chained_renames_preserve_the_original_projection_source() {
+        let source_table =
+            TableSchema::new("users", [ColumnSchema::new("email", ColumnType::String)]);
+        let read_table = TableSchema::new(
+            "users",
+            [ColumnSchema::new("contact_email", ColumnType::String)],
+        );
+        let lens_path = CompiledLensPath {
+            target_table: "users".to_owned(),
+            ops: vec![
+                CompiledLensOp::Rename {
+                    from: "email".to_owned(),
+                    to: "email_address".to_owned(),
+                },
+                CompiledLensOp::Rename {
+                    from: "email_address".to_owned(),
+                    to: "contact_email".to_owned(),
+                },
+            ],
+        };
+
+        let fields =
+            project_current_content_fields(&source_table, &read_table, Some(&lens_path), 7, false);
+        let contact_email = fields
+            .iter()
+            .find(|field| field.output_name == user_column_field("contact_email"))
+            .expect("projected read column");
+
+        assert_eq!(
+            contact_email.expression,
+            ProjectExpr::Field(FieldRef::name(user_column_field("email"))),
+        );
+    }
 
     #[test]
     fn binding_source_shape_is_descriptor_and_claim_path_identity() {

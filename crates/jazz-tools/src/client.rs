@@ -1487,6 +1487,15 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
     }
 }
 
+fn public_to_core_cell(value: Value, nullable: bool) -> Result<CoreValue> {
+    let value = public_to_core_value(value)?;
+    if nullable && !matches!(value, CoreValue::Nullable(_)) {
+        Ok(CoreValue::Nullable(Some(Box::new(value))))
+    } else {
+        Ok(value)
+    }
+}
+
 fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
     match value {
         serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
@@ -2083,12 +2092,7 @@ impl JazzClient {
                     .ok_or_else(|| {
                         JazzError::Write(format!("unknown column {name} on table {table}"))
                     })?;
-                let value = public_to_core_value(value)?;
-                let value = if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
-                    CoreValue::Nullable(Some(Box::new(value)))
-                } else {
-                    value
-                };
+                let value = public_to_core_cell(value, column.nullable)?;
                 Ok((name, value))
             })
             .collect()
@@ -2580,6 +2584,21 @@ mod tests {
         assert_eq!(
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
             CoreValue::U32(0x8000_0000)
+        );
+    }
+
+    #[test]
+    fn public_non_null_value_is_wrapped_for_nullable_core_cell() {
+        assert_eq!(
+            public_to_core_cell(Value::Text("alice@example.com".to_owned()), true)
+                .expect("nullable text cell should encode"),
+            CoreValue::Nullable(Some(Box::new(CoreValue::String(
+                "alice@example.com".to_owned(),
+            )))),
+        );
+        assert_eq!(
+            public_to_core_cell(Value::Null, true).expect("null cell should stay null"),
+            CoreValue::Nullable(None),
         );
     }
 

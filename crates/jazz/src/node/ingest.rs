@@ -330,7 +330,10 @@ where
         &mut self,
         author: AuthorId,
         lens: MigrationLens,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         self.require_catalogue_admin(author)?;
         if lens.id != lens.content_id() {
             return Err(Error::InvalidCatalogueUpdate(
@@ -343,13 +346,20 @@ where
             return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
         }
         self.validate_migration_lens(&lens)?;
-        self.catalogue
-            .catalogue_lenses
-            .entry(lens.id)
-            .or_insert(lens.clone());
+        let installed = if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.catalogue.catalogue_lenses.entry(lens.id)
+        {
+            entry.insert(lens.clone());
+            true
+        } else {
+            false
+        };
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.persist_catalogue_lens(&lens)?;
+        if installed {
+            self.rebuild_database_slot()?;
+        }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
             schema: None,
@@ -1505,6 +1515,7 @@ where
                     && self.has_forward_lens_path(
                         author_schema,
                         self.catalogue.current_write_schema.schema,
+                        version.table(),
                     );
                 let (table_schema, target_schema, stored) = if has_forward_lens {
                     let mut target_table = version.table().to_owned();
@@ -3962,12 +3973,13 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
+                let current_table = global_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                );
                 batch.update_raw(
-                    global_current_table_name_for_schema(
-                        version.table(),
-                        schema_version,
-                        base_for_current_names,
-                    ),
+                    current_table,
                     global_current_primary_key(version.row_uuid()),
                     owned_record_from_storage_values(
                         &table.global_current_storage_tables()[0],
@@ -4326,6 +4338,7 @@ where
                 && self.has_forward_lens_path(
                     author_schema,
                     self.catalogue.current_write_schema.schema,
+                    version.table(),
                 )
             {
                 target_schema = self.catalogue.current_write_schema.schema;
@@ -4563,9 +4576,14 @@ where
         None
     }
 
-    fn has_forward_lens_path(&mut self, source: SchemaVersionId, target: SchemaVersionId) -> bool {
-        self.shortest_lens_path_ids_cached(source, target, LensPathDirection::Forward)
-            .is_some()
+    fn has_forward_lens_path(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        table: &str,
+    ) -> bool {
+        self.compiled_lens_path(source, target, LensPathDirection::Forward, table)
+            .is_ok_and(|path| path.is_some())
     }
 
     pub(super) fn ingest_rejected_transaction(

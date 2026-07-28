@@ -1052,6 +1052,7 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
+            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
             propagates_upstream,
             author,
             read_tier,
@@ -3611,6 +3612,54 @@ where
                 state.author,
             )
         };
+        let groove_runtime_token = node.borrow().groove_runtime_token();
+        if state.borrow().groove_runtime_token != groove_runtime_token {
+            let (shape, binding) = {
+                let state = state.borrow();
+                match &state.kind {
+                    SubscriptionKind::Prepared { shape, binding, .. } => {
+                        (shape.clone(), binding.clone())
+                    }
+                }
+            };
+            let (maintained, snapshot) =
+                node.borrow_mut().open_local_maintained_view_subscription(
+                    &shape, &binding, author, read_tier, &read_view, None,
+                )?;
+            let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled = subscription_is_settled(
+                &node.borrow(),
+                &shape,
+                &binding,
+                settled_tier,
+                read_view.clone(),
+            );
+            let mut state_ref = state.borrow_mut();
+            match &mut state_ref.kind {
+                SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } => *maintained_subscription = Some(maintained),
+            }
+            let event = subscription_delta_event_with_reset(
+                read_tier,
+                settled,
+                &state_ref.snapshot,
+                &snapshot,
+                true,
+            );
+            state_ref.groove_runtime_token = groove_runtime_token;
+            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+            state_ref.settled = settled;
+            if state_ref.sender.unbounded_send(event).is_ok() {
+                changed += 1;
+            }
+            drop(state_ref);
+            retained.push(Rc::downgrade(&state));
+            continue;
+        }
         let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
@@ -6850,6 +6899,7 @@ fn write_rejected(reason: RejectionReason) -> Error {
 
 struct SubscriptionState {
     kind: SubscriptionKind,
+    groove_runtime_token: u64,
     propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
