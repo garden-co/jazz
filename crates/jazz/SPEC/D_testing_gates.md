@@ -26,10 +26,10 @@ appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
 
-1. `cargo test -p jazz -j 2`
-2. `cargo test -p groove -j 2`
-3. `cargo test -p jazz-tools --features test -j 2`
-4. `cargo test -p jazz-server -j 2`
+1. `cargo test -p jazz`
+2. `cargo test -p groove`
+3. `cargo test -p jazz-tools --features test`
+4. `cargo test -p jazz-server`
 5. `cargo check -p jazz-sim --benches`
 6. `dev/gates/ts-wire-codec.sh`
 7. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
@@ -40,6 +40,9 @@ For ordinary Rust/core work, the full gate set is:
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine,
 storage, or benchmark harnesses. A change to a public `jazz` type additionally
 gates the full workspace, including examples.
+
+Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
+replacing the former fixed `-j 2` guidance.
 
 ### D.2 The tiers
 
