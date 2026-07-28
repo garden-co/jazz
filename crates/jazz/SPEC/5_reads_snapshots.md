@@ -60,6 +60,10 @@ perform the deletion anti-join over the global-current tables (`INV-READ-8`).
 Those tables equal the accepted argmax winners and stay consistent across reopen
 (`INV-READ-12`).
 
+**Implementation status.** Current global winner maintenance is covered by
+`sync::accepted_fates_maintain_global_current_tables`; reopen consistency is
+exercised by `sync::reopened_core_continues_sync_after_restart`.
+
 ### 5.3 Snapshots
 
 Snapshots give an exclusive transaction a stable read frontier. A snapshot
@@ -94,6 +98,12 @@ reads the covered set rather than the live currency tables, later arrivals can
 change ordinary current reads but cannot change a read inside an already-open
 transaction. The exclusive validation rules in chapter 3 depend on this
 stability.
+
+**Implementation status.** Stable snapshot reads and the pending-write overlay
+are covered by
+`exclusive_transactions::exclusive_tx_snapshot_read_ignores_newer_commits_after_open`
+and
+`exclusive_transactions::exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads`.
 
 Every transactional read is recorded for that validation. A point read records a
 `RowRead` when the row is present in the snapshot-visible view, or an
