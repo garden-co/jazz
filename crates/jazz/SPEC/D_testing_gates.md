@@ -10,10 +10,10 @@ detail rather than duplicating it.
 
 Invariant digest:
 
-- `INV-TEST-1`: m3seededrunisdeterministicforfixedseed proves bit-for-bit replay; lensparallelmaterializationoraclematchesenginereadsseeded is the schema/lens seeded oracle gate.
-- `INV-TEST-2`: Node-core simulation must be deterministic: time, randomness, and delivery order are injected by drivers, and failure to replay bit-for-bit is a bug. This is a guidanc...
-- `INV-TEST-3`: Every consistency claim gets randomized oracle coverage; the oracle suite covers domination, merge convergence, exclusive validation, and sync convergence.
-- `INV-TEST-4`: The canonical Jazz gate set (see D.1) is local-only until CI closes the groove-only gap. This is a guidance/process anc...
+- `INV-TEST-1`: Fixed-seed simulation and schema/lens materialization checks MUST replay deterministically.
+- `INV-TEST-2`: Node-core simulation MUST be deterministic under driver-supplied time, randomness, and delivery order.
+- `INV-TEST-3`: Every consistency claim MUST have randomized oracle coverage.
+- `INV-TEST-4`: The canonical local gate set MUST be maintained as the pre-push verification contract, and any difference from CI MUST be explicit.
 
 ## Details
 
@@ -90,11 +90,20 @@ duplication/reordering/redelivery, and **threaded** runs exercise load realism.
 Wide soaks use the maintained-vs-one-shot oracle form named above, alongside the
 existing M3 soak conventions.
 
+**Implementation status (verified).**
+`m3_seeded_run_is_deterministic_for_fixed_seed` and
+`m3_maintained_one_shot_differential_oracle` exercise deterministic replay and
+randomized maintained-vs-one-shot equivalence.
+
 ### D.4 Oracle norm and public-surface preference
 
 Every consistency claim gets randomized oracle coverage. The coverage includes
 domination, merge convergence, exclusive validation, and sync convergence
 (`INV-TEST-3`).
+
+**Implementation status (verified).**
+`m3_seeded_sync_interleavings_converge_against_oracle` is the seeded sync
+oracle test.
 
 Tests prefer the public surfaces: the jazz `Db` facade and groove `Database`.
 The SaaS `Db` smoke test is the model: subscribe via `db.subscribe`, mutate
@@ -107,7 +116,8 @@ lower-level tests that best pin an invariant.
 
 The required local gates and the GitHub Actions workflow are not equivalent yet.
 The canonical set above is the pre-push discipline mirrored from
-`.claude/CLAUDE.md` (`INV-TEST-4` would require closing the CI gap fully).
+`.claude/CLAUDE.md`; this distinction remains explicit as required by
+`INV-TEST-4`.
 
 ## Open Questions
 

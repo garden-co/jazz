@@ -9,15 +9,15 @@ are directional; only anchored headline artifacts become claims.
 
 Invariant digest:
 
-- `INV-BENCH-1`: a scenario that can only run on one driver is incomplete. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-2`: compared systems and retained runs use identical declared link profiles. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-3`: headline metrics are reported against at least one floor/ceiling/reference anchor. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-4`: every emitted retained line includes scenario, driver, seed, profile, gitsha, gitdirty, hostname, knobs. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-5`: deterministic scenario runs must assert oracle equality or explicit security counters before reporting success. This is a guidance/process anchor, not runtime conforma...
-- `INV-BENCH-6`: forbidden rows/deltas delivered to an unauthorized client must be exactly zero. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-7`: accepted jazz schedules replayed against SQLite must produce identical final state for S4 reference runs. This is a guidance/process anchor, not runtime conformance.
-- `INV-BENCH-8`: S5 must model append streams as full content: bytes rewrites in streamDocs, not a userland event log, and compare against fsync append-log, SQLite WAL, and zstd anchor...
-- `INV-PERF-2`: INV-PERF-2 correctness is part of benchmark validity: deterministic counters/oracle checks are hard gates, and a benchmark that gets fast by changing results must fail...
+- `INV-BENCH-1`: Every benchmark scenario MUST support both deterministic correctness execution and timing execution.
+- `INV-BENCH-2`: Compared systems and retained benchmark runs MUST use equivalent declared topology, link, and durability profiles.
+- `INV-BENCH-3`: Headline benchmark metrics MUST be interpreted against a declared floor, ceiling, or reference anchor.
+- `INV-BENCH-4`: Every retained benchmark line MUST include sufficient workload, environment, and source-state provenance to reproduce and interpret it.
+- `INV-BENCH-5`: A benchmark run MUST establish result correctness before it can report success.
+- `INV-BENCH-6`: An unauthorized client MUST receive zero forbidden rows and deltas.
+- `INV-BENCH-7`: A benchmark reference replay MUST produce the same final logical state as the accepted schedule it represents.
+- `INV-BENCH-8`: Durable-stream benchmarks MUST model and validate complete persisted content, including resumption, rather than a substitute event-log abstraction, and MUST compare it with appropriate durable reference anchors.
+- `INV-PERF-2`: Correctness is part of benchmark validity: deterministic counters or oracle checks are hard gates, and a benchmark that gets faster by changing results MUST fail.
 
 ## Details
 
@@ -31,6 +31,10 @@ query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S7** migration lenses · **S8** branching · **S9** durable execution. Every
 _implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
+
+**Implementation status (2026-07-27).** S8 is the only scenario without a
+harness; the phase-level audit below records the current coverage of the other
+scenarios.
 
 ### B.2 Methodology
 
@@ -49,6 +53,10 @@ harness]`).
 - **JSONL + retention.** Every retained line carries `scenario`, `driver`,
   `seed`, `profile`, `git_sha`, `git_dirty`, `hostname`, and knobs, under
   `benchmarks/results/jazz` (`INV-BENCH-4`).
+
+  **Implementation status (current retained format).** The named fields are
+  the current JSONL schema; they are the present implementation of the
+  provenance requirement, not the invariant's exhaustive definition.
 
 ### B.3 Correctness oracles
 

@@ -10,18 +10,18 @@ chapters, and the SPEC, not the README, is the contract.
 
 Invariant digest:
 
-- `INV-DISC-1`: node-core work must remain simulation-first. Load-bearing rule: production node semantics are exercised through deterministic inputs and explicit method/event surfaces...
-- `INV-DISC-2`: all cross-node sync must use exhaustive serializable message enums, and every concept must be reachable through protocol messages, node storage, or both. Current SyncM...
-- `INV-DISC-3`: relays and peers are roles over the same node/message vocabulary, not separate semantic implementations. Node::ingestrelaycommitunit stores pending local units without...
-- `INV-DISC-4`: commit/fate/view ingestion must be idempotent and conflict-detecting. Duplicate relay commit units compare transaction payload and canonical versions, then no-op if id...
-- `INV-DISC-5`: time-like and state-lattice domains must use distinct types and monotone transitions. Identifiers: GlobalSeq, TxTime, Fate, DurabilityTier. GlobalSeq::next is explicit...
-- `INV-DISC-6`: the implementation must preserve structural column taxonomy. Wire payloads carry VersionRecord data and not local/global-derived currentness (protocol.rs lines 110-140...
-- `INV-DISC-7`: oracle-first testing is part of implementation discipline. The oracle is independent of groove (oracle.rs lines 1-24); seeded M3 runs compare core/global/current/subsc...
-- `INV-DISC-8`: out-of-order, duplicate, restart, and rehydrate hazards must be first-class seeded-test actions. The M3 harness duplicates upstream/fate/view messages, delivers child...
-- `INV-DISC-9`: parked work must be observable and drained at quiescence. SyncMetrics currently tracks parkedorphans, parkedorphansresolved, parkedincomplete, parkedincompleteresolved...
-- `INV-DISC-10`: crash/restart recovery must rebuild in-memory node discipline state from storage, not from transport/session state. recoverfromstorage rebuilds aliases, schema aliases...
-- `INV-DISC-11`: peer-level complete-tx payload inventory and deterministic counters are implementation artifacts, not semantic state. PeerState owns shippedcompletetxpayloads, per-sub...
-- `INV-DISC-12`: benchmarks are discipline gates that report deterministic counters plus timing ratios, but appendix A should not quote dirty-tree numbers. Sync benchmark emits JSON fi...
+- `INV-DISC-1`: Node-core semantics MUST be deterministic under explicit driver inputs and remain directly simulatable.
+- `INV-DISC-2`: Every cross-node semantic concept MUST have an exhaustive, serializable representation in the protocol, storage, or both.
+- `INV-DISC-3`: Relay, edge, and core roles MUST share one node and message model rather than separate semantic implementations.
+- `INV-DISC-4`: Commit, fate, and view ingestion MUST be idempotent and detect conflicting replays.
+- `INV-DISC-5`: State with ordering or lattice semantics MUST use distinct types and monotone transitions.
+- `INV-DISC-6`: Replicated state MUST remain structurally distinct from derived current state, which MUST be recomputed rather than replicated, and its provenance MUST remain attributable to its transaction.
+- `INV-DISC-7`: Node correctness tests MUST use an independent oracle for randomized semantic checks.
+- `INV-DISC-8`: Seeded tests MUST model reordering, duplication, restart, and rehydration hazards as explicit actions.
+- `INV-DISC-9`: Parked work MUST be observable and MUST drain at quiescence.
+- `INV-DISC-10`: Recovery MUST reconstruct semantic node state from durable storage rather than transport or session state.
+- `INV-DISC-11`: Peer payload inventory and operational counters MUST remain implementation artifacts rather than semantic state.
+- `INV-DISC-12`: Benchmark receipts MUST report deterministic work counters and timing ratios, and MUST NOT present dirty-worktree measurements as results.
 
 ## Details
 
@@ -34,6 +34,9 @@ randomness. Time enters only as an explicit `now_ms` parameter
 `PeerState` advance synchronously through explicit methods (`INV-DISC-1`).
 Threading and channels belong only to integration drivers
 (`threaded_four_tier`), never to node logic.
+
+**Implementation status (verified).**
+`m3_seeded_run_is_deterministic_for_fixed_seed` exercises fixed-seed replay.
 
 ### A.2 Everything reachable through messages or storage
 
@@ -49,6 +52,9 @@ node storage, or both (`INV-DISC-2`). The `SyncMessage` set is `CommitUnit`,
 `PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`,
 `ViewUpdate`, `FetchContentExtent`, and `ContentExtents`.
 
+**Implementation status (verified).** `wire_fixture_messages` covers the
+serializable `SyncMessage` fixtures.
+
 ### A.3 Roles, not separate implementations
 
 Relay, edge, and core are roles over a shared node model, not separate semantic
@@ -57,12 +63,21 @@ serves all tiers: relay ingest stores pending units without assigning fate,
 `PeerRole` controls link identity and read narrowing, and the four-tier tests
 run every tier through the same types.
 
+**Implementation status (verified).**
+`four_tier_topology_relays_pending_units_and_core_fates` exercises the shared
+topology.
+
 ### A.4 Idempotent, conflict-detecting ingestion
 
 Ingestion must tolerate replay without hiding divergence. Commit, fate, and
 view ingestion are idempotent and conflict-detecting (`INV-DISC-4`): a duplicate
 unit with matching payload no-ops or returns the known fate, a conflicting
 payload errors, and a stale `Pending` never regresses an `Accepted` fate.
+
+**Implementation status (verified).**
+`duplicate_commit_units_must_match_original_payload` and
+`stale_pending_fate_update_cannot_regress_accepted` cover replay and fate
+regression handling.
 
 ### A.5 Typed, monotone state
 
@@ -92,6 +107,10 @@ exercises. Initializing a counter _at_ its cap silently disables coverage and is
 a test bug, not a valid simplification. Recovery rebuilds node state (aliases,
 catalogue/branch metadata, HLC/global-seq, pending edges, rejected headers) from
 storage, never from transport/session state (`INV-DISC-10`).
+
+**Implementation status (verified).**
+`m3_seeded_sync_interleavings_converge_against_oracle` exercises the seeded
+hazards, and the recovery suite covers reopening durable node state.
 
 ### A.7 Counters and benchmarks as gates
 
