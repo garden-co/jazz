@@ -298,15 +298,6 @@ where
             // graph without reopening storage through the old catalogue row.
             self.groove_runtime_token = next_groove_runtime_token();
         }
-        if schema.id != self.catalogue.current_schema_version_id {
-            let mut added_partition = false;
-            for table in &schema.schema.tables {
-                added_partition |= self.persist_partition(table.name.clone(), schema.id)?;
-            }
-            if added_partition {
-                self.rebuild_database_slot()?;
-            }
-        }
         let updates = self.drain_parked_commit_units()?;
         self.drain_parked_shape_registrations()?;
         let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
