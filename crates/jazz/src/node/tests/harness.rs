@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 include!("support.rs");
 include!("catalogue_lenses.rs");
+include!("lens_projected_maintained.rs");
 include!("branching.rs");
 include!("time_travel.rs");
 include!("queries.rs");

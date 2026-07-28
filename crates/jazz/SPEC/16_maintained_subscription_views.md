@@ -175,9 +175,11 @@ Known gaps fall into distinct buckets:
 
 Staged convergence of read sources:
 
-- partitioned or schema-projected reads do not yet install a maintained groove
-  graph; root current reads are source-specific one-shot reads, and projected
-  joins/reachable are unsupported until source-aware lowering exists;
+- same-table visible-current schema projection over compatible current
+  partitions installs a maintained groove graph for a single root source with
+  canonical natural column add, drop, copy, and rename lenses; table renames,
+  projected joins, arrays, reachable traversal, and multi-hop table lineage
+  remain unsupported until source-aware lowering exists;
 - historical/time-travel reads with filters and joins use shared clause lowering
   over historical current rows; historical reachable is unsupported until
   source-aware reachable lowering exists;

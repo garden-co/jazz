@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-LOWER-9`: Query lowering MUST begin from visiblecurrentgraph and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name jazz-query:<shapeid>, then executed through Database::bindshape; ma...
 - `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
-- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST bypass prepared groove lowering; supported root current reads MUST evaluate from proj...
+- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST lower their representable source projection into groove rather than bypassing the...
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses,...
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match...
@@ -44,6 +44,7 @@ Invariant digest:
   `by_table_global_seq` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the ful...
+- `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative...
 
 ## Details
 
@@ -256,14 +257,22 @@ ordered suffixes which lower through `TopBy`. For maintained subscriptions, ch.
 16 tracks
 aggregate/projection/predicate-policy lowering gaps separately from remaining
 window capability limits. `INV-LOWER-12` — a read crossing
-partitioned/schema-projected data bypasses the ordinary prepared current plan
-cache; supported root current reads use projected current source rows, and
-unsupported join/reachable projected shapes fail loudly until they have
-source-aware lowering. Historical current reads with filters and joins lower
+partitioned/schema-projected data must lower every representable source
+projection into groove; schema projection is a source-lowering responsibility,
+not permission to bypass the prepared groove boundary. Implementation status:
+same-table, visible-current, current-family, canonical natural lens projection is
+lowered for a single maintained root source over compatible current partitions,
+including column add, drop, copy, and rename. Table renames, joins, arrays,
+reachable traversal, and multi-hop table lineage remain unsupported until they
+have source-aware lowering. Historical current reads with filters and joins lower
 through the shared clause layer over a historical source; historical reachable
 still requires source-aware reachable lowering. These staged source gaps must not
-create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
-parameter predicates until supported.
+create a second query algebra. `INV-LOWER-25` — a lens-projected maintained
+source must emit the same net weighted current-row and witness deltas as applying
+the selected natural lens path to the authoritative per-version current-row delta
+stream, with no full-state diff except initial hydration or an explicit
+reset/rebuild. `INV-LOWER-11` — prepared lowering rejects `!=` parameter
+predicates until supported.
 
 ### 14.5 Sync views & exclusive validation → groove
 
