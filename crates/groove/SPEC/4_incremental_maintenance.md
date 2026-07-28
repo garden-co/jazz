@@ -18,10 +18,10 @@ Invariant digest:
 - `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
-- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes for the lifetime of the database unless/until an explicit shape-drop API exists.
+- `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-STORAGE-18`: Base table writes MUST be staged before the tick and flushed together with durable tick writes only after the tick succeeds.
 - `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable Persist writes.
-- `INV-TICK-1`: A public commit tick MUST advance IvmRuntime.currenttick exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
+- `INV-TICK-1`: A public commit tick MUST advance logical time exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
 - `INV-TICK-2`: A subscription MUST receive exactly one initial hydration RecordDeltas message, including an empty message for an empty result, before it receives future commit deltas.
 - `INV-TICK-3`: Commit notifications MUST contain weighted result deltas only; unchanged matching rows and base-table changes outside the query result MUST NOT be reported.
 - `INV-TICK-4`: Same-key operations in one DatabaseBatch MUST compute deltas against prior operations in that batch, not only against pre-batch storage, and table deltas MUST be conso...
@@ -36,7 +36,6 @@ Invariant digest:
 - `INV-TICK-13`: A Persist node MUST consolidate all same-tick deltas by durable key before writing storage, and a unique persist target MUST reject a positive delta that conflicts wit...
 - `INV-TICK-14`: Prepared-shape output routing MUST update per-binding materialized weights and MUST send each output delta only to active subscriptions whose BindingKey equals the pro...
 - `INV-TICK-15`: A recursive positive incremental tick MUST emit each newly discovered recursive fact at weight +1 at most once and MUST collapse duplicate derivations.
-- `INV-TICK-16`: A recursive tick with any negative table delta, existing accumulated state plus table deltas, empty unbound state, or unhydrated step arrangements MUST recompute from...
 - `INV-TICK-17`: Recursive recompute and incremental recursion MUST reject non-positive recursive frontier facts instead of assigning bag-recursive semantics.
 - `INV-TICK-18`: Recursive evaluation MUST stop with RecursiveIterationLimit when the frontier remains non-empty after RecursiveOp.maxiters.
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
@@ -77,7 +76,7 @@ single-threaded**, and every tick runs the same fixed sequence:
    by `BindingKey` (ch. 5).
 6. **Clean up** — drop dead subscriptions and clear the per-tick memo.
 
-Every tick advances `current_tick` exactly once, and every durable (`Persist`)
+Every tick advances logical time exactly once, and every durable (`Persist`)
 node is evaluated before any subscription is notified (`INV-TICK-1`).
 
 No state that feeds a maintained view may change without the maintained view
@@ -169,12 +168,19 @@ bounded fixpoint inside the tick; chapter 6 gives the full semantics.
 
 At the tick level, positive incremental recursive maintenance emits each newly
 discovered fact at `+1` at most once and collapses duplicate derivations
-(`INV-TICK-15`). Any tick with a negative table delta, or with unhydrated
-recursive state, recomputes from storage and emits the diff against the previous
-accumulated set (`INV-TICK-16`, prov — the binding output contract is the
-minimal diff, `INV-REC-8`). After that recompute hydrates step arrangements,
-later insert-only commits can return to the positive-incremental path
-(`INV-REC-9`).
+(`INV-TICK-15`). A recompute reads authoritative storage and emits only the
+diff against the previous accumulated set (`INV-REC-8`). After that recompute
+hydrates step arrangements, later insert-only commits can return to the
+positive-incremental path (`INV-REC-9`).
+
+**Implementation-status note (provisional; `INV-TICK-16`).** The reference
+implementation selects recompute for negative table deltas, cached recursive
+state with table deltas, empty unbound state, or unhydrated step arrangements.
+This trigger set is broader than the minimum necessary; the contractual result
+is the minimal diff required by `INV-REC-8`. The behavior is covered by
+`recursive_graph_subscriptions_recompute_after_edge_update`,
+`prepared_recursive_binding_retraction_recomputes_instead_of_erroring`, and
+`prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction`.
 
 _Further invariants._ `INV-TICK-17` — recursion rejects non-positive frontier
 facts rather than assigning bag-recursive semantics (ch. 6). `INV-TICK-18` —
@@ -182,7 +188,11 @@ recursive evaluation stops with `RecursiveIterationLimit` when the frontier is
 still non-empty after `max_iters` (ch. 6). `INV-TICK-20` — contextual recursive
 child state is not persisted in `operator_states` after recompute (ch. 6).
 
-### 4.6 The unified arrangement model (target)
+### 4.6 The unified arrangement model
+
+**Target design.** This is a committed design, not the current implementation.
+The implementation-status note at the end of this section records the present
+separate paths.
 
 Every keyed structure in groove is one thing: an **arrangement** — an ordered
 keyed store of records with three orthogonal attributes:
@@ -268,6 +278,11 @@ Terminology: _arrangement_ is the spec term everywhere; "index" remains
 acceptable user-facing shorthand for the declared durable pk-ref case.
 "Covering" replaces ad-hoc "full record vs PK" phrasing. A _boundary
 arrangement_ is the param-keyed arrangement at a shape's binding join.
+
+**Implementation-status note.** The reference implementation still has
+separate table-store, direct-store, and `IndexBy`/`Persist` paths. It does not
+persist prepared-shape binding-free frontiers, so `INV-ARR-1` through
+`INV-ARR-5` remain target design rather than current requirements.
 
 ### 4.9 Subsumed maintenance backlog
 
