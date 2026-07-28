@@ -1638,6 +1638,9 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
                 rows.insert((row.table().to_owned(), row.row_uuid()));
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }

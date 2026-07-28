@@ -4125,6 +4125,30 @@ where
         Ok(())
     }
 
+    pub(crate) fn validate_shape_ast_for_registration(
+        &self,
+        shape_id: ShapeId,
+        ast: &ShapeAst,
+    ) -> Result<Option<ValidatedQuery>, Error> {
+        if ast.version != ShapeAst::VERSION {
+            return Err(Error::InvalidStoredValue("unsupported query AST version"));
+        }
+        let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
+            return Ok(None);
+        };
+        let shape = match &ast.body {
+            ShapeBody::Query(query) => {
+                query.validate_with_schema_version(&schema.schema, ast.schema_version)?
+            }
+            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
+                .validate_with_schema_version(&schema.schema, ast.schema_version)?,
+        };
+        if shape.shape_id() != shape_id {
+            return Err(Error::InvalidStoredValue("shape id does not match AST"));
+        }
+        Ok(Some(shape))
+    }
+
     pub(super) fn drain_parked_shape_registrations(&mut self) -> Result<(), Error> {
         let ready = self
             .parking
@@ -5703,6 +5727,25 @@ where
         {
             return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
         }
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
+    }
+
+    /// The query-program half of candidate write-policy evaluation.
+    ///
+    /// Production callers must retain the `inherits` fallback in
+    /// `write_policy_query_allows_insert_candidate` until inherited write
+    /// authorization is fully lowered. The differential harness invokes this
+    /// primitive directly in test builds so that fallback cannot hide a mismatch.
+    fn write_policy_query_allows_insert_candidate_lowered(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
         let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
@@ -5765,6 +5808,20 @@ where
             access_paths,
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_policy_query_allows_insert_candidate_lowered_for_test(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
     }
 
     fn write_policy_query_program_allows(
@@ -7801,6 +7858,25 @@ where
         Ok(plan)
     }
 
+    pub(crate) fn ensure_peer_maintained_subscription_view_supported(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<(), Error> {
+        self.compile_current_query_program_for_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn mark_peer_maintained_query_shape_cache(
         &mut self,
         shape: &ValidatedQuery,
@@ -9780,6 +9856,8 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::U16(left), Value::U16(right)) => left.cmp(right),
         (Value::U32(left), Value::U32(right)) => left.cmp(right),
         (Value::U64(left), Value::U64(right)) => left.cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.cmp(right),
         (Value::F64(left), Value::F64(right)) => left.total_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
         (Value::String(left), Value::String(right)) => left.cmp(right),
@@ -9855,6 +9933,8 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),

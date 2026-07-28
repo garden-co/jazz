@@ -55,7 +55,8 @@ use crate::protocol_limits::{
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery, relation_query_to_query,
+    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+    relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
@@ -195,6 +196,8 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type UpstreamSubscriptionOwners =
+    Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
@@ -875,7 +878,6 @@ where
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         Ok(QueryAttachment {
@@ -896,7 +898,6 @@ where
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
@@ -980,8 +981,18 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
+        self.validate_prepared_shape_for_registration(prepared)?;
         let read_tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                author,
+                &opts.read_view,
+            )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -1008,7 +1019,7 @@ where
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
-        let mut cleanup = None;
+        let mut upstream_subscription_handles = Vec::new();
         let propagates_upstream = opts.propagation == Propagation::Full;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
@@ -1033,7 +1044,7 @@ where
             remote_read_tier = Some(upstream_opts.tier);
             let upstream_subscriptions =
                 self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
+            upstream_subscription_handles = upstream_subscriptions;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -1072,11 +1083,34 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        let cleanup = if upstream_subscription_handles.is_empty() {
+            None
+        } else {
+            let owner = Rc::downgrade(&state);
+            register_upstream_subscription_owner(
+                &self.node.upstream_subscription_owners,
+                &upstream_subscription_handles,
+                &state,
+            );
+            Some(self.upstream_subscription_cleanup(upstream_subscription_handles, owner))
+        };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup,
         })
+    }
+
+    fn validate_prepared_shape_for_registration(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<(), Error> {
+        let ast = ShapeAst::from_validated(&prepared.shape);
+        let validation = {
+            let node = self.node.node.borrow();
+            validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
+        };
+        validation.map(|_| ()).map_err(Error::from)
     }
 
     async fn open_relation_subscription(
@@ -1098,7 +1132,16 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
-        ensure_supported_subscription_shape(shape)?;
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                opts.tier,
+                identity,
+                &opts.read_view,
+            )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node
@@ -1140,14 +1183,21 @@ where
     fn upstream_subscription_cleanup(
         &self,
         upstream_subscriptions: Vec<UpstreamCoverageHandle>,
+        owner: Weak<RefCell<SubscriptionState>>,
     ) -> Box<dyn FnOnce()> {
         let node = Rc::clone(&self.node.node);
         let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
         let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
+        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
         let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
         let scheduler = Rc::clone(&self.node.scheduler);
         Box::new(move || {
             for handle in upstream_subscriptions {
+                unregister_upstream_subscription_owner(
+                    &upstream_subscription_owners,
+                    handle.subscription,
+                    &owner,
+                );
                 let mut refcounts = upstream_coverage_refcounts.borrow_mut();
                 let Some(count) = refcounts.get_mut(&handle.coverage) else {
                     continue;
@@ -2260,6 +2310,10 @@ where
     ) -> Result<(), Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
+        // Restore needs one content version and one deletion-register version:
+        // `tx_write` rejects a version carrying both. The layers have separate
+        // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
+        // Keep this staged form aligned with the committed restore path.
         node.tx_write(tx_id, table, row, cells, None)?;
         node.tx_write(
             tx_id,
@@ -3277,6 +3331,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
@@ -3299,6 +3354,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -3487,6 +3543,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -3615,6 +3672,7 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
@@ -4098,6 +4156,85 @@ where
     Ok(changed)
 }
 
+fn register_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    handles: &[UpstreamCoverageHandle],
+    state: &Rc<RefCell<SubscriptionState>>,
+) {
+    let weak = Rc::downgrade(state);
+    let mut owners = owners.borrow_mut();
+    for handle in handles {
+        owners
+            .entry(handle.subscription)
+            .or_default()
+            .push(weak.clone());
+    }
+}
+
+fn unregister_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    state: &Weak<RefCell<SubscriptionState>>,
+) {
+    let mut owners = owners.borrow_mut();
+    let Some(entries) = owners.get_mut(&subscription) else {
+        return;
+    };
+    entries.retain(|entry| !entry.ptr_eq(state) && entry.strong_count() > 0);
+    if entries.is_empty() {
+        owners.remove(&subscription);
+    }
+}
+
+fn route_upstream_subscription_rejection(
+    subscriptions: &SubscriptionList,
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    reason: SubscribeRejectReason,
+) -> usize {
+    let mut delivered = 0;
+    if let Some(entries) = owners.borrow_mut().get_mut(&subscription) {
+        entries.retain(|entry| entry.strong_count() > 0);
+        for state in entries.iter().filter_map(Weak::upgrade) {
+            let event = SubscriptionEvent::Rejected {
+                reason: reason.clone(),
+            };
+            if state.borrow().sender.unbounded_send(event).is_ok() {
+                delivered += 1;
+            }
+        }
+        if delivered > 0 {
+            return delivered;
+        }
+    }
+
+    for state in subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        let state_ref = state.borrow();
+        if !state_ref.propagates_upstream {
+            continue;
+        }
+        let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
+        let read_view =
+            upstream_register_shape_options(state_ref.read_tier, state_ref.read_view.clone())
+                .read_view_key();
+        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+            continue;
+        }
+        if subscription.binding_id != BindingId(uuid::Uuid::nil())
+            && binding.binding_id() != subscription.binding_id
+        {
+            continue;
+        }
+        let event = SubscriptionEvent::Rejected {
+            reason: reason.clone(),
+        };
+        if state_ref.sender.unbounded_send(event).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
 /// Binding-supplied transport for one peer link.
 ///
 /// The `Db` writes outbound messages with [`Transport::send`] and pulls inbound
@@ -4396,6 +4533,7 @@ where
     transport: Box<dyn Transport>,
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4749,6 +4887,17 @@ where
                                 });
                             }
                         }
+                        SyncMessage::SubscribeRejected {
+                            subscription,
+                            reason,
+                        } => {
+                            stats.subscription_events += route_upstream_subscription_rejection(
+                                &self.subscriptions,
+                                &self.upstream_subscription_owners,
+                                subscription,
+                                reason,
+                            );
+                        }
                         message => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -4811,19 +4960,80 @@ where
                             ast,
                         } => {
                             if let Err(message) = validate_shape_ast_size(&ast) {
-                                let _ = message;
-                                drop_peer_request(&self.node);
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if ensure_supported_register_shape_options(&opts).is_err() {
-                                drop_peer_request(&self.node);
+                            if let Err(error) = ensure_supported_register_shape_options(&opts) {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    error.message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if let Some(query) = ast.query() {
-                                if ensure_supported_maintained_coverage_query_shape(query).is_err()
-                                {
+                            let shape_validation = {
+                                let node = self.node.borrow();
+                                validate_shape_ast_for_registration(&node, shape_id, &ast)
+                            };
+                            let shape = match shape_validation {
+                                Ok(Some(shape)) => Some(shape),
+                                Ok(None) => None,
+                                Err(_) => {
                                     drop_peer_request(&self.node);
                                     continue;
+                                }
+                            };
+                            if let Some(shape) = &shape {
+                                if shape.params().is_empty() {
+                                    let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
+                                    let binding = match binding {
+                                        Ok(binding) => binding,
+                                        Err(_) => {
+                                            drop_peer_request(&self.node);
+                                            continue;
+                                        }
+                                    };
+                                    let supported = self
+                                        .node
+                                        .borrow_mut()
+                                        .ensure_peer_maintained_subscription_view_supported(
+                                            shape,
+                                            &binding,
+                                            opts.tier,
+                                            ingest_context.identity,
+                                            &opts.read_view,
+                                        );
+                                    if let Err(crate::node::Error::QueryCapability(detail)) =
+                                        supported
+                                    {
+                                        let subscription = SubscriptionKey {
+                                            shape_id,
+                                            binding_id: binding.binding_id(),
+                                            read_view: opts.read_view_key(),
+                                        };
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    } else if supported.is_err() {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
                                 }
                             }
                             let registration_key = (shape_id, opts.read_view_key());
@@ -4869,10 +5079,6 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
-                            if ensure_supported_subscription_shape(&shape).is_err() {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
                             let value_map = shape
                                 .params()
                                 .keys()
@@ -4906,6 +5112,28 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let supported = self
+                                .node
+                                .borrow_mut()
+                                .ensure_peer_maintained_subscription_view_supported(
+                                    &shape,
+                                    &binding,
+                                    opts.tier,
+                                    ingest_context.identity,
+                                    &opts.read_view,
+                                );
+                            if let Err(crate::node::Error::QueryCapability(detail)) = supported {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    subscription,
+                                    detail,
+                                )
+                                .map_err(transport_error)?;
+                                continue;
+                            } else if supported.is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
@@ -4929,14 +5157,12 @@ where
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(crate::node::Error::QueryCapability(detail)) => {
-                                        self.transport
-                                            .send(SyncMessage::SubscribeRejected {
-                                                subscription,
-                                                reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                                                    detail,
-                                                },
-                                            })
-                                            .map_err(transport_error)?;
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
                                         continue;
                                     }
                                     Err(error) => return Err(error.into()),
@@ -6306,15 +6532,6 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
     ensure_supported_read_view(opts)
 }
 
-fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
-    ensure_supported_maintained_coverage_query_shape(shape.query())
-}
-
-fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
-    let _ = query;
-    Ok(())
-}
-
 fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
@@ -6332,6 +6549,39 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_shape_ast_for_registration<S>(
+    node: &NodeState<S>,
+    shape_id: ShapeId,
+    ast: &ShapeAst,
+) -> Result<Option<ValidatedQuery>, crate::node::Error>
+where
+    S: OrderedKvStorage,
+{
+    node.validate_shape_ast_for_registration(shape_id, ast)
+}
+
+fn send_unsupported_shape_capability_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    detail: String,
+) -> Result<(), TransportError> {
+    transport.send(SyncMessage::SubscribeRejected {
+        subscription,
+        reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    })
+}
+
+fn register_shape_rejection_subscription(
+    shape_id: ShapeId,
+    read_view: ReadViewKey,
+) -> SubscriptionKey {
+    SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view,
+    }
 }
 
 fn coverage_key(
@@ -6971,6 +7221,11 @@ pub enum SubscriptionEvent {
         settled: bool,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
+    },
+    /// The serving peer rejected the propagated upstream subscription.
+    Rejected {
+        /// Stable rejection class plus diagnostic detail from the serving peer.
+        reason: SubscribeRejectReason,
     },
     /// The subscription stream was closed by the producer.
     Closed,
