@@ -308,6 +308,7 @@ pub enum ColumnType {
     Array(Box<ColumnType>),
     Nullable(Box<ColumnType>),
     I64,
+    I32,
 }
 
 impl ColumnType {
@@ -325,6 +326,7 @@ impl ColumnType {
             Self::U16 => ValueType::U16,
             Self::U32 => ValueType::U32,
             Self::U64 => ValueType::U64,
+            Self::I32 => ValueType::I32,
             Self::I64 => ValueType::I64,
             Self::F64 => ValueType::F64,
             Self::Bool => ValueType::Bool,

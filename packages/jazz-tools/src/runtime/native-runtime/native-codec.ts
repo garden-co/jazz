@@ -58,7 +58,17 @@ export type SubscriptionDeltaChunk = {
   settled?: boolean;
   tier?: string;
 };
-export type SubscriptionStreamChunk = SubscriptionSnapshotChunk | SubscriptionDeltaChunk;
+export type SubscriptionRejectedChunk = {
+  type: "rejected";
+  reason: {
+    type: "UnsupportedShapeCapability";
+    detail: string;
+  };
+};
+export type SubscriptionStreamChunk =
+  | SubscriptionSnapshotChunk
+  | SubscriptionDeltaChunk
+  | SubscriptionRejectedChunk;
 
 export async function readSubscriptionSnapshot(
   reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,

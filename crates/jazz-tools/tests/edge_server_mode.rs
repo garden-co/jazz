@@ -13,7 +13,7 @@ use jazz_tools::row_input;
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
-    SchemaBuilder, TableSchema, Value,
+    SchemaBuilder, SubscriptionStreamItem, TableSchema, Value,
 };
 use serde_json::json;
 use support::{
@@ -69,6 +69,79 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 |deltas| has_added(deltas, todo_id),
             )
             .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_subscription_shape_returns_err_offline() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let client = JazzClient::test_client(todo_schema()).await;
+            let query = QueryBuilder::new("todos").offset(1).limit(1).build();
+
+            let error = match client.subscribe(query).await {
+                Ok(_) => panic!("unsupported maintained subscription shape should fail"),
+                Err(error) => error,
+            };
+
+            let message = error.to_string();
+            assert!(
+                message.contains("maintained subscription view window shape is not lowered yet"),
+                "unexpected subscribe error: {message}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000101")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+
+            let mut stream = client
+                .subscribe(QueryBuilder::new("todos").build())
+                .await
+                .expect("normal subscription should open");
+            let (todo_id, _, batch_id) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "delta item", "done" => false),
+                )
+                .expect("insert todo");
+            client
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("todo should settle at edge");
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let now = tokio::time::Instant::now();
+                assert!(now < deadline, "timed out waiting for delta item");
+                let item = tokio::time::timeout(deadline - now, stream.next())
+                    .await
+                    .expect("subscription item should arrive")
+                    .expect("subscription stream should stay open");
+                match item {
+                    SubscriptionStreamItem::Delta(delta) => {
+                        if delta.added.iter().any(|row| row.id == todo_id) {
+                            break;
+                        }
+                    }
+                    SubscriptionStreamItem::Rejected { reason } => {
+                        panic!("normal subscription was rejected: {reason:?}")
+                    }
+                }
+            }
         })
         .await;
 }

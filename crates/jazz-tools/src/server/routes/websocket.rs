@@ -276,8 +276,9 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
         serde_json::Value::Number(value) => value
             .as_u64()
             .map(CoreValue::U64)
+            .or_else(|| value.as_i64().map(CoreValue::I64))
             .or_else(|| value.as_f64().map(CoreValue::F64))
-            .ok_or_else(|| "claims only support unsigned integers and f64 numbers".to_owned()),
+            .ok_or_else(|| "claim number is not representable".to_owned()),
         serde_json::Value::String(value) => Ok(CoreValue::String(value)),
         serde_json::Value::Array(values) => values
             .into_iter()

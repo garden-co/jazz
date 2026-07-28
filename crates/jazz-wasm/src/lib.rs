@@ -520,6 +520,16 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.exclusive_delete(tx_id, table, row_id))
     }
 
+    fn exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_id: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| db.exclusive_restore(tx_id, table, row_id, cells))
+    }
+
     fn commit_exclusive(&self, tx_id: OpenTxId) -> Result<TxId, jazz::db::Error> {
         with_wasm_db!(self, |db| db.commit_exclusive_handle(tx_id))
     }
@@ -1880,7 +1890,7 @@ impl WasmTx {
         let now_ms = updated_at_ms.map(|value| value as u64);
         let open_tx = self.open_tx_for_read()?;
         self.db
-            .exclusive_write(open_tx, &table, row_id, cells.clone())
+            .exclusive_restore(open_tx, &table, row_id, cells.clone())
             .map_err(to_js_error)?;
         self.pending_writes()?.push(WasmTxWrite::Restore {
             table,
@@ -2496,6 +2506,21 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
         SubscriptionEvent::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;
+        }
+        SubscriptionEvent::Rejected { reason } => {
+            let reason_object = js_sys::Object::new();
+            match reason {
+                jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
+                    set_prop(
+                        &reason_object,
+                        "type",
+                        JsValue::from_str("UnsupportedShapeCapability"),
+                    )?;
+                    set_prop(&reason_object, "detail", JsValue::from_str(&detail))?;
+                }
+            }
+            set_prop(&object, "type", JsValue::from_str("rejected"))?;
+            set_prop(&object, "reason", reason_object.into())?;
         }
     };
     Ok(object.into())

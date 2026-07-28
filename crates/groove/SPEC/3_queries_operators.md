@@ -32,7 +32,10 @@ Invariant digest:
 - `INV-QUERY-19`: `BindingSourceOp` MUST NOT be evaluated through ordinary subscription/query graphs outside prepared shapes.
 - `INV-QUERY-20`: `ArgMaxByOp` and `ArgMinByOp` MUST accept arbitrary upstream graph inputs. Base-table inputs MUST have primary-key columns exactly `group_cols + order_cols`; non-table inputs MUST use `group_cols + order_cols` as the comparison key.
 - `INV-QUERY-21`: `ArgMaxByOp` and `ArgMinByOp` MUST emit only winner changes for touched groups, suppressing non-winner changes and net-zero group deltas.
-- `INV-QUERY-22`: `OpType::SemiJoin`, `OpType::Distinct`, `OpType::Negate`, and `OpType::Aggregate` MUST NOT be advertised as executable query operators until runtime support exists.
+- `INV-QUERY-22`: A query operator MUST NOT be advertised as executable unless
+  the runtime can execute that operator for the advertised scope; executable
+  support may be narrower than the reserved descriptor vocabulary.
+
 - `INV-QUERY-23`: TopBy MUST order each partition's positive-multiplicity records by order_cols with declared directions, then tie_cols ascending, then encoded full-record bytes ascending; the total order MUST NOT depend on arrival or iteration order.
 - `INV-QUERY-24`: `TopByOp` MUST apply bag semantics to window occupancy: a record with positive multiplicity `m` occupies `m` consecutive ordinals of the partition's ordered stream, the retained window is the ordinal range `[offset, offset + limit)` (all ordinals `>= offset` when unbounded), and records with non-positive multiplicity are absent.
 - `INV-QUERY-25`: A record straddling a window boundary MUST contribute exactly its in-window copies, as one output record whose weight is the in-window copy count.
@@ -280,14 +283,31 @@ and then encoded full-record bytes as the final order. Floating-point aggregate
 functions are not part of the maintained contract until their replay
 determinism is specified.
 
-### 3.8 Reserved (non-executable) operators
+### 3.8 Operator advertisement and current executable scope
 
-Some operator descriptors are reserved names, not executable query behavior.
-They are therefore **not part of the query contract** until runtime support
-lands: `Aggregate`, `SemiJoin`, `Distinct`, `Negate`, and the non-inner
-`JoinOpKind` variants (`Left`/`Right`/`Full`) carried by `OpType`. The
-`Aggregate` semantics above are an implementation target; until runtime support
-exists it must not be advertised as executable (`INV-QUERY-22`).
+The runtime may carry operator descriptors before every descriptor is executable
+for every graph shape. The durable contract is capability honesty: a query
+operator MUST NOT be advertised as executable unless the runtime can execute that
+operator for the advertised scope (`INV-QUERY-22`). Unsupported descriptors must
+fail explicitly rather than be approximated.
+
+Implementation status:
+
+- `SemiJoin` is executable for ordinary, non-recursive graph execution. It shares
+  the anti-join arrangement machinery and emits left rows whose join key has
+  positive right-side multiplicity. Recursive seed/step placement remains
+  unsupported.
+- `Aggregate` is executable for ordinary, non-recursive graph execution over the
+  implemented aggregate subset: `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` over
+  supported field/nullability shapes. Distinct aggregates are rejected. Integer
+  sums are bounded by the output integer type; `AVG` returns `F64`; empty/all-null
+  non-count summaries are not yet SQL-compatible empty aggregate rows. Floating
+  replay determinism is explicitly outside the maintained contract until
+  specified.
+- `Distinct` is not yet executable and remains a reserved descriptor.
+- `Negate` is not yet executable and remains a reserved descriptor.
+- Non-inner `JoinOpKind` variants (`Left`/`Right`/`Full`) carried by `OpType`
+  remain reserved until graph semantics and runtime support are specified.
 
 ### 3.9 The SQL-lowerable subset
 
