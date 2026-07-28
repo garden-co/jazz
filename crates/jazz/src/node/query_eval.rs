@@ -519,6 +519,14 @@ struct CurrentSourceGraph {
 }
 
 #[derive(Clone, Debug)]
+struct ProjectedCurrentPartition {
+    schema_version: SchemaVersionId,
+    base_for_current_names: SchemaVersionId,
+    table: TableSchema,
+    lens_path: Option<CompiledLensPath>,
+}
+
+#[derive(Clone, Debug)]
 enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index { index: String, prefix: Vec<Value> },
@@ -648,7 +656,10 @@ where
             }
         };
         if !matches!(projection.schema_family, SchemaFamilySelection::Current)
-            || !matches!(projection.storage, StorageSchemaSelection::Single(_))
+            || !matches!(
+                projection.storage,
+                StorageSchemaSelection::Single(_) | StorageSchemaSelection::CompatiblePartitions
+            )
             || !matches!(projection.lens, LensSelection::Canonical)
         {
             return Err(source_resolution_error(
@@ -875,13 +886,11 @@ where
                     }))
         {
             if !request.requirements.metadata.is_empty() {
-                if self.node.table(&request.source.table).is_ok() {
-                    return Err(source_resolution_error(
-                        request,
-                        SourceGap::SchemaProjection,
-                    ));
-                }
-                self.node.query_engine_read_metrics.source_full_scans += 1;
+                let source = self.projected_maintained_visible_current_source_graph(
+                    request,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                )?;
                 resolved_current_source_graph(
                     self.node,
                     &table,
@@ -889,7 +898,7 @@ where
                     &request.requirements,
                     &request.authorization,
                     self.read_view.policy_schema,
-                    None,
+                    Some(source.graph),
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
@@ -1129,7 +1138,7 @@ where
     }
 
     fn deletion_register_source_for_request(
-        &self,
+        &mut self,
         request: &SourceRequest,
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
@@ -1157,6 +1166,12 @@ where
         if branch_data.is_some() {
             return Err(source_resolution_error(request, SourceGap::BranchOverlay));
         }
+        if self.needs_projected_current_source(&request.source.table) {
+            return Ok(Some(DeletionRegisterSource {
+                graph: self.projected_deletion_register_current_source_graph(request, tier)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
+        }
         Ok(Some(DeletionRegisterSource {
             graph: deletion_register_current_source_graph(&table.name, tier),
             row_uuid_field: "row_uuid".to_owned(),
@@ -1164,7 +1179,7 @@ where
     }
 
     fn content_version_source_for_request(
-        &self,
+        &mut self,
         request: &SourceRequest,
         table: &TableSchema,
         graph_tier: Option<DurabilityTier>,
@@ -1191,6 +1206,12 @@ where
         }
         if branch_data.is_some() {
             return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+        }
+        if self.needs_projected_current_source(&request.source.table) {
+            return Ok(Some(ContentVersionSource {
+                graph: self.projected_content_current_source_graph(request, table, tier, false)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
         }
         Ok(Some(ContentVersionSource {
             graph: content_version_current_source_graph(table, tier, false),
@@ -1228,6 +1249,182 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
     }
 
+    fn projected_maintained_visible_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        Ok(CurrentSourceGraph {
+            graph: self.projected_content_current_source_graph(request, table, tier, true)?,
+            descriptor: current_row_descriptor(table),
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    fn projected_content_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        read_table: &TableSchema,
+        tier: DurabilityTier,
+        include_global_seq: bool,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let partitions = self.same_table_projected_current_partitions(request)?;
+        let read_schema_alias = self
+            .node
+            .ensure_schema_version_alias(self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+            .0;
+        let inputs = partitions
+            .iter()
+            .map(|partition| {
+                let graph = current_content_with_version_graph_for_schema(
+                    &partition.table,
+                    partition.schema_version,
+                    partition.base_for_current_names,
+                    tier,
+                    include_global_seq,
+                );
+                graph.project_fields(project_current_content_fields(
+                    &partition.table,
+                    read_table,
+                    partition.lens_path.as_ref(),
+                    read_schema_alias,
+                    include_global_seq,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let graph = match inputs.as_slice() {
+            [] => {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::SchemaProjection,
+                ));
+            }
+            [single] => single.clone(),
+            _ => GraphBuilder::union(inputs),
+        };
+        Ok(
+            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"]).project(
+                global_current_storage_fields(read_table, true, include_global_seq),
+            ),
+        )
+    }
+
+    fn projected_deletion_register_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let partitions = self.same_table_projected_current_partitions(request)?;
+        let inputs = partitions
+            .iter()
+            .map(|partition| {
+                deletion_register_current_source_graph_for_schema(
+                    &request.source.table,
+                    partition.schema_version,
+                    partition.base_for_current_names,
+                    tier,
+                )
+            })
+            .collect::<Vec<_>>();
+        let graph = match inputs.as_slice() {
+            [] => {
+                return Err(source_resolution_error(
+                    request,
+                    SourceGap::SchemaProjection,
+                ));
+            }
+            [single] => single.clone(),
+            _ => GraphBuilder::union(inputs),
+        };
+        Ok(
+            GraphBuilder::arg_max_by(graph, ["row_uuid"], ["tx_time", "tx_node_id"])
+                .project_fields(register_storage_fields_for_query_engine("")),
+        )
+    }
+
+    fn same_table_projected_current_partitions(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<Vec<ProjectedCurrentPartition>, SourceResolutionError> {
+        let mut schemas = BTreeSet::from([self.node.catalogue.current_schema_version_id]);
+        schemas.extend(self.node.catalogue.partitions.iter().filter_map(
+            |(logical_table, schema_version)| {
+                (logical_table == &request.source.table).then_some(*schema_version)
+            },
+        ));
+        schemas.insert(self.read_view.read_schema);
+
+        let mut partitions = Vec::new();
+        for schema_version in schemas {
+            let Ok(source_table) = self
+                .node
+                .table_in_schema(&request.source.table, schema_version)
+            else {
+                continue;
+            };
+            let lens_path = if schema_version == self.read_view.read_schema {
+                None
+            } else if let Some(path) = self
+                .node
+                .compiled_lens_path(
+                    schema_version,
+                    self.read_view.read_schema,
+                    LensPathDirection::Forward,
+                    &request.source.table,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+            {
+                if path.target_table != request.source.table {
+                    continue;
+                }
+                Some(path)
+            } else if let Some(path) = self
+                .node
+                .compiled_lens_path(
+                    schema_version,
+                    self.read_view.read_schema,
+                    LensPathDirection::Reverse,
+                    &request.source.table,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?
+            {
+                if path.target_table != request.source.table {
+                    continue;
+                }
+                Some(path)
+            } else {
+                continue;
+            };
+            let base_for_current_names = if self
+                .node
+                .table_in_schema(
+                    &request.source.table,
+                    self.node.catalogue.current_schema_version_id,
+                )
+                .is_ok()
+            {
+                self.node.catalogue.current_schema_version_id
+            } else {
+                schema_version
+            };
+            partitions.push(ProjectedCurrentPartition {
+                schema_version,
+                base_for_current_names,
+                table: source_table,
+                lens_path,
+            });
+        }
+        if partitions.is_empty() {
+            return Err(source_resolution_error(
+                request,
+                SourceGap::SchemaProjection,
+            ));
+        }
+        Ok(partitions)
+    }
+
     fn projected_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
@@ -1258,6 +1455,18 @@ where
                     logical == table && *version != self.node.catalogue.current_schema_version_id
                 })
     }
+
+    fn needs_projected_current_source(&self, table: &str) -> bool {
+        self.read_view.read_schema != self.node.catalogue.current_schema_version_id
+            || self
+                .node
+                .catalogue
+                .partitions
+                .iter()
+                .any(|(logical, version)| {
+                    logical == table && *version != self.node.catalogue.current_schema_version_id
+                })
+    }
 }
 
 fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
@@ -1273,6 +1482,246 @@ fn deletion_register_current_source_graph(table: &str, tier: DurabilityTier) -> 
         ["row_uuid", "tx_time", "tx_node_id"],
     )
     .project_fields(register_storage_fields_for_query_engine("left."))
+}
+
+fn current_content_with_version_graph_for_schema(
+    table: &TableSchema,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+    tier: DurabilityTier,
+    include_global_seq: bool,
+) -> GraphBuilder {
+    let fields = global_current_storage_fields(table, true, include_global_seq);
+    let deleted_winners = deletion_register_current_keys_graph_for_schema(
+        &table.name,
+        schema_version,
+        base_schema_version,
+        tier,
+        true,
+    );
+    let content_current = if tier == DurabilityTier::Global {
+        GraphBuilder::table(global_current_table_name_for_schema(
+            &table.name,
+            schema_version,
+            base_schema_version,
+        ))
+        .project(fields.clone())
+    } else {
+        let ahead = if tier == DurabilityTier::Edge {
+            edge_visible_ahead_current_graph(
+                ahead_current_table_name_for_schema(
+                    &table.name,
+                    schema_version,
+                    base_schema_version,
+                ),
+                fields.clone(),
+            )
+        } else {
+            GraphBuilder::table(ahead_current_table_name_for_schema(
+                &table.name,
+                schema_version,
+                base_schema_version,
+            ))
+            .project(fields.clone())
+        };
+        GraphBuilder::arg_max_by(
+            GraphBuilder::union([
+                GraphBuilder::table(global_current_table_name_for_schema(
+                    &table.name,
+                    schema_version,
+                    base_schema_version,
+                ))
+                .project(fields.clone()),
+                ahead,
+            ]),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project(fields.clone())
+    };
+    GraphBuilder::anti_join(content_current, deleted_winners, ["row_uuid"], ["row_uuid"])
+        .project(fields)
+}
+
+fn deletion_register_current_source_graph_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+    tier: DurabilityTier,
+) -> GraphBuilder {
+    if tier == DurabilityTier::Global {
+        return GraphBuilder::table(register_global_current_table_name_for_schema(
+            table,
+            schema_version,
+            base_schema_version,
+        ))
+        .project_fields(register_storage_fields_for_query_engine(""));
+    }
+    let current_keys = deletion_register_current_keys_graph_for_schema(
+        table,
+        schema_version,
+        base_schema_version,
+        tier,
+        false,
+    );
+    GraphBuilder::join(
+        GraphBuilder::table(version_storage_table_name_for_schema(
+            table,
+            VersionLayer::Deletion,
+            schema_version,
+            base_schema_version,
+        )),
+        current_keys,
+        ["row_uuid", "tx_time", "tx_node_id"],
+        ["row_uuid", "tx_time", "tx_node_id"],
+    )
+    .project_fields(register_storage_fields_for_query_engine("left."))
+}
+
+fn deletion_register_current_keys_graph_for_schema(
+    table: &str,
+    schema_version: SchemaVersionId,
+    base_schema_version: SchemaVersionId,
+    tier: DurabilityTier,
+    deleted_only: bool,
+) -> GraphBuilder {
+    let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
+    let global_table =
+        register_global_current_table_name_for_schema(table, schema_version, base_schema_version);
+    if tier == DurabilityTier::Global {
+        let graph = GraphBuilder::table(global_table);
+        return if deleted_only {
+            graph
+                .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+                .project(key_fields)
+        } else {
+            graph.project(key_fields)
+        };
+    }
+    let ahead_table =
+        register_ahead_current_table_name_for_schema(table, schema_version, base_schema_version);
+    let ahead = if tier == DurabilityTier::Edge {
+        edge_visible_ahead_current_graph(ahead_table, key_fields.map(str::to_owned).to_vec())
+    } else {
+        GraphBuilder::table(ahead_table).project(key_fields)
+    };
+    let graph = GraphBuilder::arg_max_by(
+        GraphBuilder::union([GraphBuilder::table(global_table).project(key_fields), ahead]),
+        ["row_uuid"],
+        ["tx_time", "tx_node_id"],
+    );
+    if deleted_only {
+        graph
+            .filter(PredicateExpr::eq("_deletion", Value::Enum(0)))
+            .project(key_fields)
+    } else {
+        graph.project(key_fields)
+    }
+}
+
+fn edge_visible_ahead_current_graph(table_name: String, fields: Vec<String>) -> GraphBuilder {
+    GraphBuilder::join(
+        GraphBuilder::table(table_name).project(fields.clone()),
+        GraphBuilder::table("jazz_transactions")
+            .filter(
+                PredicateExpr::And(vec![
+                    PredicateExpr::eq("fate", Value::Enum(FateTag::Accepted as u8)),
+                    PredicateExpr::Or(vec![
+                        PredicateExpr::eq("durability", Value::Enum(2)),
+                        PredicateExpr::eq("durability", Value::Enum(3)),
+                    ])
+                    .canonicalize(),
+                ])
+                .canonicalize(),
+            )
+            .project(["time", "node_id"]),
+        ["tx_time", "tx_node_id"],
+        ["time", "node_id"],
+    )
+    .project_fields(
+        fields
+            .into_iter()
+            .map(|field| ProjectField::renamed(left_field(&field), field)),
+    )
+}
+
+fn project_current_content_fields(
+    source_table: &TableSchema,
+    read_table: &TableSchema,
+    lens_path: Option<&CompiledLensPath>,
+    read_schema_alias: u64,
+    include_global_seq: bool,
+) -> Vec<ProjectField> {
+    let mut column_fields = source_table
+        .columns
+        .iter()
+        .map(|column| {
+            (
+                column.name.clone(),
+                ProjectField::named(user_column_field(&column.name)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(path) = lens_path {
+        for op in &path.ops {
+            match op {
+                CompiledLensOp::Rename { from, to } => {
+                    if let Some(field) = column_fields.remove(from) {
+                        column_fields.insert(
+                            to.clone(),
+                            ProjectField::renamed(field.output_name, user_column_field(to)),
+                        );
+                    }
+                }
+                CompiledLensOp::Copy { from, to } => {
+                    if let Some(field) = column_fields.get(from) {
+                        column_fields.insert(
+                            to.clone(),
+                            ProjectField::renamed(field.output_name.clone(), user_column_field(to)),
+                        );
+                    }
+                }
+                CompiledLensOp::Add { column, default } => {
+                    column_fields.insert(
+                        column.clone(),
+                        ProjectField::literal(
+                            user_column_field(column),
+                            Value::Nullable(Some(Box::new(default.clone()))),
+                        ),
+                    );
+                }
+                CompiledLensOp::Drop { column } => {
+                    column_fields.remove(column);
+                }
+            }
+        }
+    }
+
+    let mut fields = vec![
+        ProjectField::named("row_uuid"),
+        ProjectField::literal("schema_version", Value::U64(read_schema_alias)),
+        ProjectField::named("parents"),
+    ];
+    fields.extend(read_table.columns.iter().map(|column| {
+        column_fields.remove(&column.name).unwrap_or_else(|| {
+            ProjectField::null_typed(
+                user_column_field(&column.name),
+                ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+            )
+        })
+    }));
+    fields.extend([
+        ProjectField::named("created_by"),
+        ProjectField::named("created_at"),
+        ProjectField::named("updated_by"),
+        ProjectField::named("updated_at"),
+        ProjectField::named("tx_time"),
+        ProjectField::named("tx_node_id"),
+    ]);
+    if include_global_seq {
+        fields.push(ProjectField::named("global_seq"));
+    }
+    fields
 }
 
 fn content_version_current_source_graph(
