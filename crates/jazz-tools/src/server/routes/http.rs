@@ -810,7 +810,7 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    let mut schema_with_permissions = match state
+    let target_schema = match state
         .catalogue
         .known_schema(&state.catalogue_store, &schema_hash)
     {
@@ -835,6 +835,7 @@ pub(super) async fn publish_permissions_handler(
                 .into_response();
         }
     };
+    let mut schema_with_permissions = target_schema.clone();
 
     let permissions = request
         .permissions
