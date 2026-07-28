@@ -822,7 +822,10 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
+        if let Some(reason) = self
+            .reject_source_delta_reason(&versions)
+            .or_else(|| self.invalid_cell_value_reason(&versions))
+        {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -1056,7 +1059,10 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
+        if let Some(reason) = self
+            .reject_source_delta_reason(&versions)
+            .or_else(|| self.invalid_cell_value_reason(&versions))
+        {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -1253,7 +1259,10 @@ where
                 durability: None,
             }]);
         }
-        if let Some(reason) = self.reject_source_delta_reason(&versions) {
+        if let Some(reason) = self
+            .reject_source_delta_reason(&versions)
+            .or_else(|| self.invalid_cell_value_reason(&versions))
+        {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
             let mut updates = vec![SyncMessage::FateUpdate {
@@ -4575,6 +4584,68 @@ where
             }
         }
         Ok((source, table.to_owned()))
+    }
+
+    /// Returns a rejection reason when any version carries a cell value that is
+    /// invalid for the column it lands in.
+    ///
+    /// Ingest is a trust boundary: a peer's wire bytes are not validated by the
+    /// local write path that produced them, so they are validated here before
+    /// anything is staged. Cells are checked against the schema they land in,
+    /// after forward-lens translation, because a lens can move a value into a
+    /// differently constrained column (`CopyColumn`) or introduce one outright
+    /// (`AddColumn`) without transforming any column's type.
+    fn invalid_cell_value_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
+        for version in versions {
+            if version.deletion().is_some() {
+                continue;
+            }
+            let author_schema = version.schema_version();
+            let Ok(source_table_schema) = self.table_in_schema(version.table(), author_schema)
+            else {
+                continue;
+            };
+            let mut target_table = version.table().to_owned();
+            let mut cells = source_table_schema
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    version
+                        .optional_cell_at(idx)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            let mut target_schema = author_schema;
+            if author_schema != self.catalogue.current_write_schema.schema
+                && self.has_forward_lens_path(
+                    author_schema,
+                    self.catalogue.current_write_schema.schema,
+                    version.table(),
+                )
+            {
+                target_schema = self.catalogue.current_write_schema.schema;
+                match self.translate_cells_forward(
+                    author_schema,
+                    target_schema,
+                    &target_table,
+                    &mut cells,
+                ) {
+                    Ok(table) => target_table = table,
+                    // Lens-chain failures are reported by the staging path.
+                    Err(_) => continue,
+                }
+            }
+
+            let Ok(table_schema) = self.table_in_schema(&target_table, target_schema) else {
+                continue;
+            };
+            if let Err(error) = validate_cells_map(&table_schema, &cells) {
+                return Some(error.to_string());
+            }
+        }
+        None
     }
 
     fn reject_source_delta_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {

@@ -5,7 +5,10 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
+use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+use jazz::time::TxTime;
+use jazz::tx::{Fate, Transaction, TxId, TxKind};
 use serde_json::{Value as JsonValue, json};
 
 fn documents_schema(payload_schema: Option<JsonValue>) -> JazzSchema {
@@ -69,6 +72,86 @@ fn row(byte: u8) -> RowUuid {
 
 fn payload(raw: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("payload".to_owned(), Value::String(raw.to_owned()))])
+}
+
+/// Emits a wire commit unit carrying `raw` in `documents.payload`, as an
+/// untrusted peer would, and hands it to the receiving node's ingest boundary.
+fn ingest_remote_payload(
+    node: &mut NodeState<MemoryStorage>,
+    schema: &JazzSchema,
+    document_id: RowUuid,
+    raw: &str,
+) -> Vec<SyncMessage> {
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "documents")
+        .expect("documents table");
+    let peer = NodeUuid::from_bytes([0x33; 16]);
+    let author = AuthorId::from_bytes([0xb2; 16]);
+    let tx_time = TxTime(500);
+    let tx_id = TxId::new(tx_time, peer);
+
+    let version = VersionRecord::from_cells(
+        table,
+        schema.version_id(),
+        document_id,
+        Vec::new(),
+        author,
+        tx_time,
+        author,
+        tx_time,
+        &BTreeMap::from([("payload".to_owned(), Value::String(raw.to_owned()))]),
+        None,
+    )
+    .expect("peer encodes a wire record without validating it");
+
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 1,
+        made_by: author,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+
+    node.ingest_commit_unit(tx, vec![version], 500)
+        .expect("ingest reports rejection through fate, not a transport error")
+}
+
+/// Asserts the peer's row never became visible and that the node reported the
+/// transaction as rejected rather than silently dropping it.
+fn assert_row_absent(
+    node: &mut NodeState<MemoryStorage>,
+    document_id: RowUuid,
+    messages: &[SyncMessage],
+) {
+    assert_eq!(
+        node.visible_current_cells("documents", document_id)
+            .expect("query local row"),
+        None,
+        "invalid JSON from a peer must not reach storage"
+    );
+
+    let rejected = messages.iter().any(|message| {
+        matches!(
+            message,
+            SyncMessage::FateUpdate {
+                fate: Fate::Rejected(_),
+                ..
+            }
+        )
+    });
+    assert!(
+        rejected,
+        "peer must be told the commit unit was rejected: {messages:?}"
+    );
 }
 
 fn query_documents(db: &Db<MemoryStorage>, schema: &JazzSchema) -> Vec<(RowUuid, Vec<Value>)> {
@@ -217,4 +300,44 @@ fn update_rejects_json_schema_violation_and_preserves_existing_payload() {
         rows[0].1,
         vec![Value::String("{\"name\":\"ok\"}".to_owned())]
     );
+}
+
+/// Verifies that JSON values arriving from a remote peer are validated before
+/// they are persisted, not merely on the local write path.
+///
+/// Actor: a peer node emits a wire commit unit whose `documents.payload` cell
+/// is syntactically malformed, and the receiving node must not persist it.
+///
+/// Constructing the `VersionRecord` directly is deliberate rather than a
+/// shortcut: the local write API rejects this value, so the only way an
+/// invalid cell reaches storage is from a peer that did not validate it. That
+/// untrusted-peer wire record *is* the subject under test.
+#[test]
+fn remote_ingest_rejects_syntactically_invalid_json() {
+    let schema = documents_schema(None);
+    let mut node = open_node(schema.clone());
+    let document_id = row(3);
+
+    let messages = ingest_remote_payload(&mut node, &schema, document_id, "{");
+
+    assert_row_absent(&mut node, document_id, &messages);
+}
+
+/// Verifies that a remote peer cannot persist JSON that parses but violates the
+/// column's attached JSON Schema.
+///
+/// Actor: a peer node emits a wire commit unit whose `documents.payload` holds
+/// `{"name":123}` for a column requiring `name` to be a string.
+///
+/// See `remote_ingest_rejects_syntactically_invalid_json` for why the wire
+/// record is constructed directly.
+#[test]
+fn remote_ingest_rejects_json_schema_violation() {
+    let schema = schema_requiring_string_name();
+    let mut node = open_node(schema.clone());
+    let document_id = row(4);
+
+    let messages = ingest_remote_payload(&mut node, &schema, document_id, "{\"name\":123}");
+
+    assert_row_absent(&mut node, document_id, &messages);
 }
