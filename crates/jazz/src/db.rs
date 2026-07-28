@@ -1996,6 +1996,12 @@ where
             .map_err(Into::into)
     }
 
+    /// Set whether this authority may settle session-scoped reads and writes.
+    /// Enabling it rehydrates all live subscriber views.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.set_permissions_ready(ready)
+    }
+
     /// Return the current write-schema pointer known to this database.
     pub fn current_write_schema(&self) -> CurrentWriteSchema {
         self.node.node.borrow().current_write_schema()
@@ -3169,6 +3175,19 @@ where
     /// Borrow the served node.
     pub fn node(&self) -> Rc<RefCell<NodeState<S>>> {
         Rc::clone(&self.node)
+    }
+
+    /// Change whether subscriber links may serve their registered views.
+    /// Publishing a permissions head always rehydrates every live view, so a
+    /// tighter head retracts rows without requiring a reconnect.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.borrow_mut().set_permissions_ready(ready);
+        if ready {
+            for connection in self.connections.borrow().iter() {
+                connection.borrow_mut().rehydrate_subscriber_views()?;
+            }
+        }
+        Ok(())
     }
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
@@ -4371,6 +4390,66 @@ where
         })
     }
 
+    /// Rehydrate every view served on this subscriber link. This is used when
+    /// an authority installs its first permissions head or replaces it with a
+    /// tighter one: the client keeps the same subscription, but its visible
+    /// membership must be recalculated immediately.
+    fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let ConnectionLink::Subscriber {
+            peer,
+            coverage_groups,
+            serve_dirty,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        let groups = coverage_groups
+            .iter()
+            .map(|(coverage, group)| {
+                (
+                    coverage.clone(),
+                    group.shape.clone(),
+                    group.binding.clone(),
+                    group.subscribers.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (coverage, shape, binding, subscribers) in groups {
+            let group_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let mut update = {
+                let mut node = self.node.borrow_mut();
+                peer.rehydrate_query_for_subscription_with_opts(
+                    &mut node,
+                    group_subscription,
+                    &shape,
+                    &binding,
+                    coverage.opts.clone(),
+                )?
+            };
+            // A policy-head rehydrate is authoritative. Force reset framing
+            // even when the peer's known-state cursor is current: permissions
+            // are not represented in that cursor.
+            if let SyncMessage::ViewUpdate {
+                reset_result_set, ..
+            } = &mut update
+            {
+                *reset_result_set = true;
+            }
+            for subscription in subscribers {
+                let update = retarget_view_update(update.clone(), subscription);
+                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+            }
+        }
+        *serve_dirty = true;
+        Ok(())
+    }
+
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
@@ -4772,7 +4851,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let update = if first_subscriber {
+                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let update = if !permissions_ready {
+                                None
+                            } else if first_subscriber {
                                 peer.declare_known_state(group_subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
                                 let update_result = peer
@@ -4805,7 +4887,7 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                retarget_view_update(update, subscription)
+                                Some(retarget_view_update(update, subscription))
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
@@ -4823,23 +4905,11 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                update
+                                Some(update)
                             };
-                            #[cfg(feature = "sync-autopsy")]
-                            sync_autopsy::record(format!(
-                                "subscriber send rehydrate {}",
-                                summarize_sync_message(&update)
-                            ));
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
-                            self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                            send_with_content_extents(
-                                &self.node,
-                                peer,
-                                self.transport.as_mut(),
-                                update,
-                            )?;
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -4850,6 +4920,20 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             served.insert(subscription, coverage);
+                            if let Some(update) = update {
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber send rehydrate {}",
+                                    summarize_sync_message(&update)
+                                ));
+                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
+                            }
                             if first_subscriber {
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
@@ -4926,6 +5010,26 @@ where
                                 }
                                 _ => None,
                             };
+                            if let Some((tx_id, _)) = &relay_upload
+                                && !self.node.borrow().permissions_ready()
+                            {
+                                let response = SyncMessage::FateUpdate {
+                                    tx_id: *tx_id,
+                                    fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                                        "permissions_head_missing: no published permissions head"
+                                            .to_owned(),
+                                    )),
+                                    global_seq: None,
+                                    durability: None,
+                                };
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                                continue;
+                            }
                             let write_state_tx_id = write_state_update_tx_id(&other);
                             // RegisterShape (registers the shape ahead of its
                             // binding), plus the write-upload path: any
@@ -4972,7 +5076,7 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty {
+                if *serve_dirty && self.node.borrow().permissions_ready() {
                     for (coverage, group) in coverage_groups.iter() {
                         let group_subscription = SubscriptionKey {
                             shape_id: coverage.shape_id,

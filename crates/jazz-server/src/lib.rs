@@ -318,6 +318,14 @@ impl ShellDb {
         }
     }
 
+    fn set_permissions_ready(&self, ready: bool) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db.set_permissions_ready(ready).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.set_permissions_ready(ready).map_err(Into::into),
+        }
+    }
+
     fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn jazz::db::Transport>,
@@ -599,6 +607,23 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision = current.revision;
         self.runtime_schema_state.last_published_schema = Some(schema_id);
         Ok(schema_id)
+    }
+
+    /// Publish a schema derived from the authoritative permissions head and
+    /// release parked session-scoped reads and writes.
+    pub fn publish_permissions_schema(
+        &mut self,
+        schema: JazzSchema,
+    ) -> ShellResult<SchemaVersionId> {
+        let schema_id = self.publish_runtime_schema(schema)?;
+        self.db.set_permissions_ready(true)?;
+        Ok(schema_id)
+    }
+
+    /// Prevent session-scoped reads and writes from settling until the
+    /// authority has installed a permissions head.
+    pub fn set_permissions_ready(&mut self, ready: bool) -> ShellResult<()> {
+        self.db.set_permissions_ready(ready)
     }
 
     /// Accept one subscriber byte session under the supplied author identity.
