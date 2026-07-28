@@ -112,8 +112,7 @@ converge independently of delivery order (`INV-HIST-15`).
 _Further invariants._ `INV-HIST-7` — a merge version's transaction time is
 strictly after the maximum made-at time of the observed heads. `INV-HIST-15` —
 merge-strategy output is deterministic and grouping-insensitive over the
-head/parent set, with no wall-clock or node-local state in merged values (partial
-coverage).
+head/parent set, with no wall-clock or node-local state in merged values.
 
 ### 4.3.1 Merge strategies and text merge
 
@@ -142,10 +141,14 @@ built-in scalar/LWW fallback, built-in plaintext retained-run merge, registered
 format-aware strategy, then future app/plugin strategies. Merge-time failure at
 any rung degrades to rung 2 with the fallback id recorded.
 
-Current staging limitations are explicit. More-than-two-head rich-text
-format-aware merges are not yet fully covered outside the built-in plaintext
-path, and op-edits against format-declared columns are rejected until the
-format-aware strategy surface owns those edits end to end.
+**Implementation status.** The reference implementation covers built-in
+plaintext text merging, including recording the selected strategy, in
+`content_store::authority_merge_version_merges_concurrent_text_edits_and_records_strategy`.
+It does not yet provide equivalent coverage for format-aware rich-text merges
+with more than two heads. The current reference implementation rejects op-edits
+to format-declared columns, covered by
+`content_store::op_edits_on_format_declared_columns_are_rejected`; the external
+strategy surface needed to support them is an open design question below.
 
 **Merging merges.** Distinct upstream nodes may each mint merge versions for the
 same row. If those nodes observed different frontiers, one merge may include a
@@ -210,11 +213,9 @@ without wedging authority progress.
 
 ### Open questions
 
-- 🔶 **External strategy surface.** The deterministic, non-wedging
-  `MergeStrategy` contract is normative. The external plugin/registry surface
-  that lets applications ship new strategies is still staged; built-ins and
-  registered test strategies exercise only the first engine paths.
+- 🔶 **External strategy surface.** What plugin or registry surface lets
+  applications provide merge strategies while preserving the deterministic,
+  non-wedging `MergeStrategy` contract?
 - 🔶 **Strategy versioning and schema movement.** Changing a merge strategy is a
-  schema-version change, but the compatibility story for old clients, lenses,
-  corrected strategies, and historical re-merge remains open beyond the built-in
-  strategy paths.
+  schema-version change, but what compatibility rules govern old clients, lenses,
+  corrected strategies, and historical re-merge?
