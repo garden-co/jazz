@@ -3627,6 +3627,13 @@ fn lift_literal_filter(
                             field.output_name.clone(),
                             value.clone(),
                         )),
+                        ProjectExpr::TypedLiteral { value, value_type } => {
+                            Ok(ProjectField::literal_typed(
+                                field.output_name.clone(),
+                                value.clone(),
+                                value_type.clone(),
+                            ))
+                        }
                         ProjectExpr::Null(value_type) => Ok(ProjectField::null_typed(
                             field.output_name.clone(),
                             value_type.clone(),
@@ -3918,7 +3925,9 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
-                ProjectExpr::Literal(_) | ProjectExpr::Null(_) => return Ok(field.clone()),
+                ProjectExpr::Literal(_)
+                | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source = field_ref_name(&original_output, field_ref)?;
             if rewritten_output.field_index(&source).is_none() {
@@ -6219,6 +6228,7 @@ fn project_descriptor(
                 ProjectExpr::Literal(value) => value
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                ProjectExpr::TypedLiteral { value_type, .. } => value_type.clone(),
                 ProjectExpr::Null(value_type) => value_type.clone(),
                 ProjectExpr::Nullable(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -6257,6 +6267,7 @@ fn project_field_expr(
     match &field.expression {
         ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
         ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
+        ProjectExpr::TypedLiteral { value, .. } => Ok(PlanExpr::literal(value.clone())),
         ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
         ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
         ProjectExpr::NullableFlat(source) => {

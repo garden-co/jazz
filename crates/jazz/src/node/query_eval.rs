@@ -1348,14 +1348,12 @@ where
         &mut self,
         request: &SourceRequest,
     ) -> Result<Vec<ProjectedCurrentPartition>, SourceResolutionError> {
-        let mut schemas = BTreeSet::from([self.node.catalogue.current_schema_version_id]);
+        let mut schemas = BTreeSet::new();
         schemas.extend(self.node.catalogue.partitions.iter().filter_map(
             |(logical_table, schema_version)| {
                 (logical_table == &request.source.table).then_some(*schema_version)
             },
         ));
-        schemas.insert(self.read_view.read_schema);
-
         let mut partitions = Vec::new();
         for schema_version in schemas {
             let Ok(source_table) = self
@@ -1666,27 +1664,34 @@ fn project_current_content_fields(
         for op in &path.ops {
             match op {
                 CompiledLensOp::Rename { from, to } => {
-                    if let Some(field) = column_fields.remove(from) {
-                        column_fields.insert(
-                            to.clone(),
-                            ProjectField::renamed(field.output_name, user_column_field(to)),
-                        );
+                    if let Some(mut field) = column_fields.remove(from) {
+                        field.output_name = user_column_field(to);
+                        column_fields.insert(to.clone(), field);
                     }
                 }
                 CompiledLensOp::Copy { from, to } => {
                     if let Some(field) = column_fields.get(from) {
-                        column_fields.insert(
-                            to.clone(),
-                            ProjectField::renamed(field.output_name.clone(), user_column_field(to)),
-                        );
+                        let mut copy = field.clone();
+                        copy.output_name = user_column_field(to);
+                        column_fields.insert(to.clone(), copy);
                     }
                 }
                 CompiledLensOp::Add { column, default } => {
                     column_fields.insert(
                         column.clone(),
-                        ProjectField::literal(
+                        ProjectField::literal_typed(
                             user_column_field(column),
                             Value::Nullable(Some(Box::new(default.clone()))),
+                            read_table
+                                .columns
+                                .iter()
+                                .find(|candidate| candidate.name == *column)
+                                .map(|candidate| {
+                                    ValueType::Nullable(Box::new(
+                                        candidate.column_type.clone().value_type(),
+                                    ))
+                                })
+                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
                         ),
                     );
                 }

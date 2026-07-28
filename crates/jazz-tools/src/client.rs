@@ -2063,10 +2063,34 @@ impl JazzClient {
         };
         Ok(Some(value))
     }
-    fn core_cells(values: HashMap<String, Value>) -> Result<jazz::db::RowCells> {
+    fn core_cells(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<jazz::db::RowCells> {
+        let schema = self.schema()?;
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Write(format!("unknown table {table}")))?;
         values
             .into_iter()
-            .map(|(name, value)| Ok((name, public_to_core_value(value)?)))
+            .map(|(name, value)| {
+                let column = table_schema
+                    .columns
+                    .columns
+                    .iter()
+                    .find(|column| column.name.as_str() == name)
+                    .ok_or_else(|| {
+                        JazzError::Write(format!("unknown column {name} on table {table}"))
+                    })?;
+                let value = public_to_core_value(value)?;
+                let value = if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
+                    CoreValue::Nullable(Some(Box::new(value)))
+                } else {
+                    value
+                };
+                Ok((name, value))
+            })
             .collect()
     }
     fn core_ordered_values(
@@ -2271,7 +2295,7 @@ impl JazzClient {
     ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
         {
             let row_values = self.core_ordered_values(table, &values)?;
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 let row_id =
                     self.db
@@ -2298,7 +2322,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(values)?;
+            let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
@@ -2315,7 +2339,15 @@ impl JazzClient {
     /// Update a row.
     pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
         {
-            let cells = Self::core_cells(updates.into_iter().collect())?;
+            let table = self
+                .db
+                .inner
+                .borrow()
+                .row_tables
+                .get(&object_id)
+                .cloned()
+                .ok_or_else(|| JazzError::Write(format!("unknown row {object_id}")))?;
+            let cells = self.core_cells(&table, updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_update(batch_id, object_id, cells)?;
                 Ok(batch_id)

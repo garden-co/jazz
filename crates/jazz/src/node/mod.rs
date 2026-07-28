@@ -3491,8 +3491,11 @@ where
                     .table_lenses
                     .iter()
                     .find(|candidate| candidate.target_table == current_table),
-            }
-            .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            };
+            let Some(table_lens) = table_lens else {
+                self.catalogue.compiled_lens_cache.insert(key, None);
+                return Ok(None);
+            };
             match direction {
                 LensPathDirection::Forward => {
                     for op in &table_lens.ops {
