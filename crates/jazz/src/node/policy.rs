@@ -24,7 +24,8 @@ where
         if author == AuthorId::SYSTEM {
             return Ok(true);
         }
-        let (table, cells) = self.policy_projection_for_version_record(version)?;
+        let (policy_schema_version, table, cells) =
+            self.policy_projection_for_version_record(version)?;
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(true);
@@ -61,6 +62,7 @@ where
             return Ok(true);
         };
         self.write_policy_query_allows_insert_candidate(
+            policy_schema_version,
             &table,
             &policy,
             version.row_uuid(),
@@ -152,7 +154,7 @@ where
     fn policy_projection_for_version_row(
         &mut self,
         version: &VersionRow,
-    ) -> Result<(TableSchema, BTreeMap<String, Value>), Error> {
+    ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
         let source_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -170,7 +172,7 @@ where
     fn policy_projection_for_version_record(
         &mut self,
         version: &VersionRecord,
-    ) -> Result<(TableSchema, BTreeMap<String, Value>), Error> {
+    ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
         let source_schema = version.schema_version();
         let source_table = self.table_in_schema(version.table(), source_schema)?;
         let cells = source_table
@@ -192,10 +194,12 @@ where
         table: &str,
         _source_table: &TableSchema,
         mut cells: BTreeMap<String, Value>,
-    ) -> Result<(TableSchema, BTreeMap<String, Value>), Error> {
+    ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
+        // Resolve the schema that owns the policy bundle, then project data
+        // (including table identity) into it. The bundle itself stays unchanged.
         let target = self.policy_target_schema_for_source(source, table)?;
         if source == target {
-            return Ok((self.table_in_schema(table, target)?, cells));
+            return Ok((target, self.table_in_schema(table, target)?, cells));
         }
 
         if let Some(path) =
@@ -203,7 +207,7 @@ where
         {
             let forward_table = apply_compiled_lens_path(&path, &mut cells);
             let table = self.table_in_schema(&forward_table, target)?;
-            return Ok((table, cells));
+            return Ok((target, table, cells));
         }
 
         if let Some(path) =
@@ -211,12 +215,12 @@ where
         {
             let reverse_table = apply_compiled_lens_path(&path, &mut cells);
             let table = self.table_in_schema(&reverse_table, target)?;
-            return Ok((table, cells));
+            return Ok((target, table, cells));
         }
 
         let target_table = self.table_in_schema(table, target)?;
         if policy_tables_are_directly_compatible(_source_table, &target_table) {
-            return Ok((target_table, cells));
+            return Ok((target, target_table, cells));
         }
 
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
@@ -324,7 +328,7 @@ where
                 {
                     continue;
                 }
-                let (projected_table, cells) =
+                let (_policy_schema_version, projected_table, cells) =
                     match self.policy_projection_for_version_row(&parent_version) {
                         Ok(projected) => projected,
                         Err(Error::InvalidCatalogueUpdate("lens chain is unknown")) => {
@@ -338,7 +342,11 @@ where
                             if !policy_tables_are_directly_compatible(&source_table, table) {
                                 return Err(Error::InvalidCatalogueUpdate("lens chain is unknown"));
                             }
-                            (table.clone(), parent_version.cells(&source_table)?)
+                            (
+                                self.policy_schema_for_table_name(&table.name),
+                                table.clone(),
+                                parent_version.cells(&source_table)?,
+                            )
                         }
                         Err(error) => return Err(error),
                     };
@@ -352,7 +360,7 @@ where
         if let Some(current_version) =
             self.query_local_layer_winner(&table.name, version.row_uuid(), VersionLayer::Content)?
         {
-            let (projected_table, cells) =
+            let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
                 return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);

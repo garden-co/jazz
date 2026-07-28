@@ -5689,6 +5689,7 @@ where
 
     pub(super) fn write_policy_query_allows_insert_candidate(
         &mut self,
+        policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
@@ -5704,26 +5705,24 @@ where
             return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
         }
 
-        // `table` and `policy` were projected through the write-policy lens in
-        // `policy_projection_for_version_record`. Validate and lower them against
-        // that same active write schema, not the bootstrap schema.
-        let write_schema_version = self.catalogue.current_write_schema.schema;
-        let write_schema = &self
-            .catalogue
-            .catalogue_schemas
-            .get(&write_schema_version)
-            .ok_or(Error::InvalidStoredValue(
-                "current write schema payload missing",
-            ))?
-            .schema;
+        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+                .schema
+        };
         let policy_shape = policy
             .clone()
-            .validate_with_schema_version(write_schema, write_schema_version)?;
+            .validate_with_schema_version(policy_schema, policy_schema_version)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
-            write_schema,
+            policy_schema,
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
