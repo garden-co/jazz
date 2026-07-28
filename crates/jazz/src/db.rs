@@ -2086,7 +2086,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage paired content and deletion-register restore writes.
+    /// Stage paired content and deletion-register restore writes, applying defaults for omitted columns.
     pub fn mergeable_restore(
         &self,
         tx_id: OpenTxId,
@@ -2095,9 +2095,6 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         let content_parents = node
@@ -2253,7 +2250,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a restore inside an owned exclusive transaction handle.
+    /// Stage a restore inside an owned exclusive transaction handle, applying defaults for omitted columns.
     pub fn exclusive_restore(
         &self,
         tx_id: OpenTxId,
@@ -2261,9 +2258,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         node.tx_write(tx_id, table, row, cells, None)?;
@@ -2302,7 +2296,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Restore a row locally. Data is required by the public API contract.
+    /// Restore a row locally, applying defaults for omitted columns.
     ///
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
@@ -2323,9 +2317,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
@@ -2369,9 +2360,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
@@ -2438,9 +2426,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2474,9 +2459,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -6575,12 +6557,12 @@ where
         Ok(())
     }
 
-    /// Stage a restore with explicit row data.
+    /// Stage a restore, applying defaults for omitted columns.
     pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore with explicit row data and millisecond provenance time.
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
     pub fn restore_at_ms(
         &mut self,
         table: &str,
@@ -6598,9 +6580,6 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.db.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.db.node.node.borrow_mut();
