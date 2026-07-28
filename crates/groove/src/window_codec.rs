@@ -1068,6 +1068,7 @@ mod tests {
                 ("u16", ValueType::U16),
                 ("u32", ValueType::U32),
                 ("u64", ValueType::U64),
+                ("i32", ValueType::I32),
                 ("i64", ValueType::I64),
                 ("f64", ValueType::F64),
                 ("bool", ValueType::Bool),
@@ -1191,6 +1192,34 @@ mod tests {
                 WindowRecord::new(
                     owned(schema.key_descriptor(), &[Value::U64(idx as u64)]),
                     owned(schema.value_descriptor(), &[Value::I64(score)]),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let encoded = encode_window(&schema, &records).unwrap();
+        let summary = summarize_window(&encoded).unwrap();
+        assert_eq!(
+            summary.column_encodings,
+            vec![
+                ColumnEncodingKind::DeltaVarint,
+                ColumnEncodingKind::DeltaVarint
+            ]
+        );
+        assert_round_trip(&schema, &records);
+    }
+
+    #[test]
+    fn i32_columns_use_delta_varint_encoding() {
+        let schema = WindowSchema::new(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            RecordDescriptor::new([("score", ValueType::I32)]),
+        );
+        let records = (-8..8)
+            .enumerate()
+            .map(|(idx, score)| {
+                WindowRecord::new(
+                    owned(schema.key_descriptor(), &[Value::U64(idx as u64)]),
+                    owned(schema.value_descriptor(), &[Value::I32(score)]),
                 )
             })
             .collect::<Vec<_>>();
@@ -1336,6 +1365,7 @@ mod tests {
                 Value::U16(rng.next() as u16),
                 Value::U32(rng.next() as u32),
                 Value::U64(rng.next()),
+                Value::I32((rng.next() % 20_000) as i32 - 10_000),
                 Value::I64((rng.next() % 20_000) as i64 - 10_000),
                 Value::F64((rng.next() % 10_000) as f64 / 10.0),
                 Value::Bool(rng.next().is_multiple_of(2)),
