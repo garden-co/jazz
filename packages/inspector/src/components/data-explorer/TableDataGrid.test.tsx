@@ -60,7 +60,12 @@ const mockWasmSchema = {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      { name: "maybe_done", column_type: { type: "Boolean" }, nullable: true },
+      {
+        name: "maybe_done",
+        column_type: { type: "Boolean" },
+        nullable: true,
+        default: { type: "Null" },
+      },
       { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
       { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
       { name: "blob", column_type: { type: "Bytea" }, nullable: true },
@@ -663,9 +668,22 @@ describe("TableDataGrid", () => {
     const statusCell = stagedCells[7];
     expect(statusCell).not.toBeUndefined();
     expect(within(statusCell as HTMLElement).getByText("open")).not.toBeNull();
-    expect(within(initialStagedRow as HTMLElement).getAllByText("<null>").length).toBeGreaterThan(
-      0,
-    );
+    // italic <null>, actual value omitted until edited
+    const unsetTitle = within(stagedCells[1] as HTMLElement).getByText("<null>");
+    expect(unsetTitle.tagName).toBe("I");
+    expect(unsetTitle.getAttribute("data-cell-value-state")).toBe("unset");
+    // regular <null>, omitted so the database applies its default
+    const defaultNull = within(stagedCells[3] as HTMLElement).getByText("<null>");
+    expect(defaultNull.tagName).toBe("DIV");
+    expect(defaultNull.getAttribute("data-cell-value-state")).toBeNull();
+    // regular <null>, included in the insert
+    const nullableNull = within(stagedCells[4] as HTMLElement).getByText("<null>");
+    expect(nullableNull.tagName).toBe("DIV");
+    expect(nullableNull.getAttribute("data-cell-value-state")).toBeNull();
+    const doneCheckbox = within(initialStagedRow as HTMLElement).getByRole("checkbox", {
+      name: "Toggle done for staged insert",
+    });
+    expect((doneCheckbox as HTMLInputElement).checked).toBe(false);
 
     fireEvent.doubleClick(stagedCells[1] as HTMLElement);
     const titleEditor = screen.getByLabelText("Edit title");
@@ -683,19 +701,54 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledWith(
-        expect.objectContaining({ _table: "todos" }),
-        expect.objectContaining({
-          title: "new todo",
-          done: true,
-          meta: null,
-          owner_id: null,
-        }),
-      );
+      expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ _table: "todos" }), {
+        title: "new todo",
+        done: true,
+        meta: null,
+        owner_id: null,
+      });
       expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
+  });
+
+  it("reports the Db insert error", async () => {
+    mockInsert.mockImplementationOnce(() => {
+      throw new Error('Insert failed: WriteError("missing required column title")');
+    });
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("missing required column title");
+    });
+
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+  });
+
+  it("includes an explicitly entered empty string in a staged insert", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    const stagedCells = getCellsInRowContaining("staged");
+    fireEvent.doubleClick(stagedCells[1] as HTMLElement);
+    const titleEditor = screen.getByLabelText("Edit title");
+    fireEvent.change(titleEditor, { target: { value: "temporary" } });
+    fireEvent.change(titleEditor, { target: { value: "" } });
+    fireEvent.blur(titleEditor);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ _table: "todos" }), {
+        title: "",
+        done: false,
+        meta: null,
+        owner_id: null,
+      });
+    });
   });
 
   it("queues multiple staged insert rows and inserts them from the banner", async () => {
@@ -708,7 +761,7 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("2 staged inserts")).not.toBeNull();
 
     let stagedBadges = screen.getAllByText("staged");
-    let firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
+    const firstStagedCells = getCellsInRow(stagedBadges[0] as HTMLElement);
     fireEvent.doubleClick(firstStagedCells[1] as HTMLElement);
     const firstTitleEditor = screen.getByLabelText("Edit title");
     fireEvent.change(firstTitleEditor, { target: { value: "first todo" } });
@@ -734,26 +787,18 @@ describe("TableDataGrid", () => {
 
     await waitFor(() => {
       expect(mockInsert).toHaveBeenCalledTimes(2);
-      expect(mockInsert).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({ _table: "todos" }),
-        expect.objectContaining({
-          title: "first todo",
-          done: true,
-          meta: null,
-          owner_id: null,
-        }),
-      );
-      expect(mockInsert).toHaveBeenNthCalledWith(
-        2,
-        expect.objectContaining({ _table: "todos" }),
-        expect.objectContaining({
-          title: "second todo",
-          done: false,
-          meta: null,
-          owner_id: null,
-        }),
-      );
+      expect(mockInsert).toHaveBeenNthCalledWith(1, expect.objectContaining({ _table: "todos" }), {
+        title: "first todo",
+        done: true,
+        meta: null,
+        owner_id: null,
+      });
+      expect(mockInsert).toHaveBeenNthCalledWith(2, expect.objectContaining({ _table: "todos" }), {
+        title: "second todo",
+        done: false,
+        meta: null,
+        owner_id: null,
+      });
       expect(mockInsertWait).toHaveBeenCalledTimes(2);
     });
   });

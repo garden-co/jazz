@@ -21,6 +21,24 @@ const otherTodoSchema = {
 type OtherTodoSchema = s.Schema<typeof otherTodoSchema>;
 const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema);
 
+const taggedTodoSchema = {
+  tagged_todos: s.table({
+    title: s.string(),
+    tags: s.array(s.string()).default([]),
+  }),
+};
+type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
+const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema);
+
+const defaultsTodoSchema = {
+  defaults_todos: s.table({
+    title: s.string().default("default title"),
+    done: s.boolean().default(false),
+  }),
+};
+type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
+const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema);
+
 let db: Db;
 
 beforeEach(async () => {
@@ -110,6 +128,136 @@ describe("Db transactions", () => {
         done: true,
       },
     );
+  });
+
+  it("reads insert update delete effects inside a mergeable callback transaction", async () => {
+    const existing = db.insert(app.todos, { title: "committed", done: false }).value;
+
+    const result = await db.transaction(async (tx) => {
+      const inserted = tx.insert(app.todos, { title: "inserted", done: false });
+      tx.update(app.todos, existing.id, { done: true });
+      tx.delete(app.todos, inserted.id);
+
+      await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+        { id: existing.id, title: "committed", done: true },
+      ]);
+
+      return existing.id;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+      { id: existing.id, title: "committed", done: true },
+    ]);
+  });
+
+  it("reads a restored row inside a mergeable callback transaction", async () => {
+    const deleted = await db
+      .insert(app.todos, { title: "deleted", done: false })
+      .wait({ tier: "local" });
+    await db.delete(app.todos, deleted.id).wait({ tier: "local" });
+
+    const result = await db.transaction(async (tx) => {
+      const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
+
+      await expect(tx.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+        restored,
+      );
+
+      return restored;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+      result.value,
+    );
+  });
+
+  it("applies defaults to empty inserts and restores inside a mergeable callback transaction", async () => {
+    const inserted = await db.insert(defaultsApp.defaults_todos, {}).wait({ tier: "local" });
+    await db.delete(defaultsApp.defaults_todos, inserted.id).wait({ tier: "local" });
+
+    const result = await db.transaction(async (tx) => {
+      const restored = tx.restore(defaultsApp.defaults_todos, inserted.id, {});
+
+      await expect(
+        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+      ).resolves.toEqual(restored);
+
+      return restored;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(
+      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+    ).resolves.toEqual(inserted);
+  });
+
+  it("orders in-transaction reads by explicit orderBy and by implicit row id when omitted", async () => {
+    const result = await db.transaction(async (tx) => {
+      tx.insert(app.todos, { title: "b", done: false });
+      tx.insert(app.todos, { title: "a", done: false });
+      tx.insert(app.todos, { title: "c", done: false });
+
+      // The deleted TS read overlay used to sort transaction reads itself. These
+      // assertions pin the observable behavior: explicit title ordering here,
+      // and SPEC 6.4.1's implicit ascending row_uuid ordering below.
+      await expect(
+        tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local" }),
+      ).resolves.toMatchObject([{ title: "a" }, { title: "b" }, { title: "c" }]);
+
+      return tx.all(app.todos.where({}), { tier: "local" });
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual(result.value);
+  });
+
+  it("applies non-eq predicates and limit offset inside a mergeable transaction", async () => {
+    const result = await db.transaction(async (tx) => {
+      tx.insert(app.todos, { title: "a", done: false });
+      tx.insert(app.todos, { title: "b", done: false });
+      tx.insert(app.todos, { title: "c", done: false });
+      tx.insert(app.todos, { title: "d", done: false });
+
+      await expect(
+        tx.all(app.todos.where({ title: { gt: "b" } } as never).orderBy("title", "asc"), {
+          tier: "local",
+        }),
+      ).resolves.toMatchObject([{ title: "c" }, { title: "d" }]);
+
+      return tx.all(app.todos.where({}).orderBy("title", "asc").offset(1).limit(2), {
+        tier: "local",
+      });
+    });
+
+    expect(result.value).toMatchObject([{ title: "b" }, { title: "c" }]);
+    await result.wait({ tier: "local" });
+  });
+
+  it("applies contains predicates inside a mergeable transaction", async () => {
+    const taggedDb = await createDb({
+      appId: `db-transaction-tagged-test`,
+      driver: { type: "memory" },
+      serverUrl: "ws://example.invalid",
+      adminSecret: "db-transaction-tagged-test-admin",
+    });
+
+    try {
+      const result = await taggedDb.transaction(async (tx) => {
+        tx.insert(taggedApp.tagged_todos, { title: "work", tags: ["urgent", "team"] });
+        tx.insert(taggedApp.tagged_todos, { title: "home", tags: ["personal"] });
+
+        return tx.all(taggedApp.tagged_todos.where({ tags: { contains: "urgent" } } as never), {
+          tier: "local",
+        });
+      });
+
+      expect(result.value).toMatchObject([{ title: "work", tags: ["urgent", "team"] }]);
+      await result.wait({ tier: "local" });
+    } finally {
+      await taggedDb.shutdown();
+    }
   });
 
   it("types exclusive transaction waits without durability options", () => {

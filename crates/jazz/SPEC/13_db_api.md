@@ -12,33 +12,36 @@ non-sequentially can start here (ch. 1, §1.1).
 
 Invariant digest:
 
-- `INV-API-1`: Db MUST be the high-level runtime-typed client facade — a thin wrapper over a participant Node (which owns the NodeState engine, connections, and serving) — and it MUS...
-- `INV-API-2`: Db is a client only and has no role: Db::open MUST construct a non-history-complete client NodeState. A history-complete, fate-deciding authority is a core Node opened...
-- `INV-API-3`: Db::read and Db::one MUST be synchronous local reads and MUST NOT wait for upstream sync; Db::all MUST use ReadOpts to choose the effective durability tier.
-- `INV-API-4`: When ReadOpts.localupdates == LocalUpdates::Immediate, the effective read tier MUST be at least DurabilityTier::Local; when it is Deferred, the effective read tier MUS...
-- `INV-API-5`: ReadOpts::default() MUST be { tier: DurabilityTier::Local, localupdates: LocalUpdates::Immediate, propagation: Propagation::Full }.
-- `INV-API-6`: Db::subscribe MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the no...
-- `INV-API-8`: Db::insert MUST generate the row id using its configured RowIdSource; Db::insertwithid MUST use the caller-supplied RowUuid.
-- `INV-API-9`: Db::update MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
-- `INV-API-10`: Db::upsert MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
-- `INV-API-11`: Db::delete MUST lower to a mergeable commit with DeletionEvent::Deleted and make the row absent from current reads after local application.
-- `INV-API-12`: Db::restore MUST reject empty cell data with ErrorCode::Schema and MUST lower a non-empty restore to content write plus DeletionEvent::Restored.
-- `INV-API-13`: Every local write method MUST return a WriteHandle carrying the affected RowUuid, backing TxId, and local durability tier.
-- `INV-API-14`: A local write on a Db MUST be DurabilityTier::Local and queued for upstream upload; a Db (always a client) MUST NOT self-finalize. Self-finalization to Accepted/Global...
-- `INV-API-15`: WriteHandle::wait(tier) MUST return the handle TxId when the requested tier is locally satisfied, MUST return ErrorCode::WriteRejected for rejected fates, and MUST ret...
-- `INV-API-16`: Transport implementations MUST be non-blocking; tryrecv() == None MUST mean no inbound message is currently staged and MUST NOT be interpreted by Db as disconnect.
-- `INV-API-17`: Db::connectupstream MUST carry already-registered facade subscriptions upstream immediately by placing their (ValidatedQuery, Binding) pairs into the connection's pend...
-- `INV-API-18`: Db::subscribe MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
-- `INV-API-19`: An upstream PeerConnection::tick MUST send each unannounced usage-site subscription by first sending SyncMessage::RegisterShape once per shape and then SyncMessage::Su...
-- `INV-API-20`: An upstream PeerConnection::tick MUST upload each locally-authored TxId at most once per connection by reading commitunitfor(txid), sending it, and marking it uploaded.
-- `INV-API-21`: A subscriber PeerConnection::tick MUST serve subscriptions under the AuthorId passed to Node::acceptsubscriber, not under the serving node's own identity.
-- `INV-API-22`: Db::tick() MUST service every registered PeerConnection exactly once by calling PeerConnection::tick.
-- `INV-API-24`: The query builder exposed through Db::table MUST support OR/AND/NOT predicates, contains, inlist, isnull, includes with JoinMode::Holes, required includes, select, lim...
-- `INV-API-25`: TextEdit operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to LargeValueEditOp::Insert/LargeValueEditOp::Delete.
-- `INV-API-26`: Db::mergeabletx() MUST group multiple facade writes under one mergeable TxId, and the produced commit unit MUST set Transaction.ntotalwrites to the number of grouped v...
-- `INV-API-27`: Db::exclusivetx() MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning WriteRejected when authority validation detect...
-- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
-- `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
+- `INV-API-1`: Db MUST be the high-level runtime-typed client facade, exposing the application API and connection-driving surface without introducing different application or sync semantics; it MUST validate user Query values before executing reads or subscriptions.
+- `INV-API-2`: Db::open MUST construct a non-history-complete client. The history-complete opening path is reserved for core/Node use and MUST NOT make the ordinary application facade a fate authority.
+- `INV-API-3`: `Db::read` and `Db::one` MUST be synchronous local reads and MUST NOT wait for upstream sync; `Db::all` MUST use `ReadOpts` to choose the effective durability tier.
+- `INV-API-4`: When `ReadOpts.local_updates == LocalUpdates::Immediate`, the effective read tier MUST be at least `DurabilityTier::Local`; when it is `Deferred`, the effective read tier MUST be exactly `ReadOpts.tier`.
+- `INV-API-5`: `ReadOpts::default()` MUST be `{ tier: DurabilityTier::Local, local_updates: LocalUpdates::Immediate, propagation: Propagation::Full }`.
+- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes; edge/global subscriptions apply the same query semantics over their accepted-state frontiers. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the edge/global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
+- `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
+  events and MUST NOT queue facade-side full-result diffs as the normal live
+  subscription mechanism.
+- `INV-API-8`: `Db::insert` MUST generate the row id using its configured `RowIdSource`; `Db::insert_with_id` MUST use the caller-supplied `RowUuid`.
+- `INV-API-9`: `Db::update` MUST preserve omitted fields for a locally present row by merging the patch over the row's current local cells.
+- `INV-API-10`: `Db::upsert` MUST merge supplied cells over current cells when the row exists locally and MUST write supplied cells directly when the row does not exist locally.
+- `INV-API-11`: `Db::delete` MUST lower to a mergeable commit with `DeletionEvent::Deleted` and make the row absent from current reads after local application.
+- `INV-API-12`: `Db::restore` MUST reject empty cell data with `ErrorCode::Schema` and MUST lower a non-empty restore to content write plus `DeletionEvent::Restored`.
+- `INV-API-13`: Every local write method MUST return a `WriteHandle` carrying the affected `RowUuid`, backing `TxId`, and local durability tier.
+- `INV-API-14`: A local write on a `Db` MUST be `DurabilityTier::Local` and queued for upstream upload; a `Db` (always a client) MUST NOT self-finalize. Self-finalization to `Accepted`/`Global` is a core `Node` behavior (ch. 9).
+- `INV-API-15`: `WriteHandle::wait(tier)` MUST return the handle `TxId` when the requested tier is locally satisfied, MUST return `ErrorCode::WriteRejected` for rejected fates, and MUST return `ErrorCode::NotObserved` when the requested tier is not locally observed.
+- `INV-API-16`: `Transport` implementations MUST be non-blocking; `try_recv() == None` MUST mean no inbound message is currently staged and MUST NOT be interpreted by `Db` as disconnect.
+- `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
+- `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
+- `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
+- `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
+- `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
+- `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
+- `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
+- `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
+- `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
+- `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
+- `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` MUST evaluate permissions under the current `DbIdentity.author` without committing writes, changing local rows, or using caller-supplied identity.
+- `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 
 ## Details
 
@@ -195,16 +198,19 @@ synchronous local UI state after a local write. `Edge` and `Global`
 subscriptions use the same query semantics, but their source/frontier and first
 settlement/completeness rules are constrained to edge- or global-accepted data.
 
-The design target is that **all** live subscriptions are backed by the unified
-maintained subscription machinery from ch. 16, differing only in read frontier,
-source resolution, and settlement semantics. The facade must not grow a second
-query engine by rerunning `query_rows` and diffing full results as the normal
-live-subscription mechanism. Until local maintained-view subscriptions are fully
-unified with the edge/global path, implementations may keep an explicitly named
-local materialized-row bridge for alpha-compatible local live reads, but that is
-staging debt rather than a semantic exception (`INV-API-6`). Binding ABIs must
-keep subscription delivery as a thin event bridge over the core subscription
-surface (§13.7), not a second facade-side diff engine.
+All live subscriptions use one maintained subscription mechanism, differing only
+in read frontier, source resolution, and settlement semantics. The facade must
+not grow a second query engine by rerunning `query_rows` and diffing full results
+as its normal live-subscription mechanism. Subscription delivery is a thin event
+bridge over the core subscription surface: it carries opened, reset, and delta
+events, rather than facade-side diffs of full result sets (`INV-API-7`, and
+`groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
+
+**Implementation status (2026-07-27).** Local live reads currently use a named
+local materialized-row bridge while maintained-view integration continues;
+`db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads`
+(`crates/jazz/src/db/tests.rs:3886`) covers the local-tier behavior. This is an
+implementation staging note, not a semantic exception.
 
 ### 13.4 Writes
 
@@ -318,12 +324,19 @@ Facade errors carry an `ErrorCode` plus a message:
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
 (§13.5). Read policies evaluate `claim("sub")` plus admission/session-provided
 runtime claims (ch. 7); client query bindings never supply policy claims.
-Time-travel reads and branches exist at the `Node` level (ch. 11) but are not on
-the `Db` facade yet. The initial binding ABI design is below; remaining
+`Db::open_history_complete` and `Db::at` provide history-complete facade reads;
+ordinary client facades remain history-incomplete (`crates/jazz/src/db.rs:383`,
+`crates/jazz/src/db.rs:637`). Branch operations otherwise remain at the `Node`
+level (ch. 11). The initial binding ABI design is below; remaining
 **designed but not yet on the facade** surface stays in the Open questions
 section.
 
-### 13.7 Initial TS/WASM/NAPI Binding Surface
+### 13.7 Initial TS/WASM/NAPI binding implementation notes (non-normative)
+
+This section records a current ABI architecture and capability snapshot. It is
+not a product-semantics contract: bindings may change object, payload, and queue
+shapes so long as they preserve this chapter's facade semantics and §13.13's
+single-owner query rule.
 
 The binding surface is a thin host-language wrapper around Rust-owned `Db`,
 transaction, subscription, and selected serving `Node` objects. It is not a
@@ -355,11 +368,10 @@ data path. This is the same lower-level groove descriptor/raw encoding family
 used by sync records, but read results are projected current-row records rather
 than sync `VersionRecord` payloads with parents/deletion/schema-version fields.
 
-The binding boundary is intentionally thin. WASM/NAPI bindings SHOULD expose
-idiomatic host objects around the real Rust `Db`, transaction, subscription, and
-transport APIs. Postcard can be called directly where byte payloads are useful;
-there is no core ABI module, command bridge, handle registry, event queue, DTO
-namespace, or second public API.
+The binding boundary is intentionally thin. Current WASM/NAPI bindings expose
+idiomatic host objects around Rust `Db`, transaction, subscription, and transport
+APIs. Postcard can be used directly where byte payloads are useful; the listed
+ABI shapes are implementation choices rather than a second public API.
 
 Subscriptions cross the boundary as host streams/callbacks built on
 `Db::subscribe`, with postcard-encoded chunks if a byte payload is needed.
@@ -517,8 +529,8 @@ fork query, transaction, or sync semantics.
 
 ### 13.13 Query semantics live in the core
 
-Decision, Anselm 2026-07-21: query semantics live in the core, in exactly one
-place. TypeScript, wasm, napi, and runtime client layers may build queries,
+Query semantics have exactly one owner: the core. TypeScript, wasm, napi, and
+runtime client layers may build queries,
 serialize query IR, cache prepared handles, transport frames, and hydrate typed
 application objects — but they must not independently evaluate predicates,
 ordering, limit/offset/windowing, relation/include membership, permission
@@ -535,13 +547,10 @@ inside open exclusive transactions (`tx_query` over
 `OverlayRef::OpenTransaction`); binding layers plumb handles to it rather than
 overlaying pending writes above the engine.
 
-Known violations at decision time (tx read overlay, TS relation/include
-materialization, TS-computed semantic deltas, pre-core predicate rewriting) are
-inventoried in the branch's semantic-duplication audit and are being removed in
-stacked cleanup work; new code must not add to that list. The default-ordering
-drift (§6.4.1 implemented in core but re-derived inconsistently above it) is
-the canonical example of why: every re-implementation is a divergence waiting
-for a workload.
+**Implementation status (2026-07-27).** Core-owned branch read views are
+exercised by `single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads`
+(`crates/jazz/src/db/tests.rs:1690`). Cross-binding semantic-duplication audit
+state is intentionally not asserted as a timeless contract here.
 
 ## Open Questions
 
@@ -605,16 +614,6 @@ These are designed but not landed:
   promises, callbacks, and streams over real Rust objects. WASM and NAPI still
   need to prove equivalent completion and error ordering without a Rust-owned
   global event queue.
-
-B2–B4 have **landed** (the binding-facing surface is now complete): **B2** —
-`PeerConnection::serve_current_rows`, a connection-owned `ResumeCursor`
-(`accept_subscriber_with_resume`), and `last_resume_bytes()` accounting; **B3** —
-`Db::open_history_complete`, `Db::at(GlobalSeq, &Query)` (returning
-`HistoricalReadRequiresServer` when incomplete), and facade catalogue/lens ops
-(`publish_schema` / `publish_lens` / `set_current_write_schema`, Core-gated);
-**B4** — exclusive/CAS over the sync surface (the in-memory commit unit is uploaded
-so the authority validates serializably) plus fate exposure via `Db::write_state` /
-`WriteHandle::write_state` (`WriteState { fate, durability }`).
 
 - 🔶 **Benchmark migration.** As each remaining sync slice lands, migrate the
   matching peer-layer benchmarks onto the `Db` surface: S3/S4 for

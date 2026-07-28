@@ -10,6 +10,7 @@ use crate::public_api::types::{ColumnType, RowDescriptor, TableName, Value};
 pub enum QueryBuildError {
     UnsupportedShape,
     NullBetweenBound { column: String },
+    AggregateColumnRequired { function: AggregateFunction },
 }
 
 impl fmt::Display for QueryBuildError {
@@ -26,6 +27,9 @@ impl fmt::Display for QueryBuildError {
                     f,
                     "BETWEEN does not support NULL bounds for column '{column}'"
                 )
+            }
+            QueryBuildError::AggregateColumnRequired { function } => {
+                write!(f, "{function:?} aggregate requires an input column")
             }
         }
     }
@@ -625,6 +629,9 @@ pub struct AggregateOutput {
 pub enum AggregateFunction {
     Count,
     Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -662,6 +669,15 @@ impl Query {
         Self::validate_array_subqueries(&self.array_subqueries)?;
         if let Some(recursive) = &self.recursive {
             Self::validate_conditions(&recursive.filters)?;
+        }
+        if let Some(aggregate) = &self.aggregate {
+            for output in &aggregate.outputs {
+                if output.function != AggregateFunction::Count && output.column.is_none() {
+                    return Err(QueryBuildError::AggregateColumnRequired {
+                        function: output.function,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1036,6 +1052,60 @@ impl QueryBuilder {
             .outputs
             .push(AggregateOutput {
                 function: AggregateFunction::Sum,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add AVG(column).
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Avg,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MIN(column).
+    pub fn min(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Min,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MAX(column).
+    pub fn max(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Max,
                 column: Some(column.into()),
             });
         self
@@ -1570,6 +1640,30 @@ mod tests {
                 column: "score".into()
             })
         );
+    }
+
+    #[test]
+    fn query_validation_rejects_non_count_aggregate_without_a_column() {
+        let mut query = QueryBuilder::new("metrics").count().build();
+        query.aggregate = Some(AggregateSpec {
+            group_by: None,
+            outputs: vec![AggregateOutput {
+                function: AggregateFunction::Sum,
+                column: None,
+            }],
+        });
+
+        assert_eq!(
+            query.validate_for_engine(),
+            Err(QueryBuildError::AggregateColumnRequired {
+                function: AggregateFunction::Sum,
+            })
+        );
+    }
+
+    #[test]
+    fn query_validation_allows_count_without_a_column() {
+        assert!(QueryBuilder::new("metrics").count().try_build().is_ok());
     }
 
     #[test]

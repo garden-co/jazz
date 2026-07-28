@@ -17,28 +17,28 @@ history) and ch. 8 (the wire protocol).
 Invariant digest:
 
 - `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
-- `INV-TX-1`: A transaction MUST NOT expose open writes to ordinary reads or subscriptions before commit.
-- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as Fate::Pending with DurabilityTier::Local and emit exactly one SyncMessage::CommitUnit.
-- `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
-- `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
+- `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
+- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
+- `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
+- `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
-- `INV-TX-7`: A commit unit whose txid.time.physicalms() exceeds the authority admission clock by more than SKEWTOLERANCEMS MUST be rejected as RejectionReason::ClientClockTooFarAhe...
-- `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as RejectionReason::Cascade { root }, preserving the original roo...
-- `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain for...
-- `INV-TX-10`: Applying a fate update MUST NOT move globalseq backward and MUST update durability only monotonically upward.
-- `INV-TX-11`: Accepted authority commits MUST receive the next GlobalSeq, advance the allocator/watermark, and report DurabilityTier::Global.
+- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any parent transaction's `tx_id.time`, and its versions MUST NOT enter history.
+- `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
+- `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as `RejectionReason::Cascade { root }`, preserving the original root transaction id.
+- `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
+- `INV-TX-10`: Applying a fate update MUST NOT move `global_seq` backward and MUST update `durability` only monotonically upward.
+- `INV-TX-11`: Accepted authority commits MUST receive the next `GlobalSeq`, advance the allocator/watermark, and report `DurabilityTier::Global`.
 - `INV-TX-12`: Local durability MUST NOT imply upstream survival; committed local transactions that have not reached an upstream tier MAY be lost if local storage is destroyed.
-- `INV-TX-13`: An exclusive transaction's basesnapshot.globalbase MUST be the contiguous applied global watermark.
+- `INV-TX-13`: An exclusive transaction's `base_snapshot.global_base` MUST be the contiguous applied global watermark.
 - `INV-TX-14`: Exclusive snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing the (RowUuid, TxId) output set at basesnapshot.globalbase against current global output for...
-- `INV-TX-19`: Exclusive predicate validation MUST be sensitive to bindingid/bindingvalues and MUST use the inline query shape without requiring prior shape registration.
-- `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written row's current global content tx id MUST equal the single recorded parent, or absence when no pare...
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing the `(RowUuid, TxId)` output set at `base_snapshot.global_base` against current global output for the same shape and binding.
+- `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
+- `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written row's current global content tx id MUST equal the single recorded parent, or absence when no parent is recorded.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
-- `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visi...
+- `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 
 ## Details
 
@@ -103,6 +103,10 @@ local storage is destroyed (`INV-TX-12`).
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_seq` backward and raises `durability` only monotonically.
 
+**Implementation status.** The reference implementation enforces this
+monotonicity; `fate_regressions::stale_pending_fate_update_cannot_regress_accepted`
+exercises a stale pending update after global acceptance.
+
 ### 3.4 Mergeable transactions
 
 Mergeable transactions are the eventually consistent write path. They give a
@@ -148,8 +152,7 @@ Fate authority is **structural**. A node acts as fate authority exactly when the
 host wires it as one: the core accept path for global authority, or the
 edge-authority ingest entry point for edge-decided mergeable fates. There is no
 row-content inference, topology guess, or ambient `is_authority` flag that turns
-ordinary sync receipt into acceptance authority. This decision was recorded by
-Anselm on 2026-07-03.
+ordinary sync receipt into acceptance authority.
 
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
@@ -227,12 +230,9 @@ atomicity.
 
 ### Open questions
 
-- 🔶 **Monotonicity tests.** `INV-TX-10` (global_seq/durability monotonicity) has
-  implementation but no direct test — `untested` in the registry until covered.
-- 🔶 **Mergeable authority placement.** Edge mergeable authority and
-  permission-subscription gating are the design; the implementation path
-  described by this chapter currently has the core act as the mergeable fate
-  authority before global finalization.
+- 🔶 **Mergeable authority placement.** What deployment and
+  permission-subscription-gating requirements must apply when an edge is wired
+  as a mergeable fate authority, rather than merely relaying commits to core?
 - 🔶 **Opt-in transaction facade.** The former replayable-reconciliation TODO
   defines explicit transactional writes with authority-decided fate, optional
   local pending overlay, schema-family validation, restart persistence, and

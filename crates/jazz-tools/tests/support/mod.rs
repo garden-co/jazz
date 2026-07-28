@@ -7,7 +7,7 @@ use jazz_tools::server::JazzServer;
 use jazz_tools::sync::ClientId;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
-    QueryBuilder, Schema, SubscriptionStream, Value,
+    QueryBuilder, Schema, SubscriptionStream, SubscriptionStreamItem, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -455,7 +455,7 @@ pub async fn wait_for_subscription_update<F>(
             panic!("timed out waiting for {description}; observed log: {log:#?}");
         }
 
-        let delta = tokio::time::timeout(deadline - now, stream.next())
+        let item = tokio::time::timeout(deadline - now, stream.next())
             .await
             .unwrap_or_else(|_| {
                 panic!("timed out waiting for {description}; observed log: {log:#?}")
@@ -463,6 +463,12 @@ pub async fn wait_for_subscription_update<F>(
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });
+        let delta = match item {
+            SubscriptionStreamItem::Delta(delta) => delta,
+            SubscriptionStreamItem::Rejected { reason } => {
+                panic!("subscription rejected while waiting for {description}: {reason:?}")
+            }
+        };
 
         log.push(delta);
     }
@@ -488,7 +494,10 @@ pub async fn collect_stream_deltas(
 
         let next_wait = (deadline - now).min(DEFAULT_STREAM_POLL_INTERVAL);
         match tokio::time::timeout(next_wait, stream.next()).await {
-            Ok(Some(delta)) => log.push(delta),
+            Ok(Some(SubscriptionStreamItem::Delta(delta))) => log.push(delta),
+            Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+                panic!("subscription rejected while collecting deltas: {reason:?}")
+            }
             Ok(None) => return,
             Err(_) => continue,
         }

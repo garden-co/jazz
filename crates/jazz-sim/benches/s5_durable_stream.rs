@@ -1231,6 +1231,9 @@ fn apply_subscription_event(rows: &mut Vec<jazz::node::CurrentRow>, event: Subsc
                 }
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }

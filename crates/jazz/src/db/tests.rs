@@ -145,6 +145,9 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 }
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("unexpected subscription rejection while applying delta: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }
@@ -318,6 +321,7 @@ fn ordered_limited_related_text_values(
 fn event_settled(event: &SubscriptionEvent) -> bool {
     match event {
         SubscriptionEvent::Delta { settled, .. } => *settled,
+        SubscriptionEvent::Rejected { .. } => false,
         SubscriptionEvent::Closed => false,
     }
 }
@@ -388,6 +392,37 @@ fn assert_subscribe_rejected_branch_overlay(
             assert_eq!(subscription, expected_subscription);
             assert!(
                 detail.contains("BranchOverlay"),
+                "unexpected rejection detail: {detail}"
+            );
+        }
+        other => panic!("expected SubscribeRejected, got {other:?}"),
+    }
+}
+
+fn assert_subscribe_rejected_unsupported_window(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+) {
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        message,
+        expected_subscription,
+        "maintained subscription view window shape is not lowered yet",
+    );
+}
+
+fn assert_subscribe_rejected_unsupported_shape_capability_detail(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+    expected_detail: &str,
+) {
+    match message {
+        SyncMessage::SubscribeRejected {
+            subscription,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        } => {
+            assert_eq!(subscription, expected_subscription);
+            assert!(
+                detail.contains(expected_detail),
                 "unexpected rejection detail: {detail}"
             );
         }
@@ -5777,6 +5812,137 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
 }
 
 #[test]
+fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0x51, owner, &schema);
+    let (client_transport, mut server_transport) = duplex();
+    let upstream = db.connect_upstream(client_transport);
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("local subscription should open before upstream response");
+    assert!(matches!(
+        block_on(subscription.next_event()),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    upstream.borrow_mut().tick().unwrap();
+    let mut subscribed = None;
+    while let Some(message) = server_transport.try_recv() {
+        if let SyncMessage::Subscribe(subscribe) = message {
+            subscribed = Some(subscribe.subscription);
+        }
+    }
+    let subscribed = subscribed.expect("expected upstream subscribe command");
+
+    server_transport
+        .send(SyncMessage::SubscribeRejected {
+            subscription: subscribed,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                detail: "server does not support this maintained shape".to_owned(),
+            },
+        })
+        .unwrap();
+    upstream.borrow_mut().tick().unwrap();
+
+    match block_on(subscription.next_event()) {
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        }) => assert_eq!(detail, "server does not support this maintained shape"),
+        other => panic!("expected stream-carried rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_others() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("first", false, owner));
+    seed(&server, "todos", cells("second", false, owner));
+
+    // Protocol-level coverage: jazz-tools subscriptions do not expose raw
+    // SubscribeRejected messages, so this exercises the first layer where the
+    // rejection is directly observable while still using public query builders.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let supported_shape = Query::from("todos").validate(&schema).unwrap();
+    let unsupported_shape = Query::from("todos")
+        .offset(1)
+        .limit(1)
+        .validate(&schema)
+        .unwrap();
+    let supported_binding = supported_shape.bind(BTreeMap::new()).unwrap();
+    let unsupported_binding = unsupported_shape.bind(BTreeMap::new()).unwrap();
+    let supported_subscription = SubscriptionKey {
+        shape_id: supported_shape.shape_id(),
+        binding_id: supported_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let unsupported_subscription = SubscriptionKey {
+        shape_id: unsupported_shape.shape_id(),
+        binding_id: unsupported_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: unsupported_shape.shape_id(),
+            ast: ShapeAst::from_validated(&unsupported_shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: supported_shape.shape_id(),
+            ast: ShapeAst::from_validated(&supported_shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: supported_shape.shape_id(),
+            subscription: supported_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_subscribe_rejected_unsupported_window(
+        client_transport
+            .try_recv()
+            .expect("expected unsupported shape rejection"),
+        unsupported_subscription,
+    );
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("expected supported subscription update after rejection"),
+        supported_subscription,
+    );
+
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: unsupported_shape.shape_id(),
+            subscription: unsupported_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    seed(&server, "todos", cells("third", false, owner));
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("supported subscription should continue after unsupported subscribe"),
+        supported_subscription,
+    );
+}
+
+#[test]
 fn subscriber_connection_rejects_local_tier_register_shape() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -5794,6 +5960,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         tier: DurabilityTier::Local,
         read_view: ReadViewSpec::default(),
     };
+    let rejected_read_view = opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
@@ -5804,13 +5971,16 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_eq!(
-        server
-            .node()
-            .borrow()
-            .sync_metrics()
-            .dropped_peer_request_messages,
-        1
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        client_transport
+            .try_recv()
+            .expect("expected local-tier registration rejection"),
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::nil()),
+            read_view: rejected_read_view,
+        },
+        "global-tier registration",
     );
 
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -6170,6 +6340,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
         tier: DurabilityTier::Edge,
         read_view: ReadViewSpec::default(),
     };
+    let rejected_read_view = edge_opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
@@ -6180,13 +6351,16 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_eq!(
-        server
-            .node()
-            .borrow()
-            .sync_metrics()
-            .dropped_peer_request_messages,
-        1
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        client_transport
+            .try_recv()
+            .expect("expected edge-tier registration rejection"),
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::nil()),
+            read_view: rejected_read_view,
+        },
+        "global-tier registration",
     );
 }
 
@@ -8854,6 +9028,9 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
                 removed,
                 ..
             } => (added, updated, removed),
+            SubscriptionEvent::Rejected { reason } => {
+                panic!("unexpected subscription rejection: {reason:?}")
+            }
             SubscriptionEvent::Closed => (Vec::new(), Vec::new(), Vec::new()),
         };
         assert!(added.is_empty());
