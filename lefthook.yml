@@ -2,8 +2,14 @@ pre-commit:
   commands:
     no-sensitive-data:
       # Patterns live in jazz-private (cleartext there instead of decodable
-      # base64 here); hook is a no-op on machines without that checkout.
-      run: sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh"; if [ -x "$GATE" ]; then "$GATE"; else exit 0; fi'
+      # base64 here). Contributors without that checkout are not blocked, but
+      # the skip is announced: a silent pass is indistinguishable from a clean
+      # scan, and this hook is the only thing keeping customer-identifying
+      # strings out of this public repo.
+      run: >-
+        sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh";
+        if [ -x "$GATE" ]; then "$GATE";
+        else echo "WARNING - sensitive-data guard NOT RUN. $GATE is missing, so commits are not scanned for customer-identifying strings. Clone jazz-private to enable it." >&2; exit 0; fi'
     rustfmt:
       glob: "*.rs"
       run: cargo fmt
