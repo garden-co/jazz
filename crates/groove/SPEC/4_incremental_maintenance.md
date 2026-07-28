@@ -10,36 +10,39 @@ operator semantics in chapter 3.
 
 Invariant digest:
 
-- `INV-ARR-1`: Every keyed structure (table store, declared index, operator state) MUST be a thin wrapper over the arrangement abstraction: one write path, one probe interface, one i...
+- `INV-ARR-1`: Every keyed structure (table store, declared index, operator state) MUST be a thin wrapper over the arrangement abstraction: one write path, one probe interface, one identity scheme (`ArrangementKey`) — no parallel paths (ch. 4 §4.6).
 - `INV-ARR-2`: Resident arrangements implement the ordered-KV contract; hash acceleration, if ever added, lives behind the same interface — never as a parallel path (ch. 4 §4.6).
 - `INV-ARR-3`: Binding-boundary arrangements MUST be keyed by the parameter column(s) and shared across bindings and structurally identical shape prefixes (ch. 4 §4.6).
-- `INV-ARR-4`: The durable arrangement set = base tables + declared indexes + the prepared shapes' binding-free set-semantic frontier, deduplicated by arrangement identity; weight-mu...
+- `INV-ARR-4`: The durable arrangement set = base tables + declared indexes + the prepared shapes' binding-free set-semantic frontier, deduplicated by arrangement identity; weight-multiplying state is recomputed from persisted inputs, not persisted (ch. 4 §4.6).
 - `INV-ARR-5`: A durable arrangement hydrates from its own persisted form, not by rescanning its inputs (ch. 4 §4.6).
-- `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
+- `INV-ARR-6`: Source operators MAY hydrate from static point, prefix, or range scan specs over their table/index arrangement key; the scan spec MUST participate in node identity, and one-shot static scans MUST NOT perturb existing subscriptions.
+- `INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit rebuild from authoritative base state. Producer classes include upstream sync apply, local commit finalize, fate application including merge-back/ahead cleanup, subscription registration changes, repair/refetch apply, and recovery. This invariant was made explicit after July 2026 incidents in fallback classification, bulk-load suppression, serve-dirty gating/epoch handling, fated ahead cleanup, and subscriber dirty propagation.
+- `INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffing, and delivery to subscribers — must be bounded by the size of the change and its affected keys, never by the size of the accumulated view state. Corollary 1: Full re-materialization or full-state diffing on a maintained path is a defect, even when its observable output is correct. Equivalence gates (INV-MV-1, the differential oracle) verify observations; INV-INC-1 constrains mechanism; passing the former does not license violating the latter. Corollary 2: A snapshot is not a separate concept: initial hydration is the first delta, applied to empty state, using the same delta shape and delivery pathway as every subsequent change. Any type, wire shape, or code path that exists only to carry the full current state of a maintained view is a second format of the view and shares the burden of proof of the no-second-formats rule. Corollary 3 (strong form, Anselm 2026-07-09): One-shot reads are the degenerate case of maintained views (subscribe, take first delta, unsubscribe) — not the other way around. New query capabilities must define their delta form no later than their one-shot form; a capability shipped one-shot-only is incomplete, not done. Legitimate O(state) moments (initial hydration, reset-after-revocation) are covered: there, the state IS the change.
 - `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
 - `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
 - `INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-STORAGE-18`: Base table writes MUST be staged before the tick and flushed together with durable tick writes only after the tick succeeds.
-- `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable Persist writes.
+- `INV-STORAGE-19`: Runtime storage reads during a staged tick MUST observe staged set/delete operations before committed storage, including same-tick durable `Persist` writes.
 - `INV-TICK-1`: A public commit tick MUST advance logical time exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
-- `INV-TICK-2`: A subscription MUST receive exactly one initial hydration RecordDeltas message, including an empty message for an empty result, before it receives future commit deltas.
+- `INV-TICK-2`: A subscription MUST receive exactly one initial hydration `RecordDeltas` message, including an empty message for an empty result, before it receives future commit deltas.
 - `INV-TICK-3`: Commit notifications MUST contain weighted result deltas only; unchanged matching rows and base-table changes outside the query result MUST NOT be reported.
-- `INV-TICK-4`: Same-key operations in one DatabaseBatch MUST compute deltas against prior operations in that batch, not only against pre-batch storage, and table deltas MUST be conso...
-- `INV-TICK-5`: TickEvaluator MUST NOT reuse node outputs across different scopes, ticks, or recursive sub-ticks; per-tick memoized outputs MUST be cleared after the tick.
-- `INV-TICK-6`: Shared arrangements MUST be keyed by ArrangementKey { scope, input, fields, descriptor }, so identical context-independent join inputs share one arrangement across sub...
-- `INV-TICK-7`: A root-scope arrangement MUST be stamped with SubTick { tick: currenttick, subtick: 0 }; only context-dependent arrangements may use the recursive evaluator's nonzero...
-- `INV-TICK-8`: Arrangement state MUST NOT move backward in logical time; stale reads MUST fail instead of returning data for the wrong Tick/SubTick.
-- `INV-TICK-9`: In accumulate mode, advancing an arrangement more than once at the same SubTick MUST be idempotent so shared state absorbs each tick delta only once.
+- `INV-TICK-4`: Same-key operations in one `DatabaseBatch` MUST compute deltas against prior operations in that batch, not only against pre-batch storage, and table deltas MUST be consolidated before ticking.
+- `INV-TICK-5`: `TickEvaluator` MUST NOT reuse node outputs across different scopes, ticks, or recursive sub-ticks; per-tick memoized outputs MUST be cleared after the tick.
+- `INV-TICK-6`: Shared arrangements MUST be keyed by `ArrangementKey { scope, input, fields, descriptor }`, so identical context-independent join inputs share one arrangement across subscriptions.
+- `INV-TICK-7`: A root-scope arrangement MUST be stamped with `SubTick { tick: current_tick, sub_tick: 0 }`; only context-dependent arrangements may use the recursive evaluator's nonzero `sub_tick`.
+- `INV-TICK-8`: Arrangement state MUST NOT move backward in logical time; stale reads MUST fail instead of returning data for the wrong `Tick`/`SubTick`.
+- `INV-TICK-9`: In accumulate mode, advancing an arrangement more than once at the same `SubTick` MUST be idempotent so shared state absorbs each tick delta only once.
 - `INV-TICK-10`: Inner join output deltas MUST multiply input delta weight by stored opposite-side weight and MUST subtract one copy of the same-tick left/right cross term.
 - `INV-TICK-11`: Anti-join output deltas MUST represent the visibility diff of left records for keys whose left or right inputs changed.
-- `INV-TICK-12`: Snapshot and shape hydration MUST rebuild arrangements with ArrangementUpdateMode::Replace rather than accumulating a snapshot over existing arrangement contents.
-- `INV-TICK-13`: A Persist node MUST consolidate all same-tick deltas by durable key before writing storage, and a unique persist target MUST reject a positive delta that conflicts wit...
-- `INV-TICK-14`: Prepared-shape output routing MUST update per-binding materialized weights and MUST send each output delta only to active subscriptions whose BindingKey equals the pro...
-- `INV-TICK-15`: A recursive positive incremental tick MUST emit each newly discovered recursive fact at weight +1 at most once and MUST collapse duplicate derivations.
+- `INV-TICK-12`: Snapshot and shape hydration MUST rebuild arrangements with `ArrangementUpdateMode::Replace` rather than accumulating a snapshot over existing arrangement contents.
+- `INV-TICK-13`: A `Persist` node MUST consolidate all same-tick deltas by durable key before writing storage, and a unique persist target MUST reject a positive delta that conflicts with another stored record for the same key; same-tick reads MUST see staged durable writes through the tick overlay.
+- `INV-TICK-14`: Prepared-shape output routing MUST update per-binding materialized weights and MUST send each output delta only to active subscriptions whose `BindingKey` equals the projected output key.
+- `INV-TICK-15`: A recursive positive incremental tick MUST emit each newly discovered recursive fact at weight `+1` at most once and MUST collapse duplicate derivations.
+- `INV-TICK-16`: The reference implementation selects recompute for negative table deltas, cached recursive state with table deltas, empty unbound state, or unhydrated step arrangements. This trigger set is broader than the minimum necessary; the contractual result is the minimal diff required by INV-REC-8.
 - `INV-TICK-17`: Recursive recompute and incremental recursion MUST reject non-positive recursive frontier facts instead of assigning bag-recursive semantics.
-- `INV-TICK-18`: Recursive evaluation MUST stop with RecursiveIterationLimit when the frontier remains non-empty after RecursiveOp.maxiters.
+- `INV-TICK-18`: Recursive evaluation MUST stop with `RecursiveIterationLimit` when the frontier remains non-empty after `RecursiveOp.max_iters`.
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
-- `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in operatorstates after recursive recompute; retained child operator state outside FrontierSource context remain...
+- `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in `operator_states` after recursive recompute; retained child operator state outside `FrontierSource` context remains root-scoped.
 
 ## Details
 

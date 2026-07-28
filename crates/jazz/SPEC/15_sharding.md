@@ -9,15 +9,15 @@ implemented shard behavior (`INV-SHARD-1`).
 
 Invariant digest:
 
-- `INV-SHARD-1`: Chapter 15 MUST NOT describe sharded core as implemented; conforming current implementations MUST treat sharding as an exploratory/open design area. This is a guidance...
+- `INV-SHARD-1`: Chapter 15 MUST NOT describe sharded core as implemented; conforming current implementations MUST treat sharding as an exploratory/open design area. This is a guidance/process anchor, not runtime conformance.
 - `INV-SHARD-7`: A sharded implementation MUST assign every non-global row to a schema-declared shard ownership key and MUST specify behavior for rows without a natural root and rows whose ownership key changes.
 - `INV-SHARD-8`: Exclusive transactions MUST be single-shard unless a cross-shard serialization mechanism is explicitly specified.
 - `INV-SHARD-9`: A cross-shard exclusive transaction MUST NOT be accepted without validation evidence for every shard touched by its row and predicate read-sets.
 - `INV-SHARD-10`: A sharded design MUST retain a global catalogue/sequencer for schema versions, lenses, policy bundles, and the ownership map unless it explicitly specifies an equivalent replacement.
 - `INV-SHARD-11`: A sharded design MUST define settled positions as per-shard positions or vectors and MUST specify how at(position) and at_time(t) resolve across shards.
 - `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
-- `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends...
-- `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protoc...
+- `INV-SHARD-13`: Cross-shard permission closures MUST be obtained through shard-core subscriptions or an explicitly equivalent mechanism before a shard-core assigns a fate that depends on remote-shard policy data.
+- `INV-SHARD-14`: Rebalancing MUST NOT flip partition ownership in the catalogue until the destination shard-core has the partition history needed to serve that ownership and the protocol has defined treatment of in-flight fates/subscriptions.
 
 ## Details
 

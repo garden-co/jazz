@@ -16,7 +16,7 @@ Invariant digest:
 - `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
 - `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
 - `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
-- `INV-TX-1`: A transaction MUST NOT expose open writes to ordinary reads or subscriptions before commit.
+- `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
 
 ## Details
 

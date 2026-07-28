@@ -11,34 +11,34 @@ deployment roles are chapter 9.
 
 Invariant digest:
 
-- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move globalseq backward and MUST raise observed durability only by a supplied Some(DurabilityTier) claim using monotone max...
-- `INV-SYNC-7`: A ViewUpdate result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a t...
-- `INV-SYNC-8`: A view server MUST use peerpayloadinventory.completetxpayloads only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-sc...
-- `INV-SYNC-9`: A receiver MUST reject a ViewUpdate that names a peerpayloadinventory.completetxpayloads, add, or remove transaction it lacks enough tx existence, row-version payload,...
-- `INV-SYNC-10`: A reset-result-set ViewUpdate MUST set resetresultset = true; applying it MUST clear the receiver's settled subscription result set before applying the replacement res...
-- `INV-SYNC-11`: Reset-result-set ViewUpdates MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
+- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_seq` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
+- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, predicate, and large-value material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
+- `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
+- `INV-SYNC-9`: A receiver MUST reject a `ViewUpdate` that names a `peer_payload_inventory.complete_tx_payloads`, add, or remove transaction it lacks enough tx existence, row-version payload, complete-tx payload, or view-complete exclusive payload coverage to resolve for that subscription view.
+- `INV-SYNC-10`: A reset-result-set `ViewUpdate` MUST set `reset_result_set = true`; applying it MUST clear the receiver's settled subscription result set before applying the replacement result members and program facts.
+- `INV-SYNC-11`: Reset-result-set `ViewUpdate`s MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, complete tx payload refs, or content extents.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
-- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only...
-- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for tx.ntotalwrites.
-- `INV-SYNC-17`: ViewUpdate emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
+- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
+- `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
-- `INV-SYNC-19`: FetchContentExtent handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
-- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a sin...
-- `INV-SYNC-21`: Wire TxId and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
+- `INV-SYNC-19`: `FetchContentExtent` handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
+- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
+- `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
-- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
-- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies, never result membership, program facts, or inventory refs; a body may be omitted only under the skip rule — be...
+- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
+- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies and MUST preserve result membership, program facts, and inventory refs. A version body MAY be omitted only when the receiver's membership is believed — under a fast declaration, the version also MUST have settled at or before the declared position; not-yet-fated versions MUST be shipped under a fast declaration.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
-- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those (table, rowuuid, txtime, txnodeid) payloads, and the server MUST serve...
-- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates...
-- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as Fate::Pending with DurabilityTier::Local and emit exactly one SyncMessage::CommitUnit.
+- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
+- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
+- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-11`: Accepted authority commits MUST receive the next GlobalSeq, advance the allocator/watermark, and report DurabilityTier::Global.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
+- `INV-TX-11`: Accepted authority commits MUST receive the next `GlobalSeq`, advance the allocator/watermark, and report `DurabilityTier::Global`.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global sequence, or create merge versions from that payload.
 
 ## Details
 

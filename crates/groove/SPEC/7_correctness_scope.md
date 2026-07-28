@@ -12,7 +12,7 @@ Invariant digest:
 - `INV-OK-1`: For every subscription, initial snapshot plus the consolidated sum of all received deltas MUST equal a fresh one-shot recomputation of that query against current storage.
 - `INV-OK-3`: One-shot snapshot reads MUST NOT perturb retained subscription streams or consume future tick deltas.
 - `INV-OK-13`: Persisted schema index reads MUST match a full-scan oracle over committed base-table state.
-- `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
+- `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the `Database` instance MUST be poisoned and reject subsequent operations.
 - `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
 
 ## Details
