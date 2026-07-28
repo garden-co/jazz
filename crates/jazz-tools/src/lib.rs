@@ -150,22 +150,48 @@ pub type Result<T> = std::result::Result<T, JazzError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionHandle(pub u64);
 
+/// Reason a subscription stream was rejected by a serving peer.
+#[cfg(feature = "client")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionRejectReason {
+    /// The serving peer cannot currently maintain this query shape/read view.
+    UnsupportedShapeCapability {
+        /// Human-readable diagnostic. Not part of semantic compatibility.
+        detail: String,
+    },
+}
+
+/// Item yielded by a public subscription stream.
+#[cfg(feature = "client")]
+#[derive(Clone, Debug)]
+pub enum SubscriptionStreamItem {
+    /// Incremental or reset row delta.
+    Delta(OrderedRowDelta),
+    /// The serving peer rejected the propagated upstream subscription.
+    Rejected {
+        /// Stable rejection class plus diagnostic detail.
+        reason: SubscriptionRejectReason,
+    },
+}
+
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "client")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
 }
 
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
     #[allow(dead_code)]
-    pub(crate) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>) -> Self {
+    pub(crate) fn new(
+        receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
+    ) -> Self {
         Self { receiver }
     }
 
-    /// Get the next delta, waiting if necessary.
-    pub async fn next(&mut self) -> Option<OrderedRowDelta> {
+    /// Get the next subscription item, waiting if necessary.
+    pub async fn next(&mut self) -> Option<SubscriptionStreamItem> {
         self.receiver.recv().await
     }
 }

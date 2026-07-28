@@ -1591,6 +1591,10 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.cancelled = true;
       return;
     }
+    if (chunk.type === "rejected") {
+      this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
+      return;
+    }
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
@@ -1874,17 +1878,22 @@ export class NativeRuntimeAdapter implements Runtime {
   private failActiveSubscriptions(error: Error): void {
     for (const subscription of this.subscriptions.values()) {
       if (subscription.cancelled) continue;
-      subscription.cancelled = true;
-      for (const source of subscription.sources) {
-        closeSubscriptionSource(source.source);
-      }
-      try {
-        subscription.callback?.(error, null);
-      } catch (callbackError) {
-        setTimeout(() => {
-          throw callbackError;
-        }, 0);
-      }
+      this.failSubscription(subscription, error);
+    }
+  }
+
+  private failSubscription(subscription: SubscriptionState, error: Error): void {
+    if (subscription.cancelled) return;
+    subscription.cancelled = true;
+    for (const source of subscription.sources) {
+      closeSubscriptionSource(source.source);
+    }
+    try {
+      subscription.callback?.(error, null);
+    } catch (callbackError) {
+      setTimeout(() => {
+        throw callbackError;
+      }, 0);
     }
   }
 
@@ -4081,6 +4090,10 @@ function normalizeSubscriptionChunk(chunk: unknown):
       relationSnapshot?: NativeRelationSubscriptionSnapshot;
       settled?: boolean;
     }
+  | {
+      type: "rejected";
+      reason: { type: "UnsupportedShapeCapability"; detail: string };
+    }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
   const record = chunk as {
@@ -4089,6 +4102,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     relation_delta?: unknown;
     relation_snapshot?: unknown;
+    reason?: unknown;
     reset?: unknown;
     settled?: unknown;
   };
@@ -4124,7 +4138,34 @@ function normalizeSubscriptionChunk(chunk: unknown):
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
+  if (record.type === "rejected" || record.type === "Rejected") {
+    return {
+      type: "rejected",
+      reason: normalizeSubscriptionRejectionReason(record.reason),
+    };
+  }
   throw new Error("unknown subscription chunk");
+}
+
+function normalizeSubscriptionRejectionReason(reason: unknown): {
+  type: "UnsupportedShapeCapability";
+  detail: string;
+} {
+  if (!reason || typeof reason !== "object") {
+    throw new Error("expected subscription rejection reason");
+  }
+  const record = reason as { type?: unknown; detail?: unknown };
+  if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
+    return { type: "UnsupportedShapeCapability", detail: record.detail };
+  }
+  throw new Error("unknown subscription rejection reason");
+}
+
+function subscriptionRejectionError(reason: {
+  type: "UnsupportedShapeCapability";
+  detail: string;
+}): Error {
+  return new Error(`Subscription rejected: ${reason.type}: ${reason.detail}`);
 }
 
 function subscriptionSource(

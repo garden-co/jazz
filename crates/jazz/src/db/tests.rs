@@ -145,6 +145,9 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 }
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("unexpected subscription rejection while applying delta: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }
@@ -318,6 +321,7 @@ fn ordered_limited_related_text_values(
 fn event_settled(event: &SubscriptionEvent) -> bool {
     match event {
         SubscriptionEvent::Delta { settled, .. } => *settled,
+        SubscriptionEvent::Rejected { .. } => false,
         SubscriptionEvent::Closed => false,
     }
 }
@@ -5808,6 +5812,49 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
 }
 
 #[test]
+fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0x51, owner, &schema);
+    let (client_transport, mut server_transport) = duplex();
+    let upstream = db.connect_upstream(client_transport);
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("local subscription should open before upstream response");
+    assert!(matches!(
+        block_on(subscription.next_event()),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    upstream.borrow_mut().tick().unwrap();
+    let mut subscribed = None;
+    while let Some(message) = server_transport.try_recv() {
+        if let SyncMessage::Subscribe(subscribe) = message {
+            subscribed = Some(subscribe.subscription);
+        }
+    }
+    let subscribed = subscribed.expect("expected upstream subscribe command");
+
+    server_transport
+        .send(SyncMessage::SubscribeRejected {
+            subscription: subscribed,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                detail: "server does not support this maintained shape".to_owned(),
+            },
+        })
+        .unwrap();
+    upstream.borrow_mut().tick().unwrap();
+
+    match block_on(subscription.next_event()) {
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        }) => assert_eq!(detail, "server does not support this maintained shape"),
+        other => panic!("expected stream-carried rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_others() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -8950,6 +8997,9 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
                 removed,
                 ..
             } => (added, updated, removed),
+            SubscriptionEvent::Rejected { reason } => {
+                panic!("unexpected subscription rejection: {reason:?}")
+            }
             SubscriptionEvent::Closed => (Vec::new(), Vec::new(), Vec::new()),
         };
         assert!(added.is_empty());
