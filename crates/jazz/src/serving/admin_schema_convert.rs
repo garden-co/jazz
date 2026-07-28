@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::groove::records::EnumSchema;
-use crate::groove::schema::ColumnType;
-use crate::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
+use crate::schema::{
+    ColumnSchema, ColumnType, JazzSchema, LargeValueKind, MergeStrategy, TableSchema,
+};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,7 +339,7 @@ fn convert_scalar_kind(kind: &str, path: &str) -> Result<ColumnType, AdminSchema
             path,
             "I64 columns are not supported by this alpha slice",
         )),
-        "Json" | "JSON" => Ok(ColumnType::String),
+        "Json" | "JSON" => Ok(ColumnType::Json { schema: None }),
         "Timestamp" | "timestamp" => Ok(ColumnType::U64),
         "Row" => Err(err(
             path,
@@ -397,7 +398,7 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> AdminSchemaConver
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::groove::schema::ColumnType;
+    use crate::schema::ColumnType;
     use serde_json::json;
 
     #[test]
@@ -553,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_json_as_string_storage() {
+    fn converts_json_as_jazz_type_with_string_storage() {
         let schema = convert_admin_schema(&json!({
             "events": {
                 "columns": [
@@ -565,7 +566,21 @@ mod tests {
         .expect("json schema converts");
 
         let table = &schema.tables[0];
-        assert_eq!(table.columns[0].column_type, ColumnType::String);
-        assert_eq!(table.columns[1].column_type, ColumnType::String.nullable());
+        assert_eq!(
+            table.columns[0].column_type,
+            ColumnType::Json { schema: None }
+        );
+        assert_eq!(
+            table.columns[1].column_type,
+            ColumnType::Json { schema: None }.nullable()
+        );
+        assert_eq!(
+            table.columns[0].column_type.storage_type(),
+            crate::groove::schema::ColumnType::String
+        );
+        assert_eq!(
+            table.columns[1].column_type.storage_type(),
+            crate::groove::schema::ColumnType::String.nullable()
+        );
     }
 }

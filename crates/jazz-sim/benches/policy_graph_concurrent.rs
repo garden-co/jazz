@@ -11,13 +11,12 @@ use jazz::db::{
     SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::{ColumnType, JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::policy_graph_fixture::{
@@ -693,7 +692,7 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                 .as_bool()
                 .unwrap_or_else(|| panic!("expected bool cell, got {value:?}")),
         ),
-        ColumnType::String => Value::String(match value {
+        ColumnType::String | ColumnType::Json { .. } => Value::String(match value {
             JsonValue::String(value) => value.clone(),
             JsonValue::Null => String::new(),
             other => serde_json::to_string(other).expect("serialize json cell as string"),

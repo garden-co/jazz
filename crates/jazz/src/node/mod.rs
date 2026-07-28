@@ -4784,7 +4784,7 @@ pub(crate) type PreparedQueryPlanHandle = Arc<PreparedQueryPlan>;
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedQueryParam {
     pub(crate) name: String,
-    pub(crate) ty: groove::schema::ColumnType,
+    pub(crate) ty: crate::schema::ColumnType,
     pub(crate) source: PreparedQueryParamSource,
 }
 
@@ -5226,6 +5226,9 @@ pub enum Error {
     /// Mergeable commit shape is invalid.
     #[error("invalid mergeable commit: {0}")]
     InvalidMergeableCommit(&'static str),
+    /// A string-backed JSON cell failed syntax or JSON Schema validation.
+    #[error("{0}")]
+    InvalidJsonCell(String),
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),

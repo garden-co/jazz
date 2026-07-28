@@ -8,12 +8,12 @@
 use std::collections::BTreeMap;
 
 use groove::records::Value;
-use groove::schema::ColumnType;
 use thiserror::Error;
 
 use crate::ids::SchemaVersionId;
 use crate::schema::{
-    ColumnSchema as JazzColumnSchema, JazzSchema, TableSchema, branch_metadata_table_schema,
+    ColumnSchema as JazzColumnSchema, ColumnType, JazzSchema, TableSchema,
+    branch_metadata_table_schema,
 };
 
 /// Namespace used for query shape and binding UUIDv5 ids.
@@ -3336,6 +3336,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
             | ColumnType::F64
             | ColumnType::Uuid
             | ColumnType::String
+            | ColumnType::Json { .. }
     )
 }
 
@@ -3345,7 +3346,10 @@ fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     left == right
         || matches!(
             (&left, &right),
-            (ColumnType::Enum(_), ColumnType::U8) | (ColumnType::U8, ColumnType::Enum(_))
+            (ColumnType::Enum(_), ColumnType::U8)
+                | (ColumnType::U8, ColumnType::Enum(_))
+                | (ColumnType::Json { .. }, ColumnType::String)
+                | (ColumnType::String, ColumnType::Json { .. })
         )
 }
 
@@ -3379,7 +3383,7 @@ fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
         return false;
     };
     match non_null_column_type(left) {
-        ColumnType::String => matches!(value, Value::Uuid(_)),
+        ColumnType::String | ColumnType::Json { .. } => matches!(value, Value::Uuid(_)),
         ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
         ColumnType::Array(member) => matches!(value, Value::Array(values)
         if values.iter().all(|value| {
@@ -4096,6 +4100,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         | (Value::F64(_), ColumnType::F64)
         | (Value::Bool(_), ColumnType::Bool)
         | (Value::String(_), ColumnType::String)
+        | (Value::String(_), ColumnType::Json { .. })
         | (Value::Bytes(_), ColumnType::Bytes)
         | (Value::Uuid(_), ColumnType::Uuid) => true,
         (Value::Enum(_), ColumnType::Enum(_)) => true,
@@ -4235,6 +4240,16 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             bytes.push(13);
             put_column_type(bytes, inner);
         }
+        ColumnType::Json { schema } => {
+            bytes.push(16);
+            match schema {
+                None => bytes.push(0),
+                Some(schema) => {
+                    bytes.push(1);
+                    put_str(bytes, schema);
+                }
+            }
+        }
     }
 }
 
@@ -4253,7 +4268,7 @@ fn put_len(bytes: &mut Vec<u8>, len: usize) {
 
 #[doc(hidden)]
 pub mod doctest_support {
-    use groove::schema::{ColumnSchema, ColumnType};
+    use crate::schema::{ColumnSchema, ColumnType};
 
     use crate::schema::{JazzSchema, TableSchema};
 
@@ -4301,7 +4316,7 @@ pub mod doctest_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::schema::{ColumnSchema, ColumnType};
+    use crate::schema::{ColumnSchema, ColumnType};
 
     fn schema() -> JazzSchema {
         JazzSchema::new([

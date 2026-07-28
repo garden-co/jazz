@@ -1579,8 +1579,7 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::groove::schema::ColumnType;
-    use crate::schema::{ColumnSchema, TableSchema};
+    use crate::schema::{ColumnSchema, ColumnType, TableSchema};
 
     fn simple_schema() -> JazzSchema {
         JazzSchema::new([TableSchema::new(

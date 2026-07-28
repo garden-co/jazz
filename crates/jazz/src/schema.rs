@@ -419,15 +419,123 @@ pub enum MergeStrategy {
     Counter,
 }
 
-fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
+/// Logical Jazz application-column type.
+///
+/// Most variants lower directly to the corresponding Groove storage type.
+/// JSON remains a Jazz semantic type and lowers to a Groove string.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+pub enum ColumnType {
+    /// Unsigned 8-bit integer.
+    U8,
+    /// Unsigned 16-bit integer.
+    U16,
+    /// Unsigned 32-bit integer.
+    U32,
+    /// Unsigned 64-bit integer.
+    U64,
+    /// IEEE 754 double-precision float.
+    F64,
+    /// Boolean.
+    Bool,
+    /// UTF-8 string.
+    String,
+    /// Opaque bytes.
+    Bytes,
+    /// UUID.
+    Uuid,
+    /// Enumerated value.
+    Enum(EnumSchema),
+    /// Fixed-width tuple.
+    Tuple(Vec<ColumnType>),
+    /// Homogeneous array.
+    Array(Box<ColumnType>),
+    /// Nullable value.
+    Nullable(Box<ColumnType>),
+    /// Signed 64-bit integer.
+    I64,
+    /// Signed 32-bit integer.
+    I32,
+    /// String-backed JSON value with optional canonical JSON Schema metadata.
+    Json {
+        /// Canonical JSON Schema text, when validation is constrained.
+        schema: Option<String>,
+    },
+}
+
+impl ColumnType {
+    /// Make this logical type nullable.
+    pub fn nullable(self) -> Self {
+        Self::Nullable(Box::new(self))
+    }
+
+    /// Make this logical type the element of an array.
+    pub fn array_of(self) -> Self {
+        Self::Array(Box::new(self))
+    }
+
+    /// Return the app-facing record value type.
+    pub fn value_type(&self) -> ValueType {
+        self.storage_type().value_type()
+    }
+
+    /// Lower this logical Jazz type to its physical Groove storage type.
+    pub fn storage_type(&self) -> GrooveColumnType {
+        match self {
+            Self::U8 => GrooveColumnType::U8,
+            Self::U16 => GrooveColumnType::U16,
+            Self::U32 => GrooveColumnType::U32,
+            Self::U64 => GrooveColumnType::U64,
+            Self::I64 => GrooveColumnType::I64,
+            Self::I32 => GrooveColumnType::I32,
+            Self::F64 => GrooveColumnType::F64,
+            Self::Bool => GrooveColumnType::Bool,
+            Self::String => GrooveColumnType::String,
+            Self::Bytes => GrooveColumnType::Bytes,
+            Self::Uuid => GrooveColumnType::Uuid,
+            Self::Enum(schema) => GrooveColumnType::Enum(schema.clone()),
+            Self::Tuple(members) => {
+                GrooveColumnType::Tuple(members.iter().map(ColumnType::storage_type).collect())
+            }
+            Self::Array(member) => GrooveColumnType::Array(Box::new(member.storage_type())),
+            Self::Nullable(inner) => GrooveColumnType::Nullable(Box::new(inner.storage_type())),
+            Self::Json { .. } => GrooveColumnType::String,
+        }
+    }
+}
+
+impl From<GrooveColumnType> for ColumnType {
+    fn from(column_type: GrooveColumnType) -> Self {
+        match column_type {
+            GrooveColumnType::U8 => Self::U8,
+            GrooveColumnType::U16 => Self::U16,
+            GrooveColumnType::U32 => Self::U32,
+            GrooveColumnType::U64 => Self::U64,
+            GrooveColumnType::I64 => Self::I64,
+            GrooveColumnType::I32 => Self::I32,
+            GrooveColumnType::F64 => Self::F64,
+            GrooveColumnType::Bool => Self::Bool,
+            GrooveColumnType::String => Self::String,
+            GrooveColumnType::Bytes => Self::Bytes,
+            GrooveColumnType::Uuid => Self::Uuid,
+            GrooveColumnType::Enum(schema) => Self::Enum(schema),
+            GrooveColumnType::Tuple(members) => {
+                Self::Tuple(members.into_iter().map(ColumnType::from).collect())
+            }
+            GrooveColumnType::Array(member) => Self::Array(Box::new((*member).into())),
+            GrooveColumnType::Nullable(inner) => Self::Nullable(Box::new((*inner).into())),
+        }
+    }
+}
+
+fn is_counter_column_type(column_type: &ColumnType) -> bool {
     matches!(
         column_type,
-        GrooveColumnType::U8
-            | GrooveColumnType::U16
-            | GrooveColumnType::U32
-            | GrooveColumnType::U64
-            | GrooveColumnType::I32
-            | GrooveColumnType::I64
+        ColumnType::U8
+            | ColumnType::U16
+            | ColumnType::U32
+            | ColumnType::U64
+            | ColumnType::I32
+            | ColumnType::I64
     )
 }
 
@@ -513,8 +621,8 @@ pub(crate) fn registered_column_transform(key: &str) -> Option<ColumnTransformSe
 pub struct ColumnSchema {
     /// Logical column name.
     pub name: String,
-    /// Groove storage type used for this column's cell value.
-    pub column_type: GrooveColumnType,
+    /// Jazz logical type used for this column's cell value.
+    pub column_type: ColumnType,
     /// Jazz-level large-value marker for opaque text/blob columns.
     #[serde(default)]
     pub large_value: Option<LargeValueKind>,
@@ -527,22 +635,31 @@ pub struct ColumnSchema {
 }
 
 impl ColumnSchema {
-    /// Construct an ordinary column from a groove storage type.
-    pub fn new(name: impl Into<String>, column_type: GrooveColumnType) -> Self {
+    /// Construct a column from a logical Jazz type or compatible groove storage type.
+    pub fn new(name: impl Into<String>, column_type: impl Into<ColumnType>) -> Self {
         Self {
             name: name.into(),
-            column_type,
+            column_type: column_type.into(),
             large_value: None,
             text_merge_spec: None,
             default: None,
         }
     }
 
+    /// Construct a string-backed JSON column with an optional JSON Schema.
+    pub fn json(name: impl Into<String>, schema: impl Into<Option<serde_json::Value>>) -> Self {
+        let schema = schema.into().map(|schema| {
+            String::from_utf8(crate::json_merge::canonical_json_bytes(&schema))
+                .expect("canonical JSON is UTF-8")
+        });
+        Self::new(name, ColumnType::Json { schema })
+    }
+
     /// Construct a Jazz text column stored in groove as opaque bytes.
     pub fn text(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            column_type: GrooveColumnType::Bytes,
+            column_type: ColumnType::Bytes,
             large_value: Some(LargeValueKind::Text),
             text_merge_spec: None,
             default: None,
@@ -553,7 +670,7 @@ impl ColumnSchema {
     pub fn blob(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            column_type: GrooveColumnType::Bytes,
+            column_type: ColumnType::Bytes,
             large_value: Some(LargeValueKind::Blob),
             text_merge_spec: None,
             default: None,
@@ -577,7 +694,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
     fn from(column: groove::schema::ColumnSchema) -> Self {
         Self {
             name: column.name,
-            column_type: column.column_type,
+            column_type: column.column_type.into(),
             large_value: None,
             text_merge_spec: None,
             default: None,
@@ -749,7 +866,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                user_column.column_type.storage_type().nullable(),
             )
         }));
 
@@ -803,7 +920,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                user_column.column_type.storage_type().nullable(),
             )
         }));
 
@@ -895,7 +1012,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                user_column.column_type.storage_type().nullable(),
             )
         }));
         let mut content_table = GrooveTableSchema::new(
@@ -958,7 +1075,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                user_column.column_type.storage_type().nullable(),
             )
         }));
         vec![
@@ -1438,20 +1555,20 @@ fn put_text_merge_spec(bytes: &mut Vec<u8>, spec: &TextMergeSpec) {
     put_bytes(bytes, &spec.config);
 }
 
-fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
+fn put_column_type(bytes: &mut Vec<u8>, column_type: &ColumnType) {
     match column_type {
-        GrooveColumnType::U8 => bytes.push(1),
-        GrooveColumnType::U16 => bytes.push(2),
-        GrooveColumnType::U32 => bytes.push(3),
-        GrooveColumnType::U64 => bytes.push(4),
-        GrooveColumnType::I64 => bytes.push(14),
-        GrooveColumnType::I32 => bytes.push(15),
-        GrooveColumnType::F64 => bytes.push(5),
-        GrooveColumnType::Bool => bytes.push(6),
-        GrooveColumnType::String => bytes.push(7),
-        GrooveColumnType::Bytes => bytes.push(8),
-        GrooveColumnType::Uuid => bytes.push(9),
-        GrooveColumnType::Enum(schema) => {
+        ColumnType::U8 => bytes.push(1),
+        ColumnType::U16 => bytes.push(2),
+        ColumnType::U32 => bytes.push(3),
+        ColumnType::U64 => bytes.push(4),
+        ColumnType::I64 => bytes.push(14),
+        ColumnType::I32 => bytes.push(15),
+        ColumnType::F64 => bytes.push(5),
+        ColumnType::Bool => bytes.push(6),
+        ColumnType::String => bytes.push(7),
+        ColumnType::Bytes => bytes.push(8),
+        ColumnType::Uuid => bytes.push(9),
+        ColumnType::Enum(schema) => {
             bytes.push(10);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
@@ -1459,20 +1576,30 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 put_str(bytes, variant);
             }
         }
-        GrooveColumnType::Tuple(members) => {
+        ColumnType::Tuple(members) => {
             bytes.push(11);
             put_u64(bytes, members.len() as u64);
             for member in members {
                 put_column_type(bytes, member);
             }
         }
-        GrooveColumnType::Array(member) => {
+        ColumnType::Array(member) => {
             bytes.push(12);
             put_column_type(bytes, member);
         }
-        GrooveColumnType::Nullable(member) => {
+        ColumnType::Nullable(member) => {
             bytes.push(13);
             put_column_type(bytes, member);
+        }
+        ColumnType::Json { schema } => {
+            bytes.push(16);
+            match schema {
+                None => bytes.push(0),
+                Some(schema) => {
+                    bytes.push(1);
+                    put_str(bytes, schema);
+                }
+            }
         }
     }
 }

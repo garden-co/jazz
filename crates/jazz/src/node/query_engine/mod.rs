@@ -20,13 +20,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use groove::db::GraphBuilder;
 use groove::records::{RecordDescriptor, Value};
-use groove::schema::ColumnType;
 
 use super::OpenTxId;
 use crate::ids::{AuthorId, BranchId, RowUuid, SchemaVersionId};
 use crate::protocol::{BindingViewKey, RegisterShapeOptions};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
-use crate::schema::TableSchema;
+use crate::schema::{ColumnType, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tx::{DurabilityTier, Snapshot, TxId, TxKind};
 

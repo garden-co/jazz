@@ -14,7 +14,7 @@ use crate::protocol_limits::{
     validate_shape_ast_size,
 };
 use crate::schema::LargeValueKind;
-use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE, no_text_merge_spec_hash};
+use crate::schema::{ColumnSchema, ColumnType, MERGE_HEADS_TABLE, no_text_merge_spec_hash};
 use crate::text_merge::{
     EventId as TextEventId, TextEvent, TextEventGraph, TieBreak as TextTieBreak,
 };
@@ -4864,27 +4864,24 @@ fn counter_value_to_i128(value: &Value) -> Result<i128, Error> {
     }
 }
 
-fn counter_value_from_i128(
-    column_type: &groove::schema::ColumnType,
-    value: i128,
-) -> Result<Value, Error> {
+fn counter_value_from_i128(column_type: &ColumnType, value: i128) -> Result<Value, Error> {
     match column_type {
-        groove::schema::ColumnType::U8 => u8::try_from(value)
+        ColumnType::U8 => u8::try_from(value)
             .map(Value::U8)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
-        groove::schema::ColumnType::U16 => u16::try_from(value)
+        ColumnType::U16 => u16::try_from(value)
             .map(Value::U16)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
-        groove::schema::ColumnType::U32 => u32::try_from(value)
+        ColumnType::U32 => u32::try_from(value)
             .map(Value::U32)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
-        groove::schema::ColumnType::U64 => u64::try_from(value)
+        ColumnType::U64 => u64::try_from(value)
             .map(Value::U64)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
-        groove::schema::ColumnType::I32 => i32::try_from(value)
+        ColumnType::I32 => i32::try_from(value)
             .map(Value::I32)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
-        groove::schema::ColumnType::I64 => i64::try_from(value)
+        ColumnType::I64 => i64::try_from(value)
             .map(Value::I64)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
         _ => Err(Error::InvalidStoredValue(

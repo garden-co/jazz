@@ -3,7 +3,12 @@ import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
 
-export type ValueType = { tag: number; inner?: ValueType; members?: ValueType[] };
+export type ValueType = {
+  tag: number;
+  inner?: ValueType;
+  members?: ValueType[];
+  jsonSchema?: string;
+};
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type NativeRow = { rowId: Uint8Array; deleted: boolean; raw: Uint8Array };
 export type NativeRowBatch = { table: string; descriptor: DescriptorField[]; rows: NativeRow[] };
@@ -48,6 +53,7 @@ type PostcardReaderLike = {
 type PostcardWriterLike = {
   vec(writeItem: (writer: PostcardWriterLike, index: number) => void, length: number): void;
   some(writeValue: (writer: PostcardWriterLike) => void): void;
+  none(): void;
   string(value: string): void;
   enumUnit(tag: number): void;
   bytes(value: Uint8Array): void;
@@ -146,6 +152,14 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   if (valueType.tag === 11 || valueType.tag === 12) {
     if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
     writeValueType(writer, valueType.inner);
+    return;
+  }
+  if (valueType.tag === 15) {
+    if (valueType.jsonSchema == null) {
+      writer.none();
+    } else {
+      writer.some((schemaWriter) => schemaWriter.string(valueType.jsonSchema!));
+    }
   }
 }
 
@@ -157,6 +171,12 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   if (tag === 10) {
     const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
+  }
+  if (tag === 15) {
+    return {
+      tag,
+      jsonSchema: reader.option((schemaReader) => schemaReader.string()),
+    };
   }
   return { tag };
 }
@@ -531,7 +551,7 @@ function columnTypeToValueType(type: ColumnType): ValueType {
     case "Boolean":
       return { tag: 5 };
     case "Integer":
-      return { tag: 2 };
+      return { tag: 14 };
     case "BigInt":
       return { tag: 13 };
     case "Timestamp":
@@ -704,6 +724,7 @@ function fixedSize(valueType: ValueType): number | undefined {
     case 1:
       return 2;
     case 2:
+    case 14:
       return 4;
     case 3:
     case 13:
