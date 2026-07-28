@@ -4775,6 +4775,34 @@ fn subscribe_uses_prepared_non_simple_plan() {
 }
 
 #[test]
+fn subscription_reset_preserves_ordered_window_rank() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0xa3, author, &schema);
+    for (id, title) in [(4, "alpha"), (1, "bravo"), (3, "charlie"), (2, "delta")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "todos",
+            row(id),
+            author,
+            cells(title, false, author),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos")
+        .order_by("title", OrderDirection::Asc)
+        .offset(1)
+        .limit(2);
+    let mut subscription = prepared_subscribe(&db, &query, global_subscribe_opts()).unwrap();
+
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        vec![row(1), row(3)],
+        "reset rows must retain the selected ordered window rather than member-key order"
+    );
+}
+
+#[test]
 fn simple_prepared_current_write_query_uses_lowered_plan() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
