@@ -155,6 +155,29 @@ hydrating its body and later loses read scope, subsequent content-extent fetches
 for that row are denied; Jazz does not promise post-delivery redaction of bytes
 already fetched or stored locally (ch. 7 §7.3).
 
+Large values carry no permission model of their own. A `text`/`blob` column is an
+ordinary row value for authorization purposes: the row's `SELECT` policy decides
+whether a reader sees the row at all, and therefore whether it ever obtains a
+handle; the row's `INSERT`/`UPDATE` policies decide whether a writer may author
+the value. Handle-plus-hydration is a **materialization optimization, not a
+permission boundary** — it MUST NOT become a side channel reaching bytes the row
+policy would deny (`INV-LVAL-15`, ch. 7).
+
+> **Implementation status — this property is currently unverified.**
+> A test named `large_blob_values_follow_ordinary_row_permissions` was written to
+> pin it end to end, asserting four things: (1) an authorized owner reading a
+> large-value column gets `Value::LargeValue(handle)`, and hydrating that handle
+> returns exactly the bytes written; (2) large values materialize as handles
+> rather than inline cells; (3) a peer without row `SELECT` permission sees no
+> row at all, and so never reaches the blob; (4) a peer without row `INSERT`
+> permission cannot author a row spoofing another user's ownership.
+>
+> That test was born red at `e03780d70`, and additionally lived in
+> `crates/jazz-tools/tests/catalogue_sync_integration.rs` — a target that was
+> unregistered, so never compiled and never run, for months. It was removed
+> rather than kept as a permanently-red fixture. The paragraph above is the
+> contract it was reaching for; re-establishing coverage is outstanding work.
+
 _Further invariants._ `INV-LVAL-7` — re-ingesting an extent with identical bytes
 is idempotent; conflicting bytes for the same extent are rejected. `INV-LVAL-8` —
 an extent read fails closed if any requested byte range is missing or gapped.

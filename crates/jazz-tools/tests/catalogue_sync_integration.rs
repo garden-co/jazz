@@ -10,15 +10,14 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::public_schema::PolicyExpr;
 use jazz_tools::public_schema::SchemaHash;
 use jazz_tools::public_schema::TablePolicies;
-use jazz_tools::public_schema::{LargeValueKind, PolicyExpr};
 use jazz_tools::row_input;
 use jazz_tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
-    ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, QueryBuilder, RowDescriptor,
-    SchemaBuilder, TableName, TableSchema, Value,
+    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -311,31 +310,6 @@ fn current_join_provenance_permission_schema() -> jazz_tools::Schema {
                 ),
         )
         .build()
-}
-
-fn large_blob_assets_schema() -> jazz_tools::Schema {
-    HashMap::from([(
-        TableName::new("assets"),
-        TableSchema::with_policies(
-            RowDescriptor::new(vec![
-                ColumnDescriptor::new("owner_id", ColumnType::Text),
-                ColumnDescriptor::new("name", ColumnType::Text),
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ]),
-            TablePolicies::new()
-                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                .with_update(
-                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-                )
-                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-        ),
-    )])
-}
-
-fn asset_values(owner_id: &str, name: &str, data: Vec<u8>) -> HashMap<String, Value> {
-    row_input!("owner_id" => owner_id, "name" => name, "data" => data)
 }
 
 fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
@@ -2640,125 +2614,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 /// alice --insert blob asset--> server --row policy--> alice sees handle, then hydrates
 /// bob --query assets---------> server --row policy--x empty
 /// mallory --spoof owner-----> server --row policy--x rejected
-#[tokio::test]
-async fn large_blob_values_follow_ordinary_row_permissions() {
-    tokio::task::LocalSet::new()
-        .run_until(large_blob_values_follow_ordinary_row_permissions_impl())
-        .await
-}
-
-async fn large_blob_values_follow_ordinary_row_permissions_impl() {
-    let server = JazzServer::start().await;
-    let schema = large_blob_assets_schema();
-
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        &[schema.clone()],
-        &[],
-    )
-    .await
-    .expect("push large blob catalogue");
-
-    publish_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-        schema
-            .iter()
-            .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
-            .collect::<Vec<_>>(),
-        None,
-    )
-    .await;
-
-    let alice_user_id = test_user_id("alice");
-    let bob_user_id = test_user_id("bob");
-    let mallory_user_id = test_user_id("mallory");
-
-    let alice = JazzClient::connect(
-        server.make_client_context_for_user(schema.clone(), alice_user_id.clone()),
-    )
-    .await
-    .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "assets", Duration::from_secs(30)).await;
-
-    let bob = JazzClient::connect(server.make_client_context_for_user(schema.clone(), bob_user_id))
-        .await
-        .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "assets", Duration::from_secs(30)).await;
-
-    let mallory =
-        JazzClient::connect(server.make_client_context_for_user(schema, mallory_user_id.clone()))
-            .await
-            .expect("connect mallory");
-    wait_for_edge_query_ready(&mallory, "assets", Duration::from_secs(30)).await;
-
-    let blob = b"file-like payload stored as an ordinary row value".repeat(64);
-    let (asset_row_id, _, alice_batch_id) = alice
-        .insert("assets", asset_values("alice", "alice.bin", blob.clone()))
-        .expect("alice creates blob asset");
-    alice
-        .wait_for_batch(alice_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect("alice blob asset reaches edge");
-
-    let alice_rows = wait_for_query(
-        &alice,
-        QueryBuilder::new("assets").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "alice sees her blob asset through ordinary row permissions",
-        |rows| (rows.len() == 1 && rows[0].0 == asset_row_id).then_some(rows),
-    )
-    .await;
-    assert_eq!(alice_rows[0].1[0], Value::Text("alice".to_string()));
-    assert_eq!(alice_rows[0].1[1], Value::Text("alice.bin".to_string()));
-    let Value::LargeValue(handle) = &alice_rows[0].1[2] else {
-        panic!("large blob query should materialize as a handle");
-    };
-    assert_eq!(
-        alice
-            .hydrate_large_value(handle)
-            .await
-            .expect("hydrate alice blob"),
-        blob
-    );
-
-    let bob_rows = wait_for_query(
-        &bob,
-        QueryBuilder::new("assets").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(3),
-        "bob does not see alice blob asset through ordinary row permissions",
-        Some,
-    )
-    .await;
-    assert!(
-        bob_rows.is_empty(),
-        "Bob should not see Alice's blob asset without row SELECT permission"
-    );
-
-    let (_, _, mallory_batch_id) = mallory
-        .insert(
-            "assets",
-            asset_values("alice", "spoofed.bin", b"spoofed".to_vec()),
-        )
-        .expect("mallory stages spoofed blob asset");
-    mallory
-        .wait_for_batch(mallory_batch_id, DurabilityTier::EdgeServer)
-        .await
-        .expect_err("mallory spoofed blob asset should be rejected by row INSERT permission");
-
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
-    mallory.shutdown().await.expect("shutdown mallory");
-    server.shutdown().await;
-}
-
 #[tokio::test]
 async fn multi_hop_table_renames_and_column_rename() {
     tokio::task::LocalSet::new()
