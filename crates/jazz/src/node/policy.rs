@@ -1081,7 +1081,26 @@ fn policy_values_equal(left: &Value, right: &Value) -> bool {
         (left, Value::Nullable(Some(right))) => policy_values_equal(left, right),
         (Value::Uuid(left), Value::String(right)) => uuid::Uuid::parse_str(right) == Ok(*left),
         (Value::String(left), Value::Uuid(right)) => uuid::Uuid::parse_str(left) == Ok(*right),
-        _ => left == right,
+        _ => match (policy_integer_value(left), policy_integer_value(right)) {
+            // i128 represents every core integer exactly, including u64 values
+            // greater than i64::MAX. Floats intentionally do not participate in
+            // this normalization because their precision makes integer/float
+            // equality surprising at large magnitudes.
+            (Some(left), Some(right)) => left == right,
+            _ => left == right,
+        },
+    }
+}
+
+fn policy_integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::U8(value) => Some(i128::from(*value)),
+        Value::U16(value) => Some(i128::from(*value)),
+        Value::U32(value) => Some(i128::from(*value)),
+        Value::U64(value) => Some(i128::from(*value)),
+        Value::I32(value) => Some(i128::from(*value)),
+        Value::I64(value) => Some(i128::from(*value)),
+        _ => None,
     }
 }
 
@@ -1121,7 +1140,8 @@ fn policy_join_correlations_allow(
         let Some(source_value) = column_value(&correlation.source_column) else {
             return false;
         };
-        policy_join_row_value(join_row, join_table, &correlation.join_column) == Some(source_value)
+        policy_join_row_value(join_row, join_table, &correlation.join_column)
+            .is_some_and(|join_value| policy_values_equal(&join_value, &source_value))
     })
 }
 
@@ -1156,6 +1176,10 @@ pub(super) fn policy_value_key(value: &Value) -> Option<Vec<u8>> {
         }
         Value::U64(value) => {
             bytes.push(3);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(15);
             bytes.extend(value.to_be_bytes());
         }
         Value::I64(value) => {
