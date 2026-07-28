@@ -922,7 +922,7 @@ pub(super) async fn publish_permissions_handler(
                             }
                         },
                     };
-                    if let Err(err) = core_server_shell.publish_schema(schema).await {
+                    if let Err(err) = core_server_shell.publish_permissions_schema(schema).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse::internal(format!(
