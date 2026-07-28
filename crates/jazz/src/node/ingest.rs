@@ -593,7 +593,7 @@ where
             .remove(&tx_id)
             .unwrap_or(stored.tx.made_by);
         for version in &records {
-            if !self.version_satisfies_write_policy(version, permission_subject) {
+            if !self.version_satisfies_write_policy(version, permission_subject)? {
                 let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
                 self.ingest_rejected_transaction(stored.tx, fate)?;
                 return Ok(());
@@ -1936,7 +1936,7 @@ where
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
-            if !self.version_satisfies_write_policy(version, permission_subject) {
+            if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
             }
         }
@@ -1947,11 +1947,8 @@ where
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
-    ) -> bool {
-        match self.write_policy_allows_version_record(version, author) {
-            Ok(allowed) => allowed,
-            Err(_) => false,
-        }
+    ) -> Result<bool, Error> {
+        self.write_policy_allows_version_record(version, author)
     }
 
     pub(super) fn cascade_root_for_versions(&mut self, versions: &[VersionRecord]) -> Option<TxId> {

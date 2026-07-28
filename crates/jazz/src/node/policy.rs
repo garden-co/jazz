@@ -60,7 +60,13 @@ where
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
         };
-        self.policy_allows_insert_candidate(&table, &policy, version.row_uuid(), author, &cells)
+        self.write_policy_query_allows_insert_candidate(
+            &table,
+            &policy,
+            version.row_uuid(),
+            &cells,
+            author,
+        )
     }
 
     pub(crate) fn dry_run_insert_allows(&mut self, commit: MergeableCommit) -> Result<bool, Error> {
@@ -374,6 +380,9 @@ where
         })
     }
 
+    // Legacy interpreter for write policies. The direction is lowered query-engine
+    // evaluation (e4fdad384); only not-yet-lowered cases may use this path, and
+    // every newly lowered case must shrink it rather than widening it for a shortcut.
     pub(super) fn policy_allows(
         &mut self,
         table: &TableSchema,
@@ -403,6 +412,9 @@ where
         self.policy_base_allows(table, policy, row_uuid, identity, &mut column_value)
     }
 
+    // Legacy interpreter for insert write policies. Keep this only for cases the
+    // lowered query engine cannot yet express (for example `inherits`); do not
+    // widen it to work around a lowering bug (e4fdad384).
     pub(super) fn policy_allows_insert_candidate(
         &mut self,
         table: &TableSchema,
@@ -447,6 +459,8 @@ where
         )
     }
 
+    // Base implementation for the legacy write-policy interpreter. Lowered
+    // query-engine coverage (e4fdad384) must shrink this family, never widen it.
     fn policy_base_allows(
         &mut self,
         table: &TableSchema,
@@ -481,6 +495,8 @@ where
         )
     }
 
+    // Insert-candidate member of the legacy interpreter family; keep it only for
+    // not-yet-lowered cases, never as a workaround for a lowering defect.
     fn policy_base_allows_insert_candidate(
         &mut self,
         table: &TableSchema,

@@ -5687,6 +5687,101 @@ where
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
+    pub(super) fn write_policy_query_allows_insert_candidate(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        if !policy.inherits.is_empty()
+            || policy
+                .policy_branches
+                .iter()
+                .any(|branch| !branch.inherits.is_empty())
+        {
+            return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
+        }
+
+        // `table` and `policy` were projected through the write-policy lens in
+        // `policy_projection_for_version_record`. Validate and lower them against
+        // that same active write schema, not the bootstrap schema.
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let write_schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&write_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "current write schema payload missing",
+            ))?
+            .schema;
+        let policy_shape = policy
+            .clone()
+            .validate_with_schema_version(write_schema, write_schema_version)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            write_schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let root_source = root_source_id(policy_shape.query().table.as_str());
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    policy_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape),
+                ),
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape),
+            ),
+            shape: input_shape,
+        };
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let request = QueryProgramRequest {
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+            ),
+            policy,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                policy_shape.query(),
+            ),
+        };
+        let candidate = current_row_from_cells(table, row_uuid, cells)?;
+        let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
+        let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
+        let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
+            request,
+            inline_sources,
+            access_paths,
+        )?;
+        self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
     fn write_policy_query_program_allows(
         &mut self,
         program: &QueryProgram,
