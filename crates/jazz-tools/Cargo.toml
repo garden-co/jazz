@@ -172,6 +172,10 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
+[[bench]]
+name = "saas_documents"
+harness = false
+
 [[test]]
 name = "large_blob_permissions"
 required-features = ["test"]

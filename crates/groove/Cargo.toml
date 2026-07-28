@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "micro"
 harness = false
+
+[[bench]]
+name = "saas_documents"
+harness = false

@@ -16,6 +16,7 @@ The active bench harness is the explicit `[[bench]]` list in
 - `insert_benchmark`
 - `update_benchmark`
 - `subscription_benchmark`
+- `saas_documents`
 
 All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy
@@ -49,6 +50,12 @@ than old helper behavior:
   the revoked doc visible. Recursive write-policy settlement is covered in the
   `jazz` policy tests with global/settled support rows; local-only support rows
   correctly do not authorize writes.
+- `saas_documents` builds a configurable 500k-document / 5k-team fixture
+  through public `Db` APIs, validates authenticated latest-100 queries with
+  optional status/archive filters, compares literal and parameterized bindings,
+  and emits authorization and simultaneous-binding correctness canaries.
+  See the [benchmark receipt](../../../dev/benchmarks/SAAS_DOCUMENTS_500K_RECEIPT_20260728.md)
+  and [engine findings](../../../dev/benchmarks/SAAS_DOCUMENTS_ENGINE_FINDINGS_20260728.md).
 
 ## Intended next ports
 
