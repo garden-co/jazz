@@ -1108,6 +1108,23 @@ impl Query {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
             operation: InheritsOperation::Select,
+            max_depth: None,
+        });
+        self
+    }
+
+    /// Require the row referenced by `parent_column` to be readable under the
+    /// parent table's composed read policy, with a bound for recursion through
+    /// the same inheritance atom.
+    pub fn inherits_with_depth(
+        mut self,
+        parent_column: impl Into<String>,
+        max_depth: usize,
+    ) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+            operation: InheritsOperation::Select,
+            max_depth: Some(max_depth),
         });
         self
     }
@@ -1122,6 +1139,23 @@ impl Query {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
             operation,
+            max_depth: None,
+        });
+        self
+    }
+
+    /// Require the row referenced by `parent_column` to satisfy the parent
+    /// policy for `operation`, with a bound for recursive inheritance.
+    pub fn inherits_operation_with_depth(
+        mut self,
+        parent_column: impl Into<String>,
+        operation: InheritsOperation,
+        max_depth: usize,
+    ) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+            operation,
+            max_depth: Some(max_depth),
         });
         self
     }
@@ -1762,6 +1796,9 @@ pub struct InheritsVia {
     /// Parent operation to require for the referenced row.
     #[serde(default)]
     pub operation: InheritsOperation,
+    /// Optional maximum number of recursive uses of this inheritance atom.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 /// Parent operation required by an inheritance atom.
@@ -3262,6 +3299,13 @@ fn canonical_inherits_key(inherits: &InheritsVia) -> Vec<u8> {
         InheritsOperation::Update => b'u',
         InheritsOperation::Delete => b'd',
     });
+    match inherits.max_depth {
+        Some(max_depth) => {
+            bytes.push(b'd');
+            put_len(&mut bytes, max_depth);
+        }
+        None => bytes.push(b'u'),
+    }
     bytes
 }
 

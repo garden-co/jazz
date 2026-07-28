@@ -126,12 +126,12 @@ export class WebSocketCarrier {
         message: "websocket transport error",
       });
     });
-    this.socket.addEventListener("close", () => {
+    this.socket.addEventListener("close", (event) => {
       if (this.closing) return;
       this.onError?.({
         code: "websocket_closed",
         retry: "later",
-        message: "websocket closed",
+        message: `websocket closed (code=${event.code}, reason=${event.reason || "none"})`,
       });
     });
   }
