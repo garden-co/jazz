@@ -8,10 +8,11 @@
 use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::schema::{
-    ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
-    partition_ahead_current_table_name, partition_global_current_table_name,
-    partition_history_table_name, partition_register_ahead_current_table_name,
-    partition_register_global_current_table_name, partition_register_table_name,
+    ColumnSchema, ColumnType, branch_partition_history_table_name,
+    branch_partition_register_table_name, partition_ahead_current_table_name,
+    partition_global_current_table_name, partition_history_table_name,
+    partition_register_ahead_current_table_name, partition_register_global_current_table_name,
+    partition_register_table_name,
 };
 
 use groove::schema::TableSchema as GrooveTableSchema;
@@ -1751,7 +1752,7 @@ fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
 
 struct CurrentRowDescriptorCacheEntry {
     table_name: String,
-    columns: Vec<(String, groove::schema::ColumnType)>,
+    columns: Vec<(String, ColumnType)>,
     descriptor: records::RecordDescriptor,
 }
 
@@ -1886,7 +1887,57 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
     records::RecordDescriptor::new([("cell", column.column_type.clone().value_type())])
         .create(std::slice::from_ref(value))?;
+    validate_json_value(&column.column_type, value, &column.name)?;
     Ok(())
+}
+
+fn validate_json_value(
+    column_type: &ColumnType,
+    value: &Value,
+    column_path: &str,
+) -> Result<(), Error> {
+    match (column_type, value) {
+        (ColumnType::Nullable(_), Value::Nullable(None)) => Ok(()),
+        (ColumnType::Nullable(inner), Value::Nullable(Some(value))) => {
+            validate_json_value(inner, value, column_path)
+        }
+        (ColumnType::Array(element_type), Value::Array(elements)) => {
+            for (index, element) in elements.iter().enumerate() {
+                validate_json_value(element_type, element, &format!("{column_path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        (ColumnType::Tuple(member_types), Value::Tuple(members)) => {
+            for (index, (member_type, member)) in member_types.iter().zip(members).enumerate() {
+                validate_json_value(member_type, member, &format!("{column_path}.{index}"))?;
+            }
+            Ok(())
+        }
+        (ColumnType::Json { schema }, Value::String(raw)) => {
+            let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+                Error::InvalidJsonCell(format!("invalid JSON for column `{column_path}`: {error}"))
+            })?;
+            if let Some(schema) = schema {
+                let schema = serde_json::from_str(schema).map_err(|error| {
+                    Error::InvalidJsonCell(format!(
+                        "invalid JSON schema for column `{column_path}`: {error}"
+                    ))
+                })?;
+                let validator = jsonschema::validator_for(&schema).map_err(|error| {
+                    Error::InvalidJsonCell(format!(
+                        "invalid JSON schema for column `{column_path}`: {error}"
+                    ))
+                })?;
+                if let Err(error) = validator.validate(&parsed) {
+                    return Err(Error::InvalidJsonCell(format!(
+                        "JSON schema validation failed for column `{column_path}`: {error}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 // Diagnostic helper used only by debug_assert duplicate-version checks and a

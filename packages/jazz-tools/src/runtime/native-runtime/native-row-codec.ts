@@ -9,6 +9,7 @@ export type ValueType = {
   members?: ValueType[];
   record?: DescriptorField[];
   enumSchema?: EnumSchema;
+  jsonSchema?: string;
 };
 export type DescriptorField = { name?: string; valueType: ValueType };
 export type EnumSchema = { name: string; variants: string[] };
@@ -55,6 +56,7 @@ type PostcardReaderLike = {
 type PostcardWriterLike = {
   vec(writeItem: (writer: PostcardWriterLike, index: number) => void, length: number): void;
   some(writeValue: (writer: PostcardWriterLike) => void): void;
+  none(): void;
   string(value: string): void;
   enumUnit(tag: number): void;
   bytes(value: Uint8Array): void;
@@ -141,6 +143,7 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 }
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
+  // Jazz schema ColumnType tags: 15 is Json and carries its optional schema.
   writer.enumUnit(valueType.tag);
   if (valueType.tag === 10) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
@@ -158,10 +161,19 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
   if (valueType.tag === 13) {
     if (!valueType.record) throw new Error("missing inline record descriptor for tag 13");
     writeDescriptor(writer, valueType.record);
+    return;
+  }
+  if (valueType.tag === 15) {
+    if (valueType.jsonSchema == null) {
+      writer.none();
+    } else {
+      writer.some((schemaWriter) => schemaWriter.string(valueType.jsonSchema!));
+    }
   }
 }
 
 export function readValueType(reader: PostcardReaderLike): ValueType {
+  // Jazz schema ColumnType tags: 15 is Json, distinct from Groove ValueType::I32.
   const tag = reader.u64();
   if (tag === 11 || tag === 12) {
     return { tag, inner: readValueType(reader) };
@@ -173,10 +185,17 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
   if (tag === 13) {
     return { tag, record: readDescriptor(reader) };
   }
+  if (tag === 15) {
+    return {
+      tag,
+      jsonSchema: reader.option((schemaReader) => schemaReader.string()),
+    };
+  }
   return { tag };
 }
 
 function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType): void {
+  // Groove ValueType tags: 15 is I32 and carries no payload.
   writer.enumUnit(valueType.tag);
   if (valueType.tag === 9) {
     if (!valueType.enumSchema) throw new Error("missing enum schema for Groove ValueType::Enum");

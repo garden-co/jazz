@@ -54,33 +54,36 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         postcard::from_bytes(&bytes).unwrap()
     }
 
-    fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {
+    fn sample_value(column_type: &crate::schema::ColumnType, seed: u8) -> Value {
         match column_type {
-            groove::schema::ColumnType::U8 => Value::U8(seed),
-            groove::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
-            groove::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
-            groove::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
-            groove::schema::ColumnType::I32 => Value::I32(i32::from(seed) - 128),
-            groove::schema::ColumnType::I64 => Value::I64(i64::from(seed) - 128),
-            groove::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
-            groove::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
-            groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
-            groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
-            groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
-            groove::schema::ColumnType::Enum(_) => Value::Enum(0),
-            groove::schema::ColumnType::Tuple(members) => Value::Tuple(
+            crate::schema::ColumnType::U8 => Value::U8(seed),
+            crate::schema::ColumnType::U16 => Value::U16(u16::from(seed) * 17),
+            crate::schema::ColumnType::U32 => Value::U32(u32::from(seed) * 65_537),
+            crate::schema::ColumnType::U64 => Value::U64(u64::MAX - u64::from(seed)),
+            crate::schema::ColumnType::I32 => Value::I32(i32::from(seed) - 128),
+            crate::schema::ColumnType::I64 => Value::I64(i64::from(seed) - 128),
+            crate::schema::ColumnType::F64 => Value::F64(f64::from(seed) + 0.5),
+            crate::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
+            crate::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
+            crate::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
+            crate::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
+            crate::schema::ColumnType::Enum(_) => Value::Enum(0),
+            crate::schema::ColumnType::Tuple(members) => Value::Tuple(
                 members
                     .iter()
                     .enumerate()
                     .map(|(idx, member)| sample_value(member, seed.wrapping_add(idx as u8 + 1)))
                     .collect(),
             ),
-            groove::schema::ColumnType::Array(member) => Value::Array(vec![
+            crate::schema::ColumnType::Array(member) => Value::Array(vec![
                 sample_value(member, seed.wrapping_add(1)),
                 sample_value(member, seed.wrapping_add(2)),
             ]),
-            groove::schema::ColumnType::Nullable(member) => {
+            crate::schema::ColumnType::Nullable(member) => {
                 Value::Nullable(Some(Box::new(sample_value(member, seed.wrapping_add(1)))))
+            }
+            crate::schema::ColumnType::Json { .. } => {
+                Value::String(format!("{{\"seed\":{seed}}}"))
             }
         }
     }

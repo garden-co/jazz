@@ -8,8 +8,9 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
-    MergeStrategy, TableSchema as CoreTableSchema, WritePolicies,
+    ColumnSchema as CoreColumnSchema, ColumnType as CoreColumnType, JazzSchema,
+    LargeValueKind as CoreLargeValueKind, MergeStrategy, TableSchema as CoreTableSchema,
+    WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -111,9 +112,11 @@ fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
                         .and_then(|table_schema| table_schema.columns.column(&column.name))
                         .map(|public_column| match public_column.column_type {
                             ColumnType::Enum { .. } => TypedLiteralTarget::PublicEnum,
-                            _ => TypedLiteralTarget::Core(column.column_type.clone()),
+                            _ => TypedLiteralTarget::Core(column.column_type.storage_type()),
                         })
-                        .unwrap_or_else(|| TypedLiteralTarget::Core(column.column_type.clone()));
+                        .unwrap_or_else(|| {
+                            TypedLiteralTarget::Core(column.column_type.storage_type())
+                        });
                     (column.name.clone(), target)
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -586,27 +589,32 @@ fn convert_column_type(
     table: &TableName,
     column: &str,
     column_type: &ColumnType,
-) -> Result<GrooveColumnType, SchemaConversionError> {
+) -> Result<CoreColumnType, SchemaConversionError> {
     match column_type {
-        ColumnType::Boolean => Ok(GrooveColumnType::Bool),
-        ColumnType::Text => Ok(GrooveColumnType::String),
-        ColumnType::Timestamp => Ok(GrooveColumnType::U64),
-        ColumnType::Double => Ok(GrooveColumnType::F64),
-        ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
-        ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
-        ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
+        ColumnType::Boolean => Ok(CoreColumnType::Bool),
+        ColumnType::Text => Ok(CoreColumnType::String),
+        ColumnType::Timestamp => Ok(CoreColumnType::U64),
+        ColumnType::Double => Ok(CoreColumnType::F64),
+        ColumnType::Uuid => Ok(CoreColumnType::Uuid),
+        ColumnType::Bytea => Ok(CoreColumnType::Bytes),
+        ColumnType::Enum { .. } => Ok(CoreColumnType::String),
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
-        ColumnType::Integer => Ok(GrooveColumnType::I32),
+        ColumnType::Integer => Ok(CoreColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
-        ColumnType::BigInt => Ok(GrooveColumnType::I64),
+        ColumnType::BigInt => Ok(CoreColumnType::I64),
         ColumnType::BatchId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "BatchId columns are not supported by core schema conversion yet",
         )),
-        ColumnType::Json { .. } => Ok(GrooveColumnType::String),
+        ColumnType::Json { schema } => Ok(CoreColumnType::Json {
+            schema: schema.as_ref().map(|schema| {
+                String::from_utf8(crate::json_merge::canonical_json_bytes(schema))
+                    .expect("canonical JSON is UTF-8")
+            }),
+        }),
         ColumnType::Row { .. } => Err(err(
             format!("$.{}.{}", table.as_str(), column),
             "nested Row columns are not supported by core schema conversion yet",
@@ -2331,7 +2339,7 @@ mod tests {
                 .find(|column| column.name == "done")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::Bool
+            CoreColumnType::Bool
         );
     }
 
@@ -2353,7 +2361,7 @@ mod tests {
             .find(|column| column.name == "data")
             .unwrap();
 
-        assert_eq!(column.column_type, GrooveColumnType::Bytes);
+        assert_eq!(column.column_type, CoreColumnType::Bytes);
         assert_eq!(
             column.large_value,
             Some(crate::schema::LargeValueKind::Blob)
@@ -2378,7 +2386,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32
+            CoreColumnType::I32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -2402,7 +2410,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32.array_of()
+            CoreColumnType::I32.array_of()
         );
 
         let numeric_default_schema = SchemaBuilder::new()
@@ -2468,7 +2476,7 @@ mod tests {
                 .find(|column| column.name == "title")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            CoreColumnType::String
         );
         assert_eq!(
             default_table
@@ -2551,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_json_as_core_string_storage() {
+    fn converts_public_json_to_core_json_columns() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("events")
@@ -2584,7 +2592,12 @@ mod tests {
                 .find(|column| column.name == "payload")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            CoreColumnType::Json {
+                schema: Some(
+                    "{\"properties\":{\"kind\":{\"type\":\"string\"}},\"type\":\"object\"}"
+                        .to_owned()
+                )
+            }
         );
         assert_eq!(
             table
@@ -2593,7 +2606,7 @@ mod tests {
                 .find(|column| column.name == "metadata")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String.nullable()
+            CoreColumnType::Json { schema: None }.nullable()
         );
     }
 
@@ -2616,7 +2629,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I64
+            CoreColumnType::I64
         );
     }
 

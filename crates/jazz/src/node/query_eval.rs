@@ -11,11 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
 
-use groove::ivm::{LiteralValue, PreparedShapeId, RoutedMultisinkTerminal, StaticScanSpec};
-use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
-use groove::schema::ColumnType;
-
 use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
 #[cfg(feature = "testing")]
 use super::maintained_subscription_view::{
@@ -55,7 +50,11 @@ use crate::query::{
     Include, JoinTarget, JoinVia, Operand, OrderDirection, Predicate, Query as JazzQuery,
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
+use crate::schema::ColumnType;
 use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_index_name};
+use groove::ivm::{LiteralValue, PreparedShapeId, RoutedMultisinkTerminal, StaticScanSpec};
+use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
+use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -10588,26 +10587,24 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
     ))
 }
 
-fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
+fn coerce_prepared_binding_value(value: Value, column_type: &ColumnType) -> Value {
     match (value, column_type) {
-        (Value::Uuid(value), groove::schema::ColumnType::String) => {
+        (Value::Uuid(value), ColumnType::String | ColumnType::Json { .. }) => {
             Value::String(value.to_string())
         }
-        (Value::String(value), groove::schema::ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+        (Value::String(value), ColumnType::Uuid) => uuid::Uuid::parse_str(&value)
             .map(Value::Uuid)
             .unwrap_or(Value::String(value)),
         (Value::Nullable(Some(value)), column_type) => Value::Nullable(Some(Box::new(
             coerce_prepared_binding_value(*value, column_type),
         ))),
-        (Value::Array(values), groove::schema::ColumnType::Array(inner)) => Value::Array(
+        (Value::Array(values), ColumnType::Array(inner)) => Value::Array(
             values
                 .into_iter()
                 .map(|value| coerce_prepared_binding_value(value, inner))
                 .collect(),
         ),
-        (Value::Tuple(values), groove::schema::ColumnType::Tuple(types))
-            if values.len() == types.len() =>
-        {
+        (Value::Tuple(values), ColumnType::Tuple(types)) if values.len() == types.len() => {
             Value::Tuple(
                 values
                     .into_iter()
@@ -10616,9 +10613,7 @@ fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::Col
                     .collect(),
             )
         }
-        (value, groove::schema::ColumnType::Nullable(inner))
-            if !matches!(value, Value::Nullable(_)) =>
-        {
+        (value, ColumnType::Nullable(inner)) if !matches!(value, Value::Nullable(_)) => {
             Value::Nullable(Some(Box::new(coerce_prepared_binding_value(value, inner))))
         }
         (value, _) => value,
@@ -10783,10 +10778,10 @@ fn compare_order_value_slices(left: &[Value], right: &[Value]) -> Ordering {
     left.len().cmp(&right.len())
 }
 
-fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
+fn magic_current_column_type(column: &str) -> Option<&'static ColumnType> {
     match column {
-        "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::Uuid),
-        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
+        "$createdBy" | "$updatedBy" => Some(&ColumnType::Uuid),
+        "$createdAt" | "$updatedAt" => Some(&ColumnType::U64),
         _ => None,
     }
 }
@@ -11555,7 +11550,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use groove::ivm::{FieldRef, ProjectExpr};
-    use groove::schema::{ColumnSchema, ColumnType};
     use groove::storage::{Durability, RocksDbStorage};
 
     use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
@@ -11570,7 +11564,7 @@ mod tests {
         Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, contains,
         eq, gt, in_list, lit, lte, param,
     };
-    use crate::schema::{JazzSchema, TableSchema};
+    use crate::schema::{ColumnSchema, ColumnType, JazzSchema, TableSchema};
 
     use super::*;
 
