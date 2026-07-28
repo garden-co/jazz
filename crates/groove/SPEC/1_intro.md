@@ -19,7 +19,7 @@ are never required to understand or validate groove.
 
 Invariant digest:
 
-- `INV-TICK-1`: A public commit tick MUST advance IvmRuntime.currenttick exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
+- `INV-TICK-1`: A public commit tick MUST advance logical time exactly once and evaluate all durable nodes before evaluating or routing subscription notifications.
 
 ## Details
 
@@ -62,18 +62,19 @@ where the relevant behavior is specified, as ordinary prose with the id in
 parentheses. Finer or edge-case invariants are collected in a short _Further
 invariants_ block at the end of each subsection.
 
-**Every invariant has a status and a coverage.** These are orthogonal axes:
+**Invariant registry convention.** Every invariant has a status and a coverage.
+These are orthogonal axes:
 
-- **Status** — its design standing: `now` (in force in the current
-  implementation; the contract — the default), `target` (a committed design,
-  not yet in force), `open` (the design itself is unsettled — see the chapter's
-  _Open questions_), or `prov` (true in the implementation but not a hard
-  requirement; a conformant engine may differ).
+- **Status** — its design standing: `now` (the current contract — the default),
+  `target` (a committed design), `open` (the design itself is unsettled — see
+  the chapter's _Open questions_), or `prov` (a reference-implementation
+  property rather than a hard requirement; a conformant engine may differ).
 - **Coverage** — whether an enforcing test exists: `✓` or `untested`.
 
 Only non-`now` status appears inline in the chapters. The complete mapping from
 each id to its status, coverage, enforcing test, and implementation lives in
-the out-of-band registry (`SPEC/INVARIANTS.md`).
+the out-of-band registry (`SPEC/INVARIANTS.md`). Implementation status belongs
+in a clearly marked Details note, not in an invariant's contract text.
 
 ### 1.3 Terminology
 

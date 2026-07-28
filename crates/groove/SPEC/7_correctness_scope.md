@@ -80,12 +80,12 @@ regression signals alongside the oracle. The correctness contract itself is
 _multiset_ equality — the consolidated sum of §7.1, independent of delivery
 order.
 
-With identical inputs, the reference implementation replays to the same deltas
-in the same order; this is a reference-implementation property, not part of the
-contract. As a result, a divergence from the naive recompute is always a real
-bug, never noise. Cross-operator delivery _order_ is reproducible but not itself
-a normative guarantee — depend on the consolidated result, not on the order
-deltas arrive in.
+**Reference-implementation note.** With identical inputs, the reference
+implementation replays to the same deltas in the same order; this is not part
+of the contract. A divergence from the naive recompute is therefore always a
+real bug, never noise. Cross-operator delivery _order_ is reproducible but not
+itself a normative guarantee — depend on the consolidated result, not on the
+order deltas arrive in.
 
 ## Open Questions
 
