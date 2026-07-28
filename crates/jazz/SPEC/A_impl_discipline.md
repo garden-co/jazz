@@ -108,22 +108,11 @@ results. Metrics are _not_ one unified struct: they are split across
 
 ### A.8 Canonical gates
 
-The canonical Rust gate set is part of implementation discipline. A branch that
-changes Rust/core behavior should be able to pass:
-
-- `cargo test -p jazz -j 2`
-- `cargo test -p groove -j 2`
-- `cargo test -p jazz-tools --features test -j 2` (the public API gate named in
-  `crates/jazz-tools/TESTING_GUIDELINES.md`)
-- `cargo test -p jazz-server -j 2`
-- `cargo check -p jazz-sim --benches`
-
-`cargo check -p jazz-sim --benches` is always in the set because it is cheap and
-catches public enum/API drift in benchmarks before smoke or release work. Run
-`dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage, or
-benchmark harnesses. A change to a public `jazz` type additionally gates the
-full workspace, including examples, because public type changes can break
-downstream crates without changing core tests.
+The canonical gate set is part of implementation discipline. Keep the gate list
+in one SPEC location: appendix D mirrors the operational source of truth in
+`.claude/CLAUDE.md`, including the ordinary full gate set, conditional benchmark
+smoke, sensitive-data guard, and additional full-workspace gate for public
+`jazz` type changes.
 
 This discipline was added after four concrete misses:
 

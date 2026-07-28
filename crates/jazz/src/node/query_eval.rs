@@ -5727,6 +5727,25 @@ where
         {
             return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
         }
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
+    }
+
+    /// The query-program half of candidate write-policy evaluation.
+    ///
+    /// Production callers must retain the `inherits` fallback in
+    /// `write_policy_query_allows_insert_candidate` until inherited write
+    /// authorization is fully lowered. The differential harness invokes this
+    /// primitive directly in test builds so that fallback cannot hide a mismatch.
+    fn write_policy_query_allows_insert_candidate_lowered(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
         let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
@@ -5789,6 +5808,20 @@ where
             access_paths,
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_policy_query_allows_insert_candidate_lowered_for_test(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        self.write_policy_query_allows_insert_candidate_lowered(
+            table, policy, row_uuid, cells, identity,
+        )
     }
 
     fn write_policy_query_program_allows(
@@ -7755,6 +7788,17 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity(tx_id, shape, binding, AuthorId::SYSTEM)
+    }
+
+    /// Evaluate a validated query inside an open exclusive transaction as `identity`.
+    pub fn tx_query_for_identity(
+        &mut self,
+        tx_id: OpenTxId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table(&query.table)?.clone();
@@ -7762,7 +7806,7 @@ where
             tx_id,
             shape,
             binding,
-            AuthorId::SYSTEM,
+            identity,
             CurrentQueryProgramOutput::AppRows,
         )?;
         let deltas = self
@@ -9812,6 +9856,8 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::U16(left), Value::U16(right)) => left.cmp(right),
         (Value::U32(left), Value::U32(right)) => left.cmp(right),
         (Value::U64(left), Value::U64(right)) => left.cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.cmp(right),
         (Value::F64(left), Value::F64(right)) => left.total_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
         (Value::String(left), Value::String(right)) => left.cmp(right),
@@ -9887,6 +9933,8 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),

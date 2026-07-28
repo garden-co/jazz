@@ -2090,6 +2090,29 @@ where
             .map_err(Into::into)
     }
 
+    /// Read a prepared query inside an owned exclusive transaction handle.
+    pub fn exclusive_all(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+    }
+
+    /// Read a prepared query inside an owned exclusive transaction handle as `author`.
+    pub fn exclusive_all_for_identity(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
+            .map_err(Into::into)
+    }
+
     /// Stage a full row value inside an owned exclusive transaction handle.
     pub fn exclusive_write(
         &self,
@@ -2139,6 +2162,31 @@ where
             .map_err(Into::into)
     }
 
+    /// Stage a restore inside an owned exclusive transaction handle, applying defaults for omitted columns.
+    pub fn exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        // Restore needs one content version and one deletion-register version:
+        // `tx_write` rejects a version carrying both. The layers have separate
+        // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
+        // Keep this staged form aligned with the committed restore path.
+        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(
+            tx_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
@@ -2151,6 +2199,15 @@ where
         Ok(tx_id)
     }
 
+    /// Abandon an owned exclusive transaction handle.
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .abandon_tx(open_tx_id)
+            .map_err(Into::into)
+    }
+
     pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
         self.node
             .node
@@ -2159,7 +2216,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Restore a row locally. Data is required by the public API contract.
+    /// Restore a row locally, applying defaults for omitted columns.
     ///
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
@@ -2180,9 +2237,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
@@ -2226,9 +2280,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
@@ -2295,9 +2346,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2331,9 +2379,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -6628,12 +6673,12 @@ where
         Ok(())
     }
 
-    /// Stage a restore with explicit row data.
+    /// Stage a restore, applying defaults for omitted columns.
     pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore with explicit row data and millisecond provenance time.
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
     pub fn restore_at_ms(
         &mut self,
         table: &str,
@@ -6651,9 +6696,6 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.db.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.db.node.node.borrow_mut();

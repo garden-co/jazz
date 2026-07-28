@@ -12,10 +12,110 @@ pub(super) struct ViewEvaluationContext {
     pub(super) tx_rows: BTreeMap<TxId, Option<StoredTransaction>>,
 }
 
+/// Write-policy clause role evaluated by the interpreter/lowered differential harness.
+///
+/// This is test-only because callers must not be able to select an authorization
+/// implementation in production.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WritePolicyDifferentialOperation {
+    Insert,
+    UpdateUsing,
+    UpdateCheck,
+    Delete,
+}
+
+/// The two independently-evaluated verdicts produced by the differential harness.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WritePolicyDifferentialVerdicts {
+    pub(crate) interpreter: bool,
+    pub(crate) lowered: bool,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Evaluate one write-policy clause through both authorization implementations.
+    ///
+    /// Internal coverage is necessary here: the two implementations are not
+    /// separately observable through the public client API, and this seam must
+    /// remain unavailable outside test builds. `candidate` is required for
+    /// insert/update-check clauses; `old_row` is required for update-using/delete
+    /// clauses. The lowered half intentionally bypasses the production inherited
+    /// insert fallback so the harness can detect divergence in that remaining fork.
+    #[cfg(test)]
+    pub(crate) fn evaluate_write_policy_differential_for_test(
+        &mut self,
+        operation: WritePolicyDifferentialOperation,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        candidate: Option<&BTreeMap<String, Value>>,
+        old_row: Option<&CurrentRow>,
+        identity: AuthorId,
+    ) -> Result<WritePolicyDifferentialVerdicts, Error> {
+        let (interpreter, cells) = match operation {
+            WritePolicyDifferentialOperation::Insert => {
+                let cells = candidate.ok_or(Error::InvalidStoredValue(
+                    "insert differential evaluation requires a candidate row",
+                ))?;
+                (
+                    self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells)?,
+                    cells.clone(),
+                )
+            }
+            WritePolicyDifferentialOperation::UpdateCheck => {
+                let cells = candidate.ok_or(Error::InvalidStoredValue(
+                    "update-check differential evaluation requires a candidate row",
+                ))?;
+                let mut effective_cells = old_row
+                    .into_iter()
+                    .flat_map(|row| {
+                        table.columns.iter().filter_map(|column| {
+                            row.cell(table, &column.name)
+                                .map(|value| (column.name.clone(), value))
+                        })
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                effective_cells.extend(cells.clone());
+                (
+                    self.policy_allows(table, policy, row_uuid, identity, |column| {
+                        cells.get(column).cloned().or_else(|| {
+                            old_row.and_then(|row| policy_join_row_value(row, table, column))
+                        })
+                    })?,
+                    effective_cells,
+                )
+            }
+            WritePolicyDifferentialOperation::UpdateUsing
+            | WritePolicyDifferentialOperation::Delete => {
+                let row = old_row.ok_or(Error::InvalidStoredValue(
+                    "old-row differential evaluation requires an existing row",
+                ))?;
+                (
+                    self.policy_allows_current_row(table, policy, row, identity)?,
+                    table
+                        .columns
+                        .iter()
+                        .filter_map(|column| {
+                            row.cell(table, &column.name)
+                                .map(|value| (column.name.clone(), value))
+                        })
+                        .collect(),
+                )
+            }
+        };
+        let lowered = self.write_policy_query_allows_insert_candidate_lowered_for_test(
+            table, policy, row_uuid, &cells, identity,
+        )?;
+        Ok(WritePolicyDifferentialVerdicts {
+            interpreter,
+            lowered,
+        })
+    }
+
     pub(super) fn write_policy_allows_version_record(
         &mut self,
         version: &VersionRecord,
@@ -981,7 +1081,26 @@ fn policy_values_equal(left: &Value, right: &Value) -> bool {
         (left, Value::Nullable(Some(right))) => policy_values_equal(left, right),
         (Value::Uuid(left), Value::String(right)) => uuid::Uuid::parse_str(right) == Ok(*left),
         (Value::String(left), Value::Uuid(right)) => uuid::Uuid::parse_str(left) == Ok(*right),
-        _ => left == right,
+        _ => match (policy_integer_value(left), policy_integer_value(right)) {
+            // i128 represents every core integer exactly, including u64 values
+            // greater than i64::MAX. Floats intentionally do not participate in
+            // this normalization because their precision makes integer/float
+            // equality surprising at large magnitudes.
+            (Some(left), Some(right)) => left == right,
+            _ => left == right,
+        },
+    }
+}
+
+fn policy_integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::U8(value) => Some(i128::from(*value)),
+        Value::U16(value) => Some(i128::from(*value)),
+        Value::U32(value) => Some(i128::from(*value)),
+        Value::U64(value) => Some(i128::from(*value)),
+        Value::I32(value) => Some(i128::from(*value)),
+        Value::I64(value) => Some(i128::from(*value)),
+        _ => None,
     }
 }
 
@@ -1021,7 +1140,8 @@ fn policy_join_correlations_allow(
         let Some(source_value) = column_value(&correlation.source_column) else {
             return false;
         };
-        policy_join_row_value(join_row, join_table, &correlation.join_column) == Some(source_value)
+        policy_join_row_value(join_row, join_table, &correlation.join_column)
+            .is_some_and(|join_value| policy_values_equal(&join_value, &source_value))
     })
 }
 
@@ -1056,6 +1176,10 @@ pub(super) fn policy_value_key(value: &Value) -> Option<Vec<u8>> {
         }
         Value::U64(value) => {
             bytes.push(3);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(15);
             bytes.extend(value.to_be_bytes());
         }
         Value::I64(value) => {
