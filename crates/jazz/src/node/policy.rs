@@ -355,6 +355,17 @@ where
     }
 }
 
+pub(super) fn policy_join_row_value(
+    row: &CurrentRow,
+    table: &TableSchema,
+    column: &str,
+) -> Option<Value> {
+    if column == "id" {
+        Some(Value::Uuid(row.row_uuid().0))
+    } else {
+        row.cell(table, column)
+    }
+}
 fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSchema) -> bool {
     source.name == target.name
         && source.columns.len() == target.columns.len()
@@ -367,4 +378,80 @@ fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSch
                     && source.column_type == target.column_type
                     && source.large_value == target.large_value
             })
+}
+pub(super) fn policy_value_key(value: &Value) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match value {
+        Value::U8(value) => {
+            bytes.push(0);
+            bytes.push(*value);
+        }
+        Value::U16(value) => {
+            bytes.push(1);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::U32(value) => {
+            bytes.push(2);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::U64(value) => {
+            bytes.push(3);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(15);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::I64(value) => {
+            bytes.push(14);
+            bytes.extend(value.to_be_bytes());
+        }
+        Value::F64(value) if !value.is_nan() => {
+            bytes.push(4);
+            bytes.extend(value.to_bits().to_be_bytes());
+        }
+        Value::Bool(value) => {
+            bytes.push(5);
+            bytes.push(u8::from(*value));
+        }
+        Value::String(value) => {
+            bytes.push(6);
+            bytes.extend(value.as_bytes());
+        }
+        Value::Bytes(value) => {
+            bytes.push(7);
+            bytes.extend(value);
+        }
+        Value::Uuid(value) => {
+            bytes.push(8);
+            bytes.extend(value.as_bytes());
+        }
+        Value::Enum(value) => {
+            bytes.push(9);
+            bytes.push(*value);
+        }
+        Value::Tuple(values) => {
+            bytes.push(10);
+            for value in values {
+                let child = policy_value_key(value)?;
+                bytes.extend((child.len() as u64).to_be_bytes());
+                bytes.extend(child);
+            }
+        }
+        Value::Array(values) => {
+            bytes.push(11);
+            for value in values {
+                let child = policy_value_key(value)?;
+                bytes.extend((child.len() as u64).to_be_bytes());
+                bytes.extend(child);
+            }
+        }
+        Value::Nullable(None) => bytes.push(12),
+        Value::Nullable(Some(value)) => {
+            bytes.push(13);
+            bytes.extend(policy_value_key(value)?);
+        }
+        Value::F64(_) => return None,
+    }
+    Some(bytes)
 }

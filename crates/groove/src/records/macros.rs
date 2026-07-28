@@ -17,6 +17,7 @@ pub enum FieldKind {
     U64,
     I64,
     U32,
+    I32,
     F64,
     U8,
     Bool,
@@ -36,6 +37,7 @@ impl FieldKind {
             (Self::U64, ValueType::U64)
                 | (Self::I64, ValueType::I64)
                 | (Self::U32, ValueType::U32)
+                | (Self::I32, ValueType::I32)
                 | (Self::F64, ValueType::F64)
                 | (Self::U8, ValueType::U8)
                 | (Self::Bool, ValueType::Bool)
@@ -129,6 +131,36 @@ impl RecordField for i64 {
             });
         }
         read_exact_array::<8>(bytes).map(|bytes| (u64::from_be_bytes(bytes) ^ (1_u64 << 63)) as i64)
+    }
+}
+
+impl RecordField for i32 {
+    fn read(record: &BorrowedRecord<'_>, idx: usize) -> Result<Self, Error> {
+        record.get_i32(idx)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::I32(*self)
+    }
+
+    const COLUMN_KIND: FieldKind = FieldKind::I32;
+
+    fn read_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+        if value_type != &ValueType::I32 {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::I32,
+            });
+        }
+        read_exact_array::<4>(bytes).map(i32::from_le_bytes)
+    }
+
+    fn read_tuple_raw(bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
+        if value_type != &ValueType::I32 {
+            return Err(Error::TypeMismatch {
+                expected: ValueType::I32,
+            });
+        }
+        read_exact_array::<4>(bytes).map(|bytes| (u32::from_be_bytes(bytes) ^ (1_u32 << 31)) as i32)
     }
 }
 

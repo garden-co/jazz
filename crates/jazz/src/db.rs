@@ -55,7 +55,8 @@ use crate::protocol_limits::{
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery, relation_query_to_query,
+    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+    relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
@@ -875,7 +876,6 @@ where
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         Ok(QueryAttachment {
@@ -896,7 +896,6 @@ where
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
@@ -980,8 +979,17 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let read_tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                author,
+                &opts.read_view,
+            )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -1098,7 +1106,16 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
-        ensure_supported_subscription_shape(shape)?;
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                opts.tier,
+                identity,
+                &opts.read_view,
+            )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node
@@ -2112,6 +2129,31 @@ where
             .map_err(Into::into)
     }
 
+    /// Stage a restore inside an owned exclusive transaction handle, applying defaults for omitted columns.
+    pub fn exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        // Restore needs one content version and one deletion-register version:
+        // `tx_write` rejects a version carrying both. The layers have separate
+        // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
+        // Keep this staged form aligned with the committed restore path.
+        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(
+            tx_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
@@ -2141,7 +2183,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Restore a row locally. Data is required by the public API contract.
+    /// Restore a row locally, applying defaults for omitted columns.
     ///
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
@@ -2162,9 +2204,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
@@ -2208,9 +2247,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
@@ -2277,9 +2313,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2313,9 +2346,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -4668,19 +4698,80 @@ where
                             ast,
                         } => {
                             if let Err(message) = validate_shape_ast_size(&ast) {
-                                let _ = message;
-                                drop_peer_request(&self.node);
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if ensure_supported_register_shape_options(&opts).is_err() {
-                                drop_peer_request(&self.node);
+                            if let Err(error) = ensure_supported_register_shape_options(&opts) {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    error.message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if let Some(query) = ast.query() {
-                                if ensure_supported_maintained_coverage_query_shape(query).is_err()
-                                {
+                            let shape_validation = {
+                                let node = self.node.borrow();
+                                validate_shape_ast_for_registration(&node, shape_id, &ast)
+                            };
+                            let shape = match shape_validation {
+                                Ok(Some(shape)) => Some(shape),
+                                Ok(None) => None,
+                                Err(_) => {
                                     drop_peer_request(&self.node);
                                     continue;
+                                }
+                            };
+                            if let Some(shape) = &shape {
+                                if shape.params().is_empty() {
+                                    let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
+                                    let binding = match binding {
+                                        Ok(binding) => binding,
+                                        Err(_) => {
+                                            drop_peer_request(&self.node);
+                                            continue;
+                                        }
+                                    };
+                                    let supported = self
+                                        .node
+                                        .borrow_mut()
+                                        .ensure_peer_maintained_subscription_view_supported(
+                                            shape,
+                                            &binding,
+                                            opts.tier,
+                                            ingest_context.identity,
+                                            &opts.read_view,
+                                        );
+                                    if let Err(crate::node::Error::QueryCapability(detail)) =
+                                        supported
+                                    {
+                                        let subscription = SubscriptionKey {
+                                            shape_id,
+                                            binding_id: binding.binding_id(),
+                                            read_view: opts.read_view_key(),
+                                        };
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    } else if supported.is_err() {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
                                 }
                             }
                             let registration_key = (shape_id, opts.read_view_key());
@@ -4726,10 +4817,6 @@ where
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 continue;
                             };
-                            if ensure_supported_subscription_shape(&shape).is_err() {
-                                drop_peer_request(&self.node);
-                                continue;
-                            }
                             let value_map = shape
                                 .params()
                                 .keys()
@@ -4763,6 +4850,28 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let supported = self
+                                .node
+                                .borrow_mut()
+                                .ensure_peer_maintained_subscription_view_supported(
+                                    &shape,
+                                    &binding,
+                                    opts.tier,
+                                    ingest_context.identity,
+                                    &opts.read_view,
+                                );
+                            if let Err(crate::node::Error::QueryCapability(detail)) = supported {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    subscription,
+                                    detail,
+                                )
+                                .map_err(transport_error)?;
+                                continue;
+                            } else if supported.is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
@@ -4786,14 +4895,12 @@ where
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(crate::node::Error::QueryCapability(detail)) => {
-                                        self.transport
-                                            .send(SyncMessage::SubscribeRejected {
-                                                subscription,
-                                                reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                                                    detail,
-                                                },
-                                            })
-                                            .map_err(transport_error)?;
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
                                         continue;
                                     }
                                     Err(error) => return Err(error.into()),
@@ -6163,15 +6270,6 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
     ensure_supported_read_view(opts)
 }
 
-fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
-    ensure_supported_maintained_coverage_query_shape(shape.query())
-}
-
-fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
-    let _ = query;
-    Ok(())
-}
-
 fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
@@ -6189,6 +6287,39 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_shape_ast_for_registration<S>(
+    node: &NodeState<S>,
+    shape_id: ShapeId,
+    ast: &ShapeAst,
+) -> Result<Option<ValidatedQuery>, crate::node::Error>
+where
+    S: OrderedKvStorage,
+{
+    node.validate_shape_ast_for_registration(shape_id, ast)
+}
+
+fn send_unsupported_shape_capability_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    detail: String,
+) -> Result<(), TransportError> {
+    transport.send(SyncMessage::SubscribeRejected {
+        subscription,
+        reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    })
+}
+
+fn register_shape_rejection_subscription(
+    shape_id: ShapeId,
+    read_view: ReadViewKey,
+) -> SubscriptionKey {
+    SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view,
+    }
 }
 
 fn coverage_key(
@@ -6414,12 +6545,12 @@ where
         Ok(())
     }
 
-    /// Stage a restore with explicit row data.
+    /// Stage a restore, applying defaults for omitted columns.
     pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore with explicit row data and millisecond provenance time.
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
     pub fn restore_at_ms(
         &mut self,
         table: &str,
@@ -6437,9 +6568,6 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.db.apply_insert_defaults(table, cells)?;
         let (content_parents, deletion_parents) = {
             let mut node = self.db.node.node.borrow_mut();

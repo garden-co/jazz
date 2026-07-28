@@ -4137,6 +4137,30 @@ where
         Ok(())
     }
 
+    pub(crate) fn validate_shape_ast_for_registration(
+        &self,
+        shape_id: ShapeId,
+        ast: &ShapeAst,
+    ) -> Result<Option<ValidatedQuery>, Error> {
+        if ast.version != ShapeAst::VERSION {
+            return Err(Error::InvalidStoredValue("unsupported query AST version"));
+        }
+        let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
+            return Ok(None);
+        };
+        let shape = match &ast.body {
+            ShapeBody::Query(query) => {
+                query.validate_with_schema_version(&schema.schema, ast.schema_version)?
+            }
+            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
+                .validate_with_schema_version(&schema.schema, ast.schema_version)?,
+        };
+        if shape.shape_id() != shape_id {
+            return Err(Error::InvalidStoredValue("shape id does not match AST"));
+        }
+        Ok(Some(shape))
+    }
+
     pub(super) fn drain_parked_shape_registrations(&mut self) -> Result<(), Error> {
         let ready = self
             .parking
@@ -7860,6 +7884,25 @@ where
         Ok(plan)
     }
 
+    pub(crate) fn ensure_peer_maintained_subscription_view_supported(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<(), Error> {
+        self.compile_current_query_program_for_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn mark_peer_maintained_query_shape_cache(
         &mut self,
         shape: &ValidatedQuery,
@@ -9839,6 +9882,8 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::U16(left), Value::U16(right)) => left.cmp(right),
         (Value::U32(left), Value::U32(right)) => left.cmp(right),
         (Value::U64(left), Value::U64(right)) => left.cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.cmp(right),
         (Value::F64(left), Value::F64(right)) => left.total_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
         (Value::String(left), Value::String(right)) => left.cmp(right),
@@ -9914,6 +9959,8 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),

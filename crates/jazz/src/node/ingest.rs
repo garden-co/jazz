@@ -4818,6 +4818,8 @@ fn counter_value_to_i128(value: &Value) -> Result<i128, Error> {
         Value::U16(value) => Ok(i128::from(*value)),
         Value::U32(value) => Ok(i128::from(*value)),
         Value::U64(value) => Ok(i128::from(*value)),
+        Value::I32(value) => Ok(i128::from(*value)),
+        Value::I64(value) => Ok(i128::from(*value)),
         _ => Err(Error::InvalidStoredValue("counter value must be integer")),
     }
 }
@@ -4838,6 +4840,12 @@ fn counter_value_from_i128(
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
         groove::schema::ColumnType::U64 => u64::try_from(value)
             .map(Value::U64)
+            .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
+        groove::schema::ColumnType::I32 => i32::try_from(value)
+            .map(Value::I32)
+            .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
+        groove::schema::ColumnType::I64 => i64::try_from(value)
+            .map(Value::I64)
             .map_err(|_| Error::InvalidStoredValue("counter value out of range")),
         _ => Err(Error::InvalidStoredValue(
             "counter strategy requires integer column",

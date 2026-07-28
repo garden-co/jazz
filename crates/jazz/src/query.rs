@@ -697,7 +697,8 @@ fn runtime_value_object_to_record_value(
             .map(Value::Uuid)
             .map_err(|_| relation_unification_error("invalid Uuid relation literal")),
         "Bytea" => Ok(Value::Bytes(runtime_bytea_value(value)?)),
-        "Integer" | "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
+        "Integer" => Ok(Value::I32(runtime_i32_value(value)?)),
+        "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
         "BigInt" => Ok(Value::I64(runtime_i64_value(value)?)),
         "Double" => Ok(Value::F64(runtime_f64_value(value)?)),
         "Array" => {
@@ -763,6 +764,22 @@ fn runtime_u64_value(value: Option<&serde_json::Value>) -> Result<u64, QueryErro
         }),
         _ => Err(relation_unification_error(
             "integer relation literal requires a numeric value",
+        )),
+    }
+}
+
+fn runtime_i32_value(value: Option<&serde_json::Value>) -> Result<i32, QueryError> {
+    match value {
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or_else(|| {
+                relation_unification_error(
+                    "Integer relation literal requires a signed 32-bit integer",
+                )
+            }),
+        _ => Err(relation_unification_error(
+            "Integer relation literal requires an integer value",
         )),
     }
 }
@@ -2804,6 +2821,7 @@ fn is_orderable(column_type: &ColumnType) -> bool {
             | ColumnType::U16
             | ColumnType::U32
             | ColumnType::U64
+            | ColumnType::I32
             | ColumnType::I64
             | ColumnType::F64
             | ColumnType::Uuid
@@ -2865,6 +2883,7 @@ fn is_numeric(column_type: &ColumnType) -> bool {
             | ColumnType::U16
             | ColumnType::U32
             | ColumnType::U64
+            | ColumnType::I32
             | ColumnType::I64
             | ColumnType::F64
     )
@@ -3496,6 +3515,7 @@ fn value_type(value: &Value) -> ColumnType {
         Value::U16(_) => ColumnType::U16,
         Value::U32(_) => ColumnType::U32,
         Value::U64(_) => ColumnType::U64,
+        Value::I32(_) => ColumnType::I32,
         Value::I64(_) => ColumnType::I64,
         Value::F64(_) => ColumnType::F64,
         Value::Bool(_) => ColumnType::Bool,
@@ -3519,6 +3539,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         | (Value::U16(_), ColumnType::U16)
         | (Value::U32(_), ColumnType::U32)
         | (Value::U64(_), ColumnType::U64)
+        | (Value::I32(_), ColumnType::I32)
         | (Value::I64(_), ColumnType::I64)
         | (Value::F64(_), ColumnType::F64)
         | (Value::Bool(_), ColumnType::Bool)
@@ -3560,6 +3581,10 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::U64(value) => {
             bytes.push(4);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(15);
             bytes.extend_from_slice(&value.to_be_bytes());
         }
         Value::I64(value) => {
@@ -3622,6 +3647,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         ColumnType::U16 => bytes.push(2),
         ColumnType::U32 => bytes.push(3),
         ColumnType::U64 => bytes.push(4),
+        ColumnType::I32 => bytes.push(15),
         ColumnType::I64 => bytes.push(14),
         ColumnType::F64 => bytes.push(5),
         ColumnType::Bool => bytes.push(6),
