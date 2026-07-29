@@ -109,7 +109,7 @@ pub struct NodeOpenReceipt {
     pub recover_storage: Duration,
     /// Recover close markers, aliases, branches, and transaction-clock bounds.
     pub recover_catalogue_state: Duration,
-    /// Validate every persisted global-current and ahead-current row.
+    /// Validate persisted current rows and rebuild the ahead-current indexes.
     pub validate_current_rows: Duration,
     /// Recover the accepted-global-sequence watermark set.
     pub recover_global_sequences: Duration,
@@ -119,8 +119,6 @@ pub struct NodeOpenReceipt {
     pub recover_unclean_close: Duration,
     /// Recover persisted maintained-query known-state facts.
     pub recover_known_state: Duration,
-    /// Rebuild the in-memory ahead-current key indexes.
-    pub rebuild_ahead_current: Duration,
     /// Ensure aliases and persist any missing base catalogue records.
     pub finalize_catalogue: Duration,
     /// Current rows decoded by startup layout validation.
@@ -767,20 +765,6 @@ where
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
-        }
-        #[cfg(feature = "testing")]
-        let started = receipt.as_ref().map(|_| Instant::now());
-        #[cfg(feature = "testing")]
-        if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
-        } else {
-            node.rebuild_ahead_current_keys()?;
-        }
-        #[cfg(not(feature = "testing"))]
-        node.rebuild_ahead_current_keys()?;
-        #[cfg(feature = "testing")]
-        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
-            receipt.rebuild_ahead_current = started.elapsed();
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
@@ -1632,86 +1616,6 @@ where
         self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
     }
 
-    fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
-        #[cfg(feature = "testing")]
-        {
-            self.rebuild_ahead_current_keys_inner(None)
-        }
-        #[cfg(not(feature = "testing"))]
-        self.rebuild_ahead_current_keys_inner()
-    }
-
-    #[cfg(feature = "testing")]
-    fn rebuild_ahead_current_keys_with_receipt(
-        &mut self,
-        receipt: &mut NodeOpenReceipt,
-    ) -> Result<(), Error> {
-        self.rebuild_ahead_current_keys_inner(Some(receipt))
-    }
-
-    fn rebuild_ahead_current_keys_inner(
-        &mut self,
-        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
-    ) -> Result<(), Error> {
-        self.ahead_current_keys.clear();
-        self.ahead_current_rows.clear();
-        self.ahead_current_latest.clear();
-        #[cfg(feature = "testing")]
-        let mut entries = 0usize;
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_tables = table.ahead_current_storage_tables();
-            let content_rows = self
-                .database
-                .primary_key_scan_raw(&storage_tables[0].name, &[])?
-                .into_iter()
-                .map(|raw| raw.raw().to_vec())
-                .collect::<Vec<_>>();
-            let content_descriptor = storage_tables[0].record_schema();
-            for raw in content_rows {
-                #[cfg(feature = "testing")]
-                {
-                    entries += 1;
-                }
-                let record = BorrowedRecord::new(&raw, &content_descriptor);
-                self.insert_ahead_current_key(
-                    table.name.clone(),
-                    VersionLayer::Content,
-                    RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                    TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                    NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
-                );
-            }
-            let deletion_descriptor = storage_tables[1].record_schema();
-            let deletion_rows = self
-                .database
-                .primary_key_scan_raw(&storage_tables[1].name, &[])?
-                .into_iter()
-                .map(|raw| raw.raw().to_vec())
-                .collect::<Vec<_>>();
-            for raw in deletion_rows {
-                #[cfg(feature = "testing")]
-                {
-                    entries += 1;
-                }
-                let record = BorrowedRecord::new(&raw, &deletion_descriptor);
-                self.insert_ahead_current_key(
-                    table.name.clone(),
-                    VersionLayer::Deletion,
-                    RowUuid(record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                    TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                    NodeAlias(
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                    ),
-                );
-            }
-        }
-        #[cfg(feature = "testing")]
-        if let Some(receipt) = &mut receipt {
-            receipt.ahead_current_entries = entries;
-        }
-        Ok(())
-    }
-
     fn insert_ahead_current_key(
         &mut self,
         table: String,
@@ -1731,6 +1635,37 @@ where
                 }
             })
             .or_insert((tx_time, tx_node_alias));
+    }
+
+    fn replace_ahead_current_keys(
+        &mut self,
+        mut keys: Vec<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
+    ) {
+        keys.sort_unstable();
+        keys.dedup();
+
+        let mut rows = keys
+            .iter()
+            .map(|(table, _, row_uuid, _, _)| (table.clone(), *row_uuid))
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows.dedup();
+
+        let mut latest = Vec::new();
+        for (table, layer, row_uuid, tx_time, tx_node_alias) in &keys {
+            let latest_key = (table.clone(), *layer, *row_uuid);
+            if let Some((previous_key, previous_value)) = latest.last_mut()
+                && *previous_key == latest_key
+            {
+                *previous_value = (*tx_time, *tx_node_alias);
+            } else {
+                latest.push((latest_key, (*tx_time, *tx_node_alias)));
+            }
+        }
+
+        self.ahead_current_rows = rows.into_iter().collect();
+        self.ahead_current_latest = latest.into_iter().collect();
+        self.ahead_current_keys = keys.into_iter().collect();
     }
 
     fn remove_ahead_current_key(
