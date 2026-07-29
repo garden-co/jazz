@@ -1635,7 +1635,7 @@ where
     fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         {
-            return self.rebuild_ahead_current_keys_inner(None);
+            self.rebuild_ahead_current_keys_inner(None)
         }
         #[cfg(not(feature = "testing"))]
         self.rebuild_ahead_current_keys_inner()
