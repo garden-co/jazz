@@ -1736,7 +1736,7 @@ fn core_query_condition(
             column_operand(),
             values
                 .iter()
-                .map(|value| literal_operand(value))
+                .map(&literal_operand)
                 .collect::<Result<Vec<_>>>()?,
         ),
         PublicCondition::IsNull { .. } => jazz::query::is_null(column_operand()),
