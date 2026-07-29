@@ -5003,3 +5003,59 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
         ))
     ));
 }
+
+#[test]
+fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_binding() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("updated_at", ColumnType::U64),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("documents", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+
+    for index in 0..100_u64 {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("documents", row(index as u8), index).cells(BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner_a.0)),
+                ("updated_at".to_owned(), Value::U64(index)),
+            ])),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("documents", row((index + 100) as u8), index + 100)
+                .cells(BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(owner_b.0)),
+                    ("updated_at".to_owned(), Value::U64(index + 100)),
+                ])),
+        );
+    }
+
+    let shape = Query::from("documents")
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(100)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let mut peer_b = PeerState::for_author(owner_b);
+    let update_b = peer_b
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    let mut peer_a = PeerState::for_author(owner_a);
+    let update_a = peer_a
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+
+    let (adds_a, removes_a) = canonical_view_update_rows(&update_a);
+    let (adds_b, removes_b) = canonical_view_update_rows(&update_b);
+    assert!(removes_a.is_empty());
+    assert!(removes_b.is_empty());
+    assert_eq!(adds_a.len(), 100, "owner A should receive its own full window");
+    assert_eq!(adds_b.len(), 100, "owner B should receive its own full window");
+}
