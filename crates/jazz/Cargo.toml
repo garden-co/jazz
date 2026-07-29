@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "merge_back_cost"
 harness = false
+
+[[bench]]
+name = "relation_include_delivery"
+harness = false
