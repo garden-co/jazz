@@ -1,7 +1,7 @@
 #![cfg(feature = "test-utils")]
 
-use jazz_tools::row_input;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
     WriteContext,
 };
@@ -26,7 +26,7 @@ fn nullable_schema() -> Schema {
         .build()
 }
 
-fn profiles_query() -> jazz_tools::Query {
+fn profiles_query() -> jazz::tools::Query {
     QueryBuilder::new("profiles")
         .select(&["name", "age", "visits", "active", "manager_id", "tags"])
         .build()

@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use jazz::groove::records::EnumSchema;
-use jazz::groove::schema::ColumnType;
-use jazz::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
+use crate::groove::records::EnumSchema;
+use crate::groove::schema::ColumnType;
+use crate::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,7 +397,7 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> AdminSchemaConver
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz::groove::schema::ColumnType;
+    use crate::groove::schema::ColumnType;
     use serde_json::json;
 
     #[test]

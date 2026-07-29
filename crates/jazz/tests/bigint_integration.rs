@@ -4,9 +4,9 @@ mod support;
 
 use std::time::Duration;
 
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 use support::{

@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
     QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
 };

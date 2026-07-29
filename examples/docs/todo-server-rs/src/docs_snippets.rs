@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz_tools::{
+use jazz::tools::{
     DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder, Session,
     TablePolicies, Value,
 };
@@ -17,7 +17,7 @@ fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 // #region backend-request-session-rust
@@ -100,7 +100,7 @@ pub fn recursive_inherits_policy() -> TablePolicies {
 // #endregion permissions-recursive-inherits-rust
 
 // #region reading-oneshot-rust
-pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todos_oneshot(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -110,14 +110,14 @@ pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_tools::Result<usize
 // #region reading-subscriptions-rust
 pub async fn subscribe_todos(
     client: &JazzClient,
-) -> jazz_tools::Result<jazz_tools::SubscriptionStream> {
+) -> jazz::tools::Result<jazz::tools::SubscriptionStream> {
     let query = QueryBuilder::new("todos").build();
     client.subscribe(query).await
 }
 // #endregion reading-subscriptions-rust
 
 // #region reading-durability-tier-rust
-pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client
         .query(query, Some(DurabilityTier::EdgeServer))
@@ -127,7 +127,7 @@ pub async fn read_todos_at_edge_durability(client: &JazzClient) -> jazz_tools::R
 // #endregion reading-durability-tier-rust
 
 // #region reading-filters-rust
-pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todos_with_filters(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .build();
@@ -138,7 +138,7 @@ pub async fn read_todos_with_filters(client: &JazzClient) -> jazz_tools::Result<
 // #endregion reading-filters-rust
 
 // #region reading-sorting-rust
-pub async fn read_todos_sorted(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todos_sorted(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .order_by("title")
@@ -154,7 +154,7 @@ pub async fn read_todo_page(
     client: &JazzClient,
     page_size: usize,
     page: usize,
-) -> jazz_tools::Result<usize> {
+) -> jazz::tools::Result<usize> {
     let offset = page.saturating_sub(1) * page_size;
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
@@ -169,7 +169,7 @@ pub async fn read_todo_page(
 // #endregion reading-pagination-rust
 
 // #region reading-includes-rust
-pub async fn read_todos_with_project(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todos_with_project(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .join("projects")
@@ -182,7 +182,7 @@ pub async fn read_todos_with_project(client: &JazzClient) -> jazz_tools::Result<
 // #endregion reading-includes-rust
 
 // #region reading-reverse-relation-rust
-pub fn build_projects_with_todos_query() -> jazz_tools::Query {
+pub fn build_projects_with_todos_query() -> jazz::tools::Query {
     QueryBuilder::new("projects")
         .with_array("todos_via_project", |sub| {
             sub.from("todos")
@@ -194,7 +194,7 @@ pub fn build_projects_with_todos_query() -> jazz_tools::Query {
 // #endregion reading-reverse-relation-rust
 
 // #region reading-require-includes-rust
-pub fn build_todos_with_required_project() -> jazz_tools::Query {
+pub fn build_todos_with_required_project() -> jazz::tools::Query {
     QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .with_array("project", |sub| {
@@ -207,7 +207,7 @@ pub fn build_todos_with_required_project() -> jazz_tools::Query {
 // #endregion reading-require-includes-rust
 
 // #region reading-select-rust
-pub async fn read_todo_titles(client: &JazzClient) -> jazz_tools::Result<usize> {
+pub async fn read_todo_titles(client: &JazzClient) -> jazz::tools::Result<usize> {
     let query = QueryBuilder::new("todos")
         .select(&["title", "done"])
         .build();
@@ -218,7 +218,7 @@ pub async fn read_todo_titles(client: &JazzClient) -> jazz_tools::Result<usize> 
 // #endregion reading-select-rust
 
 // #region reading-recursive-rust
-pub fn build_todo_lineage_query() -> jazz_tools::Query {
+pub fn build_todo_lineage_query() -> jazz::tools::Query {
     QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .with_recursive(|r| {
@@ -232,7 +232,7 @@ pub fn build_todo_lineage_query() -> jazz_tools::Query {
 // #endregion reading-recursive-rust
 
 // #region writing-crud-rust
-pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
+pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz::tools::Result<()> {
     let values = todo_values("Write docs", "");
 
     let _new_row = client.insert("todos", values)?;
@@ -248,7 +248,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 // #region writing-durability-tier-rust
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
-) -> jazz_tools::Result<ObjectId> {
+) -> jazz::tools::Result<ObjectId> {
     let (id, _row_values, _batch_id) = client.insert(
         "todos",
         todo_values("Write docs with default durability behavior", ""),
@@ -260,7 +260,7 @@ pub async fn write_todo_with_default_durability(
 }
 // #endregion writing-durability-tier-rust
 
-pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<()> {
+pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result<()> {
     let search_term = "milk";
 
     // #region where-eq-ne-rust
@@ -382,7 +382,7 @@ pub fn composing_queries() {
 pub async fn clear_nullable_fields(
     client: &JazzClient,
     todo_id: ObjectId,
-) -> jazz_tools::Result<()> {
+) -> jazz::tools::Result<()> {
     // Set a nullable column to null
     client.update(todo_id, vec![("owner_id".to_string(), Value::Null)])?;
 
@@ -397,8 +397,8 @@ pub async fn create_file_from_bytes(
     data: &[u8],
     name: Option<&str>,
     mime_type: &str,
-) -> jazz_tools::Result<ObjectId> {
-    let mut file_values = jazz_tools::row_input!(
+) -> jazz::tools::Result<ObjectId> {
+    let mut file_values = jazz::row_input!(
         "mime_type" => mime_type,
         "data" => data.to_vec(),
     );
@@ -416,12 +416,12 @@ pub async fn create_upload_from_bytes(
     client: &JazzClient,
     data: &[u8],
     owner_id: &str,
-) -> jazz_tools::Result<ObjectId> {
+) -> jazz::tools::Result<ObjectId> {
     let file_id = create_file_from_bytes(client, data, Some("photo.jpg"), "image/jpeg").await?;
 
     let (upload_id, _, _) = client.insert(
         "uploads",
-        jazz_tools::row_input!(
+        jazz::row_input!(
             "owner_id" => owner_id,
             "label" => "Profile photo",
             "fileId" => file_id,
@@ -436,7 +436,7 @@ pub async fn create_upload_from_bytes(
 pub async fn load_file_bytes(
     client: &JazzClient,
     upload_id: ObjectId,
-) -> jazz_tools::Result<Option<Vec<u8>>> {
+) -> jazz::tools::Result<Option<Vec<u8>>> {
     let uploads = client
         .query(
             QueryBuilder::new("uploads")
@@ -479,7 +479,7 @@ pub async fn load_file_bytes(
 pub async fn delete_upload_with_file(
     client: &JazzClient,
     upload_id: ObjectId,
-) -> jazz_tools::Result<()> {
+) -> jazz::tools::Result<()> {
     let uploads = client
         .query(
             QueryBuilder::new("uploads")

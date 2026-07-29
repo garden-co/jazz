@@ -66,8 +66,11 @@ impl SchemaHash {
     ///
     /// Uses UUIDv5 with DNS namespace over the hash bytes.
     /// Deterministic: same hash always produces same ObjectId.
-    pub fn to_object_id(&self) -> crate::object::ObjectId {
-        crate::object::ObjectId::from_uuid(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, &self.0))
+    pub fn to_object_id(&self) -> crate::tools::object::ObjectId {
+        crate::tools::object::ObjectId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            &self.0,
+        ))
     }
 
     /// Compute hash for a complete schema (HashMap<TableName, TableSchema>).

@@ -5,9 +5,9 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::otel;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::otel;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 use support::{TestingClient, has_row, wait_for_query};

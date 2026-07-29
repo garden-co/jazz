@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::metadata::SYSTEM_PRINCIPAL_ID;
-use crate::transaction::BatchId;
+use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::tools::transaction::BatchId;
 
 /// Auth mode derived from the JWT's `iss` claim.
 ///

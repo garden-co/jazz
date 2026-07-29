@@ -8,9 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_tools::row_input;
-use jazz_tools::server::{JazzServer, TestJwtIssuer};
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::{JazzServer, TestJwtIssuer};
+use jazz::tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
@@ -241,7 +241,7 @@ fn make_jwt(sub: &str) -> String {
     .expect("encode jwt")
 }
 
-fn test_schema() -> jazz_tools::Schema {
+fn test_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -275,7 +275,7 @@ async fn wait_for_todos_count(
     expected_count: usize,
     timeout: Duration,
     durability_tier: Option<DurabilityTier>,
-) -> Vec<(jazz_tools::ObjectId, Vec<Value>)> {
+) -> Vec<(jazz::tools::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();

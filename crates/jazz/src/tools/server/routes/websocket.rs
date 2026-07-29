@@ -2,7 +2,7 @@
 //!
 //! This route intentionally does not share the legacy `SyncPayload` `/ws`
 //! transport framing.
-//! It accepts postcard-encoded batches of raw `jazz::wire::WireFrame` bytes,
+//! It accepts postcard-encoded batches of raw `crate::wire::WireFrame` bytes,
 //! matching the workspace engine binding/server carrier shape.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -10,28 +10,28 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::db::CommitUnitTrust;
+use crate::groove::records::Value as CoreValue;
+use crate::ids::AuthorId;
+use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use crate::wire::{
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
+    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
-use jazz::db::CommitUnitTrust;
-use jazz::groove::records::Value as CoreValue;
-use jazz::ids::AuthorId;
-use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
-use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
-};
 use tokio::sync::mpsc;
 
-use crate::public_schema::AuthMode;
-use crate::server::ServerState;
+use crate::tools::public_schema::AuthMode;
+use crate::tools::server::ServerState;
 
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::tools::server::PER_CLIENT_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = 1 << 20;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
@@ -42,7 +42,7 @@ static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = O
 ///
 /// This is a protocol boundary, not a compatibility shim for the legacy
 /// `SyncPayload` websocket. The semantic `SyncMessage` loop is deliberately
-/// gated on the server owning the state needed to open a real `jazz::Db`
+/// gated on the server owning the state needed to open a real `crate::Db`
 /// peer.
 pub(super) async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -52,7 +52,7 @@ pub(super) async fn ws_handler(
     if state.shutdown.is_shutting_down() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::transport_error::ErrorResponse::internal(
+            axum::Json(crate::tools::transport_error::ErrorResponse::internal(
                 "server is shutting down".to_string(),
             )),
         )
@@ -73,7 +73,7 @@ struct WebSocketAdmission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WebSocketAdmissionKey {
-    app_id: crate::AppId,
+    app_id: crate::tools::AppId,
     identity: AuthorId,
 }
 
@@ -147,7 +147,7 @@ fn ws_live_admissions_for(key: WebSocketAdmissionKey) -> usize {
 #[derive(serde::Deserialize)]
 struct WebSocketPrelude {
     peer_identity: String,
-    auth: crate::websocket_prelude_auth::AuthConfig,
+    auth: crate::tools::websocket_prelude_auth::AuthConfig,
 }
 
 async fn ws_admission(
@@ -159,8 +159,11 @@ async fn ws_admission(
     let auth = prelude.auth;
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
-        crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
-            .map_err(|(_, message)| message.to_owned())?;
+        crate::tools::middleware::auth::validate_admin_secret(
+            Some(admin_secret),
+            &state.auth_config,
+        )
+        .map_err(|(_, message)| message.to_owned())?;
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
@@ -195,7 +198,7 @@ async fn ws_admission(
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
     if backend_secret.is_some() && !has_jwt && !has_session_header {
-        crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
+        crate::tools::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
         return Ok(WebSocketAdmission {
             identity: peer_identity,
@@ -211,7 +214,7 @@ async fn ws_admission(
         validate_ws_cookie_origin(&headers)?;
     }
 
-    let session = crate::middleware::auth::extract_session(
+    let session = crate::tools::middleware::auth::extract_session(
         &headers,
         state.app_id,
         &state.auth_config,
@@ -235,7 +238,7 @@ async fn ws_admission(
 }
 
 fn session_claims(
-    session: crate::public_schema::Session,
+    session: crate::tools::public_schema::Session,
 ) -> Result<BTreeMap<String, CoreValue>, String> {
     let mut json = match session.claims {
         serde_json::Value::Object(map) => map,
@@ -404,7 +407,7 @@ fn is_loopback_host(host: &str) -> bool {
 
 async fn read_ws_auth_prelude(
     socket: &mut WebSocket,
-    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::tools::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
@@ -428,7 +431,7 @@ async fn read_ws_auth_prelude(
 
 async fn read_ws_frame_batch(
     socket: &mut WebSocket,
-    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<crate::tools::server::ShutdownPhase>,
     state: &ServerState,
 ) -> Option<Vec<u8>> {
     tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
@@ -708,8 +711,8 @@ async fn handle_ws_connection(
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
-    core_server_shell: &crate::server::core_server_shell::ServerShellHandle,
-    session: jazz_server::ServerSession,
+    core_server_shell: &crate::tools::server::core_server_shell::ServerShellHandle,
+    session: crate::serving::ServerSession,
 ) -> Result<(), String> {
     let outbound = core_server_shell.tick_take(session).await?;
     if outbound.is_empty() {
@@ -734,7 +737,7 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
     encoded_frames
         .iter()
-        .map(|frame| jazz::wire::decode_frame(frame))
+        .map(|frame| crate::wire::decode_frame(frame))
         .collect()
 }
 
@@ -758,7 +761,7 @@ async fn send_ws_encoded_frames(
 ) -> Result<(), axum::Error> {
     for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
         #[cfg(feature = "sync-autopsy")]
-        jazz::db::sync_autopsy::record(format!(
+        crate::db::sync_autopsy::record(format!(
             "server websocket send batch bytes={}",
             batch.len()
         ));
@@ -829,28 +832,28 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use futures::stream::FuturesUnordered;
-    use futures::{SinkExt as _, StreamExt as _};
-    use jazz::db::{
+    use crate::db::{
         Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
         SeededRowIdSource, WireTransportAdapter,
     };
-    use jazz::groove::schema::ColumnType as CoreColumnType;
-    use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-    use jazz::ids::NodeUuid;
-    use jazz::query::{Query, claim, col, eq};
-    use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
-    use jazz::tx::DurabilityTier;
-    use jazz::wire::FEATURE_STRUCTURED_ERRORS;
-    use jazz::wire::decode_frame;
-    use jazz::wire::{TransportError, WireTransport};
+    use crate::groove::schema::ColumnType as CoreColumnType;
+    use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
+    use crate::ids::NodeUuid;
+    use crate::query::{Query, claim, col, eq};
+    use crate::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+    use crate::tx::DurabilityTier;
+    use crate::wire::FEATURE_STRUCTURED_ERRORS;
+    use crate::wire::decode_frame;
+    use crate::wire::{TransportError, WireTransport};
+    use futures::stream::FuturesUnordered;
+    use futures::{SinkExt as _, StreamExt as _};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
-    use crate::AppId;
-    use crate::middleware::AuthConfig;
-    use crate::public_schema::Schema;
-    use crate::server::core_websocket_transport::WebSocketTransport;
-    use crate::server::{ServerBuilder, StorageBackend};
+    use crate::tools::AppId;
+    use crate::tools::middleware::AuthConfig;
+    use crate::tools::public_schema::Schema;
+    use crate::tools::server::core_websocket_transport::WebSocketTransport;
+    use crate::tools::server::{ServerBuilder, StorageBackend};
 
     const WS_STORM_SIZE: usize = 24;
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
@@ -1047,7 +1050,7 @@ mod tests {
         let forged_peer = AuthorId::from_bytes([0x52; 16]);
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(forged_peer.as_bytes()),
-            auth: crate::websocket_prelude_auth::AuthConfig {
+            auth: crate::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": uuid::Uuid::from_bytes(*authenticated.as_bytes()).to_string(),
@@ -1079,7 +1082,7 @@ mod tests {
         let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(identity.as_bytes()),
-            auth: crate::websocket_prelude_auth::AuthConfig {
+            auth: crate::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
                     "user_id": user_id,
@@ -1147,7 +1150,7 @@ mod tests {
             format!("http://{addr}"),
             state.app_id,
             AuthorId::from_bytes([0x41; 16]),
-            crate::websocket_prelude_auth::AuthConfig {
+            crate::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 ..Default::default()
             },
@@ -1385,7 +1388,7 @@ mod tests {
             }
         }
 
-        fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
+        fn insert_todo(&self, title: &str) -> crate::ids::RowUuid {
             self.db
                 .insert(
                     "todos",
@@ -1398,7 +1401,7 @@ mod tests {
                 .row_uuid()
         }
 
-        fn insert_private_doc(&self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
+        fn insert_private_doc(&self, title: &str, owner: AuthorId) -> crate::ids::RowUuid {
             let owner = uuid::Uuid::from_bytes(*owner.as_bytes()).to_string();
             self.db
                 .insert(
@@ -1588,7 +1591,7 @@ mod tests {
     }
 
     // Internal route-boundary test: until websocket has a public
-    // high-level client facade, this wires two real jazz::Db clients through
+    // high-level client facade, this wires two real crate::Db clients through
     // the real /apps/<APP_ID>/ws route and proves WireFrame batches
     // flow through the server after one client writes.
     #[tokio::test(flavor = "current_thread")]
@@ -1637,7 +1640,7 @@ mod tests {
     }
 
     // Internal route-boundary test: this exercises the public websocket
-    // route with two real jazz::Db clients. The reader registers a query and
+    // route with two real crate::Db clients. The reader registers a query and
     // receives empty coverage before the writer uploads a later row; convergence
     // must arrive through the maintained subscription path without the reader
     // re-propagating its query.

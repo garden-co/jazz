@@ -7,14 +7,14 @@
 
 use std::collections::HashMap;
 
-use crate::object::ObjectId;
-use crate::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-use crate::public_api::types::{
+use crate::tools::object::ObjectId;
+use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+use crate::tools::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, LargeValueKind, RowDescriptor,
     Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
-use crate::schema_lens::{LensOp, LensTransform};
+use crate::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = 7;
@@ -915,7 +915,10 @@ fn decode_current_permissions_head(
     ))
 }
 
-fn encode_operation_policy(buf: &mut Vec<u8>, policy: &crate::public_api::types::OperationPolicy) {
+fn encode_operation_policy(
+    buf: &mut Vec<u8>,
+    policy: &crate::tools::public_api::types::OperationPolicy,
+) {
     encode_optional_policy_expr(buf, policy.using.as_ref());
     encode_optional_policy_expr(buf, policy.with_check.as_ref());
 }
@@ -923,8 +926,8 @@ fn encode_operation_policy(buf: &mut Vec<u8>, policy: &crate::public_api::types:
 fn decode_operation_policy(
     data: &[u8],
     offset: &mut usize,
-) -> Result<crate::public_api::types::OperationPolicy, CatalogueEncodingError> {
-    Ok(crate::public_api::types::OperationPolicy {
+) -> Result<crate::tools::public_api::types::OperationPolicy, CatalogueEncodingError> {
+    Ok(crate::tools::public_api::types::OperationPolicy {
         using: decode_optional_policy_expr(data, offset)?,
         with_check: decode_optional_policy_expr(data, offset)?,
     })
@@ -1597,8 +1600,8 @@ fn read_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_api::policy::PolicyExpr;
-    use crate::public_api::types::SchemaBuilder;
+    use crate::tools::public_api::policy::PolicyExpr;
+    use crate::tools::public_api::types::SchemaBuilder;
     use serde_json::json;
 
     #[test]
@@ -1927,10 +1930,10 @@ mod tests {
             )
             .build();
 
-        let original_hash = crate::public_api::types::SchemaHash::compute(&schema);
+        let original_hash = crate::tools::public_api::types::SchemaHash::compute(&schema);
         let encoded = encode_schema(&schema);
         let decoded = decode_schema(&encoded).unwrap();
-        let decoded_hash = crate::public_api::types::SchemaHash::compute(&decoded);
+        let decoded_hash = crate::tools::public_api::types::SchemaHash::compute(&decoded);
 
         assert_eq!(
             original_hash, decoded_hash,

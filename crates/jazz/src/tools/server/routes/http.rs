@@ -11,11 +11,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::middleware::auth::validate_admin_secret;
-use crate::public_api::types::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
-use crate::schema_lens::{Lens, LensOp, LensTransform};
-use crate::server::{ServerState, ShutdownPhase};
-use crate::transport_error::ErrorResponse;
+use crate::tools::middleware::auth::validate_admin_secret;
+use crate::tools::public_api::types::{
+    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
+use crate::tools::schema_lens::{Lens, LensOp, LensTransform};
+use crate::tools::server::{ServerState, ShutdownPhase};
+use crate::tools::transport_error::ErrorResponse;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -587,7 +589,9 @@ pub(super) async fn publish_schema_handler(
         || state.core_server_shell_storage_config.is_some()
     {
         true => {
-            match crate::server::public_schema_convert::convert_public_schema(&request.schema) {
+            match crate::tools::server::public_schema_convert::convert_public_schema(
+                &request.schema,
+            ) {
                 Ok(schema) => Some(schema),
                 Err(err) => {
                     return (
@@ -877,7 +881,7 @@ pub(super) async fn publish_permissions_handler(
         || state.core_server_shell_storage_config.is_some()
     {
         true => {
-            match crate::server::public_schema_convert::convert_public_schema(
+            match crate::tools::server::public_schema_convert::convert_public_schema(
                 &schema_with_permissions,
             ) {
                 Ok(schema) => Some(schema),
@@ -943,7 +947,7 @@ pub(super) async fn publish_permissions_handler(
             )
                 .into_response(),
         },
-        Err(crate::server::catalogue::CatalogueError::WriteError(message))
+        Err(crate::tools::server::catalogue::CatalogueError::WriteError(message))
             if message.starts_with("stale permissions parent") =>
         {
             (

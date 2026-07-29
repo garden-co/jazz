@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use jazz::groove::records::Value;
-use jazz::ids::AuthorId;
+use crate::groove::records::Value;
+use crate::ids::AuthorId;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::Number;

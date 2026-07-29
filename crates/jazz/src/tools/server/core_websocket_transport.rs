@@ -3,19 +3,19 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::{SinkExt as _, StreamExt as _};
-use jazz::ids::AuthorId;
-use jazz::wire::{
+use crate::ids::AuthorId;
+use crate::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireError, WireFrame,
     WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
     negotiate_wire,
 };
+use futures::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::AppId;
-use crate::websocket_prelude_auth::AuthConfig;
+use crate::tools::AppId;
+use crate::tools::websocket_prelude_auth::AuthConfig;
 
 const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -161,7 +161,7 @@ impl Drop for WebSocketTransport {
 impl WireTransport for WebSocketTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
         #[cfg(feature = "sync-autopsy")]
-        jazz::db::sync_autopsy::record(format!(
+        crate::db::sync_autopsy::record(format!(
             "client websocket queue outbound frame bytes={}",
             frame.len()
         ));
@@ -179,7 +179,7 @@ impl WireTransport for WebSocketTransport {
         let frame = inbound.pop_front();
         #[cfg(feature = "sync-autopsy")]
         if let Some(frame) = &frame {
-            jazz::db::sync_autopsy::record(format!(
+            crate::db::sync_autopsy::record(format!(
                 "client websocket pop inbound before={before} after={} bytes={}",
                 inbound.len(),
                 frame.len()
@@ -262,7 +262,7 @@ async fn run_ws_pump(
                     continue;
                 };
                 #[cfg(feature = "sync-autopsy")]
-                jazz::db::sync_autopsy::record(format!(
+                crate::db::sync_autopsy::record(format!(
                     "client websocket send batch frames={} bytes={}",
                     batch.len(),
                     bytes.len()
@@ -287,7 +287,7 @@ async fn run_ws_pump(
                 let frame_count = frames.len();
                 queue.extend(frames);
                 #[cfg(feature = "sync-autopsy")]
-                jazz::db::sync_autopsy::record(format!(
+                crate::db::sync_autopsy::record(format!(
                     "client websocket received batch frames={frame_count} inbound_before={before} inbound_after={} bytes={}",
                     queue.len(),
                     bytes.len()

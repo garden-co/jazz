@@ -1,9 +1,9 @@
 use std::sync::{Arc, RwLock as StdRwLock};
 
-use crate::AppId;
-use crate::middleware::AuthConfig;
-use crate::middleware::auth::JwtVerifier;
-use jazz_server::StorageConfig;
+use crate::serving::StorageConfig;
+use crate::tools::AppId;
+use crate::tools::middleware::AuthConfig;
+use crate::tools::middleware::auth::JwtVerifier;
 
 mod builder;
 mod catalogue;
@@ -82,7 +82,7 @@ impl ServerState {
 
     pub(crate) fn start_core_server_shell(
         &self,
-        schema: jazz::schema::JazzSchema,
+        schema: crate::schema::JazzSchema,
     ) -> Result<core_server_shell::ServerShellHandle, String> {
         if let Some(core_server_shell) = self.core_server_shell() {
             return Ok(core_server_shell);
@@ -161,11 +161,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::AppId;
-    use crate::middleware::AuthConfig;
-    use crate::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
-    use crate::server::builder::{ServerBuilder, StorageBackend};
-    use crate::server::catalogue_storage::CatalogueStorageResult;
+    use crate::tools::AppId;
+    use crate::tools::middleware::AuthConfig;
+    use crate::tools::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use crate::tools::server::builder::{ServerBuilder, StorageBackend};
+    use crate::tools::server::catalogue_storage::CatalogueStorageResult;
 
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
@@ -174,13 +174,14 @@ mod tests {
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
             &self,
-        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
+        ) -> CatalogueStorageResult<Vec<crate::tools::server::catalogue_entry::CatalogueEntry>>
+        {
             Ok(Vec::new())
         }
 
         fn upsert_catalogue_entry(
             &mut self,
-            _entry: &crate::server::catalogue_entry::CatalogueEntry,
+            _entry: &crate::tools::server::catalogue_entry::CatalogueEntry,
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }

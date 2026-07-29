@@ -4,13 +4,13 @@ mod support;
 
 use std::time::Duration;
 
-use jazz_tools::public_schema::{
+use jazz::row_input;
+use jazz::tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
 };
@@ -163,7 +163,7 @@ fn gathered_resource_access_policy() -> PolicyExpr {
     }
 }
 
-async fn wait_edge_batch(client: &JazzClient, batch_id: jazz_tools::BatchId, label: &str) {
+async fn wait_edge_batch(client: &JazzClient, batch_id: jazz::tools::BatchId, label: &str) {
     tokio::time::timeout(
         Duration::from_secs(15),
         client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),
@@ -275,7 +275,7 @@ async fn visible_resource_labels(client: &JazzClient, expected_labels: &[&str]) 
     labels_from_rows(rows)
 }
 
-fn labels_from_rows(mut rows: Vec<(jazz_tools::ObjectId, Vec<Value>)>) -> Vec<String> {
+fn labels_from_rows(mut rows: Vec<(jazz::tools::ObjectId, Vec<Value>)>) -> Vec<String> {
     let mut labels = rows
         .drain(..)
         .map(|(_, values)| match values.as_slice() {

@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jazz_server::auth_admission::{
+use jazz::serving::auth_admission::{
     AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake, JwtVerifierConfig,
     LOCAL_FIRST_JWT_ISSUER, admit_local_first_jwt,
 };

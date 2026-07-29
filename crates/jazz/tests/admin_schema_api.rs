@@ -4,7 +4,7 @@ use std::net::{SocketAddr, TcpStream};
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::schema::JazzSchema;
-use jazz_server::{InMemoryServerShellConfig, loopback_http::LoopbackHttpServer};
+use jazz::serving::{InMemoryServerShellConfig, loopback_http::LoopbackHttpServer};
 use serde_json::{Value, json};
 
 fn identity() -> DbIdentity {

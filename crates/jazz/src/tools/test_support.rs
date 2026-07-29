@@ -2,20 +2,20 @@
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
-use crate::AppId;
-use crate::object::ObjectId;
+use crate::tools::AppId;
+use crate::tools::object::ObjectId;
 #[cfg(feature = "test-utils")]
-use crate::public_api::query::Query;
+use crate::tools::public_api::query::Query;
 #[cfg(feature = "test-utils")]
-use crate::public_api::types::Value;
+use crate::tools::public_api::types::Value;
 #[cfg(feature = "test-utils")]
-use crate::public_schema::SchemaHash;
+use crate::tools::public_schema::SchemaHash;
 #[cfg(feature = "test-utils")]
-use crate::schema_lens::Lens;
+use crate::tools::schema_lens::Lens;
 #[cfg(feature = "test-utils")]
-use crate::server::ServerState;
+use crate::tools::server::ServerState;
 #[cfg(feature = "test-utils")]
-use crate::{DurabilityTier, JazzClient, Schema};
+use crate::tools::{DurabilityTier, JazzClient, Schema};
 
 #[cfg(feature = "test-utils")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
@@ -39,7 +39,7 @@ pub fn disconnect_client(client: &JazzClient) -> bool {
 /// Sanctioned test-support reconnect control: reattaches the preserved client
 /// state to the original upstream transport.
 #[cfg(feature = "test-utils")]
-pub async fn reconnect_client(client: &JazzClient) -> crate::Result<bool> {
+pub async fn reconnect_client(client: &JazzClient) -> crate::tools::Result<bool> {
     client.reconnect_upstream_for_test().await
 }
 
@@ -72,7 +72,7 @@ where
 {
     let description = description.into();
     #[cfg(feature = "sync-autopsy")]
-    jazz::db::sync_autopsy::enable();
+    crate::db::sync_autopsy::enable();
     let deadline = tokio::time::Instant::now() + load_tolerant_wait_timeout(timeout);
 
     let mut last_error: Option<String> = None;
@@ -98,7 +98,7 @@ where
 
         if tokio::time::Instant::now() >= deadline {
             #[cfg(feature = "sync-autopsy")]
-            let autopsy = jazz::db::sync_autopsy::dump();
+            let autopsy = crate::db::sync_autopsy::dump();
             #[cfg(not(feature = "sync-autopsy"))]
             let autopsy = String::new();
             match last_error {

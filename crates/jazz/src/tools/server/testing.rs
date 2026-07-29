@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::AppContext;
-use crate::AppId;
-use crate::middleware::AuthConfig;
-use crate::public_schema::Schema;
-use jazz::node::EdgeCacheBudget;
+use crate::node::EdgeCacheBudget;
+use crate::tools::AppContext;
+use crate::tools::AppId;
+use crate::tools::middleware::AuthConfig;
+use crate::tools::public_schema::Schema;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;
@@ -37,7 +37,7 @@ pub struct JazzServerBuilder {
     upstream_url: Option<String>,
     edge_cache_budget: Option<EdgeCacheBudget>,
     jwks_url: Option<String>,
-    auth_clock: Option<crate::middleware::auth::AuthClock>,
+    auth_clock: Option<crate::tools::middleware::auth::AuthClock>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -115,7 +115,7 @@ impl JazzServerBuilder {
         self
     }
 
-    pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
+    pub fn with_auth_clock(mut self, clock: crate::tools::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
         self
     }
@@ -232,7 +232,7 @@ pub struct JazzServer {
     backend_secret: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
-    auth_clock: crate::middleware::auth::AuthClock,
+    auth_clock: crate::tools::middleware::auth::AuthClock,
 }
 
 impl JazzServer {
@@ -369,7 +369,7 @@ impl JazzServer {
             backend_secret,
             client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
-            auth_clock: crate::middleware::auth::AuthClock::default(),
+            auth_clock: crate::tools::middleware::auth::AuthClock::default(),
         };
         server.wait_ready().await;
         server
@@ -440,7 +440,7 @@ impl JazzServer {
             schema,
             server_url: self.base_url(),
             data_dir,
-            storage: crate::ClientStorage::Memory,
+            storage: crate::tools::ClientStorage::Memory,
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
@@ -616,7 +616,7 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use crate::server::ShutdownPhase;
+    use crate::tools::server::ShutdownPhase;
 
     use super::*;
 

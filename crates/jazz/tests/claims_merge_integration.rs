@@ -28,10 +28,10 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::public_schema::PolicyExpr;
-use jazz_tools::public_schema::TablePolicies;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::public_schema::PolicyExpr;
+use jazz::tools::public_schema::TablePolicies;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 use serde_json::json;

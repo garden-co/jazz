@@ -141,7 +141,7 @@ fn value_column_type() {
         Some(ColumnType::Timestamp)
     );
     assert_eq!(
-        Value::Uuid(crate::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
+        Value::Uuid(crate::tools::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
         Some(ColumnType::Uuid)
     );
     assert_eq!(

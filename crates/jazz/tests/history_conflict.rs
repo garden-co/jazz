@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
     SchemaBuilder, TableSchema, Value,
 };
@@ -22,7 +22,7 @@ async fn lock_history_conflict_suite() -> tokio::sync::MutexGuard<'static, ()> {
     HISTORY_CONFLICT_SUITE_LOCK.lock().await
 }
 
-fn test_schema() -> jazz_tools::Schema {
+fn test_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")

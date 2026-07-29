@@ -16,23 +16,23 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::db::DbIdentity;
+use crate::ids::{AuthorId, NodeUuid};
+use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use crate::schema::JazzSchema;
 use futures_util::{SinkExt, StreamExt};
-use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
-use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
-use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::protocol::Message;
 
-use crate::auth_admission::{
+use crate::serving::auth_admission::{
     AdmissionSource, AdmittedSession, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake,
     LOCAL_FIRST_JWT_ISSUER, admit_bearer_jwt, admit_local_first_jwt, admit_static_bearer,
     admit_static_bearer_with_claims, bearer_from_authorization,
 };
-use crate::{
+use crate::serving::{
     InMemoryServerShell, InMemoryServerShellConfig, ListenerConfig, ShellError, StorageConfig,
 };
 
@@ -553,7 +553,7 @@ fn validate_auth_handshake(
 async fn service_connection(
     mut socket: WebSocketStream<TcpStream>,
     shell: Arc<TokioMutex<InMemoryServerShell>>,
-    session: crate::ServerSession,
+    session: crate::serving::ServerSession,
 ) {
     let mut outbound_tick = tokio::time::interval(Duration::from_millis(5));
     loop {

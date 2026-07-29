@@ -4,11 +4,12 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use jazz_tools::public_schema::AggregateFunction;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::public_schema::AggregateFunction;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder,
-    RowDescriptor, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value, row_input,
+    RowDescriptor, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
 };
 use support::{TestingClient, wait_for_query};
 use uuid::Uuid;
@@ -85,7 +86,7 @@ fn policy_metrics_schema() -> Schema {
 
 async fn wait_for_values(
     client: &JazzClient,
-    query: jazz_tools::Query,
+    query: jazz::tools::Query,
     expected: Vec<Vec<Value>>,
     label: &str,
 ) {
@@ -152,7 +153,7 @@ async fn insert_bigint_metric(client: &JazzClient, bucket: &str, score: i64) {
 
 fn aggregate_query(
     outputs: impl IntoIterator<Item = (AggregateFunction, &'static str)>,
-) -> jazz_tools::Query {
+) -> jazz::tools::Query {
     let mut builder = QueryBuilder::new("metrics");
     for (function, column) in outputs {
         builder = match function {

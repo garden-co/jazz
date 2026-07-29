@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use jazz::db::DbIdentity;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::schema::JazzSchema;
-use jazz_server::{
+use jazz::serving::{
     DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
@@ -95,7 +95,7 @@ fn run_dry_run(args: Vec<String>, program: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut config = jazz_server::ServerConfig::local("dev-core");
+    let mut config = jazz::serving::ServerConfig::local("dev-core");
     apply_shell_options(&mut config, &options);
     let shell = match ServerShell::new(config) {
         Ok(shell) => shell,
@@ -698,7 +698,7 @@ impl CliOptions {
     }
 }
 
-fn apply_shell_options(config: &mut jazz_server::ServerConfig, options: &CliOptions) {
+fn apply_shell_options(config: &mut jazz::serving::ServerConfig, options: &CliOptions) {
     config.listener.bind_addr = options.listen;
     config.listener.websocket_path = options.websocket_path.clone();
     config.storage = options.storage.clone();

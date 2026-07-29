@@ -1,7 +1,9 @@
 use super::*;
-use crate::object::ObjectId;
-use crate::public_api::policy::{CmpOp, Operation, PolicyValue};
-use crate::public_api::relation_ir::{ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
+use crate::tools::object::ObjectId;
+use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
+use crate::tools::public_api::relation_ir::{
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+};
 use serde::{Deserialize, Serialize};
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
@@ -129,7 +131,7 @@ impl TablePolicies {
 /// Build table permissions with a TypeScript-DSL-like API.
 ///
 /// ```
-/// # use jazz_tools::{permissions, policy_expr as expr};
+/// # use jazz::tools::{permissions, policy_expr as expr};
 /// let policies = permissions(|p| {
 ///     p.allow_read()
 ///         .where_(expr::eq("owner_id", expr::session("user_id")));

@@ -6,17 +6,17 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 #[cfg(feature = "client")]
-use jazz_tools::{ObjectId, SubscriptionStream, SubscriptionStreamItem};
+use jazz::tools::{ObjectId, SubscriptionStream, SubscriptionStreamItem};
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 
-fn test_schema() -> jazz_tools::Schema {
+fn test_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -43,7 +43,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 async fn wait_for_subscription_driven_query<F>(
     client: &JazzClient,
     stream: &mut SubscriptionStream,
-    query: jazz_tools::Query,
+    query: jazz::tools::Query,
     timeout: Duration,
     description: &str,
     mut predicate: F,

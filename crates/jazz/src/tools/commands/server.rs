@@ -3,10 +3,10 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use jazz::node::EdgeCacheBudget;
-use jazz_tools::AppId;
-use jazz_tools::middleware::AuthConfig;
-use jazz_tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
+use crate::node::EdgeCacheBudget;
+use crate::tools::AppId;
+use crate::tools::middleware::AuthConfig;
+use crate::tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -86,7 +86,7 @@ pub async fn run(
         .then(|| {
             let meter = opentelemetry::global::meter("jazz-server");
             let shutdown = state.shutdown.clone();
-            jazz_tools::otel::register_active_websockets_gauge(&meter, move || {
+            crate::tools::otel::register_active_websockets_gauge(&meter, move || {
                 shutdown.active_websockets() as u64
             })
         });

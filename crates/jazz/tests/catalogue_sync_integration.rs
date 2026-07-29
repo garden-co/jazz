@@ -10,13 +10,13 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::public_schema::SchemaHash;
-use jazz_tools::public_schema::TablePolicies;
-use jazz_tools::public_schema::{LargeValueKind, PolicyExpr};
-use jazz_tools::row_input;
-use jazz_tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::public_schema::SchemaHash;
+use jazz::tools::public_schema::TablePolicies;
+use jazz::tools::public_schema::{LargeValueKind, PolicyExpr};
+use jazz::row_input;
+use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, QueryBuilder, RowDescriptor,
     SchemaBuilder, TableName, TableSchema, Value,
 };
@@ -29,16 +29,16 @@ use support::{
     wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
 };
 
-fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+fn user_values_v1(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
 }
 
-fn user_values_v2(id: jazz_tools::ObjectId, name: &str, email: &str) -> HashMap<String, Value> {
+fn user_values_v2(id: jazz::tools::ObjectId, name: &str, email: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name, "email" => email)
 }
 
 fn user_values_v3(
-    id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
     name: &str,
     email: &str,
     role: &str,
@@ -46,7 +46,7 @@ fn user_values_v3(
     row_input!("id" => id, "name" => name, "email" => email, "role" => role)
 }
 
-fn schema_v1() -> jazz_tools::Schema {
+fn schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -56,7 +56,7 @@ fn schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn schema_v2() -> jazz_tools::Schema {
+fn schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -67,7 +67,7 @@ fn schema_v2() -> jazz_tools::Schema {
         .build()
 }
 
-fn schema_v3() -> jazz_tools::Schema {
+fn schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -105,15 +105,15 @@ fn v2_to_v3_lens() -> Lens {
     )
 }
 
-fn rename_chain_values_v1(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
+fn rename_chain_values_v1(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "email" => email)
 }
 
-fn rename_chain_values_v3(id: jazz_tools::ObjectId, contact_email: &str) -> HashMap<String, Value> {
+fn rename_chain_values_v3(id: jazz::tools::ObjectId, contact_email: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "contact_email" => contact_email)
 }
 
-fn rename_chain_schema_v1() -> jazz_tools::Schema {
+fn rename_chain_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -123,7 +123,7 @@ fn rename_chain_schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn rename_chain_schema_v2() -> jazz_tools::Schema {
+fn rename_chain_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -133,7 +133,7 @@ fn rename_chain_schema_v2() -> jazz_tools::Schema {
         .build()
 }
 
-fn rename_chain_schema_v3() -> jazz_tools::Schema {
+fn rename_chain_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -167,15 +167,15 @@ fn rename_chain_v2_to_v3_lens() -> Lens {
     )
 }
 
-fn table_rename_values_v1(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
+fn table_rename_values_v1(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "email" => email)
 }
 
-fn table_rename_values_v2(id: jazz_tools::ObjectId, email: &str) -> HashMap<String, Value> {
+fn table_rename_values_v2(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "email" => email)
 }
 
-fn table_rename_schema_v1() -> jazz_tools::Schema {
+fn table_rename_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -185,7 +185,7 @@ fn table_rename_schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn table_rename_schema_v2() -> jazz_tools::Schema {
+fn table_rename_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("people")
@@ -206,19 +206,19 @@ fn table_rename_v1_to_v2_lens() -> Lens {
     )
 }
 
-fn table_rename_join_user_values(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+fn table_rename_join_user_values(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
 }
 
 fn table_rename_join_post_values(
-    id: jazz_tools::ObjectId,
-    author_id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
+    author_id: jazz::tools::ObjectId,
     title: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "author_id" => author_id, "title" => title)
 }
 
-fn table_rename_join_schema_v1() -> jazz_tools::Schema {
+fn table_rename_join_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -234,7 +234,7 @@ fn table_rename_join_schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn table_rename_join_schema_v2() -> jazz_tools::Schema {
+fn table_rename_join_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("people")
@@ -269,7 +269,7 @@ fn legacy_join_provenance_post_values(owner_name: &str, title: &str) -> HashMap<
     row_input!("owner_name" => owner_name, "title" => title)
 }
 
-fn legacy_join_provenance_schema() -> jazz_tools::Schema {
+fn legacy_join_provenance_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
@@ -280,7 +280,7 @@ fn legacy_join_provenance_schema() -> jazz_tools::Schema {
         .build()
 }
 
-fn current_join_provenance_permission_schema() -> jazz_tools::Schema {
+fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -308,7 +308,7 @@ fn current_join_provenance_permission_schema() -> jazz_tools::Schema {
         .build()
 }
 
-fn large_blob_assets_schema() -> jazz_tools::Schema {
+fn large_blob_assets_schema() -> jazz::tools::Schema {
     HashMap::from([(
         TableName::new("assets"),
         TableSchema::with_policies(
@@ -347,27 +347,27 @@ fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
 }
 
 fn multi_hop_table_rename_values_v1(
-    id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
     email: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "email" => email)
 }
 
 fn multi_hop_table_rename_values_v2(
-    id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
     email: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "email" => email)
 }
 
 fn multi_hop_table_rename_values_v3(
-    id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
     email_address: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "email_address" => email_address)
 }
 
-fn multi_hop_table_rename_schema_v1() -> jazz_tools::Schema {
+fn multi_hop_table_rename_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -377,7 +377,7 @@ fn multi_hop_table_rename_schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn multi_hop_table_rename_schema_v2() -> jazz_tools::Schema {
+fn multi_hop_table_rename_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("people")
@@ -387,7 +387,7 @@ fn multi_hop_table_rename_schema_v2() -> jazz_tools::Schema {
         .build()
 }
 
-fn multi_hop_table_rename_schema_v3() -> jazz_tools::Schema {
+fn multi_hop_table_rename_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("members")
@@ -426,19 +426,19 @@ fn multi_hop_table_rename_v2_to_v3_lens() -> Lens {
     )
 }
 
-fn removed_readded_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+fn removed_readded_values_v1(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
 }
 
 fn removed_readded_values_v3(
-    id: jazz_tools::ObjectId,
+    id: jazz::tools::ObjectId,
     name: &str,
     email: &str,
 ) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name, "email" => email)
 }
 
-fn removed_readded_schema_v1() -> jazz_tools::Schema {
+fn removed_readded_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -448,11 +448,11 @@ fn removed_readded_schema_v1() -> jazz_tools::Schema {
         .build()
 }
 
-fn removed_readded_schema_v2() -> jazz_tools::Schema {
+fn removed_readded_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new().build()
 }
 
-fn removed_readded_schema_v3() -> jazz_tools::Schema {
+fn removed_readded_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -518,7 +518,7 @@ struct SchemaConnectivityHttpResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSchemaHttpResponse {
-    schema: jazz_tools::Schema,
+    schema: jazz::tools::Schema,
 }
 
 #[derive(Debug, Deserialize)]
@@ -526,7 +526,7 @@ struct PermissionsHeadHttpResponse {
     head: Option<PublishedPermissionsHead>,
 }
 
-async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz_tools::Schema) {
+async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema) {
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -541,8 +541,8 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz_tools::Schema)
 
 async fn assert_edge_query_does_not_include_row(
     client: &JazzClient,
-    query: jazz_tools::Query,
-    row_id: jazz_tools::ObjectId,
+    query: jazz::tools::Query,
+    row_id: jazz::tools::ObjectId,
     timeout: Duration,
     description: &str,
 ) {
@@ -866,7 +866,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
             .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz_tools::ObjectId::new();
+    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = admin
         .insert(
             "users",
@@ -920,8 +920,8 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         .connect()
         .await;
 
-    let queued_user_id = jazz_tools::ObjectId::new();
-    let queued_row_id = jazz_tools::ObjectId::new();
+    let queued_user_id = jazz::tools::ObjectId::new();
+    let queued_row_id = jazz::tools::ObjectId::new();
     let (_, _, batch_id) = writer
         .insert_with_id(
             "users",
@@ -974,7 +974,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
     .await;
     assert!(rows_after_publish.is_empty());
 
-    let accepted_user_id = jazz_tools::ObjectId::new();
+    let accepted_user_id = jazz::tools::ObjectId::new();
     let (accepted_row_id, _, batch_id) = writer
         .insert(
             "users",
@@ -1088,7 +1088,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .connect()
         .await;
 
-    let denied_user_id = jazz_tools::ObjectId::new();
+    let denied_user_id = jazz::tools::ObjectId::new();
     let (denied_row_id, _, _) = writer
         .insert(
             "users",
@@ -1116,7 +1116,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
     wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
-    let allowed_user_id = jazz_tools::ObjectId::new();
+    let allowed_user_id = jazz::tools::ObjectId::new();
     let (allowed_row_id, _, batch_id) = writer
         .insert(
             "users",
@@ -1203,7 +1203,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
             .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz_tools::ObjectId::new();
+    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = admin
         .insert(
             "users",
@@ -1306,7 +1306,7 @@ async fn column_addition_new_client_can_read_old_rows() {
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz_tools::ObjectId::new();
+    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = alice
         .insert("users", user_values_v1(user_id_value, "Alice Smith"))
         .expect("alice creates user after permissions publish");
@@ -1389,7 +1389,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = alice
         .insert("users", user_values_v1(user_id, "Alice Pending Lens"))
         .expect("alice creates v1 user");
@@ -1509,7 +1509,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
             .await
             .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    let alice_user_id = jazz_tools::ObjectId::new();
+    let alice_user_id = jazz::tools::ObjectId::new();
     let (alice_row_id, _, alice_batch_id) = alice
         .insert("users", user_values_v1(alice_user_id, "Alice Multi-Hop"))
         .expect("alice creates v1 user");
@@ -1523,7 +1523,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
             .await
             .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
-    let bob_user_id = jazz_tools::ObjectId::new();
+    let bob_user_id = jazz::tools::ObjectId::new();
     let (bob_row_id, _, bob_batch_id) = bob
         .insert(
             "users",
@@ -1539,7 +1539,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
             .await
             .expect("connect charlie");
     wait_for_edge_query_ready(&charlie, "users", Duration::from_secs(30)).await;
-    let charlie_user_id = jazz_tools::ObjectId::new();
+    let charlie_user_id = jazz::tools::ObjectId::new();
     let (charlie_row_id, _, charlie_batch_id) = charlie
         .insert(
             "users",
@@ -1662,7 +1662,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
             .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = alice
         .insert(
             "users",
@@ -1744,7 +1744,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
             .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = bob
         .insert("users", rename_chain_values_v3(user_id, "bob@example.com"))
         .expect("bob creates v3 user");
@@ -1822,7 +1822,7 @@ async fn table_rename_new_client_can_read_old_rows() {
             .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = alice
         .insert(
             "users",
@@ -1922,7 +1922,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, _) = alice
         .insert(
             "users",
@@ -2040,7 +2040,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = bob
         .insert("people", table_rename_values_v2(user_id, "bob@example.com"))
         .expect("bob creates v2 person");
@@ -2111,7 +2111,7 @@ async fn table_rename_update_and_delete_copy_on_write() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz_tools::ObjectId::new();
+    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, batch_id) = alice
         .insert(
             "users",
@@ -2217,7 +2217,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
-    let author_id = jazz_tools::ObjectId::new();
+    let author_id = jazz::tools::ObjectId::new();
     let (_, _, batch_id) = alice
         .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
@@ -2226,7 +2226,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
         .await
         .expect("alice user reaches edge");
 
-    let post_id = jazz_tools::ObjectId::new();
+    let post_id = jazz::tools::ObjectId::new();
     let (post_row_id, _, batch_id) = alice
         .insert(
             "posts",
@@ -2306,7 +2306,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
-    let author_id = jazz_tools::ObjectId::new();
+    let author_id = jazz::tools::ObjectId::new();
     let (author_row_id, _, batch_id) = alice
         .insert("users", table_rename_join_user_values(author_id, "Alice"))
         .expect("alice creates v1 user");
@@ -2315,7 +2315,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
         .await
         .expect("alice user reaches edge");
 
-    let post_id = jazz_tools::ObjectId::new();
+    let post_id = jazz::tools::ObjectId::new();
     let (_, _, batch_id) = alice
         .insert(
             "posts",
@@ -2639,7 +2639,7 @@ async fn multi_hop_table_renames_and_column_rename() {
     .await
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    let alice_id = jazz_tools::ObjectId::new();
+    let alice_id = jazz::tools::ObjectId::new();
     let (alice_row_id, _, batch_id) = alice
         .insert(
             "users",
@@ -2664,7 +2664,7 @@ async fn multi_hop_table_renames_and_column_rename() {
     .await
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
-    let bob_id = jazz_tools::ObjectId::new();
+    let bob_id = jazz::tools::ObjectId::new();
     let (bob_row_id, _, batch_id) = bob
         .insert(
             "people",
@@ -2688,7 +2688,7 @@ async fn multi_hop_table_renames_and_column_rename() {
     .await
     .expect("connect carol");
     wait_for_edge_query_ready(&carol, "members", Duration::from_secs(30)).await;
-    let carol_id = jazz_tools::ObjectId::new();
+    let carol_id = jazz::tools::ObjectId::new();
     let (carol_row_id, _, batch_id) = carol
         .insert(
             "members",
@@ -2781,7 +2781,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let alice_id = jazz_tools::ObjectId::new();
+    let alice_id = jazz::tools::ObjectId::new();
     let (alice_row_id, _, batch_id) = alice
         .insert(
             "users",
@@ -2808,7 +2808,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let bob_id = jazz_tools::ObjectId::new();
+    let bob_id = jazz::tools::ObjectId::new();
     let (bob_row_id, _, batch_id) = bob
         .insert(
             "users",
@@ -2892,7 +2892,7 @@ async fn column_addition_old_client_can_read_new_rows() {
 
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz_tools::ObjectId::new();
+    let user_id_value = jazz::tools::ObjectId::new();
     let user_email = "bob@example.com";
     let (user_obj_id, _, _) = bob
         .insert(
@@ -2984,7 +2984,7 @@ async fn keeps_authorization_through_v1_head() {
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz_tools::ObjectId::new();
+    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, batch_id) = alice
         .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");

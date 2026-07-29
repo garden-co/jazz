@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::public_api::types::{TableName, Value};
+use crate::tools::public_api::types::{TableName, Value};
 
 /// Fully-qualified or scoped column reference inside relation IR.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

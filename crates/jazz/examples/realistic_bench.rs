@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use jazz_tools::{
+use jazz::tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema,
     SchemaBuilder, TableSchema, Value,
 };
@@ -357,7 +357,7 @@ async fn connect_client(
         schema: benchmark_schema(),
         server_url: server_url.unwrap_or("").to_string(),
         data_dir,
-        storage: jazz_tools::ClientStorage::Persistent,
+        storage: jazz::tools::ClientStorage::Persistent,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

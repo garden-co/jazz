@@ -4,11 +4,12 @@ mod support;
 
 use std::time::Duration;
 
-use jazz_tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-    policy_expr, row_input,
+    policy_expr,
 };
 use serde_json::json;
 use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};

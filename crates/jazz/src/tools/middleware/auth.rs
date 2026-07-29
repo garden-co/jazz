@@ -39,11 +39,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::AppId;
-use crate::identity;
-use crate::public_api::session::Session;
-use crate::server::ServerState;
-use crate::transport_error::UnauthenticatedResponse;
+use crate::tools::AppId;
+use crate::tools::identity;
+use crate::tools::public_api::session::Session;
+use crate::tools::server::ServerState;
+use crate::tools::transport_error::UnauthenticatedResponse;
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -923,7 +923,7 @@ pub fn resolve_verified_jwt_session(
     Ok(Session {
         user_id: subject.to_string(),
         claims,
-        auth_mode: crate::public_api::session::AuthMode::External,
+        auth_mode: crate::tools::public_api::session::AuthMode::External,
     })
 }
 
@@ -1032,8 +1032,10 @@ pub async fn extract_session(
             )
             .map_err(local_first_auth_error)?;
             let auth_mode = match issuer {
-                identity::ANONYMOUS_ISSUER => crate::public_api::session::AuthMode::Anonymous,
-                _ => crate::public_api::session::AuthMode::LocalFirst,
+                identity::ANONYMOUS_ISSUER => {
+                    crate::tools::public_api::session::AuthMode::Anonymous
+                }
+                _ => crate::tools::public_api::session::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
                 user_id: verified.user_id,
@@ -1121,7 +1123,7 @@ pub fn validate_admin_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport_error::UnauthenticatedCode;
+    use crate::tools::transport_error::UnauthenticatedCode;
     use jsonwebtoken::{EncodingKey, Header, encode};
 
     const TEST_JWKS_KID: &str = "test-kid";
@@ -1353,7 +1355,7 @@ mod tests {
         assert_eq!(session.user_id, "user-42");
         assert_eq!(
             session.auth_mode,
-            crate::public_api::session::AuthMode::External
+            crate::tools::public_api::session::AuthMode::External
         );
         assert_eq!(session.claims["subject"], "user-42");
         assert_eq!(session.claims["issuer"], "https://issuer.example");
@@ -1446,9 +1448,9 @@ mod tests {
     async fn local_first_session_has_auth_mode_localfirst_and_no_claim() {
         let app_id = AppId::from_name("test-app");
         let seed = [7u8; 32];
-        let token = crate::identity::mint_jazz_self_signed_token(
+        let token = crate::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            crate::identity::LOCAL_FIRST_ISSUER,
+            crate::tools::identity::LOCAL_FIRST_ISSUER,
             &app_id.to_string(),
             3600,
         )
@@ -1468,7 +1470,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::public_api::session::AuthMode::LocalFirst
+            crate::tools::public_api::session::AuthMode::LocalFirst
         );
         if let serde_json::Value::Object(map) = &session.claims {
             assert!(
@@ -1607,9 +1609,9 @@ mod tests {
         let app_id = AppId::from_name("test-app");
         let seed = [9u8; 32];
         let clock = TestClock::new(1_000_000);
-        let token = crate::identity::mint_jazz_self_signed_token_at(
+        let token = crate::tools::identity::mint_jazz_self_signed_token_at(
             &seed,
-            crate::identity::ANONYMOUS_ISSUER,
+            crate::tools::identity::ANONYMOUS_ISSUER,
             &app_id.to_string(),
             3600,
             clock.now_seconds(),
@@ -1632,7 +1634,7 @@ mod tests {
 
         assert_eq!(
             session.auth_mode,
-            crate::public_api::session::AuthMode::Anonymous
+            crate::tools::public_api::session::AuthMode::Anonymous
         );
     }
 }

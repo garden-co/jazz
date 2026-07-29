@@ -5,10 +5,10 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder,
     RowDescriptor, Session, TableName, TableSchema, Value,
 };
@@ -20,7 +20,7 @@ use uuid::Uuid;
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(45);
 
-fn owned_docs_schema() -> jazz_tools::Schema {
+fn owned_docs_schema() -> jazz::tools::Schema {
     HashMap::from([(
         TableName::new("docs"),
         TableSchema::with_policies(
@@ -39,9 +39,9 @@ fn owned_docs_schema() -> jazz_tools::Schema {
 
 fn user_client_context(
     server: &JazzServer,
-    schema: jazz_tools::Schema,
+    schema: jazz::tools::Schema,
     user_id: &str,
-) -> jazz_tools::AppContext {
+) -> jazz::tools::AppContext {
     let mut context = server.make_client_context_for_user(schema, user_id);
     context.backend_secret = None;
     context.admin_secret = None;

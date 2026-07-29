@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::thread;
 
-use jazz::db::{CommitUnitTrust, DbIdentity, Transport};
-use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
-use jazz::node::EdgeCacheBudget;
-use jazz::schema::JazzSchema;
-use jazz_server::{
+use crate::db::{CommitUnitTrust, DbIdentity, Transport};
+use crate::groove::records::Value;
+use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::node::EdgeCacheBudget;
+use crate::schema::JazzSchema;
+use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };

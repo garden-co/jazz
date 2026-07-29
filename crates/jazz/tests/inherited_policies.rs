@@ -4,10 +4,11 @@ mod support;
 
 use std::time::Duration;
 
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, QueryBuilder,
-    SchemaBuilder, Session, TablePolicies, TableSchema, Value, row_input,
+    SchemaBuilder, Session, TablePolicies, TableSchema, Value,
 };
 use support::{
     publish_permissions, push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query,
@@ -24,7 +25,7 @@ fn test_user_id(subject: &str) -> String {
     test_author_id(subject).uuid().to_string()
 }
 
-fn inherited_update_schema() -> jazz_tools::Schema {
+fn inherited_update_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("organizations")
@@ -81,7 +82,7 @@ fn inherited_update_schema() -> jazz_tools::Schema {
         .build()
 }
 
-fn inherited_select_schema() -> jazz_tools::Schema {
+fn inherited_select_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("organizations")
@@ -143,7 +144,7 @@ fn inherited_select_schema() -> jazz_tools::Schema {
         .build()
 }
 
-async fn publish_schema(server: &JazzServer, schema: &jazz_tools::Schema) {
+async fn publish_schema(server: &JazzServer, schema: &jazz::tools::Schema) {
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -171,9 +172,9 @@ async fn publish_schema(server: &JazzServer, schema: &jazz_tools::Schema) {
 
 fn user_context(
     server: &JazzServer,
-    schema: jazz_tools::Schema,
+    schema: jazz::tools::Schema,
     user_id: &str,
-) -> jazz_tools::AppContext {
+) -> jazz::tools::AppContext {
     let mut context = server.make_client_context_for_user(schema, user_id);
     context.backend_secret = None;
     context
@@ -181,7 +182,7 @@ fn user_context(
 
 async fn connect_ready_user(
     server: &JazzServer,
-    schema: jazz_tools::Schema,
+    schema: jazz::tools::Schema,
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {

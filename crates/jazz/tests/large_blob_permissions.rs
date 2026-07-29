@@ -5,11 +5,11 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::AppContext;
-use jazz_tools::public_schema::{LargeValueKind, PolicyExpr, TablePolicies};
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::AppContext;
+use jazz::tools::public_schema::{LargeValueKind, PolicyExpr, TablePolicies};
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder,
     RowDescriptor, Session, TableName, TableSchema, Value,
 };
@@ -28,7 +28,7 @@ fn test_user_id(subject: &str) -> String {
     test_author_id(subject).uuid().to_string()
 }
 
-fn large_blob_assets_schema() -> jazz_tools::Schema {
+fn large_blob_assets_schema() -> jazz::tools::Schema {
     HashMap::from([(
         TableName::new("assets"),
         TableSchema::with_policies(
@@ -55,7 +55,7 @@ fn asset_values(owner_id: ObjectId, name: &str, data: Vec<u8>) -> HashMap<String
 
 fn user_client_context(
     server: &JazzServer,
-    schema: jazz_tools::Schema,
+    schema: jazz::tools::Schema,
     user_id: &str,
 ) -> AppContext {
     let mut context = server.make_client_context_for_user(schema, user_id);

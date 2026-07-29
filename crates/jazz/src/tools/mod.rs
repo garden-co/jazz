@@ -2,6 +2,8 @@
 pub(crate) mod admin_catalogue_payload_codec;
 pub(crate) mod admin_catalogue_row_format;
 pub mod app_id;
+#[cfg(feature = "cli")]
+pub mod commands;
 pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
@@ -42,9 +44,9 @@ pub use public_schema::{
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 
 #[cfg(feature = "client")]
-pub use client::{JazzClient, JazzTransaction};
+pub use crate::db::TextEdit;
 #[cfg(feature = "client")]
-pub use jazz::db::TextEdit;
+pub use client::{JazzClient, JazzTransaction};
 
 pub use object::ObjectId;
 #[cfg(feature = "client")]
@@ -85,12 +87,12 @@ pub struct AppContext {
 impl AppContext {
     pub fn test(schema: Schema) -> AppContext {
         AppContext {
-            app_id: crate::AppId::random(),
+            app_id: crate::tools::AppId::random(),
             client_id: None,
             schema,
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
-            storage: crate::ClientStorage::Memory,
+            storage: crate::tools::ClientStorage::Memory,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,

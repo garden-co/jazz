@@ -14,9 +14,9 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::middleware::auth::TestClock;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::middleware::auth::TestClock;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder,
     Session, TableSchema, Value, identity,
 };

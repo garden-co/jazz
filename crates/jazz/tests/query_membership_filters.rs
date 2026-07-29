@@ -1,7 +1,8 @@
 #![cfg(feature = "test")]
 
-use jazz_tools::{
-    ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value, row_input,
+use jazz::row_input;
+use jazz::tools::{
+    ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 
 fn membership_schema() -> Schema {

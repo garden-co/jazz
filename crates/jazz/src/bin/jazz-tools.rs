@@ -14,12 +14,10 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-mod commands;
-
 use clap::{Parser, Subcommand};
-use jazz_tools::middleware::AuthConfig;
+use jazz::tools::middleware::AuthConfig;
 #[cfg(feature = "otel")]
-use jazz_tools::otel;
+use jazz::tools::otel;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
@@ -191,7 +189,7 @@ async fn main() {
     match cli.command {
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                commands::create::app(name);
+                jazz::tools::commands::create::app(name);
             }
         },
         Commands::Server {
@@ -245,7 +243,7 @@ async fn main() {
                 ..Default::default()
             };
             let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
-            if let Err(e) = commands::server::run(
+            if let Err(e) = jazz::tools::commands::server::run(
                 &app_id,
                 port,
                 &data_dir,

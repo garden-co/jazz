@@ -5,9 +5,9 @@ use std::time::Duration;
 
 mod support;
 
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value, WriteContext,
 };
@@ -25,7 +25,7 @@ fn todo_schema() -> Schema {
         .build()
 }
 
-fn todo_query() -> jazz_tools::Query {
+fn todo_query() -> jazz::tools::Query {
     QueryBuilder::new("todos")
         .select(&["title", "completed"])
         .build()

@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::admin_catalogue_row_format::encode_value_with_type;
-use crate::public_api::magic_columns::is_magic_column_name;
-use crate::public_api::types::{ColumnType, RowDescriptor, TableName, Value};
+use crate::tools::admin_catalogue_row_format::encode_value_with_type;
+use crate::tools::public_api::magic_columns::is_magic_column_name;
+use crate::tools::public_api::types::{ColumnType, RowDescriptor, TableName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryBuildError {
@@ -1523,7 +1523,7 @@ impl Default for RecursiveBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_api::types::{ColumnDescriptor, ColumnType};
+    use crate::tools::public_api::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -1618,7 +1618,7 @@ mod tests {
     #[test]
     fn query_to_predicate_supports_implicit_row_id() {
         let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
-        let row_id = crate::object::ObjectId::new();
+        let row_id = crate::tools::object::ObjectId::new();
         let query = QueryBuilder::new("users")
             .filter_eq("id", Value::Uuid(row_id))
             .build();

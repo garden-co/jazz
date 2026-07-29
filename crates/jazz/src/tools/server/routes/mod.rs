@@ -26,7 +26,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::server::ServerState;
+use crate::tools::server::ServerState;
 
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
@@ -72,7 +72,7 @@ async fn app_shutdown_gate(
     let Some(_guard) = state.shutdown.try_enter_app_request() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::transport_error::ErrorResponse::internal(
+            axum::Json(crate::tools::transport_error::ErrorResponse::internal(
                 "server is shutting down".to_string(),
             )),
         )
@@ -125,13 +125,13 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode, Uri};
     use axum::response::Json;
 
-    use crate::AppId;
-    use crate::public_api::types::{SchemaHash, TableName};
-    use crate::schema_lens::LensOp;
+    use crate::tools::AppId;
+    use crate::tools::public_api::types::{SchemaHash, TableName};
+    use crate::tools::schema_lens::LensOp;
     use std::time::Duration;
 
-    use crate::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
-    use crate::server::catalogue::ConnectionSchemaDiagnostics;
+    use crate::tools::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use crate::tools::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
@@ -139,9 +139,9 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
 
-    use crate::middleware::AuthConfig;
-    use crate::server::{ServerBuilder, ServerState, StorageBackend};
-    use jazz::wire::{
+    use crate::tools::middleware::AuthConfig;
+    use crate::tools::server::{ServerBuilder, ServerState, StorageBackend};
+    use crate::wire::{
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
     };
@@ -177,7 +177,9 @@ mod tests {
             .state
     }
 
-    async fn make_state_with_schema(schema: crate::public_api::types::Schema) -> Arc<ServerState> {
+    async fn make_state_with_schema(
+        schema: crate::tools::public_api::types::Schema,
+    ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_storage(StorageBackend::InMemory)
@@ -189,7 +191,7 @@ mod tests {
     }
 
     async fn make_edge_state_with_schema(
-        schema: crate::public_api::types::Schema,
+        schema: crate::tools::public_api::types::Schema,
         upstream_url: String,
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -322,7 +324,7 @@ mod tests {
 
         assert_eq!(
             state.shutdown.phase(),
-            crate::server::ShutdownPhase::ShuttingDown
+            crate::tools::server::ShutdownPhase::ShuttingDown
         );
     }
 

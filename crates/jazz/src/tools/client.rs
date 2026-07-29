@@ -1,4 +1,4 @@
-//! Thin Rust client facade over `jazz::db`.
+//! Thin Rust client facade over `crate::db`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -8,48 +8,48 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::public_api::query::{
-    Condition as PublicCondition, SortDirection as PublicSortDirection,
-};
-use crate::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
-use crate::public_schema::Schema;
-use crate::public_schema::TableName;
-use crate::public_schema::{
-    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
-};
-use crate::public_schema::{OrderedRowDelta, Row};
-use crate::server::core_websocket_transport::WebSocketTransport;
-use crate::server::public_schema_convert::convert_public_schema;
-#[cfg(feature = "test-utils")]
-use crate::sync::ClientId;
-use crate::sync::DurabilityTier;
-use crate::transaction::BatchId;
-use crate::websocket_prelude_auth::AuthConfig as WsAuthConfig;
-use base64::Engine;
-use jazz::db::{
+use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TextEdit as CoreTextEdit, TickScheduler,
     TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
-use jazz::groove::records::Value as CoreValue;
-use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
+use crate::groove::records::Value as CoreValue;
+use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
-use jazz::groove::storage::RocksDbStorage as CoreRocksDbStorage;
-use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use jazz::node::OpenTxId as CoreOpenTxId;
-use jazz::tx::{
+use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
+use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use crate::node::OpenTxId as CoreOpenTxId;
+use crate::tools::public_api::query::{
+    Condition as PublicCondition, SortDirection as PublicSortDirection,
+};
+use crate::tools::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
+use crate::tools::public_schema::Schema;
+use crate::tools::public_schema::TableName;
+use crate::tools::public_schema::{
+    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
+};
+use crate::tools::public_schema::{OrderedRowDelta, Row};
+use crate::tools::server::core_websocket_transport::WebSocketTransport;
+use crate::tools::server::public_schema_convert::convert_public_schema;
+#[cfg(feature = "test-utils")]
+use crate::tools::sync::ClientId;
+use crate::tools::sync::DurabilityTier;
+use crate::tools::transaction::BatchId;
+use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
+use crate::tx::{
     DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
     RejectionReason as CoreRejectionReason, TxId as CoreTxId,
 };
+use base64::Engine;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[cfg(feature = "rocksdb")]
-use crate::ClientStorage;
-use crate::{
+use crate::tools::ClientStorage;
+use crate::tools::{
     AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionRejectReason,
     SubscriptionStream, SubscriptionStreamItem,
 };
@@ -134,7 +134,7 @@ struct ClientDbInner {
 #[derive(Clone)]
 struct ConnectConfig {
     server_url: String,
-    app_id: crate::AppId,
+    app_id: crate::tools::AppId,
     auth: WsAuthConfig,
 }
 
@@ -162,7 +162,7 @@ impl Clone for Backend {
 
 impl Backend {
     async fn open(
-        schema: jazz::schema::JazzSchema,
+        schema: crate::schema::JazzSchema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
@@ -241,7 +241,7 @@ impl Backend {
     fn insert(
         &self,
         table: &str,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
         match self {
             Self::Memory(db) => {
@@ -260,7 +260,7 @@ impl Backend {
         &self,
         identity: CoreAuthorId,
         table: &str,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
         match self {
             Self::Memory(db) => {
@@ -279,7 +279,7 @@ impl Backend {
         &self,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
@@ -293,7 +293,7 @@ impl Backend {
         identity: CoreAuthorId,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => Ok(db
@@ -310,7 +310,7 @@ impl Backend {
         &self,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => Ok(db.upsert(table, row_id, cells)?.mergeable_tx_id()),
@@ -324,7 +324,7 @@ impl Backend {
         identity: CoreAuthorId,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => Ok(db
@@ -341,7 +341,7 @@ impl Backend {
         &self,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
@@ -395,8 +395,8 @@ impl Backend {
 
     fn prepare_query(
         &self,
-        query: &jazz::query::Query,
-    ) -> std::result::Result<jazz::db::PreparedQuery, CoreDbError> {
+        query: &crate::query::Query,
+    ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
         match self {
             Self::Memory(db) => db.prepare_query(query),
             #[cfg(feature = "rocksdb")]
@@ -406,9 +406,9 @@ impl Backend {
 
     fn attach_query(
         &self,
-        prepared: &jazz::db::PreparedQuery,
+        prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
-    ) -> std::result::Result<jazz::db::QueryAttachment, CoreDbError> {
+    ) -> std::result::Result<crate::db::QueryAttachment, CoreDbError> {
         match self {
             Self::Memory(db) => db.attach_query_with_opts(prepared, opts),
             #[cfg(feature = "rocksdb")]
@@ -416,7 +416,7 @@ impl Backend {
         }
     }
 
-    fn query_attachment_is_covered(&self, attachment: &jazz::db::QueryAttachment) -> bool {
+    fn query_attachment_is_covered(&self, attachment: &crate::db::QueryAttachment) -> bool {
         match self {
             Self::Memory(db) => db.query_attachment_is_covered(attachment),
             #[cfg(feature = "rocksdb")]
@@ -424,7 +424,7 @@ impl Backend {
         }
     }
 
-    fn detach_query(&self, attachment: jazz::db::QueryAttachment) {
+    fn detach_query(&self, attachment: crate::db::QueryAttachment) {
         match self {
             Self::Memory(db) => db.detach_query(attachment),
             #[cfg(feature = "rocksdb")]
@@ -434,8 +434,8 @@ impl Backend {
 
     fn row_provenance(
         &self,
-        row: &jazz::node::CurrentRow,
-    ) -> std::result::Result<Option<jazz::node::RowProvenance>, CoreDbError> {
+        row: &crate::node::CurrentRow,
+    ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
         match self {
             Self::Memory(db) => db.row_provenance(row),
             #[cfg(feature = "rocksdb")]
@@ -445,9 +445,9 @@ impl Backend {
 
     async fn all(
         &self,
-        prepared: &jazz::db::PreparedQuery,
+        prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
-    ) -> std::result::Result<Vec<jazz::node::CurrentRow>, CoreDbError> {
+    ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
         match self {
             Self::Memory(db) => db.all(prepared, opts).await,
             #[cfg(feature = "rocksdb")]
@@ -457,9 +457,9 @@ impl Backend {
 
     async fn subscribe(
         &self,
-        prepared: &jazz::db::PreparedQuery,
+        prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
-    ) -> std::result::Result<jazz::db::SubscriptionStream, CoreDbError> {
+    ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
         match self {
             Self::Memory(db) => db.subscribe(prepared, opts).await,
             #[cfg(feature = "rocksdb")]
@@ -470,7 +470,7 @@ impl Backend {
     fn write_state(
         &self,
         tx_id: CoreTxId,
-    ) -> std::result::Result<jazz::db::WriteState, CoreDbError> {
+    ) -> std::result::Result<crate::db::WriteState, CoreDbError> {
         match self {
             Self::Memory(db) => db.write_state(tx_id),
             #[cfg(feature = "rocksdb")]
@@ -499,7 +499,7 @@ impl Backend {
         tx_id: CoreOpenTxId,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
         match self {
             Self::Memory(db) => db.exclusive_write(tx_id, table, row_id, cells),
@@ -513,7 +513,7 @@ impl Backend {
         tx_id: CoreOpenTxId,
         table: &str,
         row_id: CoreRowUuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
         match self {
             Self::Memory(db) => db.exclusive_update(tx_id, table, row_id, cells),
@@ -555,7 +555,7 @@ struct ExclusiveTransactionState {
 struct ExclusiveTransactionWrite {
     table: String,
     row_id: ObjectId,
-    cells: jazz::db::RowCells,
+    cells: crate::db::RowCells,
     deletion: Option<CoreDeletionEvent>,
 }
 
@@ -604,11 +604,11 @@ impl TickScheduler for TickSchedulerImpl {
 
 impl ClientDb {
     async fn open(
-        schema: jazz::schema::JazzSchema,
+        schema: crate::schema::JazzSchema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::AppId,
+        app_id: crate::tools::AppId,
         auth: Option<WsAuthConfig>,
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(TickSchedulerImpl::default());
@@ -632,17 +632,17 @@ impl ClientDb {
 
     async fn query_rows(
         &self,
-        query: jazz::query::Query,
+        query: crate::query::Query,
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
-    ) -> Result<Vec<jazz::node::CurrentRow>> {
+    ) -> Result<Vec<crate::node::CurrentRow>> {
         ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
     }
 
     async fn subscribe(
         &self,
-        query: jazz::query::Query,
+        query: crate::query::Query,
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
@@ -654,7 +654,7 @@ impl ClientDb {
         &self,
         table: String,
         row_id: Option<Uuid>,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
@@ -695,7 +695,7 @@ impl ClientDb {
         batch_id: BatchId,
         table: String,
         row_id: Option<Uuid>,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> Result<ObjectId> {
         let mut inner = self.inner.borrow_mut();
         let row_id = ObjectId::from_uuid(row_id.unwrap_or_else(Uuid::now_v7));
@@ -727,7 +727,7 @@ impl ClientDb {
         &self,
         table: String,
         row_id: Uuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
@@ -752,7 +752,7 @@ impl ClientDb {
         batch_id: BatchId,
         table: String,
         row_id: Uuid,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let object_id = ObjectId::from_uuid(row_id);
@@ -783,7 +783,7 @@ impl ClientDb {
     fn update(
         &self,
         row_id: ObjectId,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
@@ -824,7 +824,7 @@ impl ClientDb {
         &self,
         batch_id: BatchId,
         row_id: ObjectId,
-        cells: jazz::db::RowCells,
+        cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
@@ -895,7 +895,7 @@ impl ClientDb {
         tx.writes.push(ExclusiveTransactionWrite {
             table,
             row_id,
-            cells: jazz::db::RowCells::new(),
+            cells: crate::db::RowCells::new(),
             deletion: Some(CoreDeletionEvent::Deleted),
         });
         Ok(())
@@ -1007,7 +1007,7 @@ impl ClientDb {
                     }
                     if let Err(error) = inner.borrow().db.tick() {
                         #[cfg(feature = "sync-autopsy")]
-                        jazz::db::sync_autopsy::record(format!(
+                        crate::db::sync_autopsy::record(format!(
                             "client tick driver exited after db.tick error: {error}"
                         ));
                         return;
@@ -1020,11 +1020,11 @@ impl ClientDb {
 
 impl ClientDbInner {
     async fn open(
-        schema: jazz::schema::JazzSchema,
+        schema: crate::schema::JazzSchema,
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::AppId,
+        app_id: crate::tools::AppId,
         auth: Option<WsAuthConfig>,
         scheduler: Rc<TickSchedulerImpl>,
     ) -> Result<Self> {
@@ -1145,11 +1145,11 @@ impl ClientDbInner {
 
     async fn handle_query(
         inner: &Rc<RefCell<Self>>,
-        query: jazz::query::Query,
+        query: crate::query::Query,
         opts: CoreReadOpts,
         table: String,
         wait_for_coverage: bool,
-    ) -> Result<Vec<jazz::node::CurrentRow>> {
+    ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
             let inner = inner.borrow();
             inner
@@ -1185,7 +1185,7 @@ impl ClientDbInner {
 
     async fn wait_for_query_coverage(
         inner: &Rc<RefCell<Self>>,
-        attachment: &jazz::db::QueryAttachment,
+        attachment: &crate::db::QueryAttachment,
     ) -> Result<()> {
         if inner.borrow().db.query_attachment_is_covered(attachment) {
             return Ok(());
@@ -1207,7 +1207,7 @@ impl ClientDbInner {
 
     async fn handle_subscribe(
         inner: &Rc<RefCell<Self>>,
-        query: jazz::query::Query,
+        query: crate::query::Query,
         opts: CoreReadOpts,
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
@@ -1227,7 +1227,7 @@ impl ClientDbInner {
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let mut stream = stream;
-            let mut current_rows: Vec<jazz::node::CurrentRow> = Vec::new();
+            let mut current_rows: Vec<crate::node::CurrentRow> = Vec::new();
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
@@ -1271,7 +1271,7 @@ impl ClientDbInner {
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {
                         let reason = match reason {
-                            jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
+                            crate::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
                                 detail,
                             } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
                         };
@@ -1348,7 +1348,7 @@ impl ClientDbInner {
         self.row_tables.insert(row_id, table.to_string());
     }
 
-    fn remember_rows(&mut self, table: &str, rows: &[jazz::node::CurrentRow]) {
+    fn remember_rows(&mut self, table: &str, rows: &[crate::node::CurrentRow]) {
         for row in rows {
             self.row_tables
                 .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
@@ -1454,7 +1454,7 @@ fn core_author_from_principal(principal: &str) -> CoreAuthorId {
     )
 }
 
-fn core_storage(schema: &jazz::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
+fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -1617,7 +1617,7 @@ fn public_to_core_value_for_column_type(
 
 fn public_to_core_value_for_column(
     value: Value,
-    column: &crate::public_schema::ColumnDescriptor,
+    column: &crate::tools::public_schema::ColumnDescriptor,
 ) -> Result<CoreValue> {
     let value = public_to_core_value_for_column_type(value, &column.column_type)?;
     if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
@@ -1652,18 +1652,18 @@ fn core_to_public_value_for_column_type(
     }
 }
 
-fn auth_mode_claim_value(auth_mode: crate::public_api::session::AuthMode) -> &'static str {
+fn auth_mode_claim_value(auth_mode: crate::tools::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
-        crate::public_api::session::AuthMode::External => "external",
-        crate::public_api::session::AuthMode::LocalFirst => "local-first",
-        crate::public_api::session::AuthMode::Anonymous => "anonymous",
+        crate::tools::public_api::session::AuthMode::External => "external",
+        crate::tools::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::tools::public_api::session::AuthMode::Anonymous => "anonymous",
     }
 }
 
 fn core_row_provenance_to_public(
-    provenance: jazz::node::RowProvenance,
-) -> crate::metadata::RowProvenance {
-    crate::metadata::RowProvenance {
+    provenance: crate::node::RowProvenance,
+) -> crate::tools::metadata::RowProvenance {
+    crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
         created_at: provenance.created_at.physical_ms(),
         updated_by: provenance.updated_by.0.to_string(),
@@ -1686,14 +1686,14 @@ fn public_to_core_literal_for_column(value: &Value, column_type: &ColumnType) ->
     }
 }
 
-fn core_literal_operand(value: &Value, column_type: &ColumnType) -> Result<jazz::query::Operand> {
-    public_to_core_literal_for_column(value, column_type).map(jazz::query::Operand::Literal)
+fn core_literal_operand(value: &Value, column_type: &ColumnType) -> Result<crate::query::Operand> {
+    public_to_core_literal_for_column(value, column_type).map(crate::query::Operand::Literal)
 }
 
 fn core_query_condition(
     condition: &PublicCondition,
     table_schema: &TableSchema,
-) -> Result<Vec<jazz::query::Predicate>> {
+) -> Result<Vec<crate::query::Predicate>> {
     let column = condition.column();
     let column_schema = table_schema
         .columns
@@ -1701,62 +1701,62 @@ fn core_query_condition(
         .iter()
         .find(|schema| schema.name.as_str() == column)
         .ok_or_else(|| JazzError::Query(format!("unknown column {column}")))?;
-    let column_operand = || jazz::query::Operand::Column(column.to_owned());
+    let column_operand = || crate::query::Operand::Column(column.to_owned());
     let literal_operand = |value: &Value| core_literal_operand(value, &column_schema.column_type);
 
     let predicate = match condition {
         PublicCondition::Eq { value, .. } if value.is_null() => {
-            jazz::query::is_null(column_operand())
+            crate::query::is_null(column_operand())
         }
         PublicCondition::Ne { value, .. } if value.is_null() => {
-            jazz::query::not(jazz::query::is_null(column_operand()))
+            crate::query::not(crate::query::is_null(column_operand()))
         }
         PublicCondition::Eq { value, .. } => {
-            jazz::query::eq(column_operand(), literal_operand(value)?)
+            crate::query::eq(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Ne { value, .. } => {
-            jazz::query::ne(column_operand(), literal_operand(value)?)
+            crate::query::ne(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Lt { value, .. } => {
-            jazz::query::lt(column_operand(), literal_operand(value)?)
+            crate::query::lt(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Le { value, .. } => {
-            jazz::query::lte(column_operand(), literal_operand(value)?)
+            crate::query::lte(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Gt { value, .. } => {
-            jazz::query::gt(column_operand(), literal_operand(value)?)
+            crate::query::gt(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Ge { value, .. } => {
-            jazz::query::gte(column_operand(), literal_operand(value)?)
+            crate::query::gte(column_operand(), literal_operand(value)?)
         }
         PublicCondition::Contains { value, .. } => {
-            jazz::query::contains(column_operand(), literal_operand(value)?)
+            crate::query::contains(column_operand(), literal_operand(value)?)
         }
-        PublicCondition::In { values, .. } => jazz::query::in_list(
+        PublicCondition::In { values, .. } => crate::query::in_list(
             column_operand(),
             values
                 .iter()
-                .map(|value| literal_operand(value))
+                .map(literal_operand)
                 .collect::<Result<Vec<_>>>()?,
         ),
-        PublicCondition::IsNull { .. } => jazz::query::is_null(column_operand()),
+        PublicCondition::IsNull { .. } => crate::query::is_null(column_operand()),
         PublicCondition::IsNotNull { .. } => {
-            jazz::query::not(jazz::query::is_null(column_operand()))
+            crate::query::not(crate::query::is_null(column_operand()))
         }
         PublicCondition::Between { min, max, .. } => {
             return Ok(vec![
-                jazz::query::gte(column_operand(), literal_operand(min)?),
-                jazz::query::lte(column_operand(), literal_operand(max)?),
+                crate::query::gte(column_operand(), literal_operand(min)?),
+                crate::query::lte(column_operand(), literal_operand(max)?),
             ]);
         }
     };
     Ok(vec![predicate])
 }
 
-fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> String {
+fn aggregate_output_name(output: &crate::tools::public_api::query::AggregateOutput) -> String {
     match output.function {
-        crate::public_api::query::AggregateFunction::Count => "count".to_owned(),
-        crate::public_api::query::AggregateFunction::Sum => {
+        crate::tools::public_api::query::AggregateFunction::Count => "count".to_owned(),
+        crate::tools::public_api::query::AggregateFunction::Sum => {
             format!(
                 "sum_{}",
                 output
@@ -1765,7 +1765,7 @@ fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> 
                     .expect("sum aggregate has an input column")
             )
         }
-        crate::public_api::query::AggregateFunction::Avg => {
+        crate::tools::public_api::query::AggregateFunction::Avg => {
             format!(
                 "avg_{}",
                 output
@@ -1774,7 +1774,7 @@ fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> 
                     .expect("avg aggregate has an input column")
             )
         }
-        crate::public_api::query::AggregateFunction::Min => {
+        crate::tools::public_api::query::AggregateFunction::Min => {
             format!(
                 "min_{}",
                 output
@@ -1783,7 +1783,7 @@ fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> 
                     .expect("min aggregate has an input column")
             )
         }
-        crate::public_api::query::AggregateFunction::Max => {
+        crate::tools::public_api::query::AggregateFunction::Max => {
             format!(
                 "max_{}",
                 output
@@ -1796,16 +1796,18 @@ fn aggregate_output_name(output: &crate::public_api::query::AggregateOutput) -> 
 }
 
 fn aggregate_output_column_type(
-    output: &crate::public_api::query::AggregateOutput,
+    output: &crate::tools::public_api::query::AggregateOutput,
     table_schema: &TableSchema,
     table: &str,
 ) -> Result<Option<ColumnType>> {
     match output.function {
-        crate::public_api::query::AggregateFunction::Count => Ok(Some(ColumnType::Timestamp)),
-        crate::public_api::query::AggregateFunction::Avg => Ok(Some(ColumnType::Double)),
-        crate::public_api::query::AggregateFunction::Sum
-        | crate::public_api::query::AggregateFunction::Min
-        | crate::public_api::query::AggregateFunction::Max => {
+        crate::tools::public_api::query::AggregateFunction::Count => {
+            Ok(Some(ColumnType::Timestamp))
+        }
+        crate::tools::public_api::query::AggregateFunction::Avg => Ok(Some(ColumnType::Double)),
+        crate::tools::public_api::query::AggregateFunction::Sum
+        | crate::tools::public_api::query::AggregateFunction::Min
+        | crate::tools::public_api::query::AggregateFunction::Max => {
             let column = output
                 .column
                 .as_deref()
@@ -1823,7 +1825,7 @@ fn aggregate_output_column_type(
 fn aggregate_public_values(
     query: &Query,
     table_schema: &TableSchema,
-    row: &jazz::node::CurrentRow,
+    row: &crate::node::CurrentRow,
 ) -> Result<Vec<Value>> {
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
@@ -1848,7 +1850,7 @@ fn aggregate_public_values(
         ));
     }
     let (descriptor, raw) = row.encoded_record();
-    let borrowed = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
+    let borrowed = crate::groove::records::BorrowedRecord::new(raw, descriptor);
     columns
         .into_iter()
         .map(|(column, column_type)| {
@@ -1920,7 +1922,7 @@ impl JazzClient {
             ..CoreReadOpts::default()
         }
     }
-    fn core_query(&self, query: &Query) -> Result<jazz::query::Query> {
+    fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
         if query.disjuncts.len() != 1
             || !query.joins.is_empty()
             || !query.array_subqueries.is_empty()
@@ -1933,7 +1935,7 @@ impl JazzClient {
                 "JazzClient currently supports simple table queries only".to_string(),
             ));
         }
-        let mut core_query = jazz::query::Query::from(query.table.as_str());
+        let mut core_query = crate::query::Query::from(query.table.as_str());
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(query.table.as_str()))
@@ -1948,35 +1950,35 @@ impl JazzClient {
                 .outputs
                 .iter()
                 .map(|output| match output.function {
-                    crate::public_api::query::AggregateFunction::Count => {
-                        jazz::query::Aggregate::count()
+                    crate::tools::public_api::query::AggregateFunction::Count => {
+                        crate::query::Aggregate::count()
                     }
-                    crate::public_api::query::AggregateFunction::Sum => {
-                        jazz::query::Aggregate::sum(
+                    crate::tools::public_api::query::AggregateFunction::Sum => {
+                        crate::query::Aggregate::sum(
                             output
                                 .column
                                 .as_deref()
                                 .expect("sum aggregate has an input column"),
                         )
                     }
-                    crate::public_api::query::AggregateFunction::Avg => {
-                        jazz::query::Aggregate::avg(
+                    crate::tools::public_api::query::AggregateFunction::Avg => {
+                        crate::query::Aggregate::avg(
                             output
                                 .column
                                 .as_deref()
                                 .expect("avg aggregate has an input column"),
                         )
                     }
-                    crate::public_api::query::AggregateFunction::Min => {
-                        jazz::query::Aggregate::min(
+                    crate::tools::public_api::query::AggregateFunction::Min => {
+                        crate::query::Aggregate::min(
                             output
                                 .column
                                 .as_deref()
                                 .expect("min aggregate has an input column"),
                         )
                     }
-                    crate::public_api::query::AggregateFunction::Max => {
-                        jazz::query::Aggregate::max(
+                    crate::tools::public_api::query::AggregateFunction::Max => {
+                        crate::query::Aggregate::max(
                             output
                                 .column
                                 .as_deref()
@@ -1993,8 +1995,8 @@ impl JazzClient {
         }
         for (column, direction) in &query.order_by {
             let direction = match direction {
-                PublicSortDirection::Ascending => jazz::query::OrderDirection::Asc,
-                PublicSortDirection::Descending => jazz::query::OrderDirection::Desc,
+                PublicSortDirection::Ascending => crate::query::OrderDirection::Asc,
+                PublicSortDirection::Descending => crate::query::OrderDirection::Desc,
             };
             core_query = core_query.order_by(column.clone(), direction);
         }
@@ -2009,7 +2011,7 @@ impl JazzClient {
     fn core_rows_to_public(
         &self,
         query: &Query,
-        rows: Vec<jazz::node::CurrentRow>,
+        rows: Vec<crate::node::CurrentRow>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let table = query.table.as_str();
         let schema = self.schema()?;
@@ -2069,13 +2071,15 @@ impl JazzClient {
         Ok(rows)
     }
 
-    fn core_subscription_row_to_public(db: &Backend, row: &jazz::node::CurrentRow) -> Result<Row> {
+    fn core_subscription_row_to_public(db: &Backend, row: &crate::node::CurrentRow) -> Result<Row> {
         let (_, encoded) = row.encoded_record();
         let provenance = db
             .row_provenance(row)
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
-            .unwrap_or_else(|| crate::metadata::RowProvenance::for_insert("jazz:unknown", 0));
+            .unwrap_or_else(|| {
+                crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
+            });
         Ok(Row::new(
             ObjectId::from_uuid(row.row_uuid().0),
             encoded.to_vec(),
@@ -2086,7 +2090,7 @@ impl JazzClient {
 
     fn core_subscription_snapshot_delta(
         db: &Backend,
-        rows: &[jazz::node::CurrentRow],
+        rows: &[crate::node::CurrentRow],
     ) -> Result<OrderedRowDelta> {
         let added = rows
             .iter()
@@ -2109,7 +2113,7 @@ impl JazzClient {
     fn core_subscription_reset_delta(
         db: &Backend,
         previous_rows: &[ObjectId],
-        rows: &[jazz::node::CurrentRow],
+        rows: &[crate::node::CurrentRow],
     ) -> Result<OrderedRowDelta> {
         let removed = previous_rows
             .iter()
@@ -2123,11 +2127,11 @@ impl JazzClient {
     }
 
     fn apply_core_subscription_rows(
-        current_rows: &mut Vec<jazz::node::CurrentRow>,
+        current_rows: &mut Vec<crate::node::CurrentRow>,
         reset: bool,
-        added_rows: &[jazz::node::CurrentRow],
-        updated_rows: &[jazz::node::CurrentRow],
-        removed_rows: &[jazz::db::RemovedRow],
+        added_rows: &[crate::node::CurrentRow],
+        updated_rows: &[crate::node::CurrentRow],
+        removed_rows: &[crate::db::RemovedRow],
     ) {
         if reset {
             current_rows.clear();
@@ -2159,10 +2163,10 @@ impl JazzClient {
 
     fn core_subscription_change_delta(
         db: &Backend,
-        current_rows: &[jazz::node::CurrentRow],
-        added_rows: &[jazz::node::CurrentRow],
-        updated_rows: &[jazz::node::CurrentRow],
-        removed_rows: &[jazz::db::RemovedRow],
+        current_rows: &[crate::node::CurrentRow],
+        added_rows: &[crate::node::CurrentRow],
+        updated_rows: &[crate::node::CurrentRow],
+        removed_rows: &[crate::db::RemovedRow],
     ) -> Result<OrderedRowDelta> {
         let index_of = |id: ObjectId| {
             current_rows
@@ -2214,7 +2218,7 @@ impl JazzClient {
         &self,
         table: &str,
         _row_id: CoreRowUuid,
-        row: &jazz::node::CurrentRow,
+        row: &crate::node::CurrentRow,
         column: &str,
     ) -> Result<Option<Value>> {
         let value = match column {
@@ -2252,7 +2256,7 @@ impl JazzClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<jazz::db::RowCells> {
+    ) -> Result<crate::db::RowCells> {
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(table))
@@ -2658,9 +2662,9 @@ impl JazzClient {
         None
     }
 
-    pub async fn test_client(schema: Schema) -> crate::JazzClient {
-        let context = crate::AppContext::test(schema);
-        crate::JazzClient::connect(context)
+    pub async fn test_client(schema: Schema) -> crate::tools::JazzClient {
+        let context = crate::tools::AppContext::test(schema);
+        crate::tools::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
     }
@@ -2687,9 +2691,9 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppId;
-    use crate::public_schema::Schema;
-    use crate::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+    use crate::tools::AppId;
+    use crate::tools::public_schema::Schema;
+    use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 

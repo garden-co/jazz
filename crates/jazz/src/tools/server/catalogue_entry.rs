@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::metadata::MetadataKey;
-use crate::object::ObjectId;
+use crate::tools::metadata::MetadataKey;
+use crate::tools::object::ObjectId;
 #[cfg(any(test, all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-use crate::{
+use crate::tools::{
     admin_catalogue_row_format::{decode_row, encode_row},
     public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value},
 };

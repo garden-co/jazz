@@ -4,14 +4,14 @@ mod support;
 
 use std::time::Duration;
 
-use jazz_tools::Operation;
-use jazz_tools::public_schema::{
+use jazz::row_input;
+use jazz::tools::Operation;
+use jazz::tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::{
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
     SchemaBuilder, SubscriptionStreamItem, TableSchema, Value,
 };
@@ -414,7 +414,7 @@ fn mapping_rule_access_policy() -> PolicyExpr {
     }
 }
 
-fn todo_query() -> jazz_tools::Query {
+fn todo_query() -> jazz::tools::Query {
     QueryBuilder::new("todos")
         .select(&["title", "done"])
         .build()
@@ -455,7 +455,7 @@ async fn wait_for_row(
     .await;
 }
 
-async fn wait_edge_batch(client: &JazzClient, batch_id: jazz_tools::BatchId, label: &str) {
+async fn wait_edge_batch(client: &JazzClient, batch_id: jazz::tools::BatchId, label: &str) {
     tokio::time::timeout(
         Duration::from_secs(15),
         client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),

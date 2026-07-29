@@ -16,19 +16,19 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use jazz::db::{
+use crate::db::{
     CommitUnitTrust, Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor,
     RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use crate::groove::records::Value;
+use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
-use jazz::groove::storage::RocksDbStorage;
-use jazz::ids::{AuthorId, RowUuid, SchemaVersionId};
-use jazz::node::EdgeCacheBudget;
-use jazz::protocol::{CatalogueAck, CurrentWriteSchema, SchemaVersion, SyncMessage};
-use jazz::schema::JazzSchema;
-use jazz::wire::{TransportError, WireTransport};
+use crate::groove::storage::RocksDbStorage;
+use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
+use crate::node::EdgeCacheBudget;
+use crate::protocol::{CatalogueAck, CurrentWriteSchema, SchemaVersion, SyncMessage};
+use crate::schema::JazzSchema;
+use crate::wire::{TransportError, WireTransport};
 
 mod admin_schema_convert;
 pub mod auth_admission;
@@ -320,7 +320,7 @@ impl ShellDb {
 
     fn accept_subscriber_with_claims(
         &self,
-        transport: Box<dyn jazz::db::Transport>,
+        transport: Box<dyn crate::db::Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -345,7 +345,7 @@ impl ShellDb {
 
     fn accept_subscriber_with_claims_and_trust(
         &self,
-        transport: Box<dyn jazz::db::Transport>,
+        transport: Box<dyn crate::db::Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
@@ -363,7 +363,7 @@ impl ShellDb {
 
     fn accept_edge_subscriber_with_claims(
         &self,
-        transport: Box<dyn jazz::db::Transport>,
+        transport: Box<dyn crate::db::Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) -> ShellPeerConnection {
@@ -392,7 +392,7 @@ impl ShellDb {
         }
     }
 
-    fn tick_stats(&self) -> ShellResult<jazz::db::DbTickStats> {
+    fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
         match self {
             Self::Memory(db) => db.tick_stats().map_err(Into::into),
             #[cfg(feature = "rocksdb")]
@@ -463,7 +463,7 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Memory(jazz::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb::Memory(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
             #[cfg(feature = "rocksdb")]
             StorageConfig::RocksDb { path } => {
@@ -477,7 +477,7 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Rocks(jazz::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb::Rocks(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
             #[cfg(not(feature = "rocksdb"))]
             StorageConfig::RocksDb { .. } => {
@@ -1504,8 +1504,8 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz::groove::schema::ColumnType;
-    use jazz::schema::{ColumnSchema, TableSchema};
+    use crate::groove::schema::ColumnType;
+    use crate::schema::{ColumnSchema, TableSchema};
 
     fn simple_schema() -> JazzSchema {
         JazzSchema::new([TableSchema::new(

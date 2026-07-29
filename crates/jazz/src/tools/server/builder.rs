@@ -2,29 +2,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::WireTransportAdapter;
+use crate::ids::AuthorId;
+use crate::node::EdgeCacheBudget;
+use crate::schema::JazzSchema;
+use crate::serving::{NodeRole, StorageConfig};
 use axum::Router;
-use jazz::db::WireTransportAdapter;
-use jazz::ids::AuthorId;
-use jazz::node::EdgeCacheBudget;
-use jazz::schema::JazzSchema;
-use jazz_server::{NodeRole, StorageConfig};
 use tracing::info;
 
-use crate::AppId;
-use crate::middleware::AuthConfig;
-use crate::middleware::auth::{
+use crate::tools::AppId;
+use crate::tools::middleware::AuthConfig;
+use crate::tools::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::public_schema::Schema;
+use crate::tools::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-use crate::server::CatalogueRocksDbStorage;
-use crate::server::core_websocket_transport::WebSocketTransport;
-use crate::server::routes;
-use crate::server::{
+use crate::tools::server::CatalogueRocksDbStorage;
+use crate::tools::server::core_websocket_transport::WebSocketTransport;
+use crate::tools::server::routes;
+use crate::tools::server::{
     CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
 };
 #[cfg(test)]
-use crate::sync::DurabilityTier;
+use crate::tools::sync::DurabilityTier;
 
 #[cfg(feature = "rocksdb")]
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
@@ -169,7 +169,7 @@ impl ServerBuilder {
 
         let state = Arc::new(ServerState {
             catalogue_store,
-            catalogue: crate::server::ServerCatalogue,
+            catalogue: crate::tools::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
             upstream_http_url,
@@ -178,7 +178,7 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
-            shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
+            shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
         });
 
         if let (ServerTopology::Edge, Some(upstream_url), Some(shell), Some(admin_secret)) = (
@@ -236,7 +236,7 @@ impl ServerBuilder {
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
         topology: ServerTopology,
-    ) -> Result<Option<crate::server::core_server_shell::ServerShellHandle>, String> {
+    ) -> Result<Option<crate::tools::server::core_server_shell::ServerShellHandle>, String> {
         let role = match topology {
             ServerTopology::Core => NodeRole::Core,
             ServerTopology::Edge => NodeRole::Edge,
@@ -244,7 +244,7 @@ impl ServerBuilder {
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+                crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
                     role,
@@ -261,10 +261,10 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::server::public_schema_convert::convert_public_schema(&schema)
+        let schema = crate::tools::server::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+            crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                 schema,
                 storage_config,
                 role,
@@ -378,7 +378,7 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
 
 fn spawn_edge_upstream_connector(
     state: Arc<ServerState>,
-    shell: crate::server::core_server_shell::ServerShellHandle,
+    shell: crate::tools::server::core_server_shell::ServerShellHandle,
     upstream_url: String,
     app_id: AppId,
     admin_secret: String,
@@ -391,7 +391,7 @@ fn spawn_edge_upstream_connector(
             }
             let wake_shell = shell.clone();
             let wake = Arc::new(move || wake_shell.notify_activity());
-            let auth = crate::websocket_prelude_auth::AuthConfig {
+            let auth = crate::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
@@ -551,8 +551,8 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppId;
-    use crate::server::catalogue::CatalogueStore;
+    use crate::tools::AppId;
+    use crate::tools::server::catalogue::CatalogueStore;
 
     #[tokio::test]
     async fn edge_upstream_mode_builds_with_admin_secret() {
@@ -680,11 +680,11 @@ mod tests {
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let schema = crate::public_schema::SchemaBuilder::new()
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::public_schema::ColumnType::Uuid)
-                    .column("title", crate::public_schema::ColumnType::Text),
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
+                    .column("title", crate::tools::public_schema::ColumnType::Text),
             )
             .build();
 
@@ -726,11 +726,11 @@ mod tests {
     async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-restart");
-        let schema = crate::public_schema::SchemaBuilder::new()
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::public_schema::ColumnType::Uuid)
-                    .column("title", crate::public_schema::ColumnType::Text),
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
+                    .column("title", crate::tools::public_schema::ColumnType::Text),
             )
             .build();
 

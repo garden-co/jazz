@@ -1,24 +1,24 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use jazz::groove::records::{EnumSchema, Value as GrooveValue};
-use jazz::groove::schema::ColumnType as GrooveColumnType;
-use jazz::query::{
+use crate::groove::records::{EnumSchema, Value as GrooveValue};
+use crate::groove::schema::ColumnType as GrooveColumnType;
+use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
     PolicyBranch, Predicate, Query,
 };
-use jazz::schema::{
+use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
     MergeStrategy, TableSchema as CoreTableSchema, WritePolicies,
 };
 
-use crate::public_api::policy::{CmpOp, PolicyValue};
-use crate::public_api::relation_ir::{
+use crate::tools::public_api::policy::{CmpOp, PolicyValue};
+use crate::tools::public_api::relation_ir::{
     ColumnRef, JoinKind as RelJoinKind, PredicateCmpOp as RelPredicateCmpOp,
     PredicateExpr as RelPredicateExpr, ProjectExpr as RelProjectExpr,
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
-use crate::public_schema::{
+use crate::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind, Operation, PolicyExpr,
     Schema, TableName, TableSchema, Value,
 };
@@ -1063,7 +1063,7 @@ enum LoweredRelValue {
 #[derive(Clone)]
 struct PendingReachable {
     from: Operand,
-    seed: jazz::query::ReachableSeed,
+    seed: crate::query::ReachableSeed,
     edge_table: String,
     edge_member_column: String,
     edge_parent_column: String,
@@ -1075,7 +1075,7 @@ struct LoweredRel {
     table: String,
     filters: Vec<LoweredRelPredicate>,
     joins: Vec<JoinVia>,
-    reachable: Vec<jazz::query::ReachableVia>,
+    reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
 }
 
@@ -1123,7 +1123,7 @@ fn append_exists_rel_policy_clause(
         }
     }
     if let Some(pending) = lowered.pending_reachable.take() {
-        lowered.reachable.push(jazz::query::ReachableVia {
+        lowered.reachable.push(crate::query::ReachableVia {
             access_table: table.as_str().to_owned(),
             access_row_column: "id".to_owned(),
             access_team_column: source_column.clone(),
@@ -1138,7 +1138,7 @@ fn append_exists_rel_policy_clause(
             edge_member_column: pending.edge_member_column,
             edge_parent_column: pending.edge_parent_column,
             edge_filters: pending.edge_filters,
-            bound: jazz::query::RecursionBound::MaxDepth(pending.max_depth),
+            bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
             seed: Some(pending.seed),
         });
     }
@@ -1227,7 +1227,7 @@ fn lower_exists_rel(
                         "core schema ExistsRel reachable joins must join from reachable id",
                     ));
                 }
-                let mut reachable = jazz::query::ReachableVia {
+                let mut reachable = crate::query::ReachableVia {
                     access_table: right.table,
                     access_row_column: "__pending_outer_row".to_owned(),
                     access_team_column: on.right.column.clone(),
@@ -1246,7 +1246,7 @@ fn lower_exists_rel(
                     edge_member_column: pending.edge_member_column,
                     edge_parent_column: pending.edge_parent_column,
                     edge_filters: pending.edge_filters,
-                    bound: jazz::query::RecursionBound::MaxDepth(pending.max_depth),
+                    bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
                     seed: Some(pending.seed),
                 };
                 reachable
@@ -1341,7 +1341,7 @@ fn lower_gather_seed(
     table: &TableName,
     path: &str,
     seed: &RelExpr,
-) -> Result<(Operand, jazz::query::ReachableSeed), SchemaConversionError> {
+) -> Result<(Operand, crate::query::ReachableSeed), SchemaConversionError> {
     let (input, projected_team_column, projected_filters) =
         unwrap_seed_projection(table, path, seed)?;
     let (input, filters) = unwrap_rel_filter(input);
@@ -1394,7 +1394,7 @@ fn lower_gather_seed(
         .collect();
     Ok((
         Operand::Claim(user_claim.clone()),
-        jazz::query::ReachableSeed {
+        crate::query::ReachableSeed {
             table: seed_table.as_str().to_owned(),
             user_column: Some(user_column),
             user_claim: Some(user_claim),
@@ -1441,7 +1441,7 @@ fn unwrap_joined_seed_projection<'a>(
     path: &str,
     left: &'a RelExpr,
     right: &RelExpr,
-    on: &[crate::public_api::relation_ir::JoinCondition],
+    on: &[crate::tools::public_api::relation_ir::JoinCondition],
     projected: &ColumnRef,
 ) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
     let RelExpr::TableScan {
@@ -2187,21 +2187,21 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::ObjectId;
-    use crate::public_api::policy::{CmpOp, PolicyValue};
-    use crate::public_api::relation_ir::{
+    use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+    use crate::schema::JazzSchema;
+    use crate::tools::object::ObjectId;
+    use crate::tools::public_api::policy::{CmpOp, PolicyValue};
+    use crate::tools::public_api::relation_ir::{
         ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
         KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp,
         PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
         RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
     };
-    use crate::public_api::types::TableSchemaBuilder;
-    use crate::public_schema::{
+    use crate::tools::public_api::types::TableSchemaBuilder;
+    use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
         SchemaBuilder, TablePolicies, TableSchema,
     };
-    use jazz::query::{InheritsOperation, JoinTarget, Operand, Predicate};
-    use jazz::schema::JazzSchema;
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -2306,7 +2306,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(column.column_type, GrooveColumnType::Bytes);
-        assert_eq!(column.large_value, Some(jazz::schema::LargeValueKind::Blob));
+        assert_eq!(
+            column.large_value,
+            Some(crate::schema::LargeValueKind::Blob)
+        );
     }
 
     #[test]
@@ -2420,25 +2423,25 @@ mod tests {
         assert_eq!(score_span.end - score_span.start - 1, 4);
     }
 
-    fn sample_groove_value(value_type: &jazz::groove::records::ValueType) -> GrooveValue {
+    fn sample_groove_value(value_type: &crate::groove::records::ValueType) -> GrooveValue {
         match value_type {
-            jazz::groove::records::ValueType::U8 => GrooveValue::U8(1),
-            jazz::groove::records::ValueType::U16 => GrooveValue::U16(2),
-            jazz::groove::records::ValueType::U32 => GrooveValue::U32(3),
-            jazz::groove::records::ValueType::U64 => GrooveValue::U64(4),
-            jazz::groove::records::ValueType::I32 => GrooveValue::I32(-5),
-            jazz::groove::records::ValueType::I64 => GrooveValue::I64(-6),
-            jazz::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
-            jazz::groove::records::ValueType::Bool => GrooveValue::Bool(true),
-            jazz::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
-            jazz::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
-            jazz::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            jazz::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
-            jazz::groove::records::ValueType::Tuple(members) => {
+            crate::groove::records::ValueType::U8 => GrooveValue::U8(1),
+            crate::groove::records::ValueType::U16 => GrooveValue::U16(2),
+            crate::groove::records::ValueType::U32 => GrooveValue::U32(3),
+            crate::groove::records::ValueType::U64 => GrooveValue::U64(4),
+            crate::groove::records::ValueType::I32 => GrooveValue::I32(-5),
+            crate::groove::records::ValueType::I64 => GrooveValue::I64(-6),
+            crate::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
+            crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
+            crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
+            crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
+            crate::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            crate::groove::records::ValueType::Tuple(members) => {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
-            jazz::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
-            jazz::groove::records::ValueType::Nullable(inner) => {
+            crate::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            crate::groove::records::ValueType::Nullable(inner) => {
                 GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
             }
         }
@@ -3158,7 +3161,7 @@ mod tests {
                 }],
                 join_kind: RelJoinKind::Inner,
             }),
-            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: Some("target".to_owned()),
@@ -3283,7 +3286,7 @@ mod tests {
                     right: RelValueRef::SessionRef(vec!["sub".to_owned()]),
                 },
             }),
-            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: None,
@@ -3323,7 +3326,7 @@ mod tests {
                 }],
                 join_kind: RelJoinKind::Inner,
             }),
-            columns: vec![crate::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: None,
@@ -3743,12 +3746,12 @@ mod tests {
         assert_eq!(reachable.edge_table, "team_team_edges");
         assert_eq!(reachable.edge_member_column, "child_team");
         assert_eq!(reachable.edge_parent_column, "parent_team");
-        assert_eq!(reachable.bound, jazz::query::RecursionBound::MaxDepth(8));
+        assert_eq!(reachable.bound, crate::query::RecursionBound::MaxDepth(8));
         assert_eq!(
             reachable.access_filters,
             vec![Predicate::Eq(
                 Operand::Column("grant_role".to_owned()),
-                Operand::Literal(jazz::groove::records::Value::String("viewer".to_owned())),
+                Operand::Literal(crate::groove::records::Value::String("viewer".to_owned())),
             )]
         );
         let seed = reachable.seed.as_ref().unwrap();

@@ -220,6 +220,9 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
                 rows.insert(row.row_uuid());
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("unexpected subscription rejection: {reason:?}");
+        }
         SubscriptionEvent::Closed => {}
     }
 }

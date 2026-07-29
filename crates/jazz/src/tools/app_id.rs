@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::object::ObjectId;
+use crate::tools::object::ObjectId;
 
 /// Identifier for an application's catalogue and sync namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

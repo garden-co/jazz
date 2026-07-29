@@ -13,7 +13,7 @@ pub use schema::*;
 pub use value::*;
 
 // Import PolicyExpr for use by schema module
-pub(crate) use crate::public_api::policy::PolicyExpr;
+pub(crate) use crate::tools::public_api::policy::PolicyExpr;
 
 // Tests module
 #[cfg(test)]

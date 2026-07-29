@@ -4,10 +4,10 @@ use std::time::Duration;
 
 mod support;
 
-use jazz_tools::row_input;
-use jazz_tools::server::JazzServer;
-use jazz_tools::test_support::{disconnect_client, reconnect_client};
-use jazz_tools::{
+use jazz::row_input;
+use jazz::tools::server::JazzServer;
+use jazz::tools::test_support::{disconnect_client, reconnect_client};
+use jazz::tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, LargeValueKind, ObjectId,
     QueryBuilder, RowDescriptor, Schema, Session, TableName, TableSchema, TextEdit, Value,
 };
@@ -24,7 +24,7 @@ fn text_doc_schema() -> Schema {
     .collect()
 }
 
-fn docs_query() -> jazz_tools::Query {
+fn docs_query() -> jazz::tools::Query {
     QueryBuilder::new("docs").select(&["body"]).build()
 }
 
