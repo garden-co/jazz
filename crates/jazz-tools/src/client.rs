@@ -1732,6 +1732,13 @@ fn core_query_condition(
         PublicCondition::Contains { value, .. } => {
             jazz::query::contains(column_operand(), literal_operand(value)?)
         }
+        PublicCondition::In { values, .. } => jazz::query::in_list(
+            column_operand(),
+            values
+                .iter()
+                .map(|value| literal_operand(value))
+                .collect::<Result<Vec<_>>>()?,
+        ),
         PublicCondition::IsNull { .. } => jazz::query::is_null(column_operand()),
         PublicCondition::IsNotNull { .. } => {
             jazz::query::not(jazz::query::is_null(column_operand()))
