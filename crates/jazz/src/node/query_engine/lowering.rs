@@ -2780,7 +2780,11 @@ fn lower_linear_plan_steps(
                 available_route_fields.extend(introduced_route_fields);
                 if !matches!(residual, PredicateExpr::True) {
                     let predicate = lower_predicate(&residual, source, root_source, request)?;
-                    graph = graph.filter(predicate);
+                    graph = if uses_policy_value_comparison(request) {
+                        graph.policy_filter(predicate)
+                    } else {
+                        graph.filter(predicate)
+                    };
                 }
             }
             LinearStep::Join { right, mode, on } => {
@@ -2863,7 +2867,8 @@ fn lower_linear_plan_steps(
                         dedup_fields.clone(),
                         right_keys.clone(),
                     );
-                    graph = GraphBuilder::join(graph, right_reduced, left_keys, right_keys);
+                    graph =
+                        policy_join_if_needed(graph, right_reduced, left_keys, right_keys, request);
                     // Downstream steps (Project, route retention) resolve
                     // right-prefixed fields through this; the right side now
                     // carries only the dedup fields.
@@ -2883,7 +2888,8 @@ fn lower_linear_plan_steps(
                         reduced_right_fields,
                     ));
                 } else {
-                    graph = GraphBuilder::join(graph, right_graph, left_keys, right_keys);
+                    graph =
+                        policy_join_if_needed(graph, right_graph, left_keys, right_keys, request);
                     let right_fields = lowered_right.fields.clone();
                     last_join_right = Some((
                         (**right).clone(),
@@ -3056,6 +3062,24 @@ fn lower_linear_plan_steps(
         nullable_fields,
         nullable_field_depths,
     })
+}
+
+fn uses_policy_value_comparison(request: &QueryProgramRequest) -> bool {
+    matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
+}
+
+fn policy_join_if_needed(
+    left: GraphBuilder,
+    right: GraphBuilder,
+    left_on: impl IntoIterator<Item = impl Into<String>>,
+    right_on: impl IntoIterator<Item = impl Into<String>>,
+    request: &QueryProgramRequest,
+) -> GraphBuilder {
+    if uses_policy_value_comparison(request) {
+        GraphBuilder::policy_join(left, right, left_on, right_on)
+    } else {
+        GraphBuilder::join(left, right, left_on, right_on)
+    }
 }
 
 fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
@@ -3809,7 +3833,7 @@ fn lower_equality_param_filter_joins(
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
         }
-        graph = GraphBuilder::join(graph, binding, [join.field], [join.param])
+        graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
         retained_route_fields.insert(route_field);
     }

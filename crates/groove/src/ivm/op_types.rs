@@ -90,6 +90,19 @@ pub struct PersistOp {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FilterOp {
     pub predicate: PredicateExpr,
+    pub comparison: ValueComparison,
+}
+
+/// Equality semantics attached to an operator that compares user values.
+///
+/// Normal query and arrangement work compares encoded value types exactly.
+/// Policy evaluation is the sole exception: policy claims compare integral
+/// widths and signedness by their exact `i128` value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ValueComparison {
+    #[default]
+    Exact,
+    Policy,
 }
 
 /// Projection operator descriptor.
@@ -158,6 +171,7 @@ pub struct JoinOp {
     pub left_descriptor: RecordDescriptor,
     pub right_descriptor: RecordDescriptor,
     pub residual_predicate: Option<PlanExpr>,
+    pub comparison: ValueComparison,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
