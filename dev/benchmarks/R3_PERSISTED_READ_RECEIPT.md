@@ -19,11 +19,11 @@ that operation to:
 
 Profiles match the realistic benchmark definitions:
 
-| profile | users | orgs | projects | tasks | comments | watchers/task | activity |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ci` | 4 | 2 | 8 | 120 | 360 | 1 | 240 |
-| `s` | 10 | 3 | 30 | 3,000 | 12,000 | 1 | 9,000 |
-| `m` | 100 | 20 | 500 | 100,000 | 400,000 | 2 | 250,000 |
+| profile | users | orgs | projects |   tasks | comments | watchers/task | activity |
+| ------- | ----: | ---: | -------: | ------: | -------: | ------------: | -------: |
+| `ci`    |     4 |    2 |        8 |     120 |      360 |             1 |      240 |
+| `s`     |    10 |    3 |       30 |   3,000 |   12,000 |             1 |    9,000 |
+| `m`     |   100 |   20 |      500 | 100,000 |  400,000 |             2 |  250,000 |
 
 Each task is assigned round-robin to a project, so the selected project returns
 15, 100, and 200 rows respectively. The exact result count is asserted for
@@ -45,14 +45,14 @@ every sample.
 
 Three-sample medians on `anselm-devbox`, 2026-07-29, Rust 1.93.1:
 
-| profile | cache | storage open | Jazz open | prepare | first read | result rows |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `ci` | warm | 8.0 ms | 3.2 ms | 7 us | 0.6 ms | 15 |
-| `ci` | evicted | 8.9 ms | 6.1 ms | 7 us | 0.6 ms | 15 |
-| `s` | warm | 8.5 ms | 68.2 ms | 21 us | 7.6 ms | 100 |
-| `s` | evicted | 10.1 ms | 83.3 ms | 22 us | 7.5 ms | 100 |
-| `m` | warm | 12.6 ms | 3,059.6 ms | 27 us | 355.4 ms | 200 |
-| `m` | evicted | 34.6 ms | 3,219.2 ms | 28 us | 339.9 ms | 200 |
+| profile | cache   | storage open |  Jazz open | prepare | first read | result rows |
+| ------- | ------- | -----------: | ---------: | ------: | ---------: | ----------: |
+| `ci`    | warm    |       8.0 ms |     3.2 ms |    7 us |     0.6 ms |          15 |
+| `ci`    | evicted |       8.9 ms |     6.1 ms |    7 us |     0.6 ms |          15 |
+| `s`     | warm    |       8.5 ms |    68.2 ms |   21 us |     7.6 ms |         100 |
+| `s`     | evicted |      10.1 ms |    83.3 ms |   22 us |     7.5 ms |         100 |
+| `m`     | warm    |      12.6 ms | 3,059.6 ms |   27 us |   355.4 ms |         200 |
+| `m`     | evicted |      34.6 ms | 3,219.2 ms |   28 us |   339.9 ms |         200 |
 
 The primary scale signal is Jazz open, not RocksDB open. First materialization
 also grows much faster than result size, consistent with the existing gap around
