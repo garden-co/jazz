@@ -2149,6 +2149,20 @@ impl RecursionBound {
     pub fn default_max_depth() -> Self {
         Self::MaxDepth(8)
     }
+
+    /// This bound expressed as a step count.
+    ///
+    /// `Fixpoint` carries no user-facing depth, so it falls back to the
+    /// conservative loop cap used by evaluator paths that are not true
+    /// fixpoint. Restores the behaviour of the `iteration_cap` accessor removed
+    /// in c2db5a8e4, whose last caller survived the removal and left the crate
+    /// unable to compile.
+    pub(crate) fn depth_steps(self) -> usize {
+        match self {
+            Self::Fixpoint => 128,
+            Self::MaxDepth(max_depth) => max_depth.max(1),
+        }
+    }
 }
 
 /// Query predicate.
