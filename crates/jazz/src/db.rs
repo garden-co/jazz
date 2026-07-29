@@ -1969,6 +1969,7 @@ where
         Ok(MergeableTx {
             db: self,
             tx_id: self.begin_mergeable()?,
+            committed: false,
         })
     }
 
@@ -1991,6 +1992,7 @@ where
         Ok(MergeableTx {
             db: self,
             tx_id: self.begin_mergeable_for_identity(author)?,
+            committed: false,
         })
     }
 
@@ -2084,6 +2086,20 @@ where
     }
 
     /// Stage a full row value in an owned mergeable transaction.
+    /// Stage an insert in an owned mergeable transaction.
+    ///
+    /// This and its `mergeable_update` / `mergeable_delete` / `mergeable_restore`
+    /// siblings are the single implementation of mergeable staging.
+    /// [`MergeableTx`] is a thin handle that holds an `OpenTxId` and delegates
+    /// to exactly these methods, adding a read overlay and abandon-on-drop.
+    ///
+    /// Both layers exist because callers differ in who owns the transaction's
+    /// lifetime. Rust callers want the RAII handle. The wasm and napi bindings
+    /// cannot hold one: JS keeps the transaction open across separate FFI calls,
+    /// so there is no Rust frame to borrow across, and constructing a
+    /// [`MergeableTx`] per call would abandon the transaction when that handle
+    /// dropped at the end of the call. Those callers own the lifetime themselves
+    /// and drive these primitives by id.
     pub fn mergeable_insert(
         &self,
         tx_id: OpenTxId,
@@ -6685,12 +6701,23 @@ macro_rules! row {
 }
 
 /// Builder for a group of mergeable writes committed as one transaction.
+///
+/// This is the Rust-facing handle: it owns the transaction's lifetime and
+/// abandons it on drop. Every method delegates to the `Db::mergeable_*`
+/// primitives, which are the single implementation — see their documentation
+/// for why both layers exist.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenTxId,
+    /// Set once the transaction has been committed, so `Drop` does not then
+    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
+    /// `abandon_transaction_handle` on an already-committed transaction — benign
+    /// only because `abandon_tx` tolerates an unknown id, and silent because the
+    /// result was discarded.
+    committed: bool,
 }
 
 impl<S> MergeableTx<'_, S>
@@ -6810,8 +6837,15 @@ where
     }
 
     /// Commit all staged writes as one mergeable transaction.
-    pub fn commit(self) -> Result<TxId, Error> {
-        self.db.commit_mergeable_handle(self.tx_id)
+    ///
+    /// On failure the transaction is left open and `Drop` abandons it, so a
+    /// failed commit does not leak an open handle.
+    pub fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_mergeable_handle(self.tx_id);
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
     }
 
     /// Read one row with this transaction's pending writes overlaid.
@@ -6830,6 +6864,9 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
         let _ = self.db.abandon_transaction_handle(self.tx_id);
     }
 }
