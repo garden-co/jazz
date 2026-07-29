@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main, codex/jazz-core-engine-swap]
   push:
-    branches: [main]
+    branches: [main, codex/jazz-core-engine-swap]
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
@@ -17,6 +17,35 @@ env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
+  # Does the integration branch still compile after a merge?
+  #
+  # PR-level checks cannot answer this. Each PR is built against the base as it
+  # was, so two PRs that are individually green can merge cleanly and produce a
+  # tree that does not build. That happened on 2026-07-29: one PR removed
+  # `RecursionBound::iteration_cap`, another kept a call to it, neither
+  # conflicted, and `codex/jazz-core-engine-swap` was left unable to compile —
+  # unnoticed until it broke unrelated work hours later.
+  #
+  # Deliberately narrow. The full suites are not yet green, so gating on them
+  # would force routine overrides and make "red" meaningless. This checks the
+  # one property we can guarantee, and is fast and flake-free. Promote the other
+  # jobs to gates individually as each goes green.
+  build-integration:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+
+      - name: Install Rust prerequisites
+        run: pnpm run ensure:rust-toolchain
+
+      - run: cargo check --workspace --all-targets
+
   lint:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
