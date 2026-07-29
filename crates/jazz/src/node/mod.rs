@@ -10,6 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "testing")]
+use std::time::Duration;
+#[cfg(feature = "testing")]
+use web_time::Instant;
 
 use groove::db::{
     CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
@@ -90,6 +94,44 @@ use open_tx::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
+
+/// Test/bench-only attribution for the durable-state work performed while opening a node.
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeOpenReceipt {
+    /// Open the catalogue-only Groove database and recover schema metadata.
+    pub catalogue_open: Duration,
+    /// Lower the complete schema and construct the full Groove database.
+    pub database_open: Duration,
+    /// Allocate process-local node state.
+    pub state_init: Duration,
+    /// Recover aliases, clocks, branches, pending edges, and rejected transactions.
+    pub recover_storage: Duration,
+    /// Recover close markers, aliases, branches, and transaction-clock bounds.
+    pub recover_catalogue_state: Duration,
+    /// Legacy full-row validation phase; zero when startup uses newer bounded recovery.
+    pub validate_current_rows: Duration,
+    /// Recover the accepted-global-sequence watermark set.
+    pub recover_global_sequences: Duration,
+    /// Recover pending-edge and rejected-transaction state.
+    pub recover_pending_and_rejected: Duration,
+    /// Clean up inconsistent ahead-current leftovers after an unclean close.
+    pub recover_unclean_close: Duration,
+    /// Recover persisted maintained-query known-state facts.
+    pub recover_known_state: Duration,
+    /// Rebuild the in-memory ahead-current key indexes.
+    pub rebuild_ahead_current: Duration,
+    /// Ensure aliases and persist any missing base catalogue records.
+    pub finalize_catalogue: Duration,
+    /// Current rows decoded by the legacy startup layout validation pass.
+    pub validated_current_rows: usize,
+    /// Accepted global sequence records consumed during recovery.
+    pub accepted_global_sequences: usize,
+    /// Transaction-index records scanned while recovering global sequences.
+    pub global_sequence_records_scanned: usize,
+    /// Ahead-current records consumed while rebuilding in-memory indexes.
+    pub ahead_current_entries: usize,
+}
 
 #[cfg(test)]
 mod tests;
@@ -504,6 +546,30 @@ where
         )
     }
 
+    #[cfg(feature = "testing")]
+    /// Open a node and return phase timings for benchmark attribution.
+    pub fn new_with_open_receipt_for_test(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+    ) -> Result<(Self, NodeOpenReceipt), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut receipt = NodeOpenReceipt::default();
+        let node = Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            large_value_checkpoint_op_interval,
+            Some(&mut receipt),
+        )?;
+        Ok((node, receipt))
+    }
+
     /// Rebuild the groove layer over the same storage using the standard open path.
     pub fn reopen_in_place(self) -> Result<Self, Error>
     where
@@ -550,7 +616,28 @@ where
         history_complete: bool,
         large_value_checkpoint_op_interval: usize,
     ) -> Result<Self, Error> {
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            large_value_checkpoint_op_interval,
+            #[cfg(feature = "testing")]
+            None,
+        )
+    }
+
+    fn new_with_options_inner(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        large_value_checkpoint_op_interval: usize,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<Self, Error> {
         let current_schema_version_id = schema.version_id();
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let CatalogueOpenState {
             storage,
             mut schemas,
@@ -559,6 +646,10 @@ where
             partitions,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.catalogue_open = started.elapsed();
+        }
         let had_base_schema = schemas.contains_key(&current_schema_version_id);
         if !had_base_schema {
             schemas.insert(
@@ -566,9 +657,17 @@ where
                 SchemaVersion::new(schema.clone()),
             );
         }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let database =
             Self::open_full_database(&schema, &schemas, &partitions, &branch_partitions, storage)?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.database_open = started.elapsed();
+        }
         let current_row_graphs = current_row_graphs(&schema);
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
@@ -644,9 +743,47 @@ where
             initial_sync_flush_active: false,
             initial_sync_flush_completed: false,
         };
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.state_init = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            node.recover_from_storage_with_receipt(receipt)?;
+        } else {
+            node.recover_from_storage()?;
+        }
+        #[cfg(not(feature = "testing"))]
         node.recover_from_storage()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_storage = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_known_state = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
+        } else {
+            node.rebuild_ahead_current_keys()?;
+        }
+        #[cfg(not(feature = "testing"))]
         node.rebuild_ahead_current_keys()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.rebuild_ahead_current = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
         let self_node_alias = node.ensure_node_alias(node_uuid)?;
         node.self_node_alias = Some(self_node_alias);
         let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
@@ -656,6 +793,10 @@ where
         }
         for table in schema.tables.iter().map(|table| table.name.clone()) {
             node.persist_partition(table, current_schema_version_id)?;
+        }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.finalize_catalogue = started.elapsed();
         }
         Ok(node)
     }
@@ -1492,9 +1633,31 @@ where
     }
 
     fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        {
+            self.rebuild_ahead_current_keys_inner(None)
+        }
+        #[cfg(not(feature = "testing"))]
+        self.rebuild_ahead_current_keys_inner()
+    }
+
+    #[cfg(feature = "testing")]
+    fn rebuild_ahead_current_keys_with_receipt(
+        &mut self,
+        receipt: &mut NodeOpenReceipt,
+    ) -> Result<(), Error> {
+        self.rebuild_ahead_current_keys_inner(Some(receipt))
+    }
+
+    fn rebuild_ahead_current_keys_inner(
+        &mut self,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
         self.ahead_current_rows.clear();
         self.ahead_current_latest.clear();
+        #[cfg(feature = "testing")]
+        let mut entries = 0usize;
         for table in self.catalogue.schema.tables.clone() {
             let storage_tables = table.ahead_current_storage_tables();
             let content_rows = self
@@ -1505,6 +1668,10 @@ where
                 .collect::<Vec<_>>();
             let content_descriptor = storage_tables[0].record_schema();
             for raw in content_rows {
+                #[cfg(feature = "testing")]
+                {
+                    entries += 1;
+                }
                 let record = BorrowedRecord::new(&raw, &content_descriptor);
                 self.insert_ahead_current_key(
                     table.name.clone(),
@@ -1522,6 +1689,10 @@ where
                 .map(|raw| raw.raw().to_vec())
                 .collect::<Vec<_>>();
             for raw in deletion_rows {
+                #[cfg(feature = "testing")]
+                {
+                    entries += 1;
+                }
                 let record = BorrowedRecord::new(&raw, &deletion_descriptor);
                 self.insert_ahead_current_key(
                     table.name.clone(),
@@ -1533,6 +1704,10 @@ where
                     ),
                 );
             }
+        }
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = &mut receipt {
+            receipt.ahead_current_entries = entries;
         }
         Ok(())
     }

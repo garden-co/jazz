@@ -46,6 +46,28 @@ where
     }
 
     pub(super) fn recover_from_storage(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        {
+            self.recover_from_storage_inner(None)
+        }
+        #[cfg(not(feature = "testing"))]
+        self.recover_from_storage_inner()
+    }
+
+    #[cfg(feature = "testing")]
+    pub(super) fn recover_from_storage_with_receipt(
+        &mut self,
+        receipt: &mut NodeOpenReceipt,
+    ) -> Result<(), Error> {
+        self.recover_from_storage_inner(Some(receipt))
+    }
+
+    fn recover_from_storage_inner(
+        &mut self,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        let stage_started = receipt.as_ref().map(|_| Instant::now());
         let cleanly_closed = self.take_valid_clean_close_marker()?;
         let storage_consistent_through = if cleanly_closed {
             None
@@ -98,6 +120,14 @@ where
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
+            receipt.recover_catalogue_state = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let stage_started = receipt.as_ref().map(|_| Instant::now());
+        #[cfg(feature = "testing")]
+        let validated_current_rows = 0usize;
         for table in self.catalogue.schema.tables.clone() {
             if let Some(raw) =
                 self.database
@@ -116,11 +146,24 @@ where
                 ));
             }
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
+            receipt.validate_current_rows = started.elapsed();
+            receipt.validated_current_rows = validated_current_rows;
+        }
+        #[cfg(feature = "testing")]
+        let stage_started = receipt.as_ref().map(|_| Instant::now());
         let mut accepted_global_seqs = Vec::new();
+        #[cfg(feature = "testing")]
+        let mut global_sequence_records_scanned = 0usize;
         for raw in self
             .database
             .index_scan_raw("jazz_transactions", "by_global_seq", &[])?
         {
+            #[cfg(feature = "testing")]
+            {
+                global_sequence_records_scanned += 1;
+            }
             let record = raw.record();
             if !matches!(fate_from_encoded_fields(record)?, Fate::Accepted) {
                 continue;
@@ -133,10 +176,21 @@ where
         }
         accepted_global_seqs.sort();
         accepted_global_seqs.dedup();
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = &mut receipt {
+            receipt.accepted_global_sequences = accepted_global_seqs.len();
+            receipt.global_sequence_records_scanned = global_sequence_records_scanned;
+        }
         for global_seq in accepted_global_seqs {
             self.record_applied_global_seq(global_seq);
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
+            receipt.recover_global_sequences = started.elapsed();
+        }
 
+        #[cfg(feature = "testing")]
+        let stage_started = receipt.as_ref().map(|_| Instant::now());
         let mut pending_edges = Vec::new();
         for raw in self
             .database
@@ -211,8 +265,18 @@ where
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
+            receipt.recover_pending_and_rejected = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let stage_started = receipt.as_ref().map(|_| Instant::now());
         if !cleanly_closed {
             self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
+        }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
+            receipt.recover_unclean_close = started.elapsed();
         }
         Ok(())
     }
