@@ -2506,7 +2506,7 @@ function writeOrNormalizeRejection<T>(
     const message = errorMessage(error);
     if (message.includes("WriteRejected")) {
       const reason = rejectionReason(message);
-      throw new Error(`${operation} failed: WriteError("${reason}")`);
+      throw writeError(operation, reason);
     }
     throw error;
   }
