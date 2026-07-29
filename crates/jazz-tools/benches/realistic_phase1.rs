@@ -46,6 +46,8 @@ type RocksBenchDb = Db<RocksDbStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+#[cfg(feature = "rocksdb")]
+const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
 struct SmallProfile {
@@ -1112,9 +1114,31 @@ fn r3_profiles() -> Vec<R3Profile> {
 struct R3PhaseSample {
     storage_open: Duration,
     jazz_open: Duration,
+    open_breakdown: Option<R3OpenBreakdown>,
     prepare: Duration,
     first_read: Duration,
     rows: usize,
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Debug)]
+struct R3OpenBreakdown {
+    catalogue_open: Duration,
+    database_open: Duration,
+    state_init: Duration,
+    recover_storage: Duration,
+    recover_catalogue_state: Duration,
+    validate_current_rows: Duration,
+    recover_global_sequences: Duration,
+    recover_pending_and_rejected: Duration,
+    recover_unclean_close: Duration,
+    recover_known_state: Duration,
+    rebuild_ahead_current: Duration,
+    finalize_catalogue: Duration,
+    validated_current_rows: usize,
+    accepted_global_sequences: usize,
+    global_sequence_records_scanned: usize,
+    ahead_current_entries: usize,
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1122,6 +1146,40 @@ struct R3PhaseSample {
 enum R3CacheMode {
     Warm,
     Evicted,
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Clone, Copy)]
+enum R3CloseMode {
+    Clean,
+    Unclean,
+}
+
+#[cfg(feature = "rocksdb")]
+impl R3CloseMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Clean => "db_close",
+            Self::Unclean => "drop_without_close",
+        }
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn r3_close_modes() -> Vec<R3CloseMode> {
+    let requested = env::var("JAZZ_R3_CLOSE_MODES").unwrap_or_else(|_| "unclean".to_owned());
+    requested
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "clean" => R3CloseMode::Clean,
+            "unclean" => R3CloseMode::Unclean,
+            other => panic!(
+                "unknown JAZZ_R3_CLOSE_MODES entry {other:?}; expected a comma-separated subset of clean,unclean"
+            ),
+        })
+        .collect()
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1196,9 +1254,8 @@ fn evict_path_from_linux_page_cache(_path: &Path) {
 fn open_rocks_db_with_phases(
     seed: u64,
     author: AuthorId,
-    history_complete: bool,
     path: &Path,
-) -> (RocksBenchDb, Duration, Duration) {
+) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -1222,15 +1279,40 @@ fn open_rocks_db_with_phases(
     .with_id_source(SeededRowIdSource::new(seed));
 
     let jazz_started = Instant::now();
-    let opened = if history_complete {
-        block_on(Db::open_history_complete(config))
-    } else {
-        block_on(Db::open(config))
+    #[cfg(feature = "r3-open-attribution")]
+    let (db, open_breakdown) = {
+        let (db, receipt) = block_on(Db::open_with_receipt_for_test(config))
+            .expect("open attributed core realistic RocksDB phase receipt db");
+        (
+            db,
+            Some(R3OpenBreakdown {
+                catalogue_open: receipt.catalogue_open,
+                database_open: receipt.database_open,
+                state_init: receipt.state_init,
+                recover_storage: receipt.recover_storage,
+                recover_catalogue_state: receipt.recover_catalogue_state,
+                validate_current_rows: receipt.validate_current_rows,
+                recover_global_sequences: receipt.recover_global_sequences,
+                recover_pending_and_rejected: receipt.recover_pending_and_rejected,
+                recover_unclean_close: receipt.recover_unclean_close,
+                recover_known_state: receipt.recover_known_state,
+                rebuild_ahead_current: receipt.rebuild_ahead_current,
+                finalize_catalogue: receipt.finalize_catalogue,
+                validated_current_rows: receipt.validated_current_rows,
+                accepted_global_sequences: receipt.accepted_global_sequences,
+                global_sequence_records_scanned: receipt.global_sequence_records_scanned,
+                ahead_current_entries: receipt.ahead_current_entries,
+            }),
+        )
     };
-    let db = opened.expect("open core realistic RocksDB phase receipt db");
+    #[cfg(not(feature = "r3-open-attribution"))]
+    let (db, open_breakdown) = (
+        block_on(Db::open(config)).expect("open core realistic RocksDB phase receipt db"),
+        None,
+    );
     let jazz_open = jazz_started.elapsed();
 
-    (db, storage_open, jazz_open)
+    (db, storage_open, jazz_open, open_breakdown)
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1238,14 +1320,15 @@ fn measure_r3_phase_sample(
     path: &Path,
     project: RowUuid,
     expected_rows: usize,
-    sample: usize,
+    _sample: usize,
     cache_mode: R3CacheMode,
+    close_mode: R3CloseMode,
 ) -> R3PhaseSample {
     if matches!(cache_mode, R3CacheMode::Evicted) {
         evict_path_from_linux_page_cache(path);
     }
-    let (db, storage_open, jazz_open) =
-        open_rocks_db_with_phases(31 + sample as u64, AUTHOR, false, path);
+    let (db, storage_open, jazz_open, open_breakdown) =
+        open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
 
     let prepare_started = Instant::now();
     let query = project_board_query(&db, project);
@@ -1259,14 +1342,45 @@ fn measure_r3_phase_sample(
         expected_rows,
         "R3 project-board result count changed"
     );
+    if matches!(close_mode, R3CloseMode::Clean) {
+        db.close()
+            .expect("close R3 phase receipt db after measured read");
+    }
 
     R3PhaseSample {
         storage_open,
         jazz_open,
+        open_breakdown,
         prepare,
         first_read,
         rows: rows.len(),
     }
+}
+
+#[cfg(feature = "rocksdb")]
+fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
+    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    if matches!(close_mode, R3CloseMode::Clean) {
+        db.close()
+            .expect("establish clean-close marker before R3 phase samples");
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn median_open_us(
+    samples: &[R3PhaseSample],
+    phase: impl Fn(&R3OpenBreakdown) -> Duration,
+) -> Option<u64> {
+    let mut values = samples
+        .iter()
+        .filter_map(|sample| sample.open_breakdown.as_ref())
+        .map(|receipt| phase(receipt).as_micros().min(u64::MAX as u128) as u64)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1287,17 +1401,29 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
         .unwrap_or(3)
         .max(1);
     let expected_rows = selected.profile.tasks.div_ceil(selected.profile.projects);
-    for cache_mode in r3_cache_modes() {
-        let samples = (0..sample_count)
-            .map(|sample| measure_r3_phase_sample(path, project, expected_rows, sample, cache_mode))
-            .collect::<Vec<_>>();
+    for close_mode in r3_close_modes() {
+        establish_r3_close_mode(path, close_mode);
+        for cache_mode in r3_cache_modes() {
+            let samples = (0..sample_count)
+                .map(|sample| {
+                    measure_r3_phase_sample(
+                        path,
+                        project,
+                        expected_rows,
+                        sample,
+                        cache_mode,
+                        close_mode,
+                    )
+                })
+                .collect::<Vec<_>>();
 
-        println!(
-            "{}",
-            serde_json::json!({
+            println!(
+                "{}",
+                serde_json::json!({
                 "scenario": "r3_rocksdb_cold_load",
                 "phase": cache_mode.phase(),
                 "cache_mode": cache_mode.id(),
+                "close_mode": close_mode.id(),
                 "profile": selected.id,
                 "users": selected.profile.users,
                 "organizations": selected.profile.organizations,
@@ -1314,10 +1440,63 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                 }),
                 "storage_open_p50_us": median_us(&samples, |sample| sample.storage_open),
                 "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
+                "catalogue_open_p50_us": median_open_us(&samples, |receipt| receipt.catalogue_open),
+                "database_open_p50_us": median_open_us(&samples, |receipt| receipt.database_open),
+                "state_init_p50_us": median_open_us(&samples, |receipt| receipt.state_init),
+                "recover_storage_p50_us": median_open_us(&samples, |receipt| receipt.recover_storage),
+                "recover_catalogue_state_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.recover_catalogue_state,
+                ),
+                "validate_current_rows_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.validate_current_rows,
+                ),
+                "recover_global_sequences_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.recover_global_sequences,
+                ),
+                "recover_pending_and_rejected_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.recover_pending_and_rejected,
+                ),
+                "recover_unclean_close_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.recover_unclean_close,
+                ),
+                "recover_known_state_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.recover_known_state,
+                ),
+                "rebuild_ahead_current_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.rebuild_ahead_current,
+                ),
+                "finalize_catalogue_p50_us": median_open_us(
+                    &samples,
+                    |receipt| receipt.finalize_catalogue,
+                ),
+                "validated_current_rows": samples[0]
+                    .open_breakdown
+                    .as_ref()
+                    .map(|receipt| receipt.validated_current_rows),
+                "accepted_global_sequences": samples[0]
+                    .open_breakdown
+                    .as_ref()
+                    .map(|receipt| receipt.accepted_global_sequences),
+                "global_sequence_records_scanned": samples[0]
+                    .open_breakdown
+                    .as_ref()
+                    .map(|receipt| receipt.global_sequence_records_scanned),
+                "ahead_current_entries": samples[0]
+                    .open_breakdown
+                    .as_ref()
+                    .map(|receipt| receipt.ahead_current_entries),
                 "prepare_p50_us": median_us(&samples, |sample| sample.prepare),
                 "first_read_p50_us": median_us(&samples, |sample| sample.first_read),
-            })
-        );
+                })
+            );
+        }
     }
 }
 

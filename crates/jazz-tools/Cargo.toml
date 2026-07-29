@@ -23,6 +23,7 @@ test = false
 [features]
 default = []
 rocksdb = ["dep:rocksdb", "jazz-server/rocksdb"]
+r3-open-attribution = ["rocksdb", "jazz/testing"]
 sqlite = ["dep:rusqlite"]
 client = ["dep:thiserror", "server"]
 server = [

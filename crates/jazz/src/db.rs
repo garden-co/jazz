@@ -35,6 +35,8 @@ const POST_TICK_HISTORY_WINDOW_BUDGET: usize = 4;
 
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
+#[cfg(feature = "testing")]
+pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
@@ -377,6 +379,34 @@ where
             ),
             next_now_ms: Cell::new(1),
         })
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a database and return internal node-open phase timings for benchmarks.
+    pub async fn open_with_receipt_for_test(
+        config: DbConfig<S>,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
+        let schema_version_id = config.schema.version_id();
+        let (node, receipt) = NodeState::new_with_open_receipt_for_test(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+            config.large_value_checkpoint_op_interval,
+        )?;
+        let db = Self {
+            schema: config.schema,
+            schema_version_id,
+            identity: config.identity,
+            node: Node::new(node),
+            row_id_source: RefCell::new(
+                config
+                    .id_source
+                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+            ),
+            next_now_ms: Cell::new(1),
+        };
+        Ok((db, receipt))
     }
 
     /// Open a database as a history-complete serving core.
