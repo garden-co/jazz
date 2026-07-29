@@ -3668,7 +3668,7 @@ impl InheritanceExpansionPath {
         let used = self.uses.get(&key).copied().unwrap_or(0);
         let limit = inherits
             .max_depth
-            .unwrap_or_else(|| crate::query::RecursionBound::default_max_depth().iteration_cap());
+            .unwrap_or_else(|| crate::query::RecursionBound::default_max_depth().depth_steps());
         if used >= limit {
             return None;
         }
