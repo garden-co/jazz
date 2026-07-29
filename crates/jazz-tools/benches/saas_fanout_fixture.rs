@@ -2,8 +2,9 @@
 //!
 //! The fixture keeps the benchmark runner small: configuration, tenant/document
 //! distribution, access-path identities, direct ACL grants, and expected initial
-//! pages all come from one model. Seeding uses only the public [`jazz::db::Db`]
-//! transaction API.
+//! pages all come from one model. Seeding uses the public [`jazz::db::Db`]
+//! transaction API, with an optional explicit authority finalization step for
+//! history-complete server fixtures.
 
 #![allow(dead_code)]
 
@@ -30,6 +31,24 @@ const DIRECT_ACL_USER_BASE: u64 = USER_NAMESPACE_WIDTH * 2;
 const PUBLIC_USER_BASE: u64 = USER_NAMESPACE_WIDTH * 3;
 const ADMIN_USER_BASE: u64 = USER_NAMESPACE_WIDTH * 4;
 const BACKGROUND_ACL_USER_BASE: u64 = USER_NAMESPACE_WIDTH * 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedMode {
+    PendingLocal,
+    SettledGlobal,
+}
+
+impl SeedMode {
+    fn write_api(self) -> &'static str {
+        match self {
+            Self::PendingLocal => "Db::mergeable_tx().insert_with_id + MergeableTx::commit",
+            Self::SettledGlobal => {
+                "Db::mergeable_tx().insert_with_id + MergeableTx::commit + Db::finalize_local_mergeable_commit_for_test"
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -662,9 +681,29 @@ impl Fixture {
     where
         S: OrderedKvStorage + ReopenableStorage + 'static,
     {
+        self.seed(db, SeedMode::PendingLocal)
+    }
+
+    /// Seed the fixture in batches and finalize every batch as settled/global.
+    ///
+    /// This is intended for history-complete server benchmarks. It keeps the
+    /// same batched public transaction path as [`Self::seed_local`] and then
+    /// explicitly performs the serving authority's local self-acceptance step.
+    pub fn seed_global<S>(&self, db: &Db<S>) -> Result<SeedReport, String>
+    where
+        S: OrderedKvStorage + ReopenableStorage + 'static,
+    {
+        self.seed(db, SeedMode::SettledGlobal)
+    }
+
+    fn seed<S>(&self, db: &Db<S>, mode: SeedMode) -> Result<SeedReport, String>
+    where
+        S: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let total_started = Instant::now();
         let organizations = seed_rows(
             db,
+            mode,
             support::ORGANIZATIONS,
             self.config.organizations,
             self.config.local_seed_batch,
@@ -677,6 +716,7 @@ impl Fixture {
         )?;
         let teams = seed_rows(
             db,
+            mode,
             support::TEAMS,
             self.config.teams,
             self.config.local_seed_batch,
@@ -699,6 +739,7 @@ impl Fixture {
         )?;
         let team_memberships = seed_rows(
             db,
+            mode,
             support::TEAM_MEMBERSHIPS,
             team_membership_rows,
             self.config.local_seed_batch,
@@ -728,6 +769,7 @@ impl Fixture {
         )?;
         let organization_memberships = seed_rows(
             db,
+            mode,
             support::ORGANIZATION_MEMBERSHIPS,
             organization_membership_rows,
             self.config.local_seed_batch,
@@ -750,6 +792,7 @@ impl Fixture {
         )?;
         let documents = seed_rows(
             db,
+            mode,
             support::DOCUMENTS,
             self.config.documents,
             self.config.local_seed_batch,
@@ -762,6 +805,7 @@ impl Fixture {
         )?;
         let document_acl = seed_rows(
             db,
+            mode,
             support::DOCUMENT_ACL,
             self.direct_acl_grants.len(),
             self.config.local_seed_batch,
@@ -779,6 +823,7 @@ impl Fixture {
             },
         )?;
         Ok(SeedReport {
+            mode,
             organizations,
             teams,
             team_memberships,
@@ -909,7 +954,7 @@ pub struct SeedPhaseReport {
 }
 
 impl SeedPhaseReport {
-    fn new(rows: usize, batches: usize, elapsed: Duration) -> Self {
+    fn new(rows: usize, batches: usize, elapsed: Duration, mode: SeedMode) -> Self {
         let seconds = elapsed.as_secs_f64();
         Self {
             rows,
@@ -920,13 +965,14 @@ impl SeedPhaseReport {
             } else {
                 rows as f64 / seconds
             },
-            write_api: "mergeable_tx.insert_with_id",
+            write_api: mode.write_api(),
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SeedReport {
+    pub mode: SeedMode,
     pub organizations: SeedPhaseReport,
     pub teams: SeedPhaseReport,
     pub team_memberships: SeedPhaseReport,
@@ -1009,6 +1055,7 @@ fn build_subscriber_plans(config: &Config) -> Result<Vec<SubscriberPlan>, String
 
 fn seed_rows<S>(
     db: &Db<S>,
+    mode: SeedMode,
     table: &'static str,
     rows: usize,
     batch_size: usize,
@@ -1027,11 +1074,18 @@ where
             tx.insert_with_id(table, row_id, cells)
                 .map_err(|error| format!("seed {table} row {index}: {error}"))?;
         }
-        tx.commit()
+        let tx_id = tx
+            .commit()
             .map_err(|error| format!("commit {table} batch {batches}: {error}"))?;
+        if mode == SeedMode::SettledGlobal {
+            db.finalize_local_mergeable_commit_for_test(tx_id)
+                .map_err(|error| {
+                    format!("settle {table} batch {batches} transaction {tx_id:?}: {error}")
+                })?;
+        }
         batches += 1;
     }
-    Ok(SeedPhaseReport::new(rows, batches, started.elapsed()))
+    Ok(SeedPhaseReport::new(rows, batches, started.elapsed(), mode))
 }
 
 fn env_usize(key: &str, default: usize) -> Result<usize, String> {

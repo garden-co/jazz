@@ -55,6 +55,13 @@ One 529,900-row binding takes 11.84 s. Ten bindings take 118.00 s, and the last
 binding still takes 11.82 s. Three 2M-document policy bindings each take
 61–67 s.
 
+The follow-up server-default RocksDB lane reaches the same conclusion under
+history-complete Global reads: after a clean reopen, each of ten bindings read
+2,929,500 logical records and took a 6.02 s median, including teams with only
+100 documents. The same-open control read the identical record count and took
+6.15 s. See
+[`SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md`](SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md).
+
 The current Local query path has no selected secondary access path, so a
 current-team query hydrates the whole local visible-current source and policy
 relations. Shape sharing does not make a new binding selective.

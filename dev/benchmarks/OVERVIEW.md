@@ -64,20 +64,26 @@ treat that documentation as stale.
 `observer_write_path`, `db_benchmark`, `authorization_scope_benchmark`,
 `insert`/`update`, `subscription`, and `realistic_phase1` (R1–R13).
 
-`saas_documents` and `saas_permission_fanout` are public-API, JSON-emitting
-scale harnesses in the same crate. They cover latest-100 team document reads,
-RBAC/direct-ACL policy branches, active-subscription fan-out, write batching,
-and approximate maintained-state sizing. Their dated receipts live beside
-this overview. The evidence-backed implementation sequence is in
+`saas_documents`, `saas_permission_fanout`, and
+`saas_persistent_hydration` are public-API, JSON-emitting scale harnesses in
+the same crate. They cover latest-100 team document reads, RBAC/direct-ACL
+policy branches, active-subscription fan-out, write batching, approximate
+maintained-state sizing, and the reopened server-default RocksDB hydration
+path. Their dated receipts live beside this overview. The evidence-backed
+implementation sequence is in
 [`plans/PLAN.md`](plans/PLAN.md), with separate plans for correctness, hydration,
 write refresh, maintained Top-K, claim rebinding, and lifecycle cleanup. The
 follow-up probe methodology and caveats are recorded in
-[`SAAS_DEEP_DIVE_RECEIPT_20260729.md`](SAAS_DEEP_DIVE_RECEIPT_20260729.md).
+[`SAAS_DEEP_DIVE_RECEIPT_20260729.md`](SAAS_DEEP_DIVE_RECEIPT_20260729.md);
+the persisted receipt is
+[`SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md`](SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md).
 
 Two things to know before trusting these:
 
-- **They're all `MemoryStorage`** unless noted, so they don't measure the
-  persisted read path at all.
+- `saas_documents` and `saas_permission_fanout` use `MemoryStorage`.
+  `saas_persistent_hydration` uses the server's
+  RocksDB/history-complete/Global path and a close/reopen boundary, but cannot
+  control the operating-system page cache.
 - The "batch" cases in `insert`/`update` are _serial insert-and-wait calls_, not
   atomic transactions. Only `subscription` has a genuinely staged 100-insert
   mergeable transaction.
@@ -97,7 +103,11 @@ Two things to know before trusting these:
 Ranked by how much they'd change a decision:
 
 1. **`INV-INC-1` has no performance receipt.** The mechanism law — maintained delivery work bounded by the change, never by view size — is enforced by an exact functional canary (one parent, 20k children, insert one, allocations within 3×). That proves the property at _one point_. No slope, no curve, no number to set a target against. Given how much recent work is justified against this invariant, it's the first gap to close.
-2. **No end-to-end persisted realistic-scale read receipt.** Legacy suites are in-memory, browser CI runs at 3%, and native R3 reopens its own temp RocksDB without controlling OS cache. We have no honest cold-read number.
+2. **No cache-controlled end-to-end persisted read receipt.** The persistent
+   SaaS harness now covers the direct serving-database policy/query path at
+   529,900 documents / 589,900 live rows, but excludes the subscriber peer,
+   transport, and client layers and cannot evict the OS page cache. We still
+   have no honest cold-disk end-to-end number.
 3. **S8 missing** (branch/merge/offline).
 4. **Policy cost now has only a local in-memory snapshot.** The SaaS fan-out
    receipt measures ordinary writes reaching authorized readers through team,

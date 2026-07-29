@@ -28,6 +28,12 @@ fixture, graph, iteration, and correctness contracts are recorded below; the
 plans require checked-in counter-based regressions before any production
 optimization lands.
 
+A follow-up server-default RocksDB/history-complete/Global run independently
+confirmed that selective hydration is still the limiting mechanism after
+reopen: each binding read 2,929,500 logical records for the 529,900-document
+fixture. See
+[`SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md`](SAAS_PERSISTENT_SERVER_HYDRATION_RECEIPT_20260729.md).
+
 ## 1. Flush-once subscription refresh
 
 ### Current command

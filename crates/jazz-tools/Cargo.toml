@@ -182,6 +182,11 @@ name = "saas_permission_fanout"
 harness = false
 required-features = ["saas-permission-bench"]
 
+[[bench]]
+name = "saas_persistent_hydration"
+harness = false
+required-features = ["saas-permission-bench", "rocksdb"]
+
 [[test]]
 name = "large_blob_permissions"
 required-features = ["test"]
