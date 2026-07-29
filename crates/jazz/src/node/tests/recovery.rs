@@ -402,6 +402,87 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
 }
 
 #[test]
+fn recovery_scans_only_sequenced_transactions_and_preserves_global_gaps() {
+    // This is intentionally an internal recovery test: the distinction between
+    // the contiguous watermark and above-watermark gaps is not exposed through
+    // the public Db API, but it is the correctness invariant of the bounded scan.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let gap;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let first = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(20), 20).cells(title_cells("first")),
+            )
+            .unwrap();
+        gap = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(21), 21).cells(title_cells("gap")),
+            )
+            .unwrap();
+        let third = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(22), 22).cells(title_cells("third")),
+            )
+            .unwrap();
+        let rejected = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(23), 23).cells(title_cells("rejected")),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            rejected,
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            None,
+            None,
+        )
+        .unwrap();
+        for index in 0..64 {
+            node.commit_mergeable(
+                MergeableCommit::new("todos", row(100 + index), u64::from(100 + index))
+                    .cells(title_cells("pending")),
+            )
+            .unwrap();
+        }
+        mark_accepted_without_ahead_cleanup(&mut node, first, GlobalSeq(1));
+        mark_accepted_without_ahead_cleanup(&mut node, third, GlobalSeq(3));
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    let (mut reopened, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024).unwrap();
+    #[cfg(not(feature = "testing"))]
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+
+    #[cfg(feature = "testing")]
+    {
+        assert_eq!(receipt.global_sequence_records_scanned, 2);
+        assert_eq!(receipt.accepted_global_sequences, 2);
+    }
+    assert_eq!(reopened.clock.applied_global_watermark, GlobalSeq(1));
+    assert_eq!(
+        reopened.clock.applied_global_above_watermark,
+        BTreeSet::from([GlobalSeq(3)])
+    );
+    assert_eq!(reopened.clock.next_global_seq, GlobalSeq(4));
+
+    reopened
+        .apply_fate_update(
+            gap,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    assert_eq!(reopened.clock.applied_global_watermark, GlobalSeq(3));
+    assert!(reopened.clock.applied_global_above_watermark.is_empty());
+}
+
+#[test]
 fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer() {
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));
     let mut peer = PeerState::new();
