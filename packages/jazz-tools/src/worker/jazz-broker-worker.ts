@@ -511,7 +511,15 @@ function blockTabForSchemaMismatch(tab: TabState): void {
   post(tab.port, {
     type: "schema-blocked",
     brokerInstanceId,
-    reason: "incompatible persistent browser schema",
+    // Keep the leading phrase stable: it is a public error string that
+    // existing callers and tests match on. The rest exists because the
+    // phrase alone reads as a storage problem, and it is not one — this
+    // fires when two *live* tabs report different schema fingerprints to
+    // the same broker, so clearing site data cannot help.
+    reason:
+      "incompatible persistent browser schema: another tab or window of this app " +
+      "is running a different schema. Close the other tabs, or reload them all so " +
+      "they agree. Clearing site data will not help — nothing persisted is compared.",
   });
 
   if (leader?.tabId === tab.tabId) {
