@@ -45,6 +45,67 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
+fn recovery_rebuilds_ahead_current_latest_and_fallback_versions() {
+    // This is intentionally internal: rejecting the latest local version must
+    // expose the prior pending version, which relies on both the full key set
+    // and the per-row latest-key index rebuilt during open.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let latest;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        node.commit_mergeable(
+            MergeableCommit::new("todos", row(11), 10).cells(title_cells("first")),
+        )
+        .unwrap();
+        latest = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(11), 11).cells(title_cells("latest")),
+            )
+            .unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    let (mut reopened, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024).unwrap();
+    #[cfg(not(feature = "testing"))]
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+
+    #[cfg(feature = "testing")]
+    assert_eq!(receipt.ahead_current_entries, 2);
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(11), title_cells("latest"))])
+    );
+
+    reopened
+        .apply_fate_update(
+            latest,
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(11), title_cells("first"))])
+    );
+}
+
+#[test]
 fn opening_defers_malformed_current_row_to_read() {
     // This is necessarily an internal regression test: planting malformed
     // persisted bytes requires direct storage access, and the core point-read
