@@ -5689,6 +5689,7 @@ where
 
     pub(super) fn write_policy_query_allows_insert_candidate(
         &mut self,
+        policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
@@ -5703,12 +5704,25 @@ where
         {
             return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
         }
-        let policy_shape = policy.clone().validate(&self.catalogue.schema)?;
+
+        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+                .schema
+        };
+        let policy_shape = policy
+            .clone()
+            .validate_with_schema_version(policy_schema, policy_schema_version)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
-            &self.catalogue.schema,
+            policy_schema,
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
