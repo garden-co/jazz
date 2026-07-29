@@ -1495,7 +1495,7 @@ where
                     .permission_subject(identity)
                     .cells(cells.clone()),
             )
-            .map_err(Error::from)?;
+            .map_err(local_write_error)?;
         if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -1534,7 +1534,7 @@ where
                     .permission_subject(identity)
                     .cells(cells.clone()),
             )
-            .map_err(Error::from)?;
+            .map_err(local_write_error)?;
         if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -1686,7 +1686,7 @@ where
             .node
             .borrow_mut()
             .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
+            .map_err(local_write_error)?;
         if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -1718,7 +1718,7 @@ where
             .node
             .borrow_mut()
             .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
+            .map_err(local_write_error)?;
         if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -2262,7 +2262,7 @@ where
             .node
             .borrow_mut()
             .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
-            .map_err(Into::into)
+            .map_err(local_write_error)
     }
 
     fn stage_mergeable_update(
@@ -2277,7 +2277,7 @@ where
             .node
             .borrow_mut()
             .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
-            .map_err(Into::into)
+            .map_err(local_write_error)
     }
 
     fn stage_mergeable_delete(
@@ -2330,7 +2330,8 @@ where
             content_parents,
             now_ms,
             true,
-        )?;
+        )
+        .map_err(local_write_error)?;
         node.tx_write_mergeable(
             tx_id,
             table,
@@ -2340,7 +2341,8 @@ where
             deletion_parents,
             now_ms,
             true,
-        )?;
+        )
+        .map_err(local_write_error)?;
         Ok(())
     }
 
@@ -2350,7 +2352,8 @@ where
             .node
             .node
             .borrow_mut()
-            .commit_mergeable_open(open_tx_id, || self.next_now_ms())?;
+            .commit_mergeable_open(open_tx_id, || self.next_now_ms())
+            .map_err(local_write_error)?;
         self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(tx_id)
@@ -2446,7 +2449,7 @@ where
             .node
             .borrow_mut()
             .tx_write(tx_id, table, row, cells, None)
-            .map_err(Into::into)
+            .map_err(local_write_error)
     }
 
     fn stage_exclusive_delete(
@@ -2481,24 +2484,27 @@ where
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(tx_id, table, row, cells, None)
+            .map_err(local_write_error)?;
         node.tx_write(
             tx_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
-        )?;
+        )
+        .map_err(local_write_error)?;
         Ok(())
     }
 
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
-        let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
-            open_tx_id,
-            self.identity.author,
-            self.next_now_ms(),
-        )?;
+        let (tx_id, unit) = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
+            .map_err(local_write_error)?;
         self.finalize_local_exclusive_unit(tx_id, unit)?;
         self.refresh_subscriptions()?;
         Ok(tx_id)
@@ -2766,14 +2772,19 @@ where
             .node
             .borrow_mut()
             .dry_run_mergeable_write_allows(commit.clone())
-            .map_err(Error::from)?;
+            .map_err(local_write_error)?;
         if !allowed {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
                 format!("policy denied {operation} on table {table}"),
             ));
         }
-        let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable(commit)
+            .map_err(local_write_error)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -7099,6 +7110,15 @@ impl Error {
             code,
             message: message.into(),
         }
+    }
+}
+
+fn local_write_error(error: crate::node::Error) -> Error {
+    match error {
+        crate::node::Error::InvalidJsonCell(message) => {
+            Error::new(ErrorCode::WriteRejected, message)
+        }
+        error => Error::from(error),
     }
 }
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -210,6 +210,7 @@ fn insert_rejects_invalid_json_text() {
         Err(error) => error,
     };
 
+    assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(
         error
             .to_string()
@@ -258,6 +259,7 @@ fn insert_rejects_json_schema_violation() {
         Err(error) => error,
     };
 
+    assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(
         error
             .to_string()
@@ -285,6 +287,7 @@ fn update_rejects_json_schema_violation_and_preserves_existing_payload() {
         Err(error) => error,
     };
 
+    assert_eq!(error.code, ErrorCode::WriteRejected);
     assert!(
         error
             .to_string()

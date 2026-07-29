@@ -148,7 +148,7 @@ describe("TS Update API", () => {
     });
 
     expect(() => db.update(app.table_with_constraints, value.id, { data: { string: "" } })).toThrow(
-      'Update failed: WriteError("encoding error: JSON schema validation failed for column `data`: \\"\\" is shorter than 1 character")',
+      'Update failed: WriteError("JSON schema validation failed for column `data`: \\"\\" is shorter than 1 character")',
     );
 
     expect(() =>
@@ -156,7 +156,7 @@ describe("TS Update API", () => {
         data: { string: "01234567890" },
       }),
     ).toThrow(
-      'Update failed: WriteError("encoding error: JSON schema validation failed for column `data`: \\"01234567890\\" is longer than 10 characters")',
+      'Update failed: WriteError("JSON schema validation failed for column `data`: \\"01234567890\\" is longer than 10 characters")',
     );
 
     expect(() =>
@@ -164,7 +164,7 @@ describe("TS Update API", () => {
         data: { integer: -1 },
       }),
     ).toThrow(
-      'Update failed: WriteError("encoding error: JSON schema validation failed for column `data`: -1 is less than the minimum of 0")',
+      'Update failed: WriteError("JSON schema validation failed for column `data`: -1 is less than the minimum of 0")',
     );
 
     expect(() =>
@@ -172,7 +172,7 @@ describe("TS Update API", () => {
         data: { integer: 11 },
       }),
     ).toThrow(
-      'Update failed: WriteError("encoding error: JSON schema validation failed for column `data`: 11 is greater than the maximum of 10")',
+      'Update failed: WriteError("JSON schema validation failed for column `data`: 11 is greater than the maximum of 10")',
     );
 
     expect(() =>
@@ -180,7 +180,7 @@ describe("TS Update API", () => {
         data: { datetime: "2020-01-01T06:15:00" },
       }),
     ).toThrow(
-      'Update failed: WriteError("encoding error: JSON schema validation failed for column `data`: \\"2020-01-01T06:15:00\\" does not match \\"^(?:(?:[0-9][0-9][2468][048]|[0-9][0-9][13579][26]|[0-9][0-9]0[48]|[02468][048]00|[13579][26]00)-02-29|[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|(?:02)-(?:0[1-9]|1[0-9]|2[0-8])))T(?:(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\\\\.[0-9]+)?)?(?:Z))$\\"")',
+      'Update failed: WriteError("JSON schema validation failed for column `data`: \\"2020-01-01T06:15:00\\" does not match \\"^(?:(?:[0-9][0-9][2468][048]|[0-9][0-9][13579][26]|[0-9][0-9]0[48]|[02468][048]00|[13579][26]00)-02-29|[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|(?:02)-(?:0[1-9]|1[0-9]|2[0-8])))T(?:(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\\.[0-9]+)?)?(?:Z))$\\"")',
     );
   });
 });
