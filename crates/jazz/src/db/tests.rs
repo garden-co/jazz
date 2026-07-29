@@ -3514,7 +3514,7 @@ fn mergeable_tx_commits_multiple_writes_under_one_tx_id() {
     let table = &doctest_support::schema().tables[0];
     let row_one = row(1);
     let row_two = row(2);
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row_one, doctest_support::todo_cells("one", false))
         .unwrap();
@@ -3548,7 +3548,7 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("draft", false))
         .unwrap();
@@ -3588,7 +3588,7 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     db.delete("todos", row).unwrap();
     assert!(prepared_read(&db, &db.table("todos")).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
     tx.restore("todos", row, doctest_support::todo_cells("restored", false))
         .unwrap();
     tx.update(
@@ -3635,7 +3635,7 @@ fn mergeable_tx_coalesces_repeated_same_row_updates() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("first", false))
         .unwrap();
@@ -3677,7 +3677,7 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
 
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
     tx.update(
         "todos",
         row,
@@ -3695,6 +3695,158 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
     assert_eq!(tx.tx_id, tx_id);
     assert_eq!(tx.n_total_writes, 1);
     assert_eq!(versions.len(), 1);
+}
+
+#[test]
+fn mergeable_tx_and_open_handle_have_identical_restore_and_reinsert_results() {
+    let builder = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let handle = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let restored = row(1);
+    let reinserted = row(2);
+
+    for db in [&builder, &handle] {
+        db.insert_with_id(
+            "todos",
+            restored,
+            doctest_support::todo_cells("archived", false),
+        )
+        .unwrap();
+        db.delete("todos", restored).unwrap();
+        db.insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("original", false),
+        )
+        .unwrap();
+    }
+
+    let mut builder_tx = builder.mergeable_tx().unwrap();
+    builder_tx
+        .restore(
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+        )
+        .unwrap();
+    builder_tx
+        .update(
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    builder_tx.delete("todos", reinserted).unwrap();
+    builder_tx
+        .insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+        )
+        .unwrap();
+    builder_tx.commit().unwrap();
+
+    let open_tx = handle.begin_mergeable().unwrap();
+    handle
+        .mergeable_restore(
+            open_tx,
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+            None,
+        )
+        .unwrap();
+    handle
+        .mergeable_update(
+            open_tx,
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            None,
+        )
+        .unwrap();
+    handle
+        .mergeable_delete(open_tx, "todos", reinserted, None)
+        .unwrap();
+    handle
+        .mergeable_insert(
+            open_tx,
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+            None,
+        )
+        .unwrap();
+    handle.commit_mergeable_handle(open_tx).unwrap();
+
+    let read_state = |db: &Db<_>| {
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        doctest_support::block_on(db.all(
+            &query,
+            ReadOpts {
+                include_deleted: true,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                (
+                    row.is_deleted(),
+                    row.cell(table, "title"),
+                    row.cell(table, "done"),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
+    };
+
+    let builder_state = read_state(&builder);
+    let handle_state = read_state(&handle);
+    assert_eq!(builder_state, handle_state);
+    assert_eq!(
+        builder_state.get(&restored),
+        Some(&(
+            false,
+            Some(Value::String("restored".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+    assert_eq!(
+        builder_state.get(&reinserted),
+        Some(&(
+            true,
+            Some(Value::String("reinserted".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+}
+
+#[test]
+fn mergeable_tx_read_observes_its_staged_restore() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(1);
+
+    db.insert_with_id("todos", row, doctest_support::todo_cells("archived", false))
+        .unwrap();
+    db.delete("todos", row).unwrap();
+
+    let mut tx = db.mergeable_tx().unwrap();
+    tx.restore("todos", row, doctest_support::todo_cells("restored", false))
+        .unwrap();
+    tx.update(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        tx.read("todos", row).unwrap(),
+        Some(doctest_support::todo_cells("restored", true))
+    );
 }
 
 #[test]
@@ -4153,7 +4305,7 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let mut tx = db.mergeable_tx().unwrap();
     for index in 0..100u8 {
         tx.insert_with_id(
             "todos",

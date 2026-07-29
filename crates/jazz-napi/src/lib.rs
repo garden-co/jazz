@@ -1731,7 +1731,8 @@ where
         db.mergeable_tx_for_identity(identity)
     } else {
         db.mergeable_tx()
-    };
+    }
+    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     for write in writes {
         match write {
             NapiTxWrite::Insert {

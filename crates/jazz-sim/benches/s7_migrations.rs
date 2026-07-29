@@ -184,7 +184,7 @@ fn commit_client_mergeable(
     row: RowUuid,
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
-    let mut tx = client.db.mergeable_tx();
+    let mut tx = client.db.mergeable_tx().unwrap();
     tx.insert_with_id(table, row, cells).unwrap();
     tx.commit().unwrap();
     client.db.tick().unwrap();

@@ -307,7 +307,9 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                 let mut next = scale + (scale % 2);
 
                 b.iter(|| {
-                    let mut tx = db.mergeable_tx();
+                    let mut tx = db
+                        .mergeable_tx()
+                        .expect("core batch transaction should open");
                     for _ in 0..batch_size {
                         next += 2;
                         tx.insert("documents", filtered_cells(next))
