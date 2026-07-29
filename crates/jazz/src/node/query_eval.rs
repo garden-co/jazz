@@ -2917,9 +2917,13 @@ fn normalize_reachable(
                     field: "reachable_team".to_owned(),
                 },
                 op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::SourceField {
-                    source: edge_source.clone(),
-                    field: reachable.edge_member_column.clone(),
+                right: if reachable.edge_member_column == "id" {
+                    NormalizedValueRef::RowId(RowIdRef::Source(edge_source.clone()))
+                } else {
+                    NormalizedValueRef::SourceField {
+                        source: edge_source.clone(),
+                        field: reachable.edge_member_column.clone(),
+                    }
                 },
             },
         },
@@ -3262,20 +3266,22 @@ fn normalize_reachable_seed(
             seed_current = seed_filter_node;
         }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
+        let seed_team_value = if seed.team_column == "id" {
+            NormalizedValueRef::RowId(RowIdRef::Source(seed_source.clone()))
+        } else {
+            NormalizedValueRef::SourceField {
+                source: seed_source.clone(),
+                field: seed.team_column.clone(),
+            }
+        };
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value.clone(),
             },
             RowProjection {
                 output: typed_output_field("reachable_team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value,
             },
         ];
         if let Some((_, claim_field)) = &claim_route_field {
@@ -3322,9 +3328,13 @@ fn reachable_seed_frontier_columns(
             seed.table, seed.team_column, team_column_ty
         )));
     }
-    let value = NormalizedValueRef::SourceField {
-        source: source.clone(),
-        field: seed.team_column.clone(),
+    let value = if seed.team_column == "id" {
+        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+    } else {
+        NormalizedValueRef::SourceField {
+            source: source.clone(),
+            field: seed.team_column.clone(),
+        }
     };
     let mut columns = vec![
         ValueSourceColumn {
@@ -3630,6 +3640,60 @@ struct PolicyAtomChain<'a> {
     reachable: &'a [crate::query::ReachableVia],
 }
 
+/// The inheritance atoms expanded on the current policy-composition path.
+///
+/// A policy can refer back to its own table through an `InheritsVia`. The
+/// normalized graph is finite only when that expansion is bounded; keep this
+/// state per path so independent policy alternatives do not consume each
+/// other's depth budget.
+#[derive(Clone, Default)]
+struct InheritanceExpansionPath {
+    uses: BTreeMap<InheritanceExpansionKey, usize>,
+}
+
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct InheritanceExpansionKey {
+    child_table: String,
+    parent_column: String,
+    operation: crate::query::InheritsOperation,
+}
+
+impl InheritanceExpansionPath {
+    fn descend(&self, child_table: &str, inherits: &crate::query::InheritsVia) -> Option<Self> {
+        let key = InheritanceExpansionKey {
+            child_table: child_table.to_owned(),
+            parent_column: inherits.parent_column.clone(),
+            operation: inherits.operation,
+        };
+        let used = self.uses.get(&key).copied().unwrap_or(0);
+        let limit = inherits
+            .max_depth
+            .unwrap_or_else(|| crate::query::RecursionBound::default_max_depth().iteration_cap());
+        if used >= limit {
+            return None;
+        }
+        let mut next = self.clone();
+        next.uses.insert(key, used + 1);
+        Some(next)
+    }
+}
+
+fn normalize_false_policy_branch(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    input: RowSetNodeId,
+    prefix: &str,
+) -> RowSetNodeId {
+    let node = RowSetNodeId(format!("{prefix}:max_depth"));
+    nodes.insert(
+        node.clone(),
+        RowSetExpr::Filter {
+            input,
+            predicate: NormalizedPredicateExpr::Or(Vec::new()),
+        },
+    );
+    node
+}
+
 fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
@@ -3700,6 +3764,7 @@ fn normalize_policy_atom_chain(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     record_join_contributions: bool,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = normalize_filter_join_chain(
         nodes,
@@ -3728,6 +3793,7 @@ fn normalize_policy_atom_chain(
             &format!("{prefix}:inherits:{index}"),
             binding_source_shape,
             param_types,
+            inheritance_path,
         )?;
     }
     for (index, reachable) in chain.reachable.iter().enumerate() {
@@ -3762,6 +3828,7 @@ fn normalize_inherited_parent_policy(
     prefix: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let child_table = table_schema(schema, &child_source.table)?;
     let parent_table_name = child_table
@@ -3775,6 +3842,10 @@ fn normalize_inherited_parent_policy(
             ))
         })?;
     let parent_table = table_schema(schema, &parent_table_name)?;
+    let Some(parent_inheritance_path) = inheritance_path.descend(&child_source.table, inherits)
+    else {
+        return Ok(normalize_false_policy_branch(nodes, child_current, prefix));
+    };
     let parent_source = inherited_parent_source_id(&parent_table_name, prefix);
     auxiliary_sources.insert(parent_source.clone());
     let parent_source_node = RowSetNodeId(format!("{prefix}:source"));
@@ -3812,6 +3883,7 @@ fn normalize_inherited_parent_policy(
                 policy,
                 binding_source_shape,
                 param_types,
+                &parent_inheritance_path,
             )?
         } else {
             normalize_policy_atom_chain(
@@ -3832,6 +3904,7 @@ fn normalize_inherited_parent_policy(
                 binding_source_shape,
                 param_types,
                 false,
+                &parent_inheritance_path,
             )?
         };
     }
@@ -3868,6 +3941,7 @@ fn normalize_policy_branch_authorization(
     policy: &JazzQuery,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut union_inputs = Vec::new();
     if !policy_branch_base_is_converter_false(policy) {
@@ -3897,6 +3971,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            inheritance_path,
         )?;
         union_inputs.push(UnionInput {
             node: normalize_row_id_projection(
@@ -3936,6 +4011,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            inheritance_path,
         )?;
         union_inputs.push(UnionInput {
             node: normalize_row_id_projection(
@@ -5436,6 +5512,7 @@ where
         let mut current = source_node;
         let mut join_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
+        let inheritance_path = InheritanceExpansionPath::default();
 
         let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
@@ -5468,6 +5545,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
                     node: normalize_row_id_projection(
@@ -5507,6 +5585,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
                     node: normalize_row_id_projection(
@@ -5563,6 +5642,7 @@ where
                 &binding_source_shape,
                 shape.params(),
                 true,
+                &inheritance_path,
             )?;
         }
 
@@ -8687,6 +8767,7 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
             inherits: vec![crate::query::InheritsVia {
                 parent_column,
                 operation: crate::query::InheritsOperation::Select,
+                max_depth: None,
             }],
         });
     }

@@ -1739,7 +1739,7 @@ fn append_inherited_policy(
     query: Query,
     operation: Operation,
     via_column: &str,
-    _max_depth: Option<usize>,
+    max_depth: Option<usize>,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -1774,7 +1774,14 @@ fn append_inherited_policy(
     // documented in crates/jazz/SPEC/14_lowering_to_groove.md section 14.7.
     // The expansion fallback predates that and multiplies per-derivation work;
     // keep the helper code below as dead fallback pending removal.
-    Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)))
+    Ok(match max_depth {
+        Some(max_depth) => query.inherits_operation_with_depth(
+            via_column,
+            convert_inherits_operation(operation),
+            max_depth,
+        ),
+        None => query.inherits_operation(via_column, convert_inherits_operation(operation)),
+    })
 }
 
 #[allow(dead_code)]
@@ -2978,6 +2985,7 @@ mod tests {
         assert_eq!(policy.inherits.len(), 1);
         assert_eq!(policy.inherits[0].parent_column, "target_team");
         assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
+        assert_eq!(policy.inherits[0].max_depth, Some(32));
     }
 
     #[test]

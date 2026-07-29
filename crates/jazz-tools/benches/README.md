@@ -44,9 +44,9 @@ than old helper behavior:
   `r13_permission_filtered_resume` reproducer in the same file combines the
   byte-wire session/resume path with that recursive read policy: a reader first
   sees direct and inherited docs, disconnects, then resumes after one inherited
-  grant is revoked and another is added. It is intentionally not registered in
-  the default green Criterion group yet, because the resumed client still keeps
-  the revoked doc visible. Recursive write-policy settlement is covered in the
+  grant is revoked and another is added. It is registered in the Criterion
+  group as a visible failing reproducer: the resumed client still keeps the
+  revoked doc visible. Recursive write-policy settlement is covered in the
   `jazz` policy tests with global/settled support rows; local-only support rows
   correctly do not authorize writes.
 
