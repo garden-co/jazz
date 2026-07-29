@@ -121,8 +121,12 @@ Supported matrix:
 
 Invalid operator/type combinations must be rejected before execution with a
 clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates must match the column type
-except for the narrow compatibility coercions listed above. The broader
+interpreted as stringification, and `in` candidates (including parameters) must
+match the column's whole-value type except for the narrow compatibility
+coercions listed above. Thus an `Array<T>` `in` candidate must itself be an
+array; a scalar `T` is rejected rather than being rewritten as a singleton array
+or a `contains` predicate. Compatibility coercions may recurse into an
+array-valued literal only when they preserve that array shape. The broader
 literal-vs-column coercion policy remains intentionally unspecified; new
 coercions need an explicit spec decision before implementation.
 
