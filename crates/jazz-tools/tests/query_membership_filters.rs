@@ -238,10 +238,17 @@ async fn invalid_membership_filters_return_type_errors() {
                 )
                 .await
                 .expect_err("in with mismatched candidate type should fail");
-            assert!(
-                wrong_in_type.to_string().contains("operand type mismatch"),
-                "unexpected in error: {wrong_in_type}"
-            );
+            // #1182 replaced the bare "operand type mismatch" with a message
+            // naming the column and both types. Assert on those parts rather
+            // than the old wording: it is what makes the error actionable, and
+            // it is strictly stronger than the string it replaced.
+            let wrong_in_message = wrong_in_type.to_string();
+            for expected in ["count", "String", "I32"] {
+                assert!(
+                    wrong_in_message.contains(expected),
+                    "in type-mismatch error should name {expected}: {wrong_in_message}"
+                );
+            }
         })
         .await;
 }
