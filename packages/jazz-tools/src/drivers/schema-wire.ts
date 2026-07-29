@@ -51,12 +51,38 @@ function runtimeSchemaJsonReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
+/**
+ * Order object keys deterministically, at every depth.
+ *
+ * The serialized form is used as a schema identity: two clients that
+ * describe the same schema must produce the same string. Property
+ * insertion order is not part of what a schema means, but `JSON.stringify`
+ * preserves it, so two equivalent objects built in different orders
+ * previously serialized differently and read as incompatible schemas.
+ *
+ * Arrays are left alone deliberately. Column order is positionally
+ * significant, so reordering one would change what the schema means
+ * rather than normalize how it is written.
+ */
+function canonicalizeSchemaValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeSchemaValue);
+  }
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalizeSchemaValue(value[key])]),
+    );
+  }
+  return value;
+}
+
 function sortSchemaTables(schema: WasmSchema): WasmSchema {
-  return Object.fromEntries(
-    Object.keys(schema)
-      .sort()
-      .map((tableName) => [tableName, schema[tableName]]),
-  ) as WasmSchema;
+  return canonicalizeSchemaValue(schema) as WasmSchema;
 }
 
 export function serializeRuntimeSchema(

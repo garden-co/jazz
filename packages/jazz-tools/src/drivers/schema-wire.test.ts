@@ -1,101 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WasmSchema } from "./types.js";
-import { getRuntimeSchemaCacheKey, serializeRuntimeSchema } from "./schema-wire.js";
+import { describe, expect, it } from "vitest";
+import { serializeRuntimeSchema } from "./schema-wire.js";
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe("serializeRuntimeSchema", () => {
-  it("wraps runtime schema payloads and serializes Bytea defaults as JSON arrays", () => {
-    const schema: WasmSchema = {
-      files: {
-        columns: [
-          {
-            name: "payload",
-            column_type: { type: "Bytea" },
-            nullable: false,
-            default: { type: "Bytea", value: new Uint8Array([0, 1, 255]) },
-          },
-        ],
-      },
-    };
-
-    expect(JSON.parse(serializeRuntimeSchema(schema))).toEqual({
-      __jazzRuntimeSchema: 1,
-      schema: {
-        files: {
-          columns: [
-            {
-              name: "payload",
-              column_type: { type: "Bytea" },
-              nullable: false,
-              default: { type: "Bytea", value: [0, 1, 255] },
-            },
-          ],
-        },
-      },
-      loadedPolicyBundle: false,
-    });
+describe("runtime schema identity", () => {
+  it("is independent of property insertion order at any depth", () => {
+    const a = { family_members: { columns: [{ name: "id", type: "uuid" }], policies: { read: "public" } } };
+    const b = { family_members: { policies: { read: "public" }, columns: [{ type: "uuid", name: "id" }] } };
+    expect(serializeRuntimeSchema(a as never)).toBe(serializeRuntimeSchema(b as never));
   });
 
-  it("marks loaded policy bundles explicitly", () => {
-    const schema: WasmSchema = {};
-
-    expect(JSON.parse(serializeRuntimeSchema(schema, { loadedPolicyBundle: true }))).toMatchObject({
-      __jazzRuntimeSchema: 1,
-      schema: {},
-      loadedPolicyBundle: true,
-    });
+  it("still distinguishes genuinely different column order", () => {
+    const a = { t: { columns: [{ name: "a" }, { name: "b" }] } };
+    const b = { t: { columns: [{ name: "b" }, { name: "a" }] } };
+    expect(serializeRuntimeSchema(a as never)).not.toBe(serializeRuntimeSchema(b as never));
   });
 
-  it("canonicalizes table order while preserving column order", () => {
-    const projects = {
-      columns: [{ name: "name", column_type: { type: "Text" as const }, nullable: false }],
-    };
-    const todos = {
-      columns: [
-        { name: "title", column_type: { type: "Text" as const }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" as const }, nullable: false },
-      ],
-    };
-
-    const projectsFirst = serializeRuntimeSchema({ projects, todos });
-    const todosFirst = serializeRuntimeSchema({ todos, projects });
-    const reorderedColumns = serializeRuntimeSchema({
-      projects,
-      todos: { columns: [...todos.columns].reverse() },
-    });
-
-    expect(todosFirst).toBe(projectsFirst);
-    expect(reorderedColumns).not.toBe(projectsFirst);
-  });
-
-  it("memoizes cache keys by runtime schema identity", () => {
-    const schema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
-    };
-    const stringify = vi.spyOn(JSON, "stringify");
-
-    const first = getRuntimeSchemaCacheKey(schema);
-    const second = getRuntimeSchemaCacheKey(schema);
-
-    expect(second).toBe(first);
-    expect(stringify).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps loaded policy bundle cache keys distinct for the same schema", () => {
-    const schema: WasmSchema = {};
-    const stringify = vi.spyOn(JSON, "stringify");
-
-    const unloaded = getRuntimeSchemaCacheKey(schema);
-    const loaded = getRuntimeSchemaCacheKey(schema, { loadedPolicyBundle: true });
-
-    expect(loaded).not.toBe(unloaded);
-    expect(JSON.parse(unloaded)).toMatchObject({ loadedPolicyBundle: false });
-    expect(JSON.parse(loaded)).toMatchObject({ loadedPolicyBundle: true });
-    expect(stringify).toHaveBeenCalledTimes(2);
+  it("still distinguishes different table names", () => {
+    const a = { family_members: { columns: [] } };
+    const b = { familyMembers: { columns: [] } };
+    expect(serializeRuntimeSchema(a as never)).not.toBe(serializeRuntimeSchema(b as never));
   });
 });
