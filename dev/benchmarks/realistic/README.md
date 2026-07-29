@@ -66,6 +66,38 @@ Run only the cold-load benchmark:
 cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
 ```
 
+R3 preserves the historical combined Criterion measurement and also emits one
+JSON phase receipt per selected profile/cache mode. The receipt separates
+RocksDB storage open, Jazz `Db` open, query preparation, and first
+materialization. Its default is the existing 120-task CI profile with the OS
+page cache left uncontrolled after fixture seeding:
+
+```bash
+JAZZ_R3_PROFILES=ci \
+  cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+  realistic_phase1/r3_rocksdb_cold_load
+```
+
+For local characterization, select any comma-separated subset of `ci,s,m`
+(120/3,000/100,000 tasks). `JAZZ_R3_PHASE_ONLY=1` skips the combined Criterion
+loop after emitting the phase receipts:
+
+```bash
+JAZZ_R3_PROFILES=ci,s,m \
+JAZZ_R3_CACHE_MODES=warm,evicted \
+JAZZ_R3_PHASE_SAMPLES=3 \
+JAZZ_R3_PHASE_ONLY=1 \
+  cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+  realistic_phase1/r3_rocksdb_cold_load
+```
+
+`warm` means a fresh RocksDB/Jazz instance over files whose OS page-cache state
+is uncontrolled after seeding. On Linux, `evicted` calls
+`posix_fadvise(POSIX_FADV_DONTNEED)` for each RocksDB file before every sample;
+eviction is outside the measured window and does not drop the machine-wide page
+cache. Both modes are process-cold. The M fixture is intentionally opt-in
+because its public-API seed takes several minutes.
+
 Export consolidated Criterion artifacts (JSON + markdown summary) from `target/criterion`:
 
 ```bash
