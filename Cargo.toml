@@ -29,6 +29,19 @@ rustc-hash = "2.1.1"
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
 
+# Keep useful file/line information in normal dev and test builds without
+# generating full debugger metadata. Tests inherit the dev profile.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Opt into full debugger metadata with `--profile debugging`.
+[profile.debugging]
+inherits = "dev"
+debug = true
+
 [profile.perf]
 inherits = "release"
 opt-level = 2
