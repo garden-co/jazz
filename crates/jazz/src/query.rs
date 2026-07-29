@@ -2147,6 +2147,18 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// An `in` candidate does not match its column's whole-value type.
+    #[error(
+        "in candidate for column {column} has type {candidate_type:?}, but the column has type {column_type:?}"
+    )]
+    InCandidateTypeMismatch {
+        /// Column on the left side of the `in` predicate.
+        column: String,
+        /// Declared type of that column.
+        column_type: ColumnType,
+        /// Type of the mismatched candidate.
+        candidate_type: ColumnType,
+    },
     /// Claim and column operand types do not match.
     #[error(
         "claim {claim_path} has type {claim_type:?}, but column {column} has type {column_type:?}"
@@ -2573,7 +2585,7 @@ fn validate_array_subquery(
     let child = table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
-    if !in_operand_types_compatible(parent_type, child_type) {
+    if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
     for predicate in &subquery.filters {
@@ -2738,14 +2750,12 @@ fn validate_predicate(
                         if !in_operand_types_compatible(&left_type, &value_type)
                             && !in_literal_value_coercible(&left_type, value) =>
                     {
-                        return Err(QueryError::OperandTypeMismatch);
+                        return Err(in_candidate_type_mismatch_error(
+                            left, left_type, value_type,
+                        ));
                     }
                     (Some(left_type), None) => {
-                        let expected = match non_null_column_type(&left_type) {
-                            ColumnType::Array(member) => *member,
-                            other => other,
-                        };
-                        infer_param(value, expected, params)?;
+                        infer_param(value, left_type, params)?;
                     }
                     (None, Some(value_type)) => infer_param(left, value_type, params)?,
                     (Some(_), Some(_)) => {}
@@ -2875,8 +2885,17 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     {
         return true;
     }
-    match left {
-        ColumnType::Array(member) => column_types_comparable(&member, &right),
+    false
+}
+
+fn array_correlation_types_compatible(parent: &ColumnType, child: &ColumnType) -> bool {
+    if in_operand_types_compatible(parent, child) {
+        return true;
+    }
+    // Array-subquery correlation expands the parent array into child lookup
+    // keys; it is distinct from whole-value `Predicate::In` membership.
+    match non_null_column_type(parent) {
+        ColumnType::Array(member) => column_types_comparable(&member, child),
         _ => false,
     }
 }
@@ -2888,10 +2907,26 @@ fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
     match non_null_column_type(left) {
         ColumnType::String => matches!(value, Value::Uuid(_)),
         ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
-        ColumnType::Array(member) => {
+        ColumnType::Array(member) => matches!(value, Value::Array(values)
+        if values.iter().all(|value| {
             in_literal_value_coercible(&member, &Operand::Literal(value.clone()))
-        }
+        })),
         _ => false,
+    }
+}
+
+fn in_candidate_type_mismatch_error(
+    left: &Operand,
+    column_type: ColumnType,
+    candidate_type: ColumnType,
+) -> QueryError {
+    match left {
+        Operand::Column(column) => QueryError::InCandidateTypeMismatch {
+            column: column.clone(),
+            column_type,
+            candidate_type,
+        },
+        _ => QueryError::OperandTypeMismatch,
     }
 }
 

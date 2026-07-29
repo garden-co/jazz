@@ -1,7 +1,8 @@
 #![cfg(feature = "test")]
 
 use jazz_tools::{
-    ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value, row_input,
+    ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    row_input,
 };
 
 fn membership_schema() -> Schema {
@@ -240,6 +241,52 @@ async fn invalid_membership_filters_return_type_errors() {
             assert!(
                 wrong_in_type.to_string().contains("operand type mismatch"),
                 "unexpected in error: {wrong_in_type}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn in_filter_rejects_scalar_candidate_for_array_column() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let client = JazzClient::test_client(membership_schema()).await;
+            client
+                .insert(
+                    "items",
+                    row_input!(
+                        "title" => "array member",
+                        "count" => 1,
+                        "score" => 1.5,
+                        "active" => true,
+                        "owner_id" => ObjectId::new(),
+                        "counts" => Value::Array(vec![Value::Integer(3)]),
+                        "flags" => Value::Array(vec![Value::Boolean(true)]),
+                        "watcher_ids" => Value::Array(Vec::new()),
+                    ),
+                )
+                .expect("insert item with array value");
+
+            let error = client
+                .query(
+                    QueryBuilder::new("items")
+                        .filter_in("counts", vec![Value::Integer(3)])
+                        .build(),
+                    None,
+                )
+                .await
+                .expect_err(
+                    "a scalar in candidate for an array column must fail validation, not return no rows",
+                );
+
+            let message = error.to_string();
+            assert!(
+                message.contains("counts"),
+                "validation error should name the array column: {message}"
+            );
+            assert!(
+                message.contains("Array") && message.contains("I32"),
+                "validation error should name the array/scalar type mismatch: {message}"
             );
         })
         .await;

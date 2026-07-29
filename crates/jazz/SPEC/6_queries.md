@@ -121,10 +121,28 @@ Supported matrix:
 
 Invalid operator/type combinations must be rejected before execution with a
 clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates must match the column type
-except for the narrow compatibility coercions listed above. The broader
+interpreted as stringification, and `in` candidates (including parameters) must
+match the column's whole-value type except for the narrow compatibility
+coercions listed above. Thus an `Array<T>` `in` candidate must itself be an
+array; a scalar `T` is rejected rather than being rewritten as a singleton array
+or a `contains` predicate. Compatibility coercions may recurse into an
+array-valued literal only when they preserve that array shape. The broader
 literal-vs-column coercion policy remains intentionally unspecified; new
 coercions need an explicit spec decision before implementation.
+
+🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
+a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why
+that shape gets written at all. `in` gives whole-value membership and `contains`
+gives single-element membership; there is currently nothing for "this array
+contains all of these" or "this array is contained by these". A user wanting
+that has no operator to reach for, and `in` with a list of elements is the
+natural wrong guess.
+
+If we add the capability it MUST be an explicit predicate with its own
+semantics — never an implicit reinterpretation of `in` that changes meaning
+depending on whether the column happens to be an array. The value of rejecting
+today is exactly that the gap stays visible, rather than being filled by a
+coercion whose meaning nobody chose (Anselm, 2026-07-29).
 
 ### 6.2 Shapes: validated, content-addressed, schema-stamped
 
