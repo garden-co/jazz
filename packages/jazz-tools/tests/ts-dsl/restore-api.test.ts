@@ -87,6 +87,18 @@ describe("TS Restore API", () => {
     });
   });
 
+  it("restores an all-default row from empty data", async () => {
+    const { value: inserted } = db.insert(app.table_with_defaults, {});
+    await db.delete(app.table_with_defaults, inserted.id).wait({ tier: "local" });
+
+    const { value: restored } = db.restore(app.table_with_defaults, inserted.id, {});
+
+    expect(restored).toEqual(inserted);
+    await expect(
+      db.one(app.table_with_defaults.where({ id: { eq: inserted.id } }), { tier: "local" }),
+    ).resolves.toEqual(inserted);
+  });
+
   it("fails when the row is not deleted", async () => {
     const project = insertProject(db);
 

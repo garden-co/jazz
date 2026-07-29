@@ -193,10 +193,6 @@ name = "aggregate_subscriptions"
 required-features = ["test-utils"]
 
 [[test]]
-name = "catalogue_sync_integration"
-required-features = ["test"]
-
-[[test]]
 name = "transactions"
 required-features = ["test-utils"]
 
@@ -213,7 +209,15 @@ name = "bigint_integration"
 required-features = ["test"]
 
 [[test]]
+name = "nullable_writes"
+required-features = ["test-utils"]
+
+[[test]]
 name = "policy_branch_closure"
+required-features = ["test"]
+
+[[test]]
+name = "query_membership_filters"
 required-features = ["test"]
 
 [[test]]

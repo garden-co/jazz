@@ -32,6 +32,7 @@ include!("time_travel.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("policies_rls.rs");
+include!("write_policy_lowering.rs");
 include!("sync.rs");
 include!("m3_differential.rs");
 include!("counter_merge.rs");

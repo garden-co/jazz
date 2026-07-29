@@ -31,6 +31,13 @@ subscription chapters win.
 Milestone: **one runnable local app can use the public TypeScript API through
 WASM or NAPI against a server shell without semantic forks.**
 
+**Implementation status.** The NAPI/server vertical slice is covered by
+`opens, mutates one row, and queries it through the native runtime payload shape`,
+`propagates an edge-tier query over the native runtime/server boundary and returns remote row adds`,
+and `server_command_loads_published_schema_and_persists_ws_data_across_restart`.
+The capability matrix and the complete product-facing lens/branch facades remain
+roadmap work.
+
 - **TS/WASM/NAPI boundary and capability matrix** — ch. 13 owns the primary direct
   named-call / event ABI over `Db` and selected binding-facing `Node` methods,
   descriptor/raw `Record` row payloads, errors, cross-binding capability matrix,
@@ -60,7 +67,7 @@ capability matrix, wire fixtures, storage configuration, and error vocabulary.
 The first supported binding must prove the shape; later bindings should consume
 the same fixtures instead of each inventing a parallel runtime contract.
 
-#### 17.2.1 NAPI status and next practical step
+#### 17.2.1 NAPI implementation status and next practical step
 
 `jazz-napi` exists as a workspace `cdylib` crate and Node package sibling to
 `jazz-wasm`. It is built with napi-rs for Linux x64 gnu, Windows x64 MSVC, macOS
@@ -82,6 +89,11 @@ package-level conformance canary that opens a native `Db`, runs
 create/update/delete/query flows, exposes one subscription as a host
 stream/callback, proves the row-record decoder shape used by WASM examples, and
 exercises the same WebSocket/server boundary as the browser worker gate.
+
+**Implementation status.** `opens, mutates one row, and queries it through the
+native runtime payload shape` and `delivers native NAPI subscription updates
+through the native handle` exercise the current package-level native runtime
+surface.
 
 ### 17.3 P1 — harden deployability
 
@@ -159,7 +171,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 8. **Release slice** — package artifacts, version compatibility checks, docs,
    and operational diagnostics for integrators.
 
-### 17.6 Open questions
+### 17.6 Recorded packaging decision
 
 - ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
   conformance matrix covers the canonical topology's backends — in-memory
@@ -169,6 +181,11 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
   the RN environment. It is deliberately scheduled last because it is pure
   tooling — a clean additional `OrderedKvStorage` backend behind the existing
   storage contract, with no design decisions attached.
+
+**Implementation status.** The alpha conformance matrix covers in-memory
+(client main thread), OPFS (client worker relay), and RocksDB (edge and core).
+SQLite is conditionally last in scope with React Native, only if RocksDB is
+unsuitable there; this is a tooling decision rather than a semantic contract.
 
 ## Open Questions
 

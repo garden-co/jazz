@@ -10,6 +10,7 @@ use crate::public_api::types::{ColumnType, RowDescriptor, TableName, Value};
 pub enum QueryBuildError {
     UnsupportedShape,
     NullBetweenBound { column: String },
+    AggregateColumnRequired { function: AggregateFunction },
 }
 
 impl fmt::Display for QueryBuildError {
@@ -26,6 +27,9 @@ impl fmt::Display for QueryBuildError {
                     f,
                     "BETWEEN does not support NULL bounds for column '{column}'"
                 )
+            }
+            QueryBuildError::AggregateColumnRequired { function } => {
+                write!(f, "{function:?} aggregate requires an input column")
             }
         }
     }
@@ -229,6 +233,8 @@ pub enum Condition {
         min: Value,
         max: Value,
     },
+    /// Column equals one of the listed values.
+    In { column: String, values: Vec<Value> },
     /// Array column contains value.
     Contains { column: String, value: Value },
     /// Column is null.
@@ -300,6 +306,16 @@ impl Condition {
                     value: encode(max),
                 },
             ]),
+            Condition::In { values, .. } if values.is_empty() => Predicate::Or(vec![]),
+            Condition::In { values, .. } => Predicate::Or(
+                values
+                    .iter()
+                    .map(|value| Predicate::RowIdEq {
+                        element_index,
+                        value: encode(value),
+                    })
+                    .collect(),
+            ),
             Condition::Contains { .. } => Predicate::Or(vec![]),
             Condition::IsNull { .. } => Predicate::RowIdIsNull { element_index },
             Condition::IsNotNull { .. } => Predicate::RowIdIsNotNull { element_index },
@@ -316,6 +332,7 @@ impl Condition {
             Condition::Gt { column, .. } => column,
             Condition::Ge { column, .. } => column,
             Condition::Between { column, .. } => column,
+            Condition::In { column, .. } => column,
             Condition::Contains { column, .. } => column,
             Condition::IsNull { column } => column,
             Condition::IsNotNull { column } => column,
@@ -347,6 +364,7 @@ impl Condition {
             | Condition::Gt { value, .. }
             | Condition::Ge { value, .. } => !value.is_null(),
             Condition::Between { min, max, .. } => !min.is_null() && !max.is_null(),
+            Condition::In { values, .. } => values.len() == 1 && !values[0].is_null(),
             _ => false,
         }
     }
@@ -394,6 +412,16 @@ impl Condition {
                         value: encode_value_with_type(max, col_type),
                     },
                 ]),
+                Condition::In { values, .. } if values.is_empty() => Predicate::Or(vec![]),
+                Condition::In { values, .. } => Predicate::Or(
+                    values
+                        .iter()
+                        .map(|value| Predicate::Eq {
+                            col_index,
+                            value: encode_value_with_type(value, col_type),
+                        })
+                        .collect(),
+                ),
                 Condition::Contains { value, .. } => Predicate::Contains {
                     col_index,
                     value: value.clone(),
@@ -625,6 +653,9 @@ pub struct AggregateOutput {
 pub enum AggregateFunction {
     Count,
     Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 /// Default disjuncts - one empty conjunction (matches all rows).
@@ -662,6 +693,15 @@ impl Query {
         Self::validate_array_subqueries(&self.array_subqueries)?;
         if let Some(recursive) = &self.recursive {
             Self::validate_conditions(&recursive.filters)?;
+        }
+        if let Some(aggregate) = &self.aggregate {
+            for output in &aggregate.outputs {
+                if output.function != AggregateFunction::Count && output.column.is_none() {
+                    return Err(QueryBuildError::AggregateColumnRequired {
+                        function: output.function,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -885,6 +925,16 @@ impl QueryBuilder {
         self
     }
 
+    /// Add an in-list filter condition.
+    pub fn filter_in(mut self, column: impl Into<String>, values: Vec<Value>) -> Self {
+        let current = self.query.disjuncts.last_mut().unwrap();
+        current.add(Condition::In {
+            column: column.into(),
+            values,
+        });
+        self
+    }
+
     /// Add an is null filter condition.
     pub fn filter_is_null(mut self, column: impl Into<String>) -> Self {
         let current = self.query.disjuncts.last_mut().unwrap();
@@ -1036,6 +1086,60 @@ impl QueryBuilder {
             .outputs
             .push(AggregateOutput {
                 function: AggregateFunction::Sum,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add AVG(column).
+    pub fn avg(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Avg,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MIN(column).
+    pub fn min(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Min,
+                column: Some(column.into()),
+            });
+        self
+    }
+
+    /// Add MAX(column).
+    pub fn max(mut self, column: impl Into<String>) -> Self {
+        self.query.aggregate.get_or_insert_with(|| AggregateSpec {
+            group_by: None,
+            outputs: Vec::new(),
+        });
+        self.query
+            .aggregate
+            .as_mut()
+            .expect("aggregate initialized")
+            .outputs
+            .push(AggregateOutput {
+                function: AggregateFunction::Max,
                 column: Some(column.into()),
             });
         self
@@ -1570,6 +1674,30 @@ mod tests {
                 column: "score".into()
             })
         );
+    }
+
+    #[test]
+    fn query_validation_rejects_non_count_aggregate_without_a_column() {
+        let mut query = QueryBuilder::new("metrics").count().build();
+        query.aggregate = Some(AggregateSpec {
+            group_by: None,
+            outputs: vec![AggregateOutput {
+                function: AggregateFunction::Sum,
+                column: None,
+            }],
+        });
+
+        assert_eq!(
+            query.validate_for_engine(),
+            Err(QueryBuildError::AggregateColumnRequired {
+                function: AggregateFunction::Sum,
+            })
+        );
+    }
+
+    #[test]
+    fn query_validation_allows_count_without_a_column() {
+        assert!(QueryBuilder::new("metrics").count().try_build().is_ok());
     }
 
     #[test]

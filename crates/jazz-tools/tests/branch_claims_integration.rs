@@ -7,8 +7,8 @@ use std::time::Duration;
 use jazz_tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz_tools::server::JazzServer;
 use jazz_tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, policy_expr,
-    row_input,
+    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    policy_expr, row_input,
 };
 use serde_json::json;
 use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
@@ -58,6 +58,56 @@ fn role_claims_gated_schema() -> Schema {
                             policy_expr::session_where("claims.role", "admin"),
                             policy_expr::session_where("claims.role", "member"),
                         ])),
+                ),
+        )
+        .build()
+}
+
+fn numeric_claims_write_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("integer_claim_rows")
+                .column("access_level", ColumnType::Integer)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
+        )
+        .table(
+            TableSchema::builder("bigint_claim_rows")
+                .column("access_level", ColumnType::BigInt)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
+        )
+        .build()
+}
+
+fn numeric_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("integer_claim_rows")
+                .column("access_level", ColumnType::Integer)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "access_level",
+                            vec!["claims".into(), "access_level".into()],
+                        )),
+                ),
+        )
+        .table(
+            TableSchema::builder("bigint_claim_rows")
+                .column("access_level", ColumnType::BigInt)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "access_level",
+                            vec!["claims".into(), "access_level".into()],
+                        )),
                 ),
         )
         .build()
@@ -151,6 +201,103 @@ async fn query_applies_claims_select_policy() {
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");
             carol.shutdown().await.expect("shutdown carol");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_claims_match_integer_columns_across_core_widths() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = numeric_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb1")
+                .as_admin()
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (integer_row_id, _, integer_batch) = admin
+                .insert(
+                    "integer_claim_rows",
+                    row_input!("access_level" => Value::Integer(-7)),
+                )
+                .expect("admin creates integer claims row");
+            admin
+                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("integer row reaches edge");
+            let (bigint_row_id, _, bigint_batch) = admin
+                .insert(
+                    "bigint_claim_rows",
+                    row_input!("access_level" => Value::BigInt(7)),
+                )
+                .expect("admin creates bigint claims row");
+            admin
+                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("bigint row reaches edge");
+
+            let bigint_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb2")
+                // Negative JWT integers are carried by the core as I64.
+                .with_claims(json!({"access_level": -7}))
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            wait_for_query(
+                &bigint_claim_user,
+                QueryBuilder::new("integer_claim_rows").build(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "I64 claim matches I32 column",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, _)| *id == integer_row_id)
+                        .then_some(())
+                },
+            )
+            .await;
+
+            let integer_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb3")
+                // Small positive JWT integers are carried by the core as U32.
+                .with_claims(json!({"access_level": 7}))
+                .ready_on("bigint_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            wait_for_query(
+                &integer_claim_user,
+                QueryBuilder::new("bigint_claim_rows").build(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "U32 claim matches I64 column",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, _)| *id == bigint_row_id)
+                        .then_some(())
+                },
+            )
+            .await;
+
+            admin.shutdown().await.expect("shutdown admin");
+            bigint_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown bigint claim user");
+            integer_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown integer claim user");
             server.shutdown().await;
         })
         .await;
@@ -584,4 +731,64 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
     panic!(
         "tracking: wire QueryBuilder::branch into the core read view for both one-shot reads and subscriptions"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_claims_authorize_writes_across_core_widths() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = numeric_claims_write_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let bigint_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb2")
+                // Negative JWT integers are carried by the core as I64.
+                .with_claims(json!({"access_level": -7}))
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (_, _, integer_batch) = bigint_claim_user
+                .insert(
+                    "integer_claim_rows",
+                    row_input!("access_level" => Value::Integer(-7)),
+                )
+                .expect("I64 claim creates I32 row");
+            bigint_claim_user
+                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("I64 claim matches I32 write policy");
+
+            let integer_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb3")
+                // Small positive JWT integers are carried by the core as U32.
+                .with_claims(json!({"access_level": 7}))
+                .ready_on("bigint_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (_, _, bigint_batch) = integer_claim_user
+                .insert(
+                    "bigint_claim_rows",
+                    row_input!("access_level" => Value::BigInt(7)),
+                )
+                .expect("U32 claim creates I64 row");
+            integer_claim_user
+                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("U32 claim matches I64 write policy");
+
+            bigint_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown bigint claim user");
+            integer_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown integer claim user");
+            server.shutdown().await;
+        })
+        .await;
 }

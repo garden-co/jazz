@@ -18,33 +18,33 @@ Invariant digest:
 
 - `INV-DATA-20`: JazzSchema::lowertogroove() MUST include the fixed metadata tables, transaction/rejection tables, per-application-table rejected/history/register/global-current tables...
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
-- `INV-LOWER-1`: Jazz schemas MUST be lowered into a groove::schema::DatabaseSchema before opening the node's groove::db::Database.
-- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key (rowuuid, txtime, txnodeid).
-- `INV-LOWER-3`: Node-local aliases in jazznodes.id and jazzschemaversions.id MUST NOT be wire identities; wire tx/schema references MUST use NodeUuid and SchemaVersionId.
-- `INV-LOWER-4`: Content versions MUST lower to jazz{table}history; deletion-register versions MUST lower to jazz{table}register; a single lowered version row MUST NOT contain both use...
-- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where deletion == deleted.
-- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove argmaxby over (txtime, txnodeid) per rowuuid for both content and deletion-register tables.
-- `INV-LOWER-7`: Global current-row reads MUST use jazz{table}globalcurrent and jazz{table}registerglobalcurrent, not scan full history, and MUST exclude rows whose register global-cur...
-- `INV-LOWER-8`: jazzglobalchanges MUST be keyed by (tablename, rowuuid, layer, globalseq) and MUST expose index byglobalseq(globalseq, tablename, rowuuid, layer) for global-base probes.
-- `INV-LOWER-9`: Query lowering MUST begin from visiblecurrentgraph and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
-- `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name jazz-query:<shapeid>, then executed through Database::bindshape; ma...
-- `INV-LOWER-11`: Prepared graph lowering MUST reject != predicates against parameters until supported.
-- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST lower their representable source projection into groove rather than bypassing the...
-- `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, excep...
-- `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses,...
-- `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match...
-- `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at basesnapshot.globalbase to...
-- `INV-LOWER-17`: ColumnSchema::text and ColumnSchema::blob MUST lower user cell storage to nullable GrooveColumnType::Bytes.
+- `INV-LOWER-1`: Jazz schemas MUST be lowered into a `groove::schema::DatabaseSchema` before opening the node's `groove::db::Database`.
+- `INV-LOWER-2`: The lowered content history table for each logical table MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
+- `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
+- `INV-LOWER-4`: Content versions MUST lower to `jazz_{table}_history`; deletion-register versions MUST lower to `jazz_{table}_register`; a single lowered version row MUST NOT contain both user cells and `_deletion`.
+- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where `_deletion == deleted`.
+- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove `arg_max_by` over `(tx_time, tx_node_id)` per `row_uuid` for both content and deletion-register tables.
+- `INV-LOWER-7`: Global current-row reads MUST use `jazz_{table}_global_current` and `jazz_{table}_register_global_current`, not scan full history, and MUST exclude rows whose register global-current winner is `Deleted`.
+- `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(table_name, row_uuid, layer, global_seq)` and MUST expose index `by_global_seq(global_seq, table_name, row_uuid, layer)` for global-base probes.
+- `INV-LOWER-9`: Query lowering MUST begin from `visible_current_graph` and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
+- `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
+- `INV-LOWER-11`: Prepared graph lowering MUST preserve the semantics of every accepted predicate shape and explicitly reject unsupported predicate shapes.
+- `INV-LOWER-12`: Query shapes whose storage read crosses partitioned or schema-projected data MUST bypass prepared groove lowering; supported root current reads MUST evaluate from projected current source rows, while unsupported joins/reachable shapes MUST fail loudly instead of falling back to the semantic oracle.
+- `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, except maintained unordered `limit(1)` with offset `0` which MAY lower through groove `ArgMinBy` over `row_uuid`, and maintained ordered windows or ordered suffixes which MUST lower through groove `TopBy`.
+- `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
+- `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
+- `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
+- `INV-LOWER-17`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower user cell storage to nullable `GrooveColumnType::Bytes`.
 - `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable, non-integer, or large-value columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
-- `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
-- `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation...
-- `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equalit...
+- `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
+- `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
+- `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equality uses an index probe, residual filters remain applied, and unindexed filters fall back to a loudly counted full scan.
 - `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
   `by_table_global_seq` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-sequence range.
-- `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the ful...
-- `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative...
+- `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
+- `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 
 ## Details
 
@@ -218,14 +218,16 @@ frontier machinery and depth/dedupe facts; fourth add array-membership join
 facts and extend the incremental-delivery canaries to cover scalar-hop,
 array-hop, union/dedup, and recursive-gather single-row updates.
 
-The current implementation split is explicit. Read policy now lowers through the
-`node/query_engine` path described above. Write-time acceptance still evaluates
-policy predicates directly in `node/policy.rs`: the ingest/dry-run path enters
-`NodeState::write_policy_allows_version_record`, which dispatches insert,
-update, and delete checks through `policy_allows*` helpers before accepting a
-version. Moving read policy into the query engine therefore did not silently
-change write acceptance semantics; `INV-LOWER-20` names that remaining direct
-write-policy boundary.
+Read and write policies both lower through the `node/query_engine` path described
+above. Write-time admission enters
+`NodeState::write_policy_allows_version_record`, projects old and candidate data
+into the policy-pinned schema, selects the matching insert/update/delete clause,
+and supplies that row as an inline root source to the identity-aware
+authorization subplan. Branch writes use the same program over the branch read
+view. Plain child-insert `inherits(parent_col)` selects the parent's
+`update_using` clause; explicit `InheritsOperation::{Insert, Update, Delete}`
+selects the matching parent write clause. There is no direct predicate
+interpreter fallback (`INV-LOWER-20`).
 
 Identity and execution are separate concerns: aggregation and non-maintained
 `order_by` are part of a shape's _semantic identity_ (canonicalized into the
@@ -257,22 +259,14 @@ ordered suffixes which lower through `TopBy`. For maintained subscriptions, ch.
 16 tracks
 aggregate/projection/predicate-policy lowering gaps separately from remaining
 window capability limits. `INV-LOWER-12` — a read crossing
-partitioned/schema-projected data must lower every representable source
-projection into groove; schema projection is a source-lowering responsibility,
-not permission to bypass the prepared groove boundary. Implementation status:
-same-table, visible-current, current-family, canonical natural lens projection is
-lowered for a single maintained root source over compatible current partitions,
-including column add, drop, copy, and rename. Table renames, joins, arrays,
-reachable traversal, and multi-hop table lineage remain unsupported until they
-have source-aware lowering. Historical current reads with filters and joins lower
+partitioned/schema-projected data bypasses the ordinary prepared current plan
+cache; supported root current reads use projected current source rows, and
+unsupported join/reachable projected shapes fail loudly until they have
+source-aware lowering. Historical current reads with filters and joins lower
 through the shared clause layer over a historical source; historical reachable
 still requires source-aware reachable lowering. These staged source gaps must not
-create a second query algebra. `INV-LOWER-25` — a lens-projected maintained
-source must emit the same net weighted current-row and witness deltas as applying
-the selected natural lens path to the authoritative per-version current-row delta
-stream, with no full-state diff except initial hydration or an explicit
-reset/rebuild. `INV-LOWER-11` — prepared lowering rejects `!=` parameter
-predicates until supported.
+create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
+parameter predicates until supported.
 
 ### 14.5 Sync views & exclusive validation → groove
 
@@ -371,12 +365,11 @@ policy filtering, pagination, and live subscription maintenance.
 
 ### Open questions
 
-- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy now lowers through
-  `node/query_engine` as part of the policy-composed query graph. Write-time
-  acceptance still evaluates directly in `node/policy.rs` via
-  `NodeState::write_policy_allows_version_record` and its `policy_allows*`
-  helpers, so the spec states the implemented split rather than leaving the
-  former prepared-shape policy question open.
+- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy and write admission both
+  lower through `node/query_engine`. Write admission supplies policy-pinned
+  old/candidate rows as inline roots and evaluates them with the authenticated
+  identity over current or branch sources; the former direct interpreter has
+  been removed.
 - 🔶 **Bytes primary keys.** The README lists bytes PKs as a "new" groove ask, but
   the implementation already uses `PrimaryKeyColumn::bytes` in several lowered
   tables — treat as satisfied rather than pending.

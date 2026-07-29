@@ -2034,6 +2034,20 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 "tier": format!("{tier:?}"),
             }))
         }
+        SubscriptionEvent::Rejected { reason } => {
+            let reason = match reason {
+                jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
+                    serde_json::json!({
+                        "type": "UnsupportedShapeCapability",
+                        "detail": detail,
+                    })
+                }
+            };
+            Ok(serde_json::json!({
+                "type": "rejected",
+                "reason": reason,
+            }))
+        }
         SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
     }
 }

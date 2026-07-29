@@ -2250,30 +2250,6 @@ describe("realistic browser benchmark harness", () => {
         }
       };
 
-      const originalWaitForRemoteReadAvailability =
-        client.waitForRemoteReadAvailability.bind(client);
-      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalWaitForRemoteReadAvailability(...args);
-        } finally {
-          phases.push({
-            phase: "client.waitForRemoteReadAvailability",
-            ms: performance.now() - startedAt,
-          });
-        }
-      };
-
-      const originalQueryInternal = client.queryInternal.bind(client);
-      client.queryInternal = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalQueryInternal(...args);
-        } finally {
-          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
       const startedAt = performance.now();
       const rows = await db.all(workQuery);
       const totalMs = performance.now() - startedAt;
@@ -2418,30 +2394,6 @@ describe("realistic browser benchmark harness", () => {
           return await originalQuery(...args);
         } finally {
           phases.push({ phase: "client.query", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalWaitForRemoteReadAvailability =
-        client.waitForRemoteReadAvailability.bind(client);
-      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalWaitForRemoteReadAvailability(...args);
-        } finally {
-          phases.push({
-            phase: "client.waitForRemoteReadAvailability",
-            ms: performance.now() - startedAt,
-          });
-        }
-      };
-
-      const originalQueryInternal = client.queryInternal.bind(client);
-      client.queryInternal = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalQueryInternal(...args);
-        } finally {
-          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
         }
       };
 

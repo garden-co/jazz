@@ -10,20 +10,20 @@ chapter 4.
 
 Invariant digest:
 
-- `INV-REC-1`: A recursive graph MUST have a seed child and a step child whose output RecordDescriptors are identical; otherwise subscription/compilation MUST fail with GraphOutputMi...
-- `INV-REC-2`: FrontierSourceOp MUST read only the RecordDeltas bound for its FrontierName in the current EvalContext; when absent it MUST yield an empty weighted record set with the...
-- `INV-REC-3`: Recursive facts MUST use set semantics: an encoded fact already present in RecursiveState::accumulated MUST NOT be emitted again or have its weight increased by duplic...
-- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight 1; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
-- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with IvmRuntimeError::UnsupportedNonMonotoneRecursion.
+- `INV-REC-1`: A recursive graph MUST have a seed child and a step child whose output `RecordDescriptor`s are identical; otherwise subscription/compilation MUST fail with `GraphOutputMismatch`.
+- `INV-REC-2`: `FrontierSourceOp` MUST read only the `RecordDeltas` bound for its `FrontierName` in the current `EvalContext`; when absent it MUST yield an empty weighted record set with the declared output descriptor.
+- `INV-REC-3`: Recursive facts MUST use set semantics: an encoded fact already present in `RecursiveState::accumulated` MUST NOT be emitted again or have its weight increased by duplicate derivations.
+- `INV-REC-4`: Accepted recursive facts MUST be emitted with weight `1`; positive recursive deltas with weight greater than one MUST collapse to one accepted fact.
+- `INV-REC-5`: Positive-only recursive evaluation MUST reject any non-positive frontier delta with `IvmRuntimeError::UnsupportedNonMonotoneRecursion`.
 - `INV-REC-6`: A recursive fixpoint MUST stop when the accepted frontier is empty and MUST converge on cyclic inputs by deduplicating against accumulated facts.
-- `INV-REC-7`: Recursive evaluation MUST fail with IvmRuntimeError::RecursiveIterationLimit { node, maxiters } when the number of step iterations exceeds RecursiveOp::maxiters.
-- `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the re...
-- `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental...
-- `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by ScopePath and recursive subtick; root-scope arrangements MUST use subtick = 0 and MUST absorb a public tick's...
-- `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for ex...
+- `INV-REC-7`: Recursive evaluation MUST fail with `IvmRuntimeError::RecursiveIterationLimit { node, max_iters }` when the number of step iterations exceeds `RecursiveOp::max_iters`.
+- `INV-REC-8`: Retractions reaching recursive state MUST be handled by full recompute from storage and diff against the previous accumulated set; subscribers MUST receive only the resulting net recursive delta.
+- `INV-REC-9`: After recompute, recursive step arrangements MUST be hydrated from full table snapshots and the full accumulated weighted record set before future positive incremental use.
+- `INV-REC-10`: Context-dependent recursive arrangements MUST be keyed by `ScopePath` and recursive `sub_tick`; root-scope arrangements MUST use `sub_tick = 0` and MUST absorb a public tick's table delta exactly once even when recursive and non-recursive consumers share them.
+- `INV-REC-11`: Hydrating a new subscriber to an already-shared recursive node MUST return the full current recursive result and MUST NOT consume or suppress future tick deltas for existing subscribers.
 - `INV-REC-12`: Recursive recompute MUST NOT persist per-context child operator state in the runtime state maps after recompute completes.
-- `INV-REC-13`: argmaxby MUST NOT be accepted inside recursive graph seed or step graphs.
-- `INV-REC-14`: SQL WITH RECURSIVE queries MUST NOT be lowered until recursive SQL planning is designed; planner MUST return PlannerError::UnsupportedQuery("recursive CTE lowering is...
+- `INV-REC-13`: `arg_max_by` MUST NOT be accepted inside recursive graph seed or step graphs.
+- `INV-REC-14`: SQL lowering MUST either preserve a query's semantics exactly or reject it explicitly.
 - `INV-REC-15`: Nested recursive graphs MUST be rejected during validation/compilation.
 
 ## Details
@@ -35,10 +35,12 @@ node pairs an initial derivation with an iterative derivation, and the iterative
 derivation receives the facts accepted in the previous iteration through a
 scoped frontier source. In the reference API this is built with
 `GraphBuilder::recursive(seed, step, frontier, max_iters)` and
-`GraphBuilder::frontier_source(frontier, output)` inside the step graph. SQL
-`WITH RECURSIVE` is not lowered; the planner rejects it with
-`UnsupportedQuery("recursive CTE lowering is not implemented yet")`
-(`INV-REC-14`).
+`GraphBuilder::frontier_source(frontier, output)` inside the step graph.
+
+**Implementation-status note.** SQL `WITH RECURSIVE` is currently rejected as
+`UnsupportedQuery("recursive CTE lowering is not implemented yet")`; the
+planner test `rejects_recursive_ctes_until_recursive_lowering_exists` verifies
+that explicit rejection (`INV-REC-14`).
 
 The recursive node has exactly two child graphs: the seed graph and the step
 graph. Their compiled output descriptors must be identical (`INV-REC-1`), so
@@ -86,6 +88,12 @@ non-positive frontier delta (`UnsupportedNonMonotoneRecursion`); non-monotone
 change is handled by recompute (§6.3), not by propagating negative frontiers
 through the loop.
 
+**Implementation-status note.** After recompute hydrates recursive step
+arrangements, the reference implementation resumes positive-incremental
+maintenance for a later insert-only commit. The
+`prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute`
+test verifies that transition.
+
 ### 6.3 Retractions: recompute and diff
 
 Recursive maintenance does not propagate negative frontiers through the loop.
@@ -119,10 +127,6 @@ per-context child operator state in the runtime state maps after it completes.
 
 ### Open questions
 
-- ✅ **Insert-only incrementality.** After a recompute hydrates recursive step
-  arrangements, the next insert-only commit over recursion inputs uses the
-  positive-incremental fixpoint again. Non-positive input deltas still recompute
-  and diff so the emitted result remains the minimal net delta (`INV-REC-8`).
 - 🔶 **Conservative recompute trigger.** A conforming engine MAY recompute more
   often than strictly necessary while still emitting the same minimal diff
   (`INV-REC-8`); the implementation recomputes on any table delta against

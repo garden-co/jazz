@@ -28,7 +28,7 @@ use crate::ivm::{
     NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
     TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
-    UnwrapNullableOp,
+    UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
     self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
@@ -1689,12 +1689,14 @@ impl IvmRuntime {
                             input: *left,
                             fields: Arc::from(plan_expr_names(&join.left_key)),
                             descriptor: join.left_descriptor,
+                            comparison: join.comparison,
                         });
                         referenced.insert(ArrangementKey {
                             scope: ScopeId::root(),
                             input: *right,
                             fields: Arc::from(plan_expr_names(&join.right_key)),
                             descriptor: join.right_descriptor,
+                            comparison: join.comparison,
                         });
                     }
                 }
@@ -1705,6 +1707,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(arg_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1715,6 +1718,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(arg_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1725,6 +1729,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(top_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1737,6 +1742,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(plan_expr_names(&aggregate.group_key)),
                             descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -2177,7 +2183,11 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
-            GraphBuilder::Filter { input, predicate } => {
+            GraphBuilder::Filter {
+                input,
+                predicate,
+                comparison,
+            } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let output = inferred_output;
@@ -2185,6 +2195,7 @@ impl IvmRuntime {
                     NodeDescriptor::new(
                         OpType::Filter(FilterOp {
                             predicate: predicate.clone(),
+                            comparison: *comparison,
                         }),
                         [input_node],
                         output,
@@ -2300,6 +2311,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2322,6 +2334,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2337,6 +2350,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2359,6 +2373,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2374,6 +2389,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2396,6 +2412,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2675,6 +2692,7 @@ struct ArrangementKey {
     input: NodeId,
     fields: Arc<[String]>,
     descriptor: RecordDescriptor,
+    comparison: ValueComparison,
 }
 
 /// Database tick plus recursive sub-tick for scoped arrangement freshness.
@@ -3090,46 +3108,52 @@ impl MultisinkSubscription {
 }
 
 impl PredicateExpr {
-    fn matches(&self, record: BorrowedRecord<'_>) -> Result<bool, IvmRuntimeError> {
+    fn matches(
+        &self,
+        record: BorrowedRecord<'_>,
+        comparison: ValueComparison,
+    ) -> Result<bool, IvmRuntimeError> {
         match self {
             Self::Eq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_eq())
+                compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
             }
             Self::Neq { field, value } => {
-                compare_record_field(record, field, value, |ord| !ord.is_eq())
+                compare_record_field(record, field, value, |ord| !ord.is_eq(), comparison)
             }
-            Self::Contains { field, value } => contains_record_field(record, field, value),
+            Self::Contains { field, value } => {
+                contains_record_field(record, field, value, comparison)
+            }
             Self::EqField { field, value_field } => {
-                compare_record_fields(record, field, value_field, |ord| ord.is_eq())
+                compare_record_fields(record, field, value_field, |ord| ord.is_eq(), comparison)
             }
             Self::ContainsField {
                 field,
                 needle_field,
-            } => contains_record_field_value(record, field, needle_field),
+            } => contains_record_field_value(record, field, needle_field, comparison),
             Self::NeqField { field, value_field } => {
-                compare_record_fields(record, field, value_field, |ord| !ord.is_eq())
+                compare_record_fields(record, field, value_field, |ord| !ord.is_eq(), comparison)
             }
             Self::Gt { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_gt())
+                compare_record_field(record, field, value, |ord| ord.is_gt(), comparison)
             }
             Self::GtEq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_ge())
+                compare_record_field(record, field, value, |ord| ord.is_ge(), comparison)
             }
             Self::Lt { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_lt())
+                compare_record_field(record, field, value, |ord| ord.is_lt(), comparison)
             }
             Self::LtEq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_le())
+                compare_record_field(record, field, value, |ord| ord.is_le(), comparison)
             }
             Self::IsNull { field } => Ok(is_sql_null_value(&record.get(field)?)),
             Self::IsNotNull { field } => Ok(!is_sql_null_value(&record.get(field)?)),
             Self::And(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record))
+                .map(|predicate| predicate.matches(record, comparison))
                 .try_fold(true, |acc, matches| matches.map(|matches| acc && matches)),
             Self::Or(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record))
+                .map(|predicate| predicate.matches(record, comparison))
                 .try_fold(false, |acc, matches| matches.map(|matches| acc || matches)),
         }
     }
@@ -3523,7 +3547,11 @@ fn lift_literal_filter(
     binding_field: &str,
 ) -> Result<Option<LiftedLiteralFilter>, IvmRuntimeError> {
     match graph {
-        GraphBuilder::Filter { input, predicate } => {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
             if let PredicateExpr::Eq { field, value } = predicate {
                 let joined =
                     literal_filter_binding_join((**input).clone(), field, value, binding_field)?;
@@ -3550,6 +3578,7 @@ fn lift_literal_filter(
                     graph: GraphBuilder::Filter {
                         input: Box::new(lifted.graph),
                         predicate: predicate.clone(),
+                        comparison: *comparison,
                     },
                     value: lifted.value,
                 }));
@@ -3562,6 +3591,7 @@ fn lift_literal_filter(
                 right,
                 left_on,
                 right_on,
+                comparison,
             } = input.as_ref()
             {
                 if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
@@ -3570,6 +3600,7 @@ fn lift_literal_filter(
                         right: right.clone(),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
+                        comparison: *comparison,
                     };
                     let mut fields =
                         project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
@@ -3589,6 +3620,7 @@ fn lift_literal_filter(
                         right: Box::new(lifted.graph),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
+                        comparison: *comparison,
                     };
                     let mut fields =
                         project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
@@ -3606,6 +3638,7 @@ fn lift_literal_filter(
             if let GraphBuilder::Filter {
                 input: filtered_input,
                 predicate: PredicateExpr::Eq { field, value },
+                ..
             } = input.as_ref()
             {
                 let joined = literal_filter_binding_join(
@@ -3684,6 +3717,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
                 let original_output = runtime.infer_builder_output(graph)?;
@@ -3692,6 +3726,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 };
                 return Ok(Some(LiftedLiteralFilter {
                     graph: project_to_output_with_binding(
@@ -3710,6 +3745,7 @@ fn lift_literal_filter(
                     right: Box::new(lifted.graph),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 };
                 return Ok(Some(LiftedLiteralFilter {
                     graph: project_to_output_with_binding(
@@ -3728,6 +3764,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
                 return Ok(None);
@@ -3738,6 +3775,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 },
                 value: lifted.value,
             }))
@@ -3747,6 +3785,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
                 return Ok(None);
@@ -3757,6 +3796,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 },
                 value: lifted.value,
             }))
@@ -4061,12 +4101,17 @@ fn propagate_binding_through_frontier(
                 RecordDescriptor::new(fields),
             ))
         }
-        GraphBuilder::Filter { input, predicate } => {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Filter {
                 input: Box::new(input),
                 predicate: predicate.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::Project { input, fields } => {
@@ -4109,6 +4154,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left = propagate_binding_through_frontier(
                 left,
@@ -4125,6 +4171,7 @@ fn propagate_binding_through_frontier(
                 right: Box::new(right),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::SemiJoin {
@@ -4132,6 +4179,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
@@ -4140,6 +4188,7 @@ fn propagate_binding_through_frontier(
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::AntiJoin {
@@ -4147,6 +4196,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
@@ -4155,6 +4205,7 @@ fn propagate_binding_through_frontier(
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::Table { .. }
@@ -4185,9 +4236,14 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             frontier,
             max_iters,
         },
-        GraphBuilder::Filter { input, predicate } => GraphBuilder::Filter {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => GraphBuilder::Filter {
             input: Box::new(replace_binding_shape(*input, shape)),
             predicate,
+            comparison,
         },
         GraphBuilder::Project { input, fields } => GraphBuilder::Project {
             input: Box::new(replace_binding_shape(*input, shape)),
@@ -4259,33 +4315,39 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::Join {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         GraphBuilder::SemiJoin {
             left,
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::SemiJoin {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         GraphBuilder::AntiJoin {
             left,
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::AntiJoin {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         graph => graph,
     }
@@ -4451,7 +4513,7 @@ impl NodeState {
         let predicate = &filter.predicate;
         let mut deltas = Vec::new();
         for delta in &input.deltas {
-            if predicate.matches(delta.borrowed(&input.descriptor))? {
+            if predicate.matches(delta.borrowed(&input.descriptor), filter.comparison)? {
                 deltas.push(delta.clone());
             }
         }
@@ -4991,7 +5053,8 @@ where
                 .descriptor
                 .output;
             let group_fields = self.aggregate_group_fields(node, &aggregate);
-            let arrangement_key = self.arrangement_key(*input, input_desc, group_fields)?;
+            let arrangement_key =
+                self.arrangement_key(*input, input_desc, group_fields, ValueComparison::Exact)?;
             if self
                 .arrangement_states
                 .get(&arrangement_key)
@@ -5482,8 +5545,14 @@ where
             join.right_descriptor,
             output_desc,
         )?;
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5506,6 +5575,7 @@ where
             &output_mapping,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5545,8 +5615,14 @@ where
         };
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5566,6 +5642,7 @@ where
             &output_desc,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5605,8 +5682,14 @@ where
         };
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5626,6 +5709,7 @@ where
             &output_desc,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5668,6 +5752,7 @@ where
             *input_node,
             output_desc,
             Arc::from(spec.group_fields.to_vec()),
+            ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
@@ -5773,6 +5858,7 @@ where
             *input_node,
             output_desc,
             Arc::from(top_by.group_fields.clone()),
+            ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
@@ -5873,8 +5959,12 @@ where
                     .push((delta.record.clone(), delta.weight));
             }
             if self.context.hydrate_arrangements {
-                let arrangement_key =
-                    self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+                let arrangement_key = self.arrangement_key(
+                    *input_node,
+                    input_desc,
+                    group_fields.clone(),
+                    ValueComparison::Exact,
+                )?;
                 let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
                 arrangement.value_mut().apply_record_deltas(
                     input_desc,
@@ -5898,8 +5988,12 @@ where
                 deltas: output,
             });
         }
-        let arrangement_key =
-            self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+        let arrangement_key = self.arrangement_key(
+            *input_node,
+            input_desc,
+            group_fields.clone(),
+            ValueComparison::Exact,
+        )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
             .arrangement_states
@@ -5999,12 +6093,14 @@ where
         input: NodeId,
         descriptor: RecordDescriptor,
         fields: Arc<[String]>,
+        comparison: ValueComparison,
     ) -> Result<ArrangementKey, IvmRuntimeError> {
         Ok(ArrangementKey {
             scope: self.operator_scope(input)?,
             input,
             fields,
             descriptor,
+            comparison,
         })
     }
 
@@ -6516,6 +6612,8 @@ fn aggregate_output_type(
                 | ValueType::U16
                 | ValueType::U32
                 | ValueType::U64
+                | ValueType::I32
+                | ValueType::I64
                 | ValueType::F64 => value_type,
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
@@ -6825,6 +6923,11 @@ fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::I32 => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
+            Ok(())
+        }
         ValueType::I64 => {
             key.push(13);
             key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
@@ -6882,6 +6985,17 @@ fn encode_record_field_key_part(
                     key.push(9);
                     key.push(13);
                     key.extend(order_preserving_i64_bits(value).to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I32) => {
+            match borrowed.get_nullable_i32(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(14);
+                    key.extend(order_preserving_i32_bits(value).to_be_bytes());
                 }
                 None => key.push(8),
             }
@@ -7028,6 +7142,7 @@ fn compare_record_field(
     field: &str,
     value: &LiteralValue,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let field_idx = record
         .descriptor()
@@ -7040,7 +7155,7 @@ fn compare_record_field(
     }
     let value = value.to_value();
     let actual = record.get(field)?;
-    Ok(compare_values_sql(&actual, &value).is_some_and(predicate))
+    Ok(compare_values_sql(&actual, &value, comparison).is_some_and(predicate))
 }
 
 enum FieldLiteralOrdering {
@@ -7064,6 +7179,9 @@ fn record_field_literal_ordering(
         }
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
+        }
+        (ValueType::I32, LiteralValue::I32(expected)) => {
+            Ok(ordering(&record.get_i32(field_idx)?, expected))
         }
         (ValueType::I64, LiteralValue::I64(expected)) => {
             Ok(ordering(&record.get_i64(field_idx)?, expected))
@@ -7117,6 +7235,10 @@ fn nullable_record_field_literal_ordering(
             .get_nullable_i64(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::I32, LiteralValue::I32(expected)) => Ok(record
+            .get_nullable_i32(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::F64, LiteralValue::F64(expected)) => {
             let expected = f64::from_bits(*expected);
             Ok(record
@@ -7158,49 +7280,58 @@ fn compare_record_fields(
     field: &str,
     value_field: &str,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let left = record.get(field)?;
     let right = record.get(value_field)?;
-    Ok(compare_values_sql(&left, &right).is_some_and(predicate))
+    Ok(compare_values_sql(&left, &right, comparison).is_some_and(predicate))
 }
 
 fn contains_record_field(
     record: BorrowedRecord<'_>,
     field: &str,
     value: &LiteralValue,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let needle = value.to_value();
     let haystack = record.get(field)?;
-    Ok(value_contains_sql(&haystack, &needle))
+    Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
 fn contains_record_field_value(
     record: BorrowedRecord<'_>,
     field: &str,
     needle_field: &str,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let haystack = record.get(field)?;
     let needle = record.get(needle_field)?;
-    Ok(value_contains_sql(&haystack, &needle))
+    Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
-fn value_contains_sql(left: &Value, right: &Value) -> bool {
+fn value_contains_sql(left: &Value, right: &Value, comparison: ValueComparison) -> bool {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => false,
-        (Value::Nullable(Some(left)), right) => value_contains_sql(left, right),
-        (left, Value::Nullable(Some(right))) => value_contains_sql(left, right),
+        (Value::Nullable(Some(left)), right) => value_contains_sql(left, right, comparison),
+        (left, Value::Nullable(Some(right))) => value_contains_sql(left, right, comparison),
         (Value::String(left), Value::String(right)) => left.contains(right),
-        (Value::Array(values), right) => values.iter().any(|value| value == right),
+        (Value::Array(values), right) => values.iter().any(|value| {
+            compare_values_sql(value, right, comparison).is_some_and(std::cmp::Ordering::is_eq)
+        }),
         _ => false,
     }
 }
 
-fn compare_values_sql(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+fn compare_values_sql(
+    left: &Value,
+    right: &Value,
+    comparison: ValueComparison,
+) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => None,
-        (Value::Nullable(Some(left)), right) => compare_values_sql(left, right),
-        (left, Value::Nullable(Some(right))) => compare_values_sql(left, right),
-        _ => compare_values(left, right),
+        (Value::Nullable(Some(left)), right) => compare_values_sql(left, right, comparison),
+        (left, Value::Nullable(Some(right))) => compare_values_sql(left, right, comparison),
+        _ => compare_values(left, right, comparison),
     }
 }
 
@@ -7212,12 +7343,25 @@ fn is_sql_null_value(value: &Value) -> bool {
     }
 }
 
-fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+fn compare_values(
+    left: &Value,
+    right: &Value,
+    comparison: ValueComparison,
+) -> Option<std::cmp::Ordering> {
+    if matches!(comparison, ValueComparison::Policy)
+        && let (Some(left), Some(right)) = (integer_value(left), integer_value(right))
+    {
+        // i128 represents every supported integer exactly, including U64
+        // values above i64::MAX. Floats deliberately do not participate: a
+        // numeric-width match must never turn into lossy integer/float equality.
+        return left.partial_cmp(&right);
+    }
     match (left, right) {
         (Value::U8(left), Value::U8(right)) => left.partial_cmp(right),
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
@@ -7228,15 +7372,27 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::Tuple(left), Value::Tuple(right)) => left
             .iter()
             .zip(right)
-            .map(|(left, right)| compare_values(left, right))
+            .map(|(left, right)| compare_values(left, right, comparison))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
         (Value::Array(left), Value::Array(right)) => left
             .iter()
             .zip(right)
-            .map(|(left, right)| compare_values(left, right))
+            .map(|(left, right)| compare_values(left, right, comparison))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
+        _ => None,
+    }
+}
+
+fn integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::U8(value) => Some(i128::from(*value)),
+        Value::U16(value) => Some(i128::from(*value)),
+        Value::U32(value) => Some(i128::from(*value)),
+        Value::U64(value) => Some(i128::from(*value)),
+        Value::I32(value) => Some(i128::from(*value)),
+        Value::I64(value) => Some(i128::from(*value)),
         _ => None,
     }
 }
@@ -7281,6 +7437,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -7346,6 +7506,10 @@ fn order_preserving_f64_bits(value: f64) -> u64 {
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -7559,6 +7723,7 @@ fn aggregate_sum(
     };
     let mut kind = None;
     let mut u64_sum = 0_u64;
+    let mut i64_sum = 0_i64;
     let mut f64_sum = 0_f64;
     for (record, weight) in records {
         if *weight <= 0 {
@@ -7585,6 +7750,14 @@ fn aggregate_sum(
                 kind.get_or_insert(ValueType::U64);
                 u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
             }
+            Value::I32(value) => {
+                kind.get_or_insert(ValueType::I32);
+                i64_sum = add_weighted_i64(i64_sum, i64::from(value), *weight)?;
+            }
+            Value::I64(value) => {
+                kind.get_or_insert(ValueType::I64);
+                i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
+            }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
                 f64_sum += value * (*weight as f64);
@@ -7603,6 +7776,10 @@ fn aggregate_sum(
             .map(Value::U32)
             .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Value::I32)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::I64 => Ok(Value::I64(i64_sum)),
         ValueType::F64 => Ok(Value::F64(f64_sum)),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7685,12 +7862,24 @@ fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRun
         .ok_or(IvmRuntimeError::UnsupportedOperator)
 }
 
+fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
+    current
+        .checked_add(
+            value
+                .checked_mul(weight)
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
     match value {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
         Value::U64(value) => Ok(*value as f64),
+        Value::I32(value) => Ok(f64::from(*value)),
+        Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7954,6 +8143,10 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);

@@ -11,34 +11,34 @@ deployment roles are chapter 9.
 
 Invariant digest:
 
-- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move globalseq backward and MUST raise observed durability only by a supplied Some(DurabilityTier) claim using monotone max...
-- `INV-SYNC-7`: A ViewUpdate result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a t...
-- `INV-SYNC-8`: A view server MUST use peerpayloadinventory.completetxpayloads only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-sc...
-- `INV-SYNC-9`: A receiver MUST reject a ViewUpdate that names a peerpayloadinventory.completetxpayloads, add, or remove transaction it lacks enough tx existence, row-version payload,...
-- `INV-SYNC-10`: A reset-result-set ViewUpdate MUST set resetresultset = true; applying it MUST clear the receiver's settled subscription result set before applying the replacement res...
-- `INV-SYNC-11`: Reset-result-set ViewUpdates MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
+- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_seq` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
+- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, predicate, and large-value material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
+- `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
+- `INV-SYNC-9`: A receiver MUST reject a `ViewUpdate` that names a `peer_payload_inventory.complete_tx_payloads`, add, or remove transaction it lacks enough tx existence, row-version payload, complete-tx payload, or view-complete exclusive payload coverage to resolve for that subscription view.
+- `INV-SYNC-10`: A reset-result-set `ViewUpdate` MUST set `reset_result_set = true`; applying it MUST clear the receiver's settled subscription result set before applying the replacement result members and program facts.
+- `INV-SYNC-11`: Reset-result-set `ViewUpdate`s MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, complete tx payload refs, or content extents.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
-- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only...
-- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for tx.ntotalwrites.
-- `INV-SYNC-17`: ViewUpdate emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
+- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
+- `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
-- `INV-SYNC-19`: FetchContentExtent handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
-- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a sin...
-- `INV-SYNC-21`: Wire TxId and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
-- `INV-SYNC-22`: An edge's upstream permission-scope subscriptions MUST be deduplicated at the sync level: identical or covering (policyshape, writerclaim) scopes share one upstream su...
-- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
-- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies, never result membership, program facts, or inventory refs; a body may be omitted only under the skip rule — be...
+- `INV-SYNC-19`: `FetchContentExtent` handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
+- `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
+- `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
+- `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
+- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
+- `INV-SYNC-24`: Known-state payload dedup MUST omit only version bodies and MUST preserve result membership, program facts, and inventory refs. A version body MAY be omitted only when the receiver's membership is believed — under a fast declaration, the version also MUST have settled at or before the declared position; not-yet-fated versions MUST be shipped under a fast declaration.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
-- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those (table, rowuuid, txtime, txnodeid) payloads, and the server MUST serve...
-- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates...
-- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as Fate::Pending with DurabilityTier::Local and emit exactly one SyncMessage::CommitUnit.
+- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
+- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
+- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-11`: Accepted authority commits MUST receive the next GlobalSeq, advance the allocator/watermark, and report DurabilityTier::Global.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
+- `INV-TX-11`: Accepted authority commits MUST receive the next `GlobalSeq`, advance the allocator/watermark, and report `DurabilityTier::Global`.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global sequence, or create merge versions from that payload.
 
 ## Details
 
@@ -51,10 +51,12 @@ Roles include relay links (`PeerRole::Relay`), edge-client links
 (`PeerRole::EdgeClient { identity }`), fate authority, durability, and eviction.
 
 A relay link represents the system author (`AuthorId::SYSTEM`) and performs no
-read narrowing. It registers each shape upstream **once** and forwards the
-**union** of downstream binding sets, which makes subscription aggregation
-composable at every hop. An edge-client link carries the terminated peer identity
-and narrows reads under that identity (ch. 7, ch. 9).
+read narrowing. An edge-client link carries the terminated peer identity and
+narrows reads under that identity (ch. 7, ch. 9).
+
+**Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
+shape is intended, but the current implementation does not guarantee it. Its
+aggregation and covering-shape semantics remain an open design question below.
 
 The peer wire form is binary-first. `WireFrame` wraps `Hello`,
 `Message(WireEnvelope)`, and `Error`; `WireEnvelope.payload` contains a
@@ -209,20 +211,12 @@ staged batch can change what any downstream subscriber would be served, the
 subscriber connections are marked dirty at the same boundary as cache
 invalidation and applied-global-sequence bookkeeping.
 
-The current receiver direction is no separate bulk/non-bulk correctness mode, no
-eligibility list that decides whether bundles bypass deltas, and no hidden
-preloaded-transaction suppression that can starve maintained views. Bulk
-shortcuts may return only as optimizations on top of the same staged-delta
-semantics. The July 2026 receiver-batch receipts were the forcing function:
-client per-bundle ingest collapsed to one commit/tick per receiver burst, and
-admin 10% cold improved from the 60.7s baseline to about 5.0s once
-staged-overlay point and prefix reads were indexed.
-
-Planned consolidation: delete the remaining reset-specific bulk bypass, delete
-initial-hydration eligibility state that only exists to select a bypass, delete
-preloaded-transaction suppression once all reset snapshots use explicit
-retractions, and move the receiver boundary onto an `OrderedKvStorage`
-transaction once that storage transaction exists.
+**Implementation status (2026-07-27).** The receiver uses the staged-delta path
+for non-reset bundles; `receiver_batch_ingests_non_reset_complete_bundles_once`
+and `cold_reset_bulk_ingest_matches_incremental_ingest`
+(`crates/jazz/src/node/tests/sync.rs`) cover the one-batch/one-tick behavior.
+The remaining reset-specific bypass and the move to an `OrderedKvStorage`
+transaction are implementation work, not protocol invariants.
 
 _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
@@ -281,7 +275,7 @@ payload required by that view is complete. This is a **view-complete exclusive
 payload**, not necessarily a complete transaction payload. Otherwise the payload
 remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
 
-The implemented peer payload inventory is deliberately narrow:
+**Implementation status (2026-07-27).** The peer payload inventory is deliberately narrow:
 `peer_payload_inventory.complete_tx_payloads: Vec<TxId>` names only complete
 transaction payload coverage, not broad "known versions" and not partial row
 payload coverage. Partial and version-level dedup is the committed known-state
@@ -355,15 +349,15 @@ against core for the policy data required by its acceptance gate. It is keyed by
 to the writer's `claim("sub")`. This hydrates only the policy rows that writer's
 writes can depend on, never a whole table.
 
-Many writers' policies read overlapping data, so permission scopes are
-**deduplicated at the sync level**. Identical `(policy_shape, writer_claim)`
-scopes resolve to a single upstream subscription whose settled result fans out to
-every acceptance gate that needs it. The edge reference-counts gate dependents so
-the upstream subscription is dropped only when the last dependent goes away
-(`INV-SYNC-22`). A broader _covering_ scope can satisfy a narrower one when the
-covering relation says it does. This is the same per-peer payload dedup machinery
-(§8.4) applied to the edge's own upstream reads. The full edge-tier semantics —
-staleness horizon, rehydration, eviction — are chapter 9.
+Permission scopes are shared at the sync level whenever one settled subscription
+can satisfy every dependent acceptance gate (`INV-SYNC-22`).
+
+**Implementation status (verified 2026-07-27).** Exact-key scopes are shared and
+reference-counted by dependent gates; this is covered by
+`edge_deduplicates_scope_subscription_for_repeated_deferred_units` and
+`edge_releases_scope_subscription_after_last_deferred_unit_resolves`
+(`crates/jazz/tests/four_tier.rs`). Whether and how a broader scope can satisfy a
+narrower one remains an open design question below.
 
 ### 8.10 Content extents and catalogue lanes
 
@@ -472,43 +466,23 @@ semantic payload should remain the same wire-frame/SyncMessage envelope used by
 network sync. Transport-local batching, compression, and resume metadata must
 not leak into row/version encoding.
 
+**Implementation status (2026-07-27).** The receiver still uses the core
+staged-batch seam rather than an `OrderedKvStorage` transaction. The wire
+envelope has no portable resume credentials or trace/replay ids, and the
+canonical cross-language fixture set is incomplete. The ordinary committed-unit
+path also remains primarily client-to-core; the client-to-edge-to-core topology
+is being exercised incrementally. Worker bridges have not yet converged on the
+network wire-frame batches.
+
 ## Open Questions
 
 ### Open questions
 
-- 🔶 **Receiver storage transaction surface.** The receiver boundary currently
-  uses the core staged-batch seam. The end state is an `OrderedKvStorage`
-  transaction surface with the same staged read-through and single-commit
-  semantics, so receiver apply does not need a Jazz-side accumulator.
-- 🔶 **Cross-language wire envelope completion.** `WireFrame`/`WireEnvelope`
-  now establish a postcard-first binary frame carrying protocol version, feature
-  bits, optional enforced session metadata, structured errors, and an encoded
-  `SyncMessage` payload. Before TS/WASM/NAPI/server integration treats this as
-  frozen, the remaining envelope work is trace/replay ids, portable resume
-  cursor acceptance/rejection, auth expiry, and unsupported-feature diagnostics.
-  **Alpha compatibility policy (decided 2026-07-02):** alpha releases make no
-  cross-version protocol or storage compatibility promise; version tags exist so
-  mismatch is a clean, diagnosable refusal, never corruption or silent
-  misbehavior. Breaking is permitted but best-effort avoided; compatibility
-  windows are a beta-era policy.
-- 🔶 **Canonical fixtures.** The wire contract needs golden encode/decode
-  fixtures for every message family, including `CommitUnit`, `FateUpdate`,
-  `RegisterShape`/`Subscribe`/`Unsubscribe`, `ViewUpdate`, content extents, and
-  catalogue/lens lanes, with explicit coverage that row/version payload bytes
-  remain custom `Record` payloads under the postcard envelope. Fixtures should
-  be consumable from Rust and TypeScript before the TS API binds to live
-  transports.
 - 🔶 **Transport state.** The current binding-facing send/poll surface can
   express "send" and "no message staged"; it cannot express closed/error/
   backpressure, auth expiry, protocol-version mismatch, or resume-cursor
   rejection. Define the protocol state machine here and expose the ergonomic
   binding surface in ch. 13.
-- 🔶 **Client/edge/core rollout.** The protocol design is the same message
-  vocabulary across UI ↔ worker, worker ↔ edge, and edge ↔ core. Current
-  implementation and simulation are staged toward client ↔ edge ↔ core: the
-  ordinary committed-unit path still often behaves as client ↔ core, while
-  edge-client links, permission-scope deferral, and edge durability are being
-  exercised toward the full topology.
 - 🔶 **Parked-unit persistence.** Authority parking is in-memory and relies on
   client retry after restart; persisted parked units are not implemented. Decide
   whether ch. 8 states this as an implementation limitation or defers to
@@ -523,9 +497,6 @@ not leak into row/version encoding.
 - 🔶 **Covering-scope subsumption** is the design for broader permission scopes
   satisfying narrower ones; the implementation has exact-key sharing only, with
   no covering relation yet.
-- 🔶 **Worker bridge carrier unification.** Replace bespoke worker messages with
-  the same core wire-frame batches carried over WebSockets, while preserving the
-  worker bridge's different disconnect and lifecycle semantics.
 - 🔶 **Upstream-open signaling.** Binding surfaces need an explicit connected /
   handshaking / failed / reconnecting signal before edge/global-tier reads are
   unblocked; a synchronous `connect()` return is not enough.

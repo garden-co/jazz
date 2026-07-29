@@ -11,26 +11,26 @@ identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 
 Invariant digest:
 
-- `INV-LENS-1`: A published SchemaVersion MUST have schema.id == schema.schema.versionid().
-- `INV-LENS-2`: A published MigrationLens MUST have lens.id == lens.contentid() and both lens.source and lens.target MUST be known SchemaVersionIds; contentid() MUST hash the canonica...
+- `INV-LENS-1`: A published `SchemaVersion` MUST have `schema.id == schema.schema.version_id()`.
+- `INV-LENS-2`: A published `MigrationLens` MUST have `lens.id == lens.content_id()` and both `lens.source` and `lens.target` MUST be known `SchemaVersionId`s; `content_id()` MUST hash the canonical lens payload and exclude the embedded id field.
 - `INV-LENS-3`: Catalogue mutation messages MUST be accepted only from catalogue admin identity and MUST reject non-admin authors.
-- `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire VersionRecord MUST expose the full SchemaVersionId.
-- `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding SchemaVersion catalogue value arrives.
+- `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
+- `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
-- `INV-LENS-7`: CurrentWriteSchema updates MUST be monotone by revision; stale revisions MUST leave currentwriteschema unchanged.
+- `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, and per-version partitions MUST survive node restart.
 - `INV-LENS-9`: A current-write-schema pointer flip to a schema with new tables MUST create/reopen per-version history and register storage tables before writes/read scans use them.
-- `INV-LENS-10`: New local writes MUST store versions under currentwriteschema.schema, using the base table only when it equals the node's base schema and a partition table otherwise.
+- `INV-LENS-10`: New local writes MUST store versions under `current_write_schema.schema`, using the base table only when it equals the node's base schema and a partition table otherwise.
 - `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema partition at ingest.
 - `INV-LENS-12`: Natural lens reads MUST fan out across registered per-version tables and project rows into the requested schema after schema-agnostic winner selection.
-- `INV-LENS-13`: Natural forward/reverse lens projection MUST implement RenameColumn, CopyColumn, AddColumn, and DropColumn.backwardsdefault deterministically, and MUST reject Transfor...
+- `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
-- `INV-LENS-15`: ShapeId MUST include the authored SchemaVersionId; identical canonical query bytes against different schema versions MUST produce different shape ids.
-- `INV-LENS-16`: RejectSourceDelta on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
-- `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving; the current registry is identity/no-op only.
+- `INV-LENS-15`: `ShapeId` MUST include the authored `SchemaVersionId`; identical canonical query bytes against different schema versions MUST produce different shape ids.
+- `INV-LENS-16`: `RejectSourceDelta` on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
+- `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
 - `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
-- `INV-LENS-20`: Per-version tables MUST NOT be automatically garbage-collected; background durable migration may compact current winners but MUST NOT delete historical tables automati...
+- `INV-LENS-20`: Per-version tables MUST NOT be automatically garbage-collected; background durable migration may compact current winners but MUST NOT delete historical tables automatically.
 
 ## Details
 
@@ -80,11 +80,16 @@ content/register row carries a `schema_version` ref, represented locally as a
 node-local `SchemaVersionAlias` resolving to the wire `SchemaVersionId`, and the
 row stays in the physical table for that version (`INV-LENS-4`, ch. 2).
 
-The base schema uses the base table. Non-base versions live in suffixed tables
-(`jazz_{table}_{schemaHash}_history` / `_register`), tracked in
-`jazz_partitions`. When the current-write pointer flips to a schema with new
-tables, those partition tables are created or reopened before any write or read
-scan uses them (`INV-LENS-9`).
+The base schema uses the base table. Non-base versions have separate physical
+storage, tracked with the version partition metadata. When the current-write
+pointer flips to a schema with new tables, those partition tables are created or
+reopened before any write or read scan uses them (`INV-LENS-9`).
+
+**Implementation status.** The current storage layout names non-base history
+and register tables `jazz_{table}_{schemaHash}_history` and `_register`, and
+records them in `jazz_partitions`. Those names are implementation details, not
+part of the storage contract; `current_write_pointer_flip_reopens_with_new_partition_tables`
+exercises the required create/reopen behavior.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, and per-version partitions survive node restart
@@ -118,9 +123,9 @@ per-version table for the logical table, selects content/deletion winners by the
 **schema-agnostic `(tx_time, node)` ordering first**, and only then translates
 the winning cells into S (`INV-LENS-12`, ch. 4).
 
-Natural lens projection implements `RenameColumn`, `CopyColumn`, `AddColumn`,
-and `DropColumn.backwards_default` deterministically in both directions
-(`INV-LENS-13`). The shape's `ShapeId` carries the authored `SchemaVersionId`,
+Natural lens projection applies supported operations deterministically in both
+directions and rejects unsupported transformations (`INV-LENS-13`). The shape's
+`ShapeId` carries the authored `SchemaVersionId`,
 so the same AST against two versions is two shapes (`INV-LENS-15`, ch. 6).
 
 Merge strategies (ch. 4) consume candidate values **after** translation into the
@@ -160,16 +165,16 @@ are multi-partition, spanning all partitions.
 ### 10.6 The lens op surface
 
 The lens operation surface is deliberately small and resolved before it reaches
-the core. The supported operations are `LensOp::{RenameTable, RenameColumn,
-CopyColumn, AddColumn, DropColumn, TransformColumn, RejectSourceDelta}`.
+the core.
 
-Natural projection accepts `TransformColumn` only when its transform key is
-present in the built-in registry and declares bijective,
-canonical-equality-preserving semantics (`INV-LENS-17`). The initial registry is
-intentionally identity/no-op only (`jazz.identity` / `identity`), so
-`TransformColumn` is currently a schema-documentation escape hatch rather than a
-value-changing migration. Enum-by-variant-name and pinned-float transforms are
-future append-only registry entries.
+**Implementation status.** The current core supports `LensOp::{RenameTable,
+RenameColumn, CopyColumn, AddColumn, DropColumn, TransformColumn,
+RejectSourceDelta}`. Natural projection accepts `TransformColumn` only for a
+registered transform that declares bijective, canonical-equality-preserving
+semantics (`INV-LENS-17`). The current registry contains only the identity/no-op
+keys `jazz.identity` and `identity`; `registered_transform_column_identity_is_accepted_and_projected`
+and `transform_column_rejects_unregistered_transform_at_publish` cover that
+surface. Additional transform keys are status work, not an invariant.
 
 Large-value text/blob columns may be renamed, but `TransformColumn` over their
 content is rejected at lens publication (`INV-LENS-18`). **The core only ever
@@ -210,9 +215,9 @@ change future merge behavior.
   must have a valid bundle, and a lens that drops a column referenced by the
   active bundle is rejected at publish (same family as the
   missing-backwards-default check).
-- 🔶 **No auto-GC.** Per-version tables must never be auto-garbage-collected;
-  background durable migration may compact current winners but never delete
-  historical tables (`INV-LENS-20`). Not implemented.
+- 🔶 **Explicit schema-version GC.** `INV-LENS-20` forbids automatic deletion of
+  version partitions. If explicit GC is ever added, what completeness,
+  branch/history, lens, and audit evidence must authorize it?
 - 🔶 **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
   `TableLens` source/target during evaluation. Decide whether the op should be
   removed or the redundant payload should be validated.
@@ -236,6 +241,3 @@ change future merge behavior.
 - 🔶 **Lens hardening.** Preserve hidden newer fields under old-client writes,
   make lens-path selection ambiguity-aware, allow corrected or asymmetric
   migrations where safe, and define type-changing migrations.
-- 🔶 **Schema version GC.** The current contract forbids automatic deletion of
-  version partitions. If explicit GC is ever added, it needs completeness,
-  branch/history, lens, and audit constraints.

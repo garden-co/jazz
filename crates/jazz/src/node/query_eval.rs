@@ -3382,9 +3382,13 @@ fn normalize_reachable(
                     field: "reachable_team".to_owned(),
                 },
                 op: NormalizedComparisonOp::Eq,
-                right: NormalizedValueRef::SourceField {
-                    source: edge_source.clone(),
-                    field: reachable.edge_member_column.clone(),
+                right: if reachable.edge_member_column == "id" {
+                    NormalizedValueRef::RowId(RowIdRef::Source(edge_source.clone()))
+                } else {
+                    NormalizedValueRef::SourceField {
+                        source: edge_source.clone(),
+                        field: reachable.edge_member_column.clone(),
+                    }
                 },
             },
         },
@@ -3727,20 +3731,22 @@ fn normalize_reachable_seed(
             seed_current = seed_filter_node;
         }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
+        let seed_team_value = if seed.team_column == "id" {
+            NormalizedValueRef::RowId(RowIdRef::Source(seed_source.clone()))
+        } else {
+            NormalizedValueRef::SourceField {
+                source: seed_source.clone(),
+                field: seed.team_column.clone(),
+            }
+        };
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value.clone(),
             },
             RowProjection {
                 output: typed_output_field("reachable_team", ColumnType::Uuid),
-                value: NormalizedValueRef::SourceField {
-                    source: seed_source.clone(),
-                    field: seed.team_column.clone(),
-                },
+                value: seed_team_value,
             },
         ];
         if let Some((_, claim_field)) = &claim_route_field {
@@ -3787,9 +3793,13 @@ fn reachable_seed_frontier_columns(
             seed.table, seed.team_column, team_column_ty
         )));
     }
-    let value = NormalizedValueRef::SourceField {
-        source: source.clone(),
-        field: seed.team_column.clone(),
+    let value = if seed.team_column == "id" {
+        NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
+    } else {
+        NormalizedValueRef::SourceField {
+            source: source.clone(),
+            field: seed.team_column.clone(),
+        }
     };
     let mut columns = vec![
         ValueSourceColumn {
@@ -4095,6 +4105,60 @@ struct PolicyAtomChain<'a> {
     reachable: &'a [crate::query::ReachableVia],
 }
 
+/// The inheritance atoms expanded on the current policy-composition path.
+///
+/// A policy can refer back to its own table through an `InheritsVia`. The
+/// normalized graph is finite only when that expansion is bounded; keep this
+/// state per path so independent policy alternatives do not consume each
+/// other's depth budget.
+#[derive(Clone, Default)]
+struct InheritanceExpansionPath {
+    uses: BTreeMap<InheritanceExpansionKey, usize>,
+}
+
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct InheritanceExpansionKey {
+    child_table: String,
+    parent_column: String,
+    operation: crate::query::InheritsOperation,
+}
+
+impl InheritanceExpansionPath {
+    fn descend(&self, child_table: &str, inherits: &crate::query::InheritsVia) -> Option<Self> {
+        let key = InheritanceExpansionKey {
+            child_table: child_table.to_owned(),
+            parent_column: inherits.parent_column.clone(),
+            operation: inherits.operation,
+        };
+        let used = self.uses.get(&key).copied().unwrap_or(0);
+        let limit = inherits
+            .max_depth
+            .unwrap_or_else(|| crate::query::RecursionBound::default_max_depth().depth_steps());
+        if used >= limit {
+            return None;
+        }
+        let mut next = self.clone();
+        next.uses.insert(key, used + 1);
+        Some(next)
+    }
+}
+
+fn normalize_false_policy_branch(
+    nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
+    input: RowSetNodeId,
+    prefix: &str,
+) -> RowSetNodeId {
+    let node = RowSetNodeId(format!("{prefix}:max_depth"));
+    nodes.insert(
+        node.clone(),
+        RowSetExpr::Filter {
+            input,
+            predicate: NormalizedPredicateExpr::Or(Vec::new()),
+        },
+    );
+    node
+}
+
 fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
@@ -4165,6 +4229,7 @@ fn normalize_policy_atom_chain(
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
     record_join_contributions: bool,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut current = normalize_filter_join_chain(
         nodes,
@@ -4193,6 +4258,7 @@ fn normalize_policy_atom_chain(
             &format!("{prefix}:inherits:{index}"),
             binding_source_shape,
             param_types,
+            inheritance_path,
         )?;
     }
     for (index, reachable) in chain.reachable.iter().enumerate() {
@@ -4227,6 +4293,7 @@ fn normalize_inherited_parent_policy(
     prefix: &str,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let child_table = table_schema(schema, &child_source.table)?;
     let parent_table_name = child_table
@@ -4240,6 +4307,10 @@ fn normalize_inherited_parent_policy(
             ))
         })?;
     let parent_table = table_schema(schema, &parent_table_name)?;
+    let Some(parent_inheritance_path) = inheritance_path.descend(&child_source.table, inherits)
+    else {
+        return Ok(normalize_false_policy_branch(nodes, child_current, prefix));
+    };
     let parent_source = inherited_parent_source_id(&parent_table_name, prefix);
     auxiliary_sources.insert(parent_source.clone());
     let parent_source_node = RowSetNodeId(format!("{prefix}:source"));
@@ -4251,7 +4322,19 @@ fn normalize_inherited_parent_policy(
         },
     );
     let mut parent_current = parent_source_node;
-    if let Some(policy) = &parent_table.read_policy {
+    let parent_policy = match inherits.operation {
+        crate::query::InheritsOperation::Select => parent_table.read_policy.as_ref(),
+        crate::query::InheritsOperation::Insert => {
+            parent_table.write_policies.insert_check.as_ref()
+        }
+        crate::query::InheritsOperation::Update => {
+            parent_table.write_policies.update_using.as_ref()
+        }
+        crate::query::InheritsOperation::Delete => {
+            parent_table.write_policies.delete_using.as_ref()
+        }
+    };
+    if let Some(policy) = parent_policy {
         parent_current = if !policy.policy_branches.is_empty() {
             normalize_policy_branch_authorization(
                 nodes,
@@ -4265,6 +4348,7 @@ fn normalize_inherited_parent_policy(
                 policy,
                 binding_source_shape,
                 param_types,
+                &parent_inheritance_path,
             )?
         } else {
             normalize_policy_atom_chain(
@@ -4285,6 +4369,7 @@ fn normalize_inherited_parent_policy(
                 binding_source_shape,
                 param_types,
                 false,
+                &parent_inheritance_path,
             )?
         };
     }
@@ -4321,6 +4406,7 @@ fn normalize_policy_branch_authorization(
     policy: &JazzQuery,
     binding_source_shape: &str,
     param_types: &BTreeMap<String, ColumnType>,
+    inheritance_path: &InheritanceExpansionPath,
 ) -> Result<RowSetNodeId, Error> {
     let mut union_inputs = Vec::new();
     if !policy_branch_base_is_converter_false(policy) {
@@ -4350,6 +4436,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            inheritance_path,
         )?;
         union_inputs.push(UnionInput {
             node: normalize_row_id_projection(
@@ -4389,6 +4476,7 @@ fn normalize_policy_branch_authorization(
             binding_source_shape,
             param_types,
             false,
+            inheritance_path,
         )?;
         union_inputs.push(UnionInput {
             node: normalize_row_id_projection(
@@ -4568,19 +4656,24 @@ where
         if ast.version != ShapeAst::VERSION {
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
         }
-        let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
-            self.sync_metrics.parked_catalogue_shapes += 1;
-            self.parking
-                .parked_shape_registrations
-                .insert(shape_id, ast);
-            return Ok(());
+        let schema = if ast.schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
+                self.sync_metrics.parked_catalogue_shapes += 1;
+                self.parking
+                    .parked_shape_registrations
+                    .insert(shape_id, ast);
+                return Ok(());
+            };
+            &schema.schema
         };
         let shape = match &ast.body {
             ShapeBody::Query(query) => {
-                query.validate_with_schema_version(&schema.schema, ast.schema_version)?
+                query.validate_with_schema_version(schema, ast.schema_version)?
             }
             ShapeBody::Relation(relation) => relation_query_to_query(relation)?
-                .validate_with_schema_version(&schema.schema, ast.schema_version)?,
+                .validate_with_schema_version(schema, ast.schema_version)?,
         };
         if shape.shape_id() != shape_id {
             return Err(Error::InvalidStoredValue("shape id does not match AST"));
@@ -4588,6 +4681,35 @@ where
         self.query.registered_shapes.insert(shape_id, shape);
         self.drain_parked_binding_deltas_for_shape(shape_id)?;
         Ok(())
+    }
+
+    pub(crate) fn validate_shape_ast_for_registration(
+        &self,
+        shape_id: ShapeId,
+        ast: &ShapeAst,
+    ) -> Result<Option<ValidatedQuery>, Error> {
+        if ast.version != ShapeAst::VERSION {
+            return Err(Error::InvalidStoredValue("unsupported query AST version"));
+        }
+        let schema = if ast.schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
+                return Ok(None);
+            };
+            &schema.schema
+        };
+        let shape = match &ast.body {
+            ShapeBody::Query(query) => {
+                query.validate_with_schema_version(schema, ast.schema_version)?
+            }
+            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
+                .validate_with_schema_version(schema, ast.schema_version)?,
+        };
+        if shape.shape_id() != shape_id {
+            return Err(Error::InvalidStoredValue("shape id does not match AST"));
+        }
+        Ok(Some(shape))
     }
 
     pub(super) fn drain_parked_shape_registrations(&mut self) -> Result<(), Error> {
@@ -5865,6 +5987,7 @@ where
         let mut current = source_node;
         let mut join_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
+        let inheritance_path = InheritanceExpansionPath::default();
 
         let binding_source_shape = PENDING_BINDING_SOURCE_SHAPE.to_owned();
         let unsupported_policy_branch = unsupported_policy_branch_reason(query);
@@ -5897,6 +6020,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
                     node: normalize_row_id_projection(
@@ -5936,6 +6060,7 @@ where
                     &binding_source_shape,
                     shape.params(),
                     false,
+                    &inheritance_path,
                 )?;
                 union_inputs.push(UnionInput {
                     node: normalize_row_id_projection(
@@ -5992,6 +6117,7 @@ where
                 &binding_source_shape,
                 shape.params(),
                 true,
+                &inheritance_path,
             )?;
         }
 
@@ -6152,7 +6278,56 @@ where
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
     }
 
-    pub(super) fn write_policy_query_allows_insert_candidate(
+    /// Authorize an inline old/candidate row through the query program.
+    ///
+    /// Insert candidates reinterpret plain `inherits(parent)` as parent
+    /// update-using authorization. Existing/update-check rows retain ordinary
+    /// read inheritance unless the policy names an explicit write operation.
+    pub(super) fn write_policy_query_allows_candidate(
+        &mut self,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+        insert_candidate: bool,
+        branch_id: Option<BranchId>,
+    ) -> Result<bool, Error> {
+        let policy_schema_version = if self
+            .catalogue
+            .schema
+            .tables
+            .iter()
+            .any(|known| known == table)
+        {
+            self.catalogue.current_schema_version_id
+        } else {
+            self.catalogue
+                .catalogue_schemas
+                .iter()
+                .find_map(|(schema_version, payload)| {
+                    payload
+                        .schema
+                        .tables
+                        .iter()
+                        .any(|known| known == table)
+                        .then_some(*schema_version)
+                })
+                .unwrap_or(self.catalogue.current_schema_version_id)
+        };
+        self.write_policy_query_allows_candidate_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            branch_id,
+        )
+    }
+
+    pub(super) fn write_policy_query_allows_candidate_for_schema(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
@@ -6160,16 +6335,24 @@ where
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
         identity: AuthorId,
+        insert_candidate: bool,
+        branch_id: Option<BranchId>,
     ) -> Result<bool, Error> {
-        if !policy.inherits.is_empty()
-            || policy
-                .policy_branches
-                .iter()
-                .any(|branch| !branch.inherits.is_empty())
-        {
-            return self.policy_allows_insert_candidate(table, policy, row_uuid, identity, cells);
+        let mut policy = policy.clone();
+        if insert_candidate {
+            for inherits in &mut policy.inherits {
+                if inherits.operation == crate::query::InheritsOperation::Select {
+                    inherits.operation = crate::query::InheritsOperation::Update;
+                }
+            }
+            for branch in &mut policy.policy_branches {
+                for inherits in &mut branch.inherits {
+                    if inherits.operation == crate::query::InheritsOperation::Select {
+                        inherits.operation = crate::query::InheritsOperation::Update;
+                    }
+                }
+            }
         }
-
         let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
         } else {
@@ -6221,13 +6404,21 @@ where
             other => other,
         };
         let request = QueryProgramRequest {
-            reads: current_query_read_set(
-                &input.shape,
-                policy_shape.schema_version(),
-                policy_shape.schema_version(),
-                DurabilityTier::Local,
-                None,
-            ),
+            reads: match branch_id {
+                Some(branch_id) => branch_query_read_set(
+                    &input.shape,
+                    policy_shape.schema_version(),
+                    DurabilityTier::Local,
+                    branch_id,
+                ),
+                None => current_query_read_set(
+                    &input.shape,
+                    policy_shape.schema_version(),
+                    policy_shape.schema_version(),
+                    DurabilityTier::Local,
+                    None,
+                ),
+            },
             policy,
             input,
             output: current_query_output_request(
@@ -6237,13 +6428,38 @@ where
         };
         let candidate = current_row_from_cells(table, row_uuid, cells)?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
-        let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
+        let access_paths = if branch_id.is_some() {
+            BTreeMap::new()
+        } else {
+            self.current_query_primary_key_access_paths(&policy_shape, &binding)?
+        };
         let program = self.compile_query_program_request_with_inline_sources_and_access_paths(
             request,
             inline_sources,
             access_paths,
         )?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+    }
+
+    pub(super) fn branch_write_policy_query_allows_candidate(
+        &mut self,
+        branch_id: BranchId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+        insert_candidate: bool,
+    ) -> Result<bool, Error> {
+        self.write_policy_query_allows_candidate(
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            Some(branch_id),
+        )
     }
 
     fn write_policy_query_program_allows(
@@ -8280,6 +8496,25 @@ where
         Ok(plan)
     }
 
+    pub(crate) fn ensure_peer_maintained_subscription_view_supported(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<(), Error> {
+        self.compile_current_query_program_for_read_view(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+        )
+        .map(|_| ())
+    }
+
     pub(crate) fn mark_peer_maintained_query_shape_cache(
         &mut self,
         shape: &ValidatedQuery,
@@ -9064,6 +9299,7 @@ fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
             inherits: vec![crate::query::InheritsVia {
                 parent_column,
                 operation: crate::query::InheritsOperation::Select,
+                max_depth: None,
             }],
         });
     }
@@ -10259,6 +10495,8 @@ fn compare_order_values(left: &Value, right: &Value) -> Ordering {
         (Value::U16(left), Value::U16(right)) => left.cmp(right),
         (Value::U32(left), Value::U32(right)) => left.cmp(right),
         (Value::U64(left), Value::U64(right)) => left.cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.cmp(right),
         (Value::F64(left), Value::F64(right)) => left.total_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
         (Value::String(left), Value::String(right)) => left.cmp(right),
@@ -10334,6 +10572,8 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
+        (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Uuid(left), Value::Uuid(right)) => left.partial_cmp(right),
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),
