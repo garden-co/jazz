@@ -67,13 +67,12 @@ fn main() {
 
     let mut rungs = Vec::with_capacity(scales.len());
     for scale in scales {
-        let mut measurements = (0..samples)
+        let measurements = (0..samples)
             .map(|sample| measure_single_child_insert(scale, sample))
             .collect::<Vec<_>>();
-        measurements.sort_by_key(|measurement| measurement.allocs);
-        let median = measurements[measurements.len() / 2];
-        emit_rung(scale, samples, median, &measurements);
-        rungs.push((scale, median));
+        let summary = summarize_rung(&measurements);
+        emit_rung(scale, samples, summary, &measurements);
+        rungs.push((scale, summary));
     }
 
     emit_slope(samples, max_ratio, &rungs);
@@ -84,6 +83,11 @@ struct Measurement {
     allocs: u64,
     bytes: u64,
     wall_us: u128,
+    delivery: DeliveryShape,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeliveryShape {
     added: usize,
     updated: usize,
     removed: usize,
@@ -92,20 +96,59 @@ struct Measurement {
     removed_edges: usize,
 }
 
-fn emit_rung(scale: usize, samples: usize, median: Measurement, all: &[Measurement]) {
-    let mut fields = phase_fields("rung", median.wall_us);
+#[derive(Clone, Copy, Debug)]
+struct RungSummary {
+    median_allocs: u64,
+    median_alloc_bytes: u64,
+    median_wall_us: u128,
+    delivery: DeliveryShape,
+}
+
+fn summarize_rung(samples: &[Measurement]) -> RungSummary {
+    let delivery = samples.first().expect("sample").delivery;
+    assert!(
+        samples
+            .iter()
+            .all(|measurement| measurement.delivery == delivery),
+        "one-row insert delivered different delta shapes across samples"
+    );
+
+    RungSummary {
+        median_allocs: median(samples.iter().map(|measurement| measurement.allocs)),
+        median_alloc_bytes: median(samples.iter().map(|measurement| measurement.bytes)),
+        median_wall_us: median(samples.iter().map(|measurement| measurement.wall_us)),
+        delivery,
+    }
+}
+
+fn median<T: Ord>(values: impl Iterator<Item = T>) -> T {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable();
+    let median_index = values.len() / 2;
+    values
+        .into_iter()
+        .nth(median_index)
+        .expect("at least one sample")
+}
+
+fn emit_rung(scale: usize, samples: usize, summary: RungSummary, all: &[Measurement]) {
+    let mut fields = phase_fields("rung", summary.median_wall_us);
     fields.insert("accumulated_children".to_owned(), json!(scale));
     fields.insert("change_rows".to_owned(), json!(1));
     fields.insert("samples".to_owned(), json!(samples));
-    fields.insert("median_allocs".to_owned(), json!(median.allocs));
-    fields.insert("median_alloc_bytes".to_owned(), json!(median.bytes));
+    fields.insert("median_allocs".to_owned(), json!(summary.median_allocs));
+    fields.insert(
+        "median_alloc_bytes".to_owned(),
+        json!(summary.median_alloc_bytes),
+    );
+    fields.insert("median_wall_us".to_owned(), json!(summary.median_wall_us));
     fields.insert(
         "allocs_min".to_owned(),
-        json!(all.first().expect("sample").allocs),
+        json!(all.iter().map(|m| m.allocs).min()),
     );
     fields.insert(
         "allocs_max".to_owned(),
-        json!(all.last().expect("sample").allocs),
+        json!(all.iter().map(|m| m.allocs).max()),
     );
     fields.insert(
         "alloc_bytes_min".to_owned(),
@@ -115,32 +158,38 @@ fn emit_rung(scale: usize, samples: usize, median: Measurement, all: &[Measureme
         "alloc_bytes_max".to_owned(),
         json!(all.iter().map(|m| m.bytes).max()),
     );
-    fields.insert("delivered_added".to_owned(), json!(median.added));
-    fields.insert("delivered_updated".to_owned(), json!(median.updated));
-    fields.insert("delivered_removed".to_owned(), json!(median.removed));
+    fields.insert("delivered_added".to_owned(), json!(summary.delivery.added));
+    fields.insert(
+        "delivered_updated".to_owned(),
+        json!(summary.delivery.updated),
+    );
+    fields.insert(
+        "delivered_removed".to_owned(),
+        json!(summary.delivery.removed),
+    );
     fields.insert(
         "delivered_added_related".to_owned(),
-        json!(median.added_related),
+        json!(summary.delivery.added_related),
     );
     fields.insert(
         "delivered_added_edges".to_owned(),
-        json!(median.added_edges),
+        json!(summary.delivery.added_edges),
     );
     fields.insert(
         "delivered_removed_edges".to_owned(),
-        json!(median.removed_edges),
+        json!(summary.delivery.removed_edges),
     );
     emit_json_line("relation_include_delivery", fields);
 }
 
-fn emit_slope(samples: usize, max_ratio: f64, rungs: &[(usize, Measurement)]) {
+fn emit_slope(samples: usize, max_ratio: f64, rungs: &[(usize, RungSummary)]) {
     let allocs = rungs
         .iter()
-        .map(|(_, measurement)| measurement.allocs)
+        .map(|(_, summary)| summary.median_allocs)
         .collect::<Vec<_>>();
     let bytes = rungs
         .iter()
-        .map(|(_, measurement)| measurement.bytes)
+        .map(|(_, summary)| summary.median_alloc_bytes)
         .collect::<Vec<_>>();
     let alloc_ratio = ratio(&allocs);
     let byte_ratio = ratio(&bytes);
@@ -154,11 +203,13 @@ fn emit_slope(samples: usize, max_ratio: f64, rungs: &[(usize, Measurement)]) {
     fields.insert("alloc_bytes_ratio_max_to_min".to_owned(), json!(byte_ratio));
     fields.insert(
         "allocs_per_accumulated_child_slope".to_owned(),
-        json!(least_squares_slope(rungs, |measurement| measurement.allocs as f64)),
+        json!(least_squares_slope(rungs, |summary| summary.median_allocs as f64)),
     );
     fields.insert(
         "alloc_bytes_per_accumulated_child_slope".to_owned(),
-        json!(least_squares_slope(rungs, |measurement| measurement.bytes as f64)),
+        json!(least_squares_slope(rungs, |summary| {
+            summary.median_alloc_bytes as f64
+        })),
     );
     fields.insert("max_ratio_rule".to_owned(), json!(max_ratio));
     fields.insert(
@@ -168,7 +219,7 @@ fn emit_slope(samples: usize, max_ratio: f64, rungs: &[(usize, Measurement)]) {
     fields.insert("flat_by_ratio_rule".to_owned(), json!(flat));
     fields.insert(
         "flat_rule".to_owned(),
-        json!("max(median work) / min(median work) <= max_ratio_rule for both allocations and allocation bytes"),
+        json!("max(per-metric median work) / min(per-metric median work) <= max_ratio_rule for both allocations and allocation bytes"),
     );
     emit_json_line("relation_include_delivery", fields);
 
@@ -184,7 +235,7 @@ fn ratio(values: &[u64]) -> f64 {
     max as f64 / min.max(1) as f64
 }
 
-fn least_squares_slope(rungs: &[(usize, Measurement)], value: impl Fn(Measurement) -> f64) -> f64 {
+fn least_squares_slope(rungs: &[(usize, RungSummary)], value: impl Fn(RungSummary) -> f64) -> f64 {
     let count = rungs.len() as f64;
     let mean_x = rungs.iter().map(|(scale, _)| *scale as f64).sum::<f64>() / count;
     let mean_y = rungs
@@ -297,7 +348,7 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
         allocs,
         bytes,
         wall_us,
-        ..counts
+        delivery: counts,
     }
 }
 
@@ -349,7 +400,7 @@ fn expect_initial_snapshot(event: SubscriptionEvent, parent: RowUuid) {
     }
 }
 
-fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Measurement {
+fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> DeliveryShape {
     match event {
         SubscriptionEvent::Delta {
             reset,
@@ -372,10 +423,7 @@ fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Measu
                     || !added_edges.is_empty(),
                 "one child insert did not deliver a relation delta"
             );
-            Measurement {
-                allocs: 0,
-                bytes: 0,
-                wall_us: 0,
+            DeliveryShape {
                 added: added.len(),
                 updated: updated.len(),
                 removed: removed.len(),
