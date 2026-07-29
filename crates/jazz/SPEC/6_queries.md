@@ -130,6 +130,20 @@ array-valued literal only when they preserve that array shape. The broader
 literal-vs-column coercion policy remains intentionally unspecified; new
 coercions need an explicit spec decision before implementation.
 
+🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
+a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why
+that shape gets written at all. `in` gives whole-value membership and `contains`
+gives single-element membership; there is currently nothing for "this array
+contains all of these" or "this array is contained by these". A user wanting
+that has no operator to reach for, and `in` with a list of elements is the
+natural wrong guess.
+
+If we add the capability it MUST be an explicit predicate with its own
+semantics — never an implicit reinterpretation of `in` that changes meaning
+depending on whether the column happens to be an array. The value of rejecting
+today is exactly that the gap stays visible, rather than being filled by a
+coercion whose meaning nobody chose (Anselm, 2026-07-29).
+
 ### 6.2 Shapes: validated, content-addressed, schema-stamped
 
 A shape is the validated, schema-stamped identity of a query. Validation
