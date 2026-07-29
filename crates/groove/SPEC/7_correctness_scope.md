@@ -12,7 +12,7 @@ Invariant digest:
 - `INV-OK-1`: For every subscription, initial snapshot plus the consolidated sum of all received deltas MUST equal a fresh one-shot recomputation of that query against current storage.
 - `INV-OK-3`: One-shot snapshot reads MUST NOT perturb retained subscription streams or consume future tick deltas.
 - `INV-OK-13`: Persisted schema index reads MUST match a full-scan oracle over committed base-table state.
-- `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
+- `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the `Database` instance MUST be poisoned and reject subsequent operations.
 - `INV-QUERY-17`: SQL lowering MUST reject unsupported SELECT/set/join shapes explicitly, including SELECT DISTINCT, grouped/ordered/limited selects, non-inner joins, and non-UNION ALL...
 
 ## Details
@@ -80,12 +80,12 @@ regression signals alongside the oracle. The correctness contract itself is
 _multiset_ equality — the consolidated sum of §7.1, independent of delivery
 order.
 
-With identical inputs, the reference implementation replays to the same deltas
-in the same order; this is a reference-implementation property, not part of the
-contract. As a result, a divergence from the naive recompute is always a real
-bug, never noise. Cross-operator delivery _order_ is reproducible but not itself
-a normative guarantee — depend on the consolidated result, not on the order
-deltas arrive in.
+**Reference-implementation note.** With identical inputs, the reference
+implementation replays to the same deltas in the same order; this is not part
+of the contract. A divergence from the naive recompute is therefore always a
+real bug, never noise. Cross-operator delivery _order_ is reproducible but not
+itself a normative guarantee — depend on the consolidated result, not on the
+order deltas arrive in.
 
 ## Open Questions
 

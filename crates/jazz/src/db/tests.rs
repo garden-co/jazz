@@ -1193,7 +1193,7 @@ fn relation_hop_schema() -> JazzSchema {
             "teams",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("org_id", ColumnType::Uuid),
+                ColumnSchema::new("org_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("org_id", "orgs")
@@ -1203,7 +1203,7 @@ fn relation_hop_schema() -> JazzSchema {
             "users",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("team_id", ColumnType::Uuid),
+                ColumnSchema::new("team_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("team_id", "teams")
@@ -2107,7 +2107,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2116,7 +2119,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2202,6 +2208,10 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
 fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = users_to_orgs_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
     db.insert_with_id(
         "orgs",
         row(0x01),
@@ -2213,7 +2223,10 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2222,14 +2235,14 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
 
-    let query = users_to_orgs_relation_query();
-
-    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     let opened = opened_rows(stream.try_next_event().expect("opened event"));
     assert_eq!(row_ids(&opened), vec![row(0x01)]);
 }
@@ -2239,9 +2252,22 @@ fn users_to_orgs_relation_query() -> RelationQuery {
         rel: RelationExpr::Project {
             input: Box::new(RelationExpr::Join {
                 left: Box::new(RelationExpr::Join {
-                    left: Box::new(RelationExpr::TableScan {
-                        table: "users".to_owned(),
-                        alias: None,
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "users".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("users".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::Literal(serde_json::json!({
+                                "type": "Uuid",
+                                "value": row(0x21).0.to_string(),
+                            })),
+                        },
                     }),
                     right: Box::new(RelationExpr::TableScan {
                         table: "teams".to_owned(),
@@ -2291,6 +2317,142 @@ fn users_to_orgs_relation_query() -> RelationQuery {
                     }),
                 },
             ],
+        },
+    }
+}
+
+#[test]
+fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscriptions() {
+    // This is an integration-level facade test: the public relation-query read
+    // and subscription APIs must both use the same maintained reachability
+    // program for the canonical gather IR emitted by the TypeScript builder.
+    let schema = JazzSchema::new([TableSchema::new(
+        "teams",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new(
+                "parent_id",
+                ColumnType::Nullable(Box::new(ColumnType::Uuid)),
+            ),
+        ],
+    )
+    .with_reference("parent_id", "teams")
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = teams_gather_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
+    let root = row(0x01);
+    let middle = row(0x02);
+    let leaf = row(0x03);
+    db.insert_with_id(
+        "teams",
+        root,
+        BTreeMap::from([("name".to_owned(), Value::String("root".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        middle,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("middle".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        leaf,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("leaf".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(middle.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let changed = opened_rows(stream.try_next_event().expect("gathered rows event"));
+    assert_eq!(
+        row_ids(&changed).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+}
+
+fn teams_gather_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("teams".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::Value::String("leaf".to_owned())),
+                },
+            }),
+            step: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "teams".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::And(vec![RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("teams".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                        }]),
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "teams".to_owned(),
+                        alias: Some("__recursive_hop_0".to_owned()),
+                    }),
+                    on: vec![crate::query::RelationJoinCondition {
+                        left: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "parent_id".to_owned(),
+                        },
+                        right: RelationColumnRef {
+                            scope: Some("__recursive_hop_0".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__recursive_hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                }],
+            }),
+            frontier_key: crate::query::RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: crate::query::RecursionBound::MaxDepth(10),
+            dedupe_key: vec![crate::query::RelationKeyRef::RowId(
+                RelationRowIdRef::Current,
+            )],
         },
     }
 }

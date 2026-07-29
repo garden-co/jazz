@@ -253,6 +253,10 @@ struct RelationFacadeJoin {
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
 pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
+    if let Some(query) = relation_gather_to_query(&query.rel)? {
+        return Ok(query);
+    }
+
     let mut plan = RelationFacadePlan::default();
     collect_relation_facade(&query.rel, &mut plan)?;
     let output_scope = plan.output_scope.clone().ok_or_else(|| {
@@ -294,6 +298,326 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         query = query.offset(plan.offset);
     }
     Ok(query)
+}
+
+/// Normalize the canonical public `gather` shape into the ordinary recursive
+/// reachability query.  The TypeScript query adapter emits this shape for a
+/// same-table forward hop: a seed relation supplies the initial rows and the
+/// step table relates each frontier row to its parent through a scalar FK.
+///
+/// Keeping this conversion here is important: `ReachableVia` already has
+/// maintained and one-shot lowering, so relation gathers do not need a second
+/// evaluator or subscription implementation.
+fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryError> {
+    let (expr, order_by, offset, limit) = peel_relation_output_steps(expr)?;
+    let RelationExpr::Gather {
+        seed,
+        step,
+        frontier_key,
+        bound,
+        dedupe_key,
+    } = expr
+    else {
+        return Ok(None);
+    };
+
+    if !matches!(
+        frontier_key,
+        RelationKeyRef::RowId(RelationRowIdRef::Current)
+    ) || !dedupe_key
+        .as_slice()
+        .eq(&[RelationKeyRef::RowId(RelationRowIdRef::Current)])
+    {
+        return Err(relation_unification_error(
+            "gather requires current-row frontier and dedupe keys",
+        ));
+    }
+
+    let (seed_table, seed_filters) = relation_gather_seed(seed)?;
+    let (edge_table, edge_member_column, edge_parent_column, edge_filters) =
+        relation_gather_step(step, &seed_table)?;
+
+    let mut query = Query::from(seed_table.clone());
+    query.reachable.push(ReachableVia {
+        // Treat each candidate output row as its own access row.  The
+        // reachability closure then acts as a membership filter over that
+        // same table, yielding the gather's seed rows and every reached row.
+        access_table: seed_table.clone(),
+        access_row_column: "id".to_owned(),
+        access_team_column: "id".to_owned(),
+        access_team_target: JoinTarget::RowId,
+        from: Operand::Literal(Value::Uuid(uuid::Uuid::nil())),
+        access_filters: Vec::new(),
+        edge_table,
+        edge_member_column,
+        edge_parent_column,
+        edge_filters,
+        bound: bound.clone(),
+        seed: Some(ReachableSeed {
+            table: seed_table.clone(),
+            user_column: None,
+            user_claim: None,
+            team_column: "id".to_owned(),
+            filters: seed_filters,
+        }),
+    });
+
+    for order in order_by {
+        if order
+            .column
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope != seed_table)
+        {
+            return Err(relation_unification_error(
+                "gather order_by must be scoped to the gathered table",
+            ));
+        }
+        query = query.order_by(order.column.column, order.direction);
+    }
+    if let Some(limit) = limit {
+        query = query.limit(limit);
+    }
+    if offset != 0 {
+        query = query.offset(offset);
+    }
+    Ok(Some(query))
+}
+
+fn peel_relation_output_steps(
+    expr: &RelationExpr,
+) -> Result<(&RelationExpr, Vec<RelationOrderBy>, usize, Option<usize>), QueryError> {
+    let mut order_by = Vec::new();
+    let mut offset = 0;
+    let mut limit = None;
+    let mut current = expr;
+    loop {
+        match current {
+            RelationExpr::OrderBy { input, terms } => {
+                order_by.extend(terms.iter().cloned());
+                current = input;
+            }
+            RelationExpr::Offset {
+                input,
+                offset: value,
+            } => {
+                offset = *value;
+                current = input;
+            }
+            RelationExpr::Limit {
+                input,
+                limit: value,
+            } => {
+                limit = Some(*value);
+                current = input;
+            }
+            _ => break,
+        }
+    }
+
+    Ok((current, order_by, offset, limit))
+}
+
+fn relation_gather_seed(seed: &RelationExpr) -> Result<(String, Vec<Predicate>), QueryError> {
+    let mut filters = Vec::new();
+    let mut current = seed;
+    while let RelationExpr::Filter { input, predicate } = current {
+        let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
+            current = input;
+            continue;
+        };
+        let RelationExpr::TableScan { table, alias } = input.as_ref() else {
+            return Err(relation_unification_error(
+                "gather seed filters must be directly over one table scan",
+            ));
+        };
+        let expected_scope = alias.as_deref().unwrap_or(table);
+        if scope != expected_scope {
+            return Err(relation_unification_error(
+                "gather seed filters must be scoped to the seed table",
+            ));
+        }
+        filters.push(predicate);
+        current = input;
+    }
+    let RelationExpr::TableScan { table, alias } = current else {
+        return Err(relation_unification_error(
+            "gather seed must be a table scan with optional filters",
+        ));
+    };
+    if alias.is_some() {
+        return Err(relation_unification_error(
+            "gather seed aliases are not unified yet",
+        ));
+    }
+    Ok((table.clone(), filters))
+}
+
+fn relation_gather_step(
+    step: &RelationExpr,
+    seed_table: &str,
+) -> Result<(String, String, String, Vec<Predicate>), QueryError> {
+    let RelationExpr::Project { input, columns } = step else {
+        return Err(relation_unification_error(
+            "gather step must project its forward-hop target",
+        ));
+    };
+    let RelationExpr::Join {
+        left,
+        right,
+        on,
+        join_kind: RelationJoinKind::Inner,
+    } = input.as_ref()
+    else {
+        return Err(relation_unification_error(
+            "gather step must be an inner forward-hop join",
+        ));
+    };
+    let RelationExpr::TableScan {
+        table: edge_table,
+        alias: edge_alias,
+    } = relation_gather_step_scan(left)?
+    else {
+        unreachable!("relation_gather_step_scan only returns table scans")
+    };
+    let edge_scope = edge_alias.as_deref().unwrap_or(edge_table);
+    let RelationExpr::TableScan {
+        table: target_table,
+        alias: Some(target_alias),
+    } = right.as_ref()
+    else {
+        return Err(relation_unification_error(
+            "gather step target must use a scoped table scan",
+        ));
+    };
+    if target_table != seed_table {
+        return Err(relation_unification_error(
+            "gather step must return rows from the seed table",
+        ));
+    }
+    if on.len() != 1 {
+        return Err(relation_unification_error(
+            "gather step requires exactly one forward-hop join condition",
+        ));
+    }
+    let condition = &on[0];
+    if condition.left.scope.as_deref() != Some(edge_scope)
+        || condition.right.scope.as_deref() != Some(target_alias)
+        || condition.right.column != "id"
+    {
+        return Err(relation_unification_error(
+            "gather step join must connect its table FK to the target row id",
+        ));
+    }
+    if columns.iter().any(|column| match &column.expr {
+        RelationProjectExpr::Column(column) => column.scope.as_deref() != Some(target_alias),
+        RelationProjectExpr::RowId(RelationRowIdRef::Current) => true,
+        RelationProjectExpr::RowId(_) => true,
+    }) {
+        return Err(relation_unification_error(
+            "gather step must project only its forward-hop target",
+        ));
+    }
+
+    let filters = relation_gather_step_filters(left)?;
+    let frontier_filter = filters.iter().find_map(|predicate| match predicate {
+        RelationPredicate::Cmp {
+            left,
+            op: RelationCmpOp::Eq,
+            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+        } if left.scope.as_deref() == Some(edge_scope) => Some(left.column.clone()),
+        _ => None,
+    });
+    let Some(edge_member_column) = frontier_filter else {
+        return Err(relation_unification_error(
+            "gather step must compare one edge column to the frontier row id",
+        ));
+    };
+    let edge_filters = filters
+        .into_iter()
+        .filter(|predicate| {
+            !matches!(
+                predicate,
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef { scope: Some(scope), .. },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                } if scope == edge_scope
+            )
+        })
+        .filter_map(|predicate| relation_predicate_to_query_predicate(&predicate).transpose())
+        .map(|result| {
+            result.and_then(|(scope, predicate)| {
+                if scope != edge_scope {
+                    return Err(relation_unification_error(
+                        "gather step filters must be scoped to the edge table",
+                    ));
+                }
+                Ok(predicate)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        edge_table.clone(),
+        edge_member_column,
+        condition.left.column.clone(),
+        edge_filters,
+    ))
+}
+
+fn relation_gather_step_scan(input: &RelationExpr) -> Result<&RelationExpr, QueryError> {
+    let mut current = input;
+    while let RelationExpr::Filter { input, .. } = current {
+        current = input;
+    }
+    if matches!(current, RelationExpr::TableScan { .. }) {
+        Ok(current)
+    } else {
+        Err(relation_unification_error(
+            "gather step filters must be directly over one table scan",
+        ))
+    }
+}
+
+fn relation_gather_step_filters(
+    input: &RelationExpr,
+) -> Result<Vec<RelationPredicate>, QueryError> {
+    let mut filters = Vec::new();
+    let mut current = input;
+    while let RelationExpr::Filter { input, predicate } = current {
+        relation_gather_step_predicates(predicate, &mut filters)?;
+        current = input;
+    }
+    Ok(filters)
+}
+
+fn relation_gather_step_predicates(
+    predicate: &RelationPredicate,
+    filters: &mut Vec<RelationPredicate>,
+) -> Result<(), QueryError> {
+    match predicate {
+        RelationPredicate::And(predicates) => {
+            for predicate in predicates {
+                relation_gather_step_predicates(predicate, filters)?;
+            }
+            Ok(())
+        }
+        RelationPredicate::Cmp { .. }
+        | RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::In { .. }
+        | RelationPredicate::Contains { .. }
+        | RelationPredicate::Or(_)
+        | RelationPredicate::Not(_) => {
+            filters.push(predicate.clone());
+            Ok(())
+        }
+        RelationPredicate::True => Ok(()),
+        RelationPredicate::False => {
+            filters.push(predicate.clone());
+            Ok(())
+        }
+    }
 }
 
 fn relation_unification_error(message: impl Into<String>) -> QueryError {
@@ -1108,6 +1432,23 @@ impl Query {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
             operation: InheritsOperation::Select,
+            max_depth: None,
+        });
+        self
+    }
+
+    /// Require the row referenced by `parent_column` to be readable under the
+    /// parent table's composed read policy, with a bound for recursion through
+    /// the same inheritance atom.
+    pub fn inherits_with_depth(
+        mut self,
+        parent_column: impl Into<String>,
+        max_depth: usize,
+    ) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+            operation: InheritsOperation::Select,
+            max_depth: Some(max_depth),
         });
         self
     }
@@ -1122,6 +1463,23 @@ impl Query {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
             operation,
+            max_depth: None,
+        });
+        self
+    }
+
+    /// Require the row referenced by `parent_column` to satisfy the parent
+    /// policy for `operation`, with a bound for recursive inheritance.
+    pub fn inherits_operation_with_depth(
+        mut self,
+        parent_column: impl Into<String>,
+        operation: InheritsOperation,
+        max_depth: usize,
+    ) -> Self {
+        self.inherits.push(InheritsVia {
+            parent_column: parent_column.into(),
+            operation,
+            max_depth: Some(max_depth),
         });
         self
     }
@@ -1325,24 +1683,6 @@ impl PolicyBranch {
             .into_iter()
             .next()
             .expect("length checked above")
-    }
-
-    pub(crate) fn as_query(&self, table: &str) -> Query {
-        Query {
-            table: table.to_owned(),
-            filters: self.filters.clone(),
-            joins: self.joins.clone(),
-            policy_branches: Vec::new(),
-            reachable: self.reachable.clone(),
-            inherits: self.inherits.clone(),
-            includes: Vec::new(),
-            array_subqueries: Vec::new(),
-            select: None,
-            order_by: Vec::new(),
-            aggregate: None,
-            limit: None,
-            offset: 0,
-        }
     }
 }
 
@@ -1762,6 +2102,9 @@ pub struct InheritsVia {
     /// Parent operation to require for the referenced row.
     #[serde(default)]
     pub operation: InheritsOperation,
+    /// Optional maximum number of recursive uses of this inheritance atom.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 /// Parent operation required by an inheritance atom.
@@ -1805,14 +2148,6 @@ impl RecursionBound {
     /// Legacy/default recursion bound used by old v0 query helpers.
     pub fn default_max_depth() -> Self {
         Self::MaxDepth(8)
-    }
-
-    /// Conservative loop cap for old evaluator paths that are not true fixpoint.
-    pub(crate) fn iteration_cap(self) -> usize {
-        match self {
-            Self::Fixpoint => 128,
-            Self::MaxDepth(max_depth) => max_depth.max(1),
-        }
     }
 }
 
@@ -2147,6 +2482,18 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// An `in` candidate does not match its column's whole-value type.
+    #[error(
+        "in candidate for column {column} has type {candidate_type:?}, but the column has type {column_type:?}"
+    )]
+    InCandidateTypeMismatch {
+        /// Column on the left side of the `in` predicate.
+        column: String,
+        /// Declared type of that column.
+        column_type: ColumnType,
+        /// Type of the mismatched candidate.
+        candidate_type: ColumnType,
+    },
     /// Claim and column operand types do not match.
     #[error(
         "claim {claim_path} has type {claim_type:?}, but column {column} has type {column_type:?}"
@@ -2573,7 +2920,7 @@ fn validate_array_subquery(
     let child = table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
-    if !in_operand_types_compatible(parent_type, child_type) {
+    if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
     for predicate in &subquery.filters {
@@ -2653,6 +3000,9 @@ fn validate_reachable(
     let edge = table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
+        if *column == "id" && edge.name == *team_table {
+            continue;
+        }
         match edge.references.get(column) {
             Some(target) if target == team_table => {}
             _ => {
@@ -2738,14 +3088,12 @@ fn validate_predicate(
                         if !in_operand_types_compatible(&left_type, &value_type)
                             && !in_literal_value_coercible(&left_type, value) =>
                     {
-                        return Err(QueryError::OperandTypeMismatch);
+                        return Err(in_candidate_type_mismatch_error(
+                            left, left_type, value_type,
+                        ));
                     }
                     (Some(left_type), None) => {
-                        let expected = match non_null_column_type(&left_type) {
-                            ColumnType::Array(member) => *member,
-                            other => other,
-                        };
-                        infer_param(value, expected, params)?;
+                        infer_param(value, left_type, params)?;
                     }
                     (None, Some(value_type)) => infer_param(left, value_type, params)?,
                     (Some(_), Some(_)) => {}
@@ -2875,8 +3223,17 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     {
         return true;
     }
-    match left {
-        ColumnType::Array(member) => column_types_comparable(&member, &right),
+    false
+}
+
+fn array_correlation_types_compatible(parent: &ColumnType, child: &ColumnType) -> bool {
+    if in_operand_types_compatible(parent, child) {
+        return true;
+    }
+    // Array-subquery correlation expands the parent array into child lookup
+    // keys; it is distinct from whole-value `Predicate::In` membership.
+    match non_null_column_type(parent) {
+        ColumnType::Array(member) => column_types_comparable(&member, child),
         _ => false,
     }
 }
@@ -2888,10 +3245,26 @@ fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
     match non_null_column_type(left) {
         ColumnType::String => matches!(value, Value::Uuid(_)),
         ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
-        ColumnType::Array(member) => {
+        ColumnType::Array(member) => matches!(value, Value::Array(values)
+        if values.iter().all(|value| {
             in_literal_value_coercible(&member, &Operand::Literal(value.clone()))
-        }
+        })),
         _ => false,
+    }
+}
+
+fn in_candidate_type_mismatch_error(
+    left: &Operand,
+    column_type: ColumnType,
+    candidate_type: ColumnType,
+) -> QueryError {
+    match left {
+        Operand::Column(column) => QueryError::InCandidateTypeMismatch {
+            column: column.clone(),
+            column_type,
+            candidate_type,
+        },
+        _ => QueryError::OperandTypeMismatch,
     }
 }
 
@@ -3262,6 +3635,13 @@ fn canonical_inherits_key(inherits: &InheritsVia) -> Vec<u8> {
         InheritsOperation::Update => b'u',
         InheritsOperation::Delete => b'd',
     });
+    match inherits.max_depth {
+        Some(max_depth) => {
+            bytes.push(b'd');
+            put_len(&mut bytes, max_depth);
+        }
+        None => bytes.push(b'u'),
+    }
     bytes
 }
 

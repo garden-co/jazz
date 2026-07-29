@@ -789,8 +789,16 @@ where
         ensure_default_read_view(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.all_relation_snapshot_for_identity(&prepared, opts, author)
-            .await
+        // Output-changing relation queries currently normalize to a single
+        // root row set.  They have no array payload edges, so request ordinary
+        // app rows instead of the relation-snapshot fact output (which is
+        // reserved for correlated array/path materialization).
+        let rows = self.all_for_identity(&prepared, opts, author).await?;
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.

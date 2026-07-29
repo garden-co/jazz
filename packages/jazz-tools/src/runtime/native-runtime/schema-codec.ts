@@ -25,6 +25,7 @@ type PolicyQueryShape = {
 type PolicyInherits = {
   parentColumn: string;
   operation: "Select" | "Insert" | "Update" | "Delete";
+  maxDepth?: number;
 };
 
 type PolicyJoin = {
@@ -499,6 +500,12 @@ function writePolicyBranch(writer: PostcardWriter, branch: PolicyQueryShape): vo
 function writePolicyInherits(writer: PostcardWriter, inherits: PolicyInherits): void {
   writer.string(inherits.parentColumn);
   writer.u64(policyInheritsOperationTag(inherits.operation));
+  if (inherits.maxDepth === undefined) {
+    writer.u64(0);
+  } else {
+    writer.u64(1);
+    writer.u64(inherits.maxDepth);
+  }
 }
 
 function policyInheritsOperationTag(operation: PolicyInherits["operation"]): number {
@@ -628,7 +635,13 @@ function policyExprToQueryShape(
       filters: [],
       joins: [],
       reachable: [],
-      inherits: [{ parentColumn: expr.via_column, operation: expr.operation }],
+      inherits: [
+        {
+          parentColumn: expr.via_column,
+          operation: expr.operation,
+          ...(expr.max_depth === undefined ? {} : { maxDepth: expr.max_depth }),
+        },
+      ],
     };
   }
   if (expr.type === "InheritsReferencing") {

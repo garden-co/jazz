@@ -88,7 +88,7 @@ async function handleMessage(message: PersistentBrowserOpfsOwnerRequest): Promis
           if (delta instanceof Error) {
             workerScope.postMessage({
               subscription: ownerHandle,
-              error: { name: delta.name, message: delta.message },
+              error: { name: delta.name, message: delta.message, stack: delta.stack },
             });
             return;
           }
@@ -232,7 +232,7 @@ function postError(id: number, error: unknown): void {
     ok: false,
     error:
       error instanceof Error
-        ? { name: error.name, message: error.message }
+        ? { name: error.name, message: error.message, stack: error.stack }
         : { message: String(error) },
   });
 }
