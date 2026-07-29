@@ -220,6 +220,10 @@ required-features = ["test"]
 name = "query_membership_filters"
 required-features = ["test"]
 
+[[test]]
+name = "flush_once_per_refresh"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
