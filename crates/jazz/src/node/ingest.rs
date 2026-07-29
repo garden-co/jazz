@@ -592,12 +592,14 @@ where
         let permission_subject = self
             .open_tx
             .local_permission_subjects
-            .remove(&tx_id)
+            .get(&tx_id)
+            .copied()
             .unwrap_or(stored.tx.made_by);
         for version in &records {
             if !self.version_satisfies_write_policy(version, permission_subject) {
                 let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
                 self.ingest_rejected_transaction(stored.tx, fate)?;
+                self.open_tx.local_permission_subjects.remove(&tx_id);
                 return Ok(());
             }
         }
@@ -611,6 +613,7 @@ where
         )?;
         self.create_merge_versions_for(&records)?;
         self.checkpoint_large_values_for_tx(tx_id)?;
+        self.open_tx.local_permission_subjects.remove(&tx_id);
         Ok(())
     }
 
