@@ -2039,6 +2039,7 @@ dependencies = [
  "jazz-server",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "lz4_flex 0.13.1",
  "mimalloc",
  "opentelemetry",

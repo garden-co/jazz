@@ -123,6 +123,7 @@ jazz-server = { workspace = true }
 # values. Scoped to dev-dependencies so the `testing` feature never reaches a
 # production build (Cargo enables dev-dependency features only for tests).
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }
+libc = "0.2"
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
