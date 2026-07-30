@@ -309,7 +309,7 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
 /// maintained and one-shot lowering, so relation gathers do not need a second
 /// evaluator or subscription implementation.
 fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryError> {
-    let (expr, order_by, offset, limit) = peel_relation_output_steps(expr)?;
+    let (expr, filters, order_by, offset, limit) = peel_relation_output_steps(expr)?;
     let RelationExpr::Gather {
         seed,
         step,
@@ -338,6 +338,17 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         relation_gather_step(step, &seed_table)?;
 
     let mut query = Query::from(seed_table.clone());
+    for filter in filters {
+        let Some((scope, filter)) = relation_predicate_to_query_predicate(filter)? else {
+            continue;
+        };
+        if !scope.is_empty() && scope != seed_table {
+            return Err(relation_unification_error(
+                "gather output filters must be scoped to the gathered table",
+            ));
+        }
+        query = query.filter(filter);
+    }
     query.reachable.push(ReachableVia {
         // Treat each candidate output row as its own access row.  The
         // reachability closure then acts as a membership filter over that
@@ -386,13 +397,27 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
 
 fn peel_relation_output_steps(
     expr: &RelationExpr,
-) -> Result<(&RelationExpr, Vec<RelationOrderBy>, usize, Option<usize>), QueryError> {
+) -> Result<
+    (
+        &RelationExpr,
+        Vec<&RelationPredicate>,
+        Vec<RelationOrderBy>,
+        usize,
+        Option<usize>,
+    ),
+    QueryError,
+> {
+    let mut filters = Vec::new();
     let mut order_by = Vec::new();
     let mut offset = 0;
     let mut limit = None;
     let mut current = expr;
     loop {
         match current {
+            RelationExpr::Filter { input, predicate } => {
+                filters.push(predicate);
+                current = input;
+            }
             RelationExpr::OrderBy { input, terms } => {
                 order_by.extend(terms.iter().cloned());
                 current = input;
@@ -415,7 +440,7 @@ fn peel_relation_output_steps(
         }
     }
 
-    Ok((current, order_by, offset, limit))
+    Ok((current, filters, order_by, offset, limit))
 }
 
 fn relation_gather_seed(seed: &RelationExpr) -> Result<(String, Vec<Predicate>), QueryError> {
