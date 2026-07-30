@@ -130,19 +130,17 @@ where
         let mut validated_current_rows = 0usize;
         #[cfg(feature = "testing")]
         let mut ahead_current_entries = 0usize;
-        let mut recovered_ahead_current_keys = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
             #[cfg(feature = "testing")]
             {
                 self.validate_current_row_storage_layout(
                     &table,
-                    &mut recovered_ahead_current_keys,
                     &mut validated_current_rows,
                     &mut ahead_current_entries,
                 )?;
             }
             #[cfg(not(feature = "testing"))]
-            self.validate_current_row_storage_layout(&table, &mut recovered_ahead_current_keys)?;
+            self.validate_current_row_storage_layout(&table)?;
             if let Some(raw) =
                 self.database
                     .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
@@ -160,7 +158,6 @@ where
                 ));
             }
         }
-        self.replace_ahead_current_keys(recovered_ahead_current_keys);
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
             receipt.validate_current_rows = started.elapsed();
@@ -314,7 +311,6 @@ where
     fn validate_current_row_storage_layout(
         &mut self,
         table: &TableSchema,
-        ahead_current_keys: &mut Vec<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
         #[cfg(feature = "testing")] rows: &mut usize,
         #[cfg(feature = "testing")] ahead_rows: &mut usize,
     ) -> Result<(), Error> {
@@ -331,21 +327,17 @@ where
         )?;
 
         let storage_tables = table.ahead_current_storage_tables();
-        self.validate_and_index_ahead_current_rows(
-            &table.name,
+        self.validate_ahead_current_rows(
             &storage_tables[0],
             VersionLayer::Content,
-            ahead_current_keys,
             #[cfg(feature = "testing")]
             rows,
             #[cfg(feature = "testing")]
             ahead_rows,
         )?;
-        self.validate_and_index_ahead_current_rows(
-            &table.name,
+        self.validate_ahead_current_rows(
             &storage_tables[1],
             VersionLayer::Deletion,
-            ahead_current_keys,
             #[cfg(feature = "testing")]
             rows,
             #[cfg(feature = "testing")]
@@ -354,12 +346,10 @@ where
         Ok(())
     }
 
-    fn validate_and_index_ahead_current_rows(
+    fn validate_ahead_current_rows(
         &mut self,
-        table: &str,
         storage_table: &groove::schema::TableSchema,
         layer: VersionLayer,
-        ahead_current_keys: &mut Vec<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
         #[cfg(feature = "testing")] row_count: &mut usize,
         #[cfg(feature = "testing")] ahead_row_count: &mut usize,
     ) -> Result<(), Error> {
@@ -377,36 +367,25 @@ where
         }
         for raw in rows {
             let record = BorrowedRecord::new(&raw, &descriptor);
-            let (row_uuid, tx_time, tx_node_alias) = match layer {
+            match layer {
                 VersionLayer::Content => {
                     record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
                     record.get_idx(GlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
                     record.get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-                    (
-                        record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
-                        record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?,
-                        record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                    )
+                    record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?;
+                    record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?;
+                    record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 }
                 VersionLayer::Deletion => {
                     record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
                     record.get_idx(RegisterGlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
                     record
                         .get_nullable_u64(RegisterGlobalCurrentRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-                    (
-                        record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?,
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                    )
+                    record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?;
+                    record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?;
+                    record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?;
                 }
-            };
-            ahead_current_keys.push((
-                table.to_owned(),
-                layer,
-                RowUuid(row_uuid),
-                TxTime(tx_time),
-                NodeAlias(tx_node_alias),
-            ));
+            }
         }
         Ok(())
     }

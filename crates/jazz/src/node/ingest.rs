@@ -4058,13 +4058,6 @@ where
                 .to_vec(),
             ),
         }
-        self.insert_ahead_current_key(
-            version.table().to_owned(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        );
         Ok(())
     }
 
@@ -4091,13 +4084,6 @@ where
             base_for_current_names,
         );
         batch.delete(table.as_ref(), history_primary_key(version));
-        self.remove_ahead_current_key(
-            version.table(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        );
         Ok(())
     }
 

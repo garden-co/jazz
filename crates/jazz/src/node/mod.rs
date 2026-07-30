@@ -246,12 +246,6 @@ pub struct NodeState<S> {
     history_complete: bool,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
-    /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
-    ahead_current_keys: BTreeSet<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
-    /// Rows touched by the ahead-current overlay.
-    ahead_current_rows: BTreeSet<(String, RowUuid)>,
-    /// Latest ahead-current key per table/layer/row for local overlay reads.
-    ahead_current_latest: BTreeMap<(String, VersionLayer, RowUuid), (TxTime, NodeAlias)>,
     /// Minimum number of large-value ops replayed before storing a checkpoint.
     large_value_checkpoint_op_interval: usize,
     /// Runtime counters for large-value materialization and checkpoint behavior.
@@ -708,9 +702,6 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             node_aliases: BTreeMap::new(),
-            ahead_current_keys: BTreeSet::new(),
-            ahead_current_rows: BTreeSet::new(),
-            ahead_current_latest: BTreeMap::new(),
             large_value_checkpoint_op_interval: large_value_checkpoint_op_interval.max(1),
             large_value_metrics: LargeValueMetrics::default(),
             large_value_materialization_cache: BTreeMap::new(),
@@ -1553,109 +1544,6 @@ where
         self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
     }
 
-    fn insert_ahead_current_key(
-        &mut self,
-        table: String,
-        layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-    ) {
-        self.ahead_current_keys
-            .insert((table.clone(), layer, row_uuid, tx_time, tx_node_alias));
-        self.ahead_current_rows.insert((table.clone(), row_uuid));
-        self.ahead_current_latest
-            .entry((table, layer, row_uuid))
-            .and_modify(|latest| {
-                if (tx_time, tx_node_alias) > *latest {
-                    *latest = (tx_time, tx_node_alias);
-                }
-            })
-            .or_insert((tx_time, tx_node_alias));
-    }
-
-    fn replace_ahead_current_keys(
-        &mut self,
-        mut keys: Vec<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
-    ) {
-        keys.sort_unstable();
-        keys.dedup();
-
-        let mut rows = keys
-            .iter()
-            .map(|(table, _, row_uuid, _, _)| (table.clone(), *row_uuid))
-            .collect::<Vec<_>>();
-        rows.sort_unstable();
-        rows.dedup();
-
-        let mut latest = Vec::new();
-        for (table, layer, row_uuid, tx_time, tx_node_alias) in &keys {
-            let latest_key = (table.clone(), *layer, *row_uuid);
-            if let Some((previous_key, previous_value)) = latest.last_mut()
-                && *previous_key == latest_key
-            {
-                *previous_value = (*tx_time, *tx_node_alias);
-            } else {
-                latest.push((latest_key, (*tx_time, *tx_node_alias)));
-            }
-        }
-
-        self.ahead_current_rows = rows.into_iter().collect();
-        self.ahead_current_latest = latest.into_iter().collect();
-        self.ahead_current_keys = keys.into_iter().collect();
-    }
-
-    fn remove_ahead_current_key(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
-    ) {
-        let table_key = table.to_owned();
-        self.ahead_current_keys.remove(&(
-            table_key.clone(),
-            layer,
-            row_uuid,
-            tx_time,
-            tx_node_alias,
-        ));
-        let latest_key = (table_key.clone(), layer, row_uuid);
-        if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            let start = (table_key.clone(), layer, row_uuid, TxTime(0), NodeAlias(0));
-            let end = (
-                table_key.clone(),
-                layer,
-                row_uuid,
-                TxTime(u64::MAX),
-                NodeAlias(u64::MAX),
-            );
-            if let Some((_, _, _, next_time, next_alias)) = self
-                .ahead_current_keys
-                .range(start..=end)
-                .next_back()
-                .cloned()
-            {
-                self.ahead_current_latest
-                    .insert(latest_key, (next_time, next_alias));
-            } else {
-                self.ahead_current_latest.remove(&latest_key);
-            }
-        }
-        if !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Content,
-            row_uuid,
-        )) && !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Deletion,
-            row_uuid,
-        )) {
-            self.ahead_current_rows.remove(&(table_key, row_uuid));
-        }
-    }
-
     fn encode_large_value_cells(
         &mut self,
         table: &TableSchema,
@@ -2249,23 +2137,13 @@ where
             candidates.push((decode_current_row(table, record)?, tx));
         }
         let ahead_tables = table.ahead_current_storage_tables();
-        if let Some((tx_time, tx_node_alias)) = self
-            .ahead_current_latest
-            .get(&(table.name.clone(), VersionLayer::Content, row_uuid))
-            .copied()
+        if let Some(raw) = self
+            .database
+            .primary_key_last_raw(&ahead_tables[0].name, &[Value::Uuid(row_uuid.0)])?
         {
-            if let Some(raw) = self.database.primary_key_get_raw(
-                &ahead_tables[0].name,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )? {
-                let record = raw.record();
-                let tx = self.current_record_sort_key(record)?;
-                candidates.push((decode_current_row(table, record)?, tx));
-            }
+            let record = raw.record();
+            let tx = self.current_record_sort_key(record)?;
+            candidates.push((decode_current_row(table, record)?, tx));
         }
         Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
     }
@@ -2290,27 +2168,17 @@ where
             ));
         }
         let ahead_tables = table.ahead_current_storage_tables();
-        if let Some((tx_time, tx_node_alias)) = self
-            .ahead_current_latest
-            .get(&(table.name.clone(), VersionLayer::Deletion, row_uuid))
-            .copied()
+        if let Some(raw) = self
+            .database
+            .primary_key_last_raw(&ahead_tables[1].name, &[Value::Uuid(row_uuid.0)])?
         {
-            if let Some(raw) = self.database.primary_key_get_raw(
-                &ahead_tables[1].name,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )? {
-                let record = raw.record();
-                candidates.push((
-                    deletion_event_from_value(
-                        record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-                    )?,
-                    self.current_record_sort_key(record)?,
-                ));
-            }
+            let record = raw.record();
+            candidates.push((
+                deletion_event_from_value(
+                    record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
+                )?,
+                self.current_record_sort_key(record)?,
+            ));
         }
         Ok(candidates.into_iter().max_by_key(|(_, tx)| *tx))
     }
