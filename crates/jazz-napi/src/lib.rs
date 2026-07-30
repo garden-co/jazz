@@ -63,15 +63,15 @@ use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
-use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
-use jazz_tools::AppId;
-use jazz_tools::identity;
-use jazz_tools::middleware::AuthConfig;
-use jazz_tools::server::{
+use jazz::tools::AppId;
+use jazz::tools::identity;
+use jazz::tools::middleware::AuthConfig;
+use jazz::tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -2055,10 +2055,10 @@ fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     JAZZ_SERVER_TELEMETRY_INIT.get_or_init(|| {
         use tracing_subscriber::layer::SubscriberExt as _;
 
-        let endpoint = jazz_tools::otel::normalize_otlp_traces_endpoint(collector_url);
+        let endpoint = jazz::tools::otel::normalize_otlp_traces_endpoint(collector_url);
         let provider =
-            jazz_tools::otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
-        let otel_layer = jazz_tools::otel::layer(&provider);
+            jazz::tools::otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
+        let otel_layer = jazz::tools::otel::layer(&provider);
         let filter = tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("jazz_tools=trace".parse().expect("valid tracing directive"))
             .add_directive("tower_http=debug".parse().expect("valid tracing directive"));
@@ -2380,7 +2380,7 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use crate::core_read_opts_from_json;
     use jazz::db::Propagation as CorePropagation;
-    use jazz_tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use serde_json::json;
 
     #[test]

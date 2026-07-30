@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::thread;
 
-use jazz_tools::{
+use jazz::tools::{
     AppContext, BatchId, DurabilityTier, JazzClient, JazzError, ObjectId, Query, Value,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -15,26 +15,26 @@ enum ClientCommand {
     Query {
         query: Query,
         durability_tier: Option<DurabilityTier>,
-        reply: oneshot::Sender<jazz_tools::Result<Vec<(ObjectId, Vec<Value>)>>>,
+        reply: oneshot::Sender<jazz::tools::Result<Vec<(ObjectId, Vec<Value>)>>>,
     },
     Insert {
         table: String,
         values: HashMap<String, Value>,
-        reply: oneshot::Sender<jazz_tools::Result<(ObjectId, Vec<Value>, BatchId)>>,
+        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, BatchId)>>,
     },
     Update {
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-        reply: oneshot::Sender<jazz_tools::Result<BatchId>>,
+        reply: oneshot::Sender<jazz::tools::Result<BatchId>>,
     },
     Delete {
         object_id: ObjectId,
-        reply: oneshot::Sender<jazz_tools::Result<BatchId>>,
+        reply: oneshot::Sender<jazz::tools::Result<BatchId>>,
     },
 }
 
 impl TodoClient {
-    pub async fn connect(context: AppContext) -> jazz_tools::Result<Self> {
+    pub async fn connect(context: AppContext) -> jazz::tools::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 
@@ -51,7 +51,7 @@ impl TodoClient {
         &self,
         query: Query,
         durability_tier: Option<DurabilityTier>,
-    ) -> jazz_tools::Result<Vec<(ObjectId, Vec<Value>)>> {
+    ) -> jazz::tools::Result<Vec<(ObjectId, Vec<Value>)>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Query {
@@ -67,7 +67,7 @@ impl TodoClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> jazz_tools::Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, BatchId)> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Insert {
@@ -83,7 +83,7 @@ impl TodoClient {
         &self,
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-    ) -> jazz_tools::Result<BatchId> {
+    ) -> jazz::tools::Result<BatchId> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Update {
@@ -95,7 +95,7 @@ impl TodoClient {
         rx.await.map_err(|_| JazzError::ChannelClosed)?
     }
 
-    pub async fn delete(&self, object_id: ObjectId) -> jazz_tools::Result<BatchId> {
+    pub async fn delete(&self, object_id: ObjectId) -> jazz::tools::Result<BatchId> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Delete { object_id, reply })
@@ -107,7 +107,7 @@ impl TodoClient {
 fn run_client_worker(
     context: AppContext,
     mut rx: mpsc::UnboundedReceiver<ClientCommand>,
-    ready_tx: std::sync::mpsc::Sender<jazz_tools::Result<()>>,
+    ready_tx: std::sync::mpsc::Sender<jazz::tools::Result<()>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

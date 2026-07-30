@@ -15,7 +15,7 @@ use axum::{
 };
 use futures_util::StreamExt as FuturesStreamExt;
 use futures_util::stream::Stream;
-use jazz_tools::{ObjectId, QueryBuilder, Value};
+use jazz::tools::{ObjectId, QueryBuilder, Value};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
@@ -98,7 +98,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
 }
 
 fn todo_values(title: String, description: String) -> std::collections::HashMap<String, Value> {
-    jazz_tools::row_input!("title" => title, "done" => false, "description" => description)
+    jazz::row_input!("title" => title, "done" => false, "description" => description)
 }
 
 /// List all todos.

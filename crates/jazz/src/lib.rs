@@ -123,10 +123,17 @@ pub mod protocol_limits;
 pub mod query;
 /// Jazz schema and storage lowering.
 pub mod schema;
+/// Operational server-shell APIs formerly provided by jazz-server.
+pub mod serving;
 /// Pure plaintext operation substrate and deterministic text-merge walk.
 pub mod text_merge;
 /// Logical time and sequence counters.
 pub mod time;
+/// Public client, server, and CLI support APIs formerly provided by jazz-tools.
+// The tools API was a separate crate before consolidation and intentionally
+// retains its existing documentation policy.
+#[allow(missing_docs)]
+pub mod tools;
 /// Transaction, fate, and history vocabulary.
 pub mod tx;
 /// Versioned transport frames around the semantic sync protocol.
