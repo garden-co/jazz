@@ -10,12 +10,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(feature = "rocksdb")]
 use std::env;
-#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+#[cfg(feature = "rocksdb")]
 use std::fs;
 #[cfg(all(feature = "rocksdb", target_os = "linux"))]
 use std::os::fd::AsRawFd;
 #[cfg(feature = "rocksdb")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 #[cfg(feature = "rocksdb")]
 use std::time::{Duration, Instant};
@@ -1115,6 +1115,9 @@ fn r3_profiles() -> Vec<R3Profile> {
 struct R3PhaseSample {
     storage_open: Duration,
     jazz_open: Duration,
+    memory_before_jazz_open: Option<R3ProcessMemory>,
+    memory_after_jazz_open: Option<R3ProcessMemory>,
+    memory_after_first_read: Option<R3ProcessMemory>,
     open_breakdown: Option<R3OpenBreakdown>,
     prepare: Duration,
     first_read: Duration,
@@ -1127,6 +1130,34 @@ struct R3PhaseSample {
     first_read_apply_projection: Duration,
     first_read_unattributed: Duration,
     rows: usize,
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Clone, Copy, Debug)]
+struct R3ProcessMemory {
+    resident_bytes: u64,
+    peak_resident_bytes: u64,
+}
+
+#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+fn r3_process_memory() -> Option<R3ProcessMemory> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let kib = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    Some(R3ProcessMemory {
+        resident_bytes: kib("VmRSS:")?.saturating_mul(1024),
+        peak_resident_bytes: kib("VmHWM:")?.saturating_mul(1024),
+    })
+}
+
+#[cfg(all(feature = "rocksdb", not(target_os = "linux")))]
+fn r3_process_memory() -> Option<R3ProcessMemory> {
+    None
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1263,7 +1294,14 @@ fn open_rocks_db_with_phases(
     seed: u64,
     author: AuthorId,
     path: &Path,
-) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
+) -> (
+    RocksBenchDb,
+    Duration,
+    Duration,
+    Option<R3ProcessMemory>,
+    Option<R3ProcessMemory>,
+    Option<R3OpenBreakdown>,
+) {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -1286,6 +1324,7 @@ fn open_rocks_db_with_phases(
     )
     .with_id_source(SeededRowIdSource::new(seed));
 
+    let memory_before_jazz_open = r3_process_memory();
     let jazz_started = Instant::now();
     #[cfg(feature = "r3-open-attribution")]
     let (db, open_breakdown) = {
@@ -1318,8 +1357,16 @@ fn open_rocks_db_with_phases(
         None,
     );
     let jazz_open = jazz_started.elapsed();
+    let memory_after_jazz_open = r3_process_memory();
 
-    (db, storage_open, jazz_open, open_breakdown)
+    (
+        db,
+        storage_open,
+        jazz_open,
+        memory_before_jazz_open,
+        memory_after_jazz_open,
+        open_breakdown,
+    )
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1334,8 +1381,14 @@ fn measure_r3_phase_sample(
     if matches!(cache_mode, R3CacheMode::Evicted) {
         evict_path_from_linux_page_cache(path);
     }
-    let (db, storage_open, jazz_open, open_breakdown) =
-        open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
+    let (
+        db,
+        storage_open,
+        jazz_open,
+        memory_before_jazz_open,
+        memory_after_jazz_open,
+        open_breakdown,
+    ) = open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
 
     let prepare_started = Instant::now();
     let query = project_board_query(&db, project);
@@ -1346,6 +1399,7 @@ fn measure_r3_phase_sample(
         .read_profiled(&query)
         .expect("read warm-cache project board");
     let first_read = read_started.elapsed();
+    let memory_after_first_read = r3_process_memory();
     assert_eq!(
         rows.len(),
         expected_rows,
@@ -1359,6 +1413,9 @@ fn measure_r3_phase_sample(
     R3PhaseSample {
         storage_open,
         jazz_open,
+        memory_before_jazz_open,
+        memory_after_jazz_open,
+        memory_after_first_read,
         open_breakdown,
         prepare,
         first_read,
@@ -1411,6 +1468,19 @@ fn median_us(samples: &[R3PhaseSample], phase: impl Fn(&R3PhaseSample) -> Durati
 }
 
 #[cfg(feature = "rocksdb")]
+fn median_memory_bytes(
+    samples: &[R3PhaseSample],
+    memory: impl Fn(&R3PhaseSample) -> Option<u64>,
+) -> Option<u64> {
+    let mut values = samples.iter().filter_map(memory).collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+#[cfg(feature = "rocksdb")]
 fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
     let sample_count = env::var("JAZZ_R3_PHASE_SAMPLES")
         .ok()
@@ -1419,7 +1489,9 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
         .max(1);
     let expected_rows = selected.profile.tasks.div_ceil(selected.profile.projects);
     for close_mode in r3_close_modes() {
-        establish_r3_close_mode(path, close_mode);
+        if env::var_os("JAZZ_R3_SKIP_CLOSE_MODE_SETUP").is_none() {
+            establish_r3_close_mode(path, close_mode);
+        }
         for cache_mode in r3_cache_modes() {
             let samples = (0..sample_count)
                 .map(|sample| {
@@ -1457,6 +1529,28 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                 }),
                 "storage_open_p50_us": median_us(&samples, |sample| sample.storage_open),
                 "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
+                "rss_before_jazz_open_p50_bytes": median_memory_bytes(&samples, |sample| {
+                    sample.memory_before_jazz_open.map(|memory| memory.resident_bytes)
+                }),
+                "rss_after_jazz_open_p50_bytes": median_memory_bytes(&samples, |sample| {
+                    sample.memory_after_jazz_open.map(|memory| memory.resident_bytes)
+                }),
+                "rss_after_first_read_p50_bytes": median_memory_bytes(&samples, |sample| {
+                    sample.memory_after_first_read.map(|memory| memory.resident_bytes)
+                }),
+                "rss_jazz_open_delta_p50_bytes": median_memory_bytes(&samples, |sample| {
+                    Some(
+                        sample
+                            .memory_after_jazz_open?
+                            .resident_bytes
+                            .saturating_sub(sample.memory_before_jazz_open?.resident_bytes),
+                    )
+                }),
+                "peak_rss_p50_bytes": median_memory_bytes(&samples, |sample| {
+                    sample
+                        .memory_after_first_read
+                        .map(|memory| memory.peak_resident_bytes)
+                }),
                 "catalogue_open_p50_us": median_open_us(&samples, |receipt| receipt.catalogue_open),
                 "database_open_p50_us": median_open_us(&samples, |receipt| receipt.database_open),
                 "state_init_p50_us": median_open_us(&samples, |receipt| receipt.state_init),
@@ -1527,13 +1621,49 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
 
     for selected in r3_profiles() {
         let profile = selected.profile;
-        let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
-        let db_path = tempdir.path().join("realistic_phase1.rocksdb");
-        let project = {
+        let persistent_fixture_dir = env::var_os("JAZZ_R3_FIXTURE_DIR").map(PathBuf::from);
+        let tempdir = persistent_fixture_dir
+            .is_none()
+            .then(|| TempDir::new().expect("create tempdir for RocksDB cold-load bench"));
+        let fixture_dir = persistent_fixture_dir.unwrap_or_else(|| {
+            tempdir
+                .as_ref()
+                .expect("R3 temporary fixture directory")
+                .path()
+                .to_path_buf()
+        });
+        fs::create_dir_all(&fixture_dir).expect("create R3 fixture directory");
+        let db_path = fixture_dir.join(format!("realistic_phase1_{}.rocksdb", selected.id));
+        let project_path =
+            fixture_dir.join(format!("realistic_phase1_{}.project.json", selected.id));
+        let project = if project_path.exists() {
+            serde_json::from_slice::<RowUuid>(
+                &fs::read(&project_path).expect("read persisted R3 fixture project"),
+            )
+            .expect("decode persisted R3 fixture project")
+        } else {
             let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
             let fixture = seed_fixture(&db, profile);
-            fixture.projects[0]
+            let project = fixture.projects[0];
+            fs::write(
+                &project_path,
+                serde_json::to_vec(&project).expect("encode R3 fixture project"),
+            )
+            .expect("persist R3 fixture project");
+            project
         };
+        if env::var_os("JAZZ_R3_SEED_ONLY").is_some() {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "scenario": "r3_rocksdb_fixture_seed",
+                    "profile": selected.id,
+                    "fixture_dir": fixture_dir,
+                    "project": project,
+                })
+            );
+            continue;
+        }
         let expected_rows = profile.tasks.div_ceil(profile.projects);
         emit_r3_phase_receipts(&db_path, project, selected);
 
