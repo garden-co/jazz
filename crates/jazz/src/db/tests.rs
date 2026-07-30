@@ -17,8 +17,9 @@ use crate::protocol_limits::{
     MAX_SHAPE_AST_BYTES, MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
-    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate, ShapeId,
-    all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
+    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
+    RelationOrderBy, ShapeId, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit,
+    lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
@@ -2407,6 +2408,40 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
     assert_eq!(
         row_ids(&filtered.rows).into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([root, leaf])
+    );
+
+    let filter_after_limit = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel.clone()),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                limit: 1,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("root".to_owned())),
+            },
+        },
+    };
+    let error =
+        block_on(db.all_relation_query(&filter_after_limit, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("gather output filters cannot wrap limit or offset")
     );
 }
 
