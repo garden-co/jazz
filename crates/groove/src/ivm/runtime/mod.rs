@@ -980,6 +980,12 @@ impl IvmRuntime {
                 },
             },
         );
+        // The binding tick above can discover a dropped older subscription
+        // and queue its retraction. Hydrating this new binding before that
+        // lifecycle work is applied would make the snapshot race the queued
+        // retraction (and can observe stale arranged state). Drain it before
+        // taking the initial snapshot; the new binding ref is already live.
+        self.flush_pending_binding_retractions(storage)?;
         let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
             Ok(initial) => initial,
             Err(error) => {

@@ -5870,16 +5870,24 @@ where
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
-        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let binding_source_shape = query_binding_source_shape_for_parts_if_needed(
+            policy_shape.params(),
+            &binding_claim_params_for_shape(&input_shape),
+        );
+        if let Some(source_shape) = &binding_source_shape {
+            // Recursive policy seeds are value sources too. Leaving their
+            // construction-time placeholder behind would register the binding
+            // under one shape while recursion snapshots another and sees an
+            // empty seed.
+            retarget_binding_value_sources(&mut input_shape, source_shape);
+        }
         let root_source = root_source_id(policy_shape.query().table.as_str());
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 &policy_shape,
                 &binding,
-                query_binding_source_shape_for_parts_if_needed(
-                    policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
-                ),
+                binding_source_shape,
                 BTreeMap::new(),
                 binding_claim_params_for_shape(&input_shape),
             ),
@@ -9464,13 +9472,43 @@ fn normalized_value_type(schema: &JazzSchema, value: &NormalizedValueRef) -> Col
         // Existing parameter references have been validated upstream. Their
         // exact type is supplied by their own declaration, not guessed here.
         NormalizedValueRef::Param(_) | NormalizedValueRef::Claim(_) => ColumnType::Uuid,
-        // Predicate normalization has already coerced literals against their
-        // column where necessary. Claims in policy predicates are normally
-        // paired with a source field, which is the authoritative case above.
-        NormalizedValueRef::Literal(_) => ColumnType::Uuid,
+        // A policy such as `$claim IN ["admin", "member"]` has no source
+        // field to supply the claim's binding type. Its literals are the
+        // authoritative declaration instead of the old UUID fallback.
+        NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes)
+            .map(|value| normalized_literal_value_type(&value))
+            .unwrap_or(ColumnType::Uuid),
         NormalizedValueRef::FrontierColumn { .. } | NormalizedValueRef::Provenance { .. } => {
             ColumnType::Uuid
         }
+    }
+}
+
+fn normalized_literal_value_type(value: &Value) -> ColumnType {
+    match value {
+        Value::U8(_) => ColumnType::U8,
+        Value::U16(_) => ColumnType::U16,
+        Value::U32(_) => ColumnType::U32,
+        Value::U64(_) => ColumnType::U64,
+        Value::I32(_) => ColumnType::I32,
+        Value::I64(_) => ColumnType::I64,
+        Value::F64(_) => ColumnType::F64,
+        Value::Bool(_) => ColumnType::Bool,
+        Value::String(_) => ColumnType::String,
+        Value::Bytes(_) => ColumnType::Bytes,
+        Value::Uuid(_) => ColumnType::Uuid,
+        Value::Enum(_) => ColumnType::U8,
+        Value::Tuple(values) => {
+            ColumnType::Tuple(values.iter().map(normalized_literal_value_type).collect())
+        }
+        Value::Array(values) => values
+            .first()
+            .map(|value| ColumnType::Array(Box::new(normalized_literal_value_type(value))))
+            .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))),
+        Value::Nullable(Some(value)) => {
+            ColumnType::Nullable(Box::new(normalized_literal_value_type(value)))
+        }
+        Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
     }
 }
 
@@ -10162,6 +10200,76 @@ fn prepared_claim_value(path: &ClaimPath, policy: &PolicyContext) -> Result<Valu
 
 fn coerce_prepared_binding_value(value: Value, column_type: &groove::schema::ColumnType) -> Value {
     match (value, column_type) {
+        // Claims originate at an untyped JSON boundary. A policy comparison
+        // supplies the concrete field type for its binding slot, so preserve
+        // numerically equal signed/unsigned values across core widths rather
+        // than asking the record encoder to accept the source representation.
+        (Value::U8(value), groove::schema::ColumnType::U16) => Value::U16(u16::from(value)),
+        (Value::U8(value), groove::schema::ColumnType::U32) => Value::U32(u32::from(value)),
+        (Value::U8(value), groove::schema::ColumnType::U64) => Value::U64(u64::from(value)),
+        (Value::U8(value), groove::schema::ColumnType::I32) => Value::I32(i32::from(value)),
+        (Value::U8(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U16(value), groove::schema::ColumnType::U8) => u8::try_from(value)
+            .map(Value::U8)
+            .unwrap_or(Value::U16(value)),
+        (Value::U16(value), groove::schema::ColumnType::U32) => Value::U32(u32::from(value)),
+        (Value::U16(value), groove::schema::ColumnType::U64) => Value::U64(u64::from(value)),
+        (Value::U16(value), groove::schema::ColumnType::I32) => Value::I32(i32::from(value)),
+        (Value::U16(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U32(value), groove::schema::ColumnType::U8) => u8::try_from(value)
+            .map(Value::U8)
+            .unwrap_or(Value::U32(value)),
+        (Value::U32(value), groove::schema::ColumnType::U16) => u16::try_from(value)
+            .map(Value::U16)
+            .unwrap_or(Value::U32(value)),
+        (Value::U32(value), groove::schema::ColumnType::U64) => Value::U64(u64::from(value)),
+        (Value::U32(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::U32(value)),
+        (Value::U32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::U64(value), groove::schema::ColumnType::U8) => u8::try_from(value)
+            .map(Value::U8)
+            .unwrap_or(Value::U64(value)),
+        (Value::U64(value), groove::schema::ColumnType::U16) => u16::try_from(value)
+            .map(Value::U16)
+            .unwrap_or(Value::U64(value)),
+        (Value::U64(value), groove::schema::ColumnType::U32) => u32::try_from(value)
+            .map(Value::U32)
+            .unwrap_or(Value::U64(value)),
+        (Value::U64(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::U64(value)),
+        (Value::U64(value), groove::schema::ColumnType::I64) => i64::try_from(value)
+            .map(Value::I64)
+            .unwrap_or(Value::U64(value)),
+        (Value::I32(value), groove::schema::ColumnType::U8) => u8::try_from(value)
+            .map(Value::U8)
+            .unwrap_or(Value::I32(value)),
+        (Value::I32(value), groove::schema::ColumnType::U16) => u16::try_from(value)
+            .map(Value::U16)
+            .unwrap_or(Value::I32(value)),
+        (Value::I32(value), groove::schema::ColumnType::U32) => u32::try_from(value)
+            .map(Value::U32)
+            .unwrap_or(Value::I32(value)),
+        (Value::I32(value), groove::schema::ColumnType::U64) => u64::try_from(value)
+            .map(Value::U64)
+            .unwrap_or(Value::I32(value)),
+        (Value::I32(value), groove::schema::ColumnType::I64) => Value::I64(i64::from(value)),
+        (Value::I64(value), groove::schema::ColumnType::U8) => u8::try_from(value)
+            .map(Value::U8)
+            .unwrap_or(Value::I64(value)),
+        (Value::I64(value), groove::schema::ColumnType::U16) => u16::try_from(value)
+            .map(Value::U16)
+            .unwrap_or(Value::I64(value)),
+        (Value::I64(value), groove::schema::ColumnType::U32) => u32::try_from(value)
+            .map(Value::U32)
+            .unwrap_or(Value::I64(value)),
+        (Value::I64(value), groove::schema::ColumnType::U64) => u64::try_from(value)
+            .map(Value::U64)
+            .unwrap_or(Value::I64(value)),
+        (Value::I64(value), groove::schema::ColumnType::I32) => i32::try_from(value)
+            .map(Value::I32)
+            .unwrap_or(Value::I64(value)),
         (Value::Uuid(value), groove::schema::ColumnType::String) => {
             Value::String(value.to_string())
         }

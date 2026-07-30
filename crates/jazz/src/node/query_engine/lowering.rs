@@ -431,6 +431,16 @@ fn parameter_domain_for_request(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    // Claim references are retargeted to `Param` before lowering so they can
+    // flow through the common binding source.  They remain claim parameters,
+    // however: treating their reserved parameter names as user parameters
+    // duplicates them in the binding descriptor and fabricates a second
+    // `__jazz_route_*` declaration.  A recursive seed can then retain that
+    // fabricated route while its frontier/step has no producer for it.
+    for name in pre_retarget_claims.keys() {
+        domain.user_params.remove(name);
+        domain.routing_params.remove(&route_param_field(name));
+    }
     for (name, claim) in &pre_retarget_claims {
         if let Some(existing) = domain.claim_params.get(name)
             && existing != claim
@@ -2815,6 +2825,12 @@ fn lower_linear_plan_steps(
                         "filters on value/frontier sources are not lowered yet".to_owned(),
                     )
                 })?;
+                // An OR of literal comparisons against one claim is the same
+                // binding-side membership gate as `SessionInList`. Collapsing
+                // it avoids unioning branches whose parameter declaration is
+                // otherwise retained without its binding-source producer.
+                let collapsed_membership = collapse_param_literal_or(predicate);
+                let predicate = collapsed_membership.as_ref().unwrap_or(predicate);
                 // A parameterized equality under `OR` cannot be represented
                 // by the scalar predicate node: its value is an execution
                 // binding, not a graph literal. Lower each disjunct as its
@@ -2833,9 +2849,17 @@ fn lower_linear_plan_steps(
                                 root_source,
                                 request,
                             )?;
-                        let (mut branch_graph, residual, contains_routes) =
+                        let (branch_graph, residual, contains_routes) =
                             lower_array_contains_param_filter_joins(
                                 joined,
+                                &residual,
+                                source,
+                                root_source,
+                                request,
+                            )?;
+                        let (mut branch_graph, residual, membership_routes) =
+                            lower_param_literal_membership_filter_joins(
+                                branch_graph,
                                 &residual,
                                 source,
                                 root_source,
@@ -2853,6 +2877,7 @@ fn lower_linear_plan_steps(
                         let mut branch_fields = fields.clone();
                         branch_fields.extend(equality_routes);
                         branch_fields.extend(contains_routes);
+                        branch_fields.extend(membership_routes);
                         branches.push(LoweredRelationInput {
                             graph: branch_graph,
                             root_source: Some(root_source.clone()),
@@ -2868,10 +2893,7 @@ fn lower_linear_plan_steps(
                         .collect::<Result<Vec<_>, _>>()?;
                     graph = GraphBuilder::union(branches.into_iter().map(|branch| branch.graph));
                     fields = union_fields;
-                    available_route_fields = route_fields
-                        .intersection(&fields)
-                        .cloned()
-                        .collect();
+                    available_route_fields = route_fields.intersection(&fields).cloned().collect();
                     continue;
                 }
                 let (joined, residual, introduced_route_fields) =
@@ -2890,11 +2912,21 @@ fn lower_linear_plan_steps(
                         root_source,
                         request,
                     )?;
+                let (joined, residual, membership_route_fields) =
+                    lower_param_literal_membership_filter_joins(
+                        joined,
+                        &residual,
+                        source,
+                        root_source,
+                        request,
+                    )?;
                 graph = joined;
                 fields.extend(introduced_route_fields.iter().cloned());
                 fields.extend(contains_route_fields.iter().cloned());
+                fields.extend(membership_route_fields.iter().cloned());
                 available_route_fields.extend(introduced_route_fields);
                 available_route_fields.extend(contains_route_fields);
+                available_route_fields.extend(membership_route_fields);
                 if !matches!(residual, PredicateExpr::True) {
                     let predicate = lower_predicate(&residual, source, root_source, request)?;
                     graph = if uses_policy_value_comparison(request) {
@@ -3153,13 +3185,20 @@ fn lower_linear_plan_steps(
                         "order-by before aggregate is not lowered yet".to_owned(),
                     ));
                 }
-                let lowered =
-                    lower_aggregate(graph, group_by, outputs, plan, root_source, request)?;
+                let lowered = lower_aggregate(
+                    graph,
+                    group_by,
+                    outputs,
+                    &available_route_fields,
+                    plan,
+                    root_source,
+                    request,
+                )?;
                 graph = lowered.graph;
                 fields = lowered.fields;
                 nullable_fields = BTreeSet::new();
                 nullable_field_depths = BTreeMap::new();
-                available_route_fields = BTreeSet::new();
+                available_route_fields = route_fields.intersection(&fields).cloned().collect();
             }
         }
     }
@@ -3192,6 +3231,40 @@ fn lower_linear_plan_steps(
         fields,
         nullable_fields,
         nullable_field_depths,
+    })
+}
+
+fn collapse_param_literal_or(predicate: &PredicateExpr) -> Option<PredicateExpr> {
+    let PredicateExpr::Or(predicates) = predicate else {
+        return None;
+    };
+    let mut param = None;
+    let mut options = Vec::with_capacity(predicates.len());
+    for predicate in predicates {
+        let PredicateExpr::Compare {
+            left,
+            op: ComparisonOp::Eq,
+            right,
+        } = predicate
+        else {
+            return None;
+        };
+        let (candidate, literal) = match (left, right) {
+            (NormalizedValueRef::Param(param), NormalizedValueRef::Literal(literal))
+            | (NormalizedValueRef::Literal(literal), NormalizedValueRef::Param(param)) => {
+                (param, literal)
+            }
+            _ => return None,
+        };
+        if param.as_deref().is_some_and(|current| current != candidate) {
+            return None;
+        }
+        param = Some(candidate.clone());
+        options.push(NormalizedValueRef::Literal(literal.clone()));
+    }
+    Some(PredicateExpr::In {
+        value: NormalizedValueRef::Param(param?),
+        options,
     })
 }
 
@@ -4093,9 +4166,7 @@ fn lower_array_contains_param_filter_joins(
             // from a local value source. `ArrayContains` also represents the
             // scalar/text contains form, whose parameter has the source type
             // rather than an array element type.
-            let value_type = match source_field_type(source, &field)
-                .map(non_null_value_type)
-            {
+            let value_type = match source_field_type(source, &field).map(non_null_value_type) {
                 Some(ValueType::Array(element)) => element.as_ref().clone(),
                 Some(value_type) => value_type.clone(),
                 None => ValueType::Uuid,
@@ -4141,6 +4212,99 @@ fn lower_array_contains_param_filter_joins(
         ));
         graph = graph.project_fields(projection);
         retained_route_fields.insert(route_field);
+    }
+    let residual = match residual.len() {
+        0 => PredicateExpr::True,
+        1 => residual.pop().expect("one residual predicate"),
+        _ => PredicateExpr::And(residual),
+    };
+    Ok((graph, residual, retained_route_fields))
+}
+
+/// Lower `$claim IN [literal, ...]` as a binding-side gate. The claim is not
+/// a field of the protected row, so lowering it as an ordinary filter would
+/// leave a predicate referring to a field the row source never produced.
+/// Joining the filtered one-row binding source instead keeps the declaration
+/// and its producer together and routes each binding's permitted rows.
+fn lower_param_literal_membership_filter_joins(
+    mut graph: GraphBuilder,
+    predicate: &PredicateExpr,
+    _source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
+    let predicates = match predicate {
+        PredicateExpr::And(predicates) => predicates.as_slice(),
+        _ => std::slice::from_ref(predicate),
+    };
+    let mut residual = Vec::new();
+    let mut retained_route_fields = BTreeSet::<String>::new();
+    for predicate in predicates {
+        let PredicateExpr::In { value, options } = predicate else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let NormalizedValueRef::Param(param) = value else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let Some(binding_source_shape) = &request.input.binding.source_shape else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let domain = parameter_domain_for_request(request)?;
+        let Some(claim) = domain.claim_params.get(param) else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let values = options
+            .iter()
+            .map(|option| match option {
+                NormalizedValueRef::Literal(bytes) => {
+                    let value = postcard::from_bytes::<Value>(bytes).map_err(|error| {
+                        UnsupportedReason::Operator(format!(
+                            "membership literal could not be decoded: {error}"
+                        ))
+                    })?;
+                    Ok(coerce_literal_for_value_type(
+                        value.into(),
+                        &claim.ty.value_type(),
+                    ))
+                }
+                _ => Err(UnsupportedReason::Operator(
+                    "parameter membership options must be literals".to_owned(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding = GraphBuilder::binding_source(
+            binding_source_shape.clone(),
+            binding_source_descriptor_with_user_params(request, [])?,
+        )
+        .filter(GroovePredicateExpr::Or(
+            values
+                .into_iter()
+                .map(|value| GroovePredicateExpr::Eq {
+                    field: param.clone(),
+                    value,
+                })
+                .collect(),
+        ));
+        let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        projection.extend(
+            retained_route_fields
+                .iter()
+                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+        );
+        projection.push(ProjectField::renamed(right_field(param), param.clone()));
+        graph = policy_join_if_needed(
+            graph,
+            binding,
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+            request,
+        )
+        .project_fields(projection);
+        retained_route_fields.insert(param.clone());
     }
     let residual = match residual.len() {
         0 => PredicateExpr::True,
@@ -4409,14 +4573,23 @@ fn lower_aggregate(
     mut graph: GraphBuilder,
     group_by: &[NormalizedValueRef],
     outputs: &[AggregateExpr],
+    routing_fields: &BTreeSet<String>,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
-    let group_cols = group_by
+    let mut group_cols = group_by
         .iter()
         .map(|value| lower_field_ref(value, plan, source, request, "aggregate group key"))
         .collect::<Result<Vec<_>, _>>()?;
+    // Prepared bindings share one aggregate graph. Keep its route declaration
+    // in the aggregate output so each binding gets its own aggregate group;
+    // this is result partitioning, not an arrangement key for a filter role.
+    for field in routing_fields {
+        if !group_cols.contains(field) {
+            group_cols.push(field.clone());
+        }
+    }
     let aggregates = outputs
         .iter()
         .map(|aggregate| lower_aggregate_expr(aggregate, plan, source, request))
