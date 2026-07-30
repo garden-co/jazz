@@ -28,7 +28,7 @@ use crate::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use base64::Engine;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, TextEdit as CoreTextEdit, TickScheduler,
     TickUrgency, Transport as CoreTransport, WireTransportAdapter,
@@ -502,9 +502,13 @@ impl Backend {
         cells: jazz::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
         match self {
-            Self::Memory(db) => db.exclusive_write(tx_id, table, row_id, cells),
+            Self::Memory(db) => db
+                .exclusive_tx_ref(tx_id)
+                .insert_with_id(table, row_id, cells),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_write(tx_id, table, row_id, cells),
+            Self::RocksDb(db) => db
+                .exclusive_tx_ref(tx_id)
+                .insert_with_id(table, row_id, cells),
         }
     }
 
@@ -516,9 +520,9 @@ impl Backend {
         cells: jazz::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
         match self {
-            Self::Memory(db) => db.exclusive_update(tx_id, table, row_id, cells),
+            Self::Memory(db) => db.exclusive_tx_ref(tx_id).update(table, row_id, cells),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_update(tx_id, table, row_id, cells),
+            Self::RocksDb(db) => db.exclusive_tx_ref(tx_id).update(table, row_id, cells),
         }
     }
 
@@ -529,9 +533,9 @@ impl Backend {
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
         match self {
-            Self::Memory(db) => db.exclusive_delete(tx_id, table, row_id),
+            Self::Memory(db) => db.exclusive_tx_ref(tx_id).delete(table, row_id),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_delete(tx_id, table, row_id),
+            Self::RocksDb(db) => db.exclusive_tx_ref(tx_id).delete(table, row_id),
         }
     }
 

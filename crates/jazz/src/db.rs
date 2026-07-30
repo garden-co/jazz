@@ -2230,7 +2230,6 @@ where
         Ok(ExclusiveTx {
             db: self,
             tx_id,
-            has_reads: Cell::new(false),
             committed: false,
         })
     }
@@ -6793,6 +6792,7 @@ where
             .map_err(Into::into)
     }
 
+    /// Stage an insert with an optional explicit provenance time.
     fn insert_with_id_at_ms_option(
         &self,
         table: &str,
@@ -6804,6 +6804,7 @@ where
             .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
     }
 
+    /// Stage an update with an optional explicit provenance time.
     fn update_at_ms_option(
         &self,
         table: &str,
@@ -6815,15 +6816,18 @@ where
             .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
     }
 
+    /// Stage a deletion with an optional explicit provenance time.
     fn delete_at_ms_option(
         &self,
         table: &str,
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        self.db().stage_mergeable_delete(self.tx_id(), table, row, now_ms)
+        self.db()
+            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
     }
 
+    /// Stage a restore with an optional explicit provenance time.
     fn restore_at_ms_option(
         &self,
         table: &str,
@@ -6861,8 +6865,9 @@ where
 {
     /// Commit all staged writes as one mergeable transaction.
     ///
-    /// On failure the transaction is left open and `Drop` abandons it, so a
-    /// failed commit does not leak an open handle.
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
     pub fn commit(mut self) -> Result<TxId, Error> {
         let result = self.db.commit_mergeable_handle(self.tx_id);
         if result.is_ok() {
@@ -6937,19 +6942,13 @@ where
     /// The id of the already-open transaction.
     fn tx_id(&self) -> OpenTxId;
 
-    /// Record a transaction-local read. Owning handles retain this bookkeeping;
-    /// non-owning refs intentionally do not own any per-handle state.
-    fn note_read(&self) {}
-
     /// Read one row inside the exclusive transaction.
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.note_read();
         self.db().exclusive_read(self.tx_id(), table, row)
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
     fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.note_read();
         self.db()
             .node
             .node
@@ -6960,7 +6959,6 @@ where
 
     /// Read a prepared query inside the exclusive transaction.
     fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.note_read();
         self.db().exclusive_all(self.tx_id(), prepared)
     }
 
@@ -6970,7 +6968,6 @@ where
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.note_read();
         self.db()
             .exclusive_all_for_identity(self.tx_id(), prepared, author)
     }
@@ -7018,7 +7015,6 @@ where
 {
     db: &'a Db<S>,
     tx_id: OpenTxId,
-    has_reads: Cell<bool>,
     committed: bool,
 }
 
@@ -7028,8 +7024,9 @@ where
 {
     /// Commit the exclusive transaction.
     ///
-    /// On failure the transaction is left open and `Drop` abandons it, so a
-    /// failed commit does not leak an open handle.
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
     pub fn commit(mut self) -> Result<TxId, Error> {
         let result = self.db.commit_exclusive_handle(self.tx_id);
         if result.is_ok() {
@@ -7049,10 +7046,6 @@ where
 
     fn tx_id(&self) -> OpenTxId {
         self.tx_id
-    }
-
-    fn note_read(&self) {
-        self.has_reads.set(true);
     }
 }
 
