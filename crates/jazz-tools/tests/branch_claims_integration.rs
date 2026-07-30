@@ -652,6 +652,19 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 "one-shot read must fail closed after claim revocation: {revoked_rows:?}"
             );
 
+            // A claim change must rebuild the maintained view under the new
+            // authorization, not merely drain its pending deltas. In
+            // particular, this removal has to arrive before a later write can
+            // trigger another view update.
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "claim revocation removes rows already materialized under the old claim",
+                |updates| has_removed(updates, initial_id),
+            )
+            .await;
+
             let (future_id, _, future_batch) = writer
                 .insert("admin_rooms", row_input!("name" => "must remain private"))
                 .expect("writer inserts post-revocation room");
@@ -660,27 +673,19 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 .await
                 .expect("post-revocation room reaches edge");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            let mut stream_closed = false;
             while tokio::time::Instant::now() < deadline {
                 let wait = (deadline - tokio::time::Instant::now()).min(Duration::from_millis(50));
                 match tokio::time::timeout(wait, stream.next()).await {
                     Ok(Some(SubscriptionStreamItem::Delta(delta))) => stream_log.push(delta),
                     Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
                         panic!(
-                            "claim revocation rejected instead of stopping the stream: {reason:?}"
+                            "claim revocation rejected instead of keeping the stream live: {reason:?}"
                         )
                     }
-                    Ok(None) => {
-                        stream_closed = true;
-                        break;
-                    }
+                    Ok(None) => panic!("claim revocation closed the existing subscription"),
                     Err(_) => {}
                 }
             }
-            assert!(
-                stream_closed || has_removed(&stream_log, initial_id),
-                "claim revocation must remove or rebind the existing subscription: {stream_log:#?}"
-            );
             assert!(
                 !has_added(&stream_log, future_id),
                 "revoked subscription must never receive post-revocation rows: {stream_log:#?}"
