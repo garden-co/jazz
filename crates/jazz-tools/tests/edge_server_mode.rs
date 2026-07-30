@@ -17,7 +17,7 @@ use jazz_tools::{
 };
 use serde_json::json;
 use support::{
-    TestingClient, has_added, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added, publish_permissions, wait_for_edge_query_ready, wait_for_query,
     wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -631,6 +631,19 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                 let body = response.text().await.expect("schema publish error body");
                 panic!("policy graph-shaped schema publish failed: {status} {body}");
             }
+
+            publish_permissions(
+                &server.base_url(),
+                server.app_id(),
+                server.admin_secret(),
+                &schema,
+                schema
+                    .iter()
+                    .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
+                    .collect::<Vec<_>>(),
+                None,
+            )
+            .await;
 
             let admin = TestingClient::builder()
                 .with_server(&server)
