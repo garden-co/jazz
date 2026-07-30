@@ -1415,14 +1415,15 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        let rows = self
-            .node
-            .current_rows_for_schema(&request.source.table, self.read_view.read_schema, tier)
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let graph = inline_current_graph(table, rows)
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(CurrentSourceGraph {
-            graph,
+            // Resolve projected sources directly from their storage partitions.
+            // Calling `current_rows_for_schema` here re-enters query compilation;
+            // a renamed table maps back to this resolver and recurses forever.
+            graph: self
+                .projected_content_current_source_graph(request, table, tier, false)?
+                .project_fields(storage_to_canonical_current_source_fields(
+                    table, true, false,
+                )),
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1694,7 +1695,11 @@ fn project_current_content_fields(
                                         candidate.column_type.clone().value_type(),
                                     ))
                                 })
-                                .expect("compiled add lens must target a read-schema column"),
+                                // A multi-lens path can add a temporary column
+                                // and remove it again before reaching the read
+                                // schema. It still needs a type while we carry
+                                // the intermediate projection.
+                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
                         ),
                     );
                 }
