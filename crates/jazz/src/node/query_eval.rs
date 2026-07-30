@@ -11271,94 +11271,12 @@ mod tests {
         ])
     }
 
-    fn owner_policy_schema() -> JazzSchema {
-        JazzSchema::new([TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("assignee", ColumnType::Uuid),
-                ColumnSchema::new("requiresAdmin", ColumnType::Bool),
-            ],
-        )
-        .with_read_policy(Query::from("issues").filter(eq(col("assignee"), claim("sub"))))])
-    }
-
-    #[test]
-    fn lowered_groove_graph_differs_for_distinct_identity_claims() {
-        let schema = owner_policy_schema();
-        let (_dir, mut node) =
-            open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), schema.clone());
-        let shape = Query::from("issues").validate(&schema).unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
-
-        let alice_graph = lowered_current_app_rows_graph(
-            &mut node,
-            &shape,
-            &binding,
-            author(0xa1),
-            &ReadViewSpec::default(),
-        );
-        let bob_graph = lowered_current_app_rows_graph(
-            &mut node,
-            &shape,
-            &binding,
-            author(0xb2),
-            &ReadViewSpec::default(),
-        );
-
-        assert_ne!(
-            alice_graph, bob_graph,
-            "claim('sub') must be encoded in the lowered Groove descriptor graph"
-        );
-    }
-
-    #[test]
-    fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
-        let schema = JazzSchema::new([TableSchema::new(
-            "issues",
-            [
-                ColumnSchema::new("title", ColumnType::String),
-                ColumnSchema::new("requiresAdmin", ColumnType::Bool),
-            ],
-        )]);
-        let (_dir, mut node) =
-            open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), schema.clone());
-        let identity = author(0xa3);
-        let shape = Query::from("issues")
-            .filter(eq(col("requiresAdmin"), claim("isAdmin")))
-            .validate(&schema)
-            .unwrap();
-        let binding = shape.bind(BTreeMap::new()).unwrap();
-
-        node.set_session_claims(
-            identity,
-            BTreeMap::from([("isAdmin".to_owned(), Value::Bool(true))]),
-        );
-        let admin_graph = lowered_current_app_rows_graph(
-            &mut node,
-            &shape,
-            &binding,
-            identity,
-            &ReadViewSpec::default(),
-        );
-
-        node.set_session_claims(
-            identity,
-            BTreeMap::from([("isAdmin".to_owned(), Value::Bool(false))]),
-        );
-        let non_admin_graph = lowered_current_app_rows_graph(
-            &mut node,
-            &shape,
-            &binding,
-            identity,
-            &ReadViewSpec::default(),
-        );
-
-        assert_ne!(
-            admin_graph, non_admin_graph,
-            "session claim values must be encoded in the lowered Groove descriptor graph"
-        );
-    }
+    // Retired graph-shape separation for identity and session claims. Claim values are
+    // now execution bindings, so descriptor-identical prepared graphs are intentional.
+    // `prepared_policy_claims_share_one_shape_and_keep_two_team_results_in_both_orders`
+    // protects the replacement contract: shared shape, but separately and correctly
+    // bound results for each identity in either call order. This preserves isolation
+    // without baking claims into the lowered graph.
 
     #[test]
     fn lowered_groove_graph_differs_for_distinct_read_views() {

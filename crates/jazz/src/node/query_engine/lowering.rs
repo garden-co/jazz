@@ -2589,7 +2589,11 @@ fn align_union_route_fields(
         .difference(&branch.fields)
         .cloned()
         .collect::<BTreeSet<_>>();
-    if missing.iter().any(|field| !route_fields.contains(field)) {
+    if missing.iter().any(|field| {
+        !route_fields.contains(field)
+            && route_param_from_field(field).is_none()
+            && claim_path_from_param_field(field).is_none()
+    }) {
         return Err(UnsupportedReason::Operator(
             "union branches must output the same fields".to_owned(),
         ));
@@ -2606,15 +2610,28 @@ fn align_union_route_fields(
                 "union route field has no binding-source producer".to_owned(),
             )
         })?;
+        let additional_user_params = missing.iter().filter_map(|field| {
+            let param = route_param_from_field(field)?;
+            request
+                .input
+                .binding
+                .param_types
+                .get(param)
+                .or_else(|| request.input.binding.extra_user_params.get(param))
+                .cloned()
+                .map(|ty| (param.to_owned(), ty))
+        });
         let binding = GraphBuilder::binding_source(
             binding_source_shape,
-            binding_source_descriptor_with_user_params(request, [])?,
+            binding_source_descriptor_with_user_params(request, additional_user_params)?,
         );
         let project_fields = fields
             .iter()
             .map(|field| {
                 if branch.fields.contains(field) {
                     ProjectField::renamed(left_field(field), field.clone())
+                } else if let Some(param) = route_param_from_field(field) {
+                    ProjectField::renamed(right_field(param), field.clone())
                 } else {
                     ProjectField::renamed(right_field(field), field.clone())
                 }
@@ -2798,6 +2815,65 @@ fn lower_linear_plan_steps(
                         "filters on value/frontier sources are not lowered yet".to_owned(),
                     )
                 })?;
+                // A parameterized equality under `OR` cannot be represented
+                // by the scalar predicate node: its value is an execution
+                // binding, not a graph literal. Lower each disjunct as its
+                // own binding-aware branch, then align the routes so a public
+                // arm is evaluated for every binding as well.
+                if let PredicateExpr::Or(predicates) = predicate
+                    && predicates.iter().any(predicate_contains_param)
+                {
+                    let mut branches = Vec::with_capacity(predicates.len());
+                    for predicate in predicates {
+                        let (joined, residual, equality_routes) =
+                            lower_equality_param_filter_joins(
+                                graph.clone(),
+                                predicate,
+                                source,
+                                root_source,
+                                request,
+                            )?;
+                        let (mut branch_graph, residual, contains_routes) =
+                            lower_array_contains_param_filter_joins(
+                                joined,
+                                &residual,
+                                source,
+                                root_source,
+                                request,
+                            )?;
+                        if !matches!(residual, PredicateExpr::True) {
+                            let predicate =
+                                lower_predicate(&residual, source, root_source, request)?;
+                            branch_graph = if uses_policy_value_comparison(request) {
+                                branch_graph.policy_filter(predicate)
+                            } else {
+                                branch_graph.filter(predicate)
+                            };
+                        }
+                        let mut branch_fields = fields.clone();
+                        branch_fields.extend(equality_routes);
+                        branch_fields.extend(contains_routes);
+                        branches.push(LoweredRelationInput {
+                            graph: branch_graph,
+                            root_source: Some(root_source.clone()),
+                            fields: branch_fields,
+                            nullable_fields: nullable_fields.clone(),
+                            nullable_field_depths: nullable_field_depths.clone(),
+                        });
+                    }
+                    let union_fields = lowered_union_fields(&branches);
+                    let branches = branches
+                        .into_iter()
+                        .map(|branch| align_union_route_fields(branch, &union_fields, request))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    graph = GraphBuilder::union(branches.into_iter().map(|branch| branch.graph));
+                    fields = union_fields;
+                    available_route_fields = route_fields
+                        .intersection(&fields)
+                        .cloned()
+                        .collect();
+                    continue;
+                }
                 let (joined, residual, introduced_route_fields) =
                     lower_equality_param_filter_joins(
                         graph,
@@ -3252,7 +3328,14 @@ fn lower_value_source(
             let source_user_params = columns
                 .iter()
                 .filter_map(|column| match &column.value {
-                    NormalizedValueRef::Param(param) if domain.user_params.contains_key(param) => {
+                    // `prepare_claim_parameters_for_policy` has already
+                    // rewritten bound claims to `Param`.  They are still
+                    // routing values (and must survive this projection), not
+                    // ordinary user parameters.
+                    NormalizedValueRef::Param(param)
+                        if domain.user_params.contains_key(param)
+                            || domain.claim_params.contains_key(param) =>
+                    {
                         Some(param.clone())
                     }
                     NormalizedValueRef::Claim(path) => {
@@ -3896,6 +3979,9 @@ fn lower_equality_param_filter_joins(
             route_param_field(&join.param)
         };
         let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        if join.nullable {
+            preserve_nullable_source_projection(&mut projection, &join.field);
+        }
         projection.extend(
             retained_route_fields
                 .iter()
@@ -3971,6 +4057,9 @@ fn lower_array_contains_param_filter_joins(
                 policy_join_if_needed(graph, binding, [field.clone()], [element_field], request);
             let route_field = param.clone();
             let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+            if nullable {
+                preserve_nullable_source_projection(&mut projection, &field);
+            }
             projection.extend(
                 retained_route_fields
                     .iter()
@@ -4001,20 +4090,19 @@ fn lower_array_contains_param_filter_joins(
         } else {
             // The validated predicate already establishes the needle type. It
             // is only used to extend descriptors for user parameters absent
-            // from a local value source.
+            // from a local value source. `ArrayContains` also represents the
+            // scalar/text contains form, whose parameter has the source type
+            // rather than an array element type.
+            let value_type = match source_field_type(source, &field)
+                .map(non_null_value_type)
+            {
+                Some(ValueType::Array(element)) => element.as_ref().clone(),
+                Some(value_type) => value_type.clone(),
+                None => ValueType::Uuid,
+            };
             binding_source_descriptor_with_user_params(
                 request,
-                [(
-                    param.clone(),
-                    column_type_from_value_type(
-                        source_field_type(source, &field)
-                            .and_then(|ty| match non_null_value_type(ty) {
-                                ValueType::Array(element) => Some(element.as_ref()),
-                                _ => None,
-                            })
-                            .unwrap_or(&ValueType::Uuid),
-                    ),
-                )],
+                [(param.clone(), column_type_from_value_type(&value_type))],
             )?
         };
         let binding =
@@ -4039,6 +4127,9 @@ fn lower_array_contains_param_filter_joins(
             route_param_field(param)
         };
         let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        if nullable {
+            preserve_nullable_source_projection(&mut projection, &field);
+        }
         projection.extend(
             retained_route_fields
                 .iter()
@@ -4057,6 +4148,18 @@ fn lower_array_contains_param_filter_joins(
         _ => PredicateExpr::And(residual),
     };
     Ok((graph, residual, retained_route_fields))
+}
+
+/// A join key is unwrapped so the join can compare its concrete values. Keep
+/// the source-facing descriptor stable afterwards: union arms and terminals
+/// still expose the original nullable source column.
+fn preserve_nullable_source_projection(projection: &mut [ProjectField], source_field: &str) {
+    if let Some(field) = projection
+        .iter_mut()
+        .find(|field| field.output_name == source_field)
+    {
+        *field = ProjectField::nullable(left_field(source_field), source_field.to_owned());
+    }
 }
 
 struct EqualityParamJoin {
@@ -4115,6 +4218,12 @@ fn source_join_field(
             let resolved = require_source_field(source, &user_column_field(field))
                 .or_else(|_| require_source_field(source, field));
             resolved?
+        }
+        NormalizedValueRef::Provenance {
+            source: value_source,
+            field,
+        } if value_source == source_id => {
+            require_source_field(source, provenance_source_field(*field))?
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
             require_source_field(source, &source.row_shape.row_uuid_field)?
