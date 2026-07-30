@@ -5612,7 +5612,11 @@ where
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(&shape.query().table),
+                self.read_policy_schema_for_table_name(
+                    &shape.query().table,
+                    shape.schema_version(),
+                    &input.shape,
+                ),
                 tier,
                 None,
             ),
@@ -5957,7 +5961,11 @@ where
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
-                self.read_policy_schema_for_table_name(&shape.query().table),
+                self.read_policy_schema_for_table_name(
+                    &shape.query().table,
+                    shape.schema_version(),
+                    &input.shape,
+                ),
                 tier,
                 read_view,
                 settled_binding_view,
