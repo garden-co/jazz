@@ -5612,7 +5612,7 @@ where
             reads: current_query_read_set(
                 &input.shape,
                 shape.schema_version(),
-                self.catalogue.current_schema_version_id,
+                self.read_policy_schema_for_table_name(&shape.query().table),
                 tier,
                 None,
             ),
@@ -5957,7 +5957,7 @@ where
             reads: query_read_set_for_read_view(
                 &input.shape,
                 shape.schema_version(),
-                self.catalogue.current_schema_version_id,
+                self.read_policy_schema_for_table_name(&shape.query().table),
                 tier,
                 read_view,
                 settled_binding_view,
@@ -5973,6 +5973,16 @@ where
         shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
+        let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema
+        };
         let query = shape.query();
         let root_source = root_source_id(&query.table);
         let (mut auxiliary_sources, closure_paths) =
@@ -6008,7 +6018,7 @@ where
                     &mut auxiliary_sources,
                     &mut join_contributions,
                     &mut reachable_contributions,
-                    &self.catalogue.schema,
+                    schema,
                     &root_source,
                     base_source_node,
                     "policy_branch:base",
@@ -6048,7 +6058,7 @@ where
                     &mut auxiliary_sources,
                     &mut join_contributions,
                     &mut reachable_contributions,
-                    &self.catalogue.schema,
+                    schema,
                     &root_source,
                     branch_source_node,
                     &format!("policy_branch:{index}"),
@@ -6105,7 +6115,7 @@ where
                 &mut auxiliary_sources,
                 &mut join_contributions,
                 &mut reachable_contributions,
-                &self.catalogue.schema,
+                schema,
                 &root_source,
                 current,
                 "query",
@@ -6126,7 +6136,7 @@ where
             current = normalize_array_subquery(
                 &mut nodes,
                 current,
-                &self.catalogue.schema,
+                schema,
                 &root_source,
                 subquery,
                 &[index],
