@@ -250,6 +250,38 @@ name = "rename_write_authorization"
 required-features = ["test"]
 
 [[test]]
+name = "catalogue_sync_integration"
+required-features = ["test"]
+
+[[test]]
+name = "history_conflict"
+required-features = ["test"]
+
+[[test]]
+name = "clients_sync"
+required-features = ["test"]
+
+[[test]]
+name = "client_restart_integration"
+required-features = ["test"]
+
+[[test]]
+name = "local_first_auth_integration"
+required-features = ["test"]
+
+[[test]]
+name = "gset_merge"
+required-features = ["test"]
+
+[[test]]
+name = "claims_merge_integration"
+required-features = ["test"]
+
+[[test]]
+name = "sync_telemetry_otel"
+required-features = ["test", "otel-core"]
+
+[[test]]
 name = "parameterized_subscription_routing"
 required-features = ["test"]
 
