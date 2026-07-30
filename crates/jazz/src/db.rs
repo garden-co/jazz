@@ -5209,6 +5209,12 @@ where
                     *serve_dirty = true;
                 }
                 if *serve_dirty {
+                    // A coverage-group refresh drains every maintained view below.
+                    // Tick the shared runtime once before that drain rather than once
+                    // per group.
+                    if !coverage_groups.is_empty() {
+                        self.node.borrow_mut().flush_query_runtime()?;
+                    }
                     for (coverage, group) in coverage_groups.iter() {
                         let group_subscription = SubscriptionKey {
                             shape_id: coverage.shape_id,
@@ -5217,7 +5223,7 @@ where
                         };
                         let update = {
                             let mut node = self.node.borrow_mut();
-                            peer.query_update_for_subscription_with_opts(
+                            peer.query_update_for_subscription_with_opts_after_runtime_flush(
                                 &mut node,
                                 group_subscription,
                                 &group.shape,
