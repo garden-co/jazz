@@ -2595,17 +2595,48 @@ fn align_union_route_fields(
         ));
     }
 
-    let project_fields = fields
-        .iter()
-        .map(|field| {
-            if branch.fields.contains(field) {
-                Ok(ProjectField::named(field.clone()))
-            } else {
-                route_literal_project_field(field, request)
-            }
-        })
-        .collect::<Result<Vec<_>, UnsupportedReason>>()?;
-    branch.graph = branch.graph.project_fields(project_fields);
+    // A route declaration is only valid when a binding-source producer is in
+    // the graph.  Do not synthesize a claim value literal for a union arm that
+    // did not happen to mention it: that makes the shared descriptor depend on
+    // the first identity.  Instead pair the missing route fields with the
+    // common binding source, so this arm is evaluated once for each binding.
+    if !missing.is_empty() {
+        let binding_source_shape = request.input.binding.source_shape.clone().ok_or_else(|| {
+            UnsupportedReason::Runtime(
+                "union route field has no binding-source producer".to_owned(),
+            )
+        })?;
+        let binding = GraphBuilder::binding_source(
+            binding_source_shape,
+            binding_source_descriptor_with_user_params(request, [])?,
+        );
+        let project_fields = fields
+            .iter()
+            .map(|field| {
+                if branch.fields.contains(field) {
+                    ProjectField::renamed(left_field(field), field.clone())
+                } else {
+                    ProjectField::renamed(right_field(field), field.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        branch.graph = policy_join_if_needed(
+            branch.graph,
+            binding,
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+            request,
+        )
+        .project_fields(project_fields);
+    } else {
+        branch.graph = branch.graph.project_fields(
+            fields
+                .iter()
+                .cloned()
+                .map(ProjectField::named)
+                .collect::<Vec<_>>(),
+        );
+    }
     branch.fields = fields.clone();
     Ok(branch)
 }
@@ -2775,9 +2806,19 @@ fn lower_linear_plan_steps(
                         root_source,
                         request,
                     )?;
+                let (joined, residual, contains_route_fields) =
+                    lower_array_contains_param_filter_joins(
+                        joined,
+                        &residual,
+                        source,
+                        root_source,
+                        request,
+                    )?;
                 graph = joined;
                 fields.extend(introduced_route_fields.iter().cloned());
+                fields.extend(contains_route_fields.iter().cloned());
                 available_route_fields.extend(introduced_route_fields);
+                available_route_fields.extend(contains_route_fields);
                 if !matches!(residual, PredicateExpr::True) {
                     let predicate = lower_predicate(&residual, source, root_source, request)?;
                     graph = if uses_policy_value_comparison(request) {
@@ -3869,6 +3910,145 @@ fn lower_equality_param_filter_joins(
         }
         graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
+        retained_route_fields.insert(route_field);
+    }
+    let residual = match residual.len() {
+        0 => PredicateExpr::True,
+        1 => residual.pop().expect("one residual predicate"),
+        _ => PredicateExpr::And(residual),
+    };
+    Ok((graph, residual, retained_route_fields))
+}
+
+/// Lower `array_column contains $parameter` through the common binding source.
+/// The predicate operator itself has no parameter slot, so the binding value
+/// must be a graph field rather than a descriptor literal.
+fn lower_array_contains_param_filter_joins(
+    mut graph: GraphBuilder,
+    predicate: &PredicateExpr,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
+    let predicates = match predicate {
+        PredicateExpr::And(predicates) => predicates.as_slice(),
+        _ => std::slice::from_ref(predicate),
+    };
+    let mut residual = Vec::new();
+    let mut retained_route_fields = BTreeSet::<String>::new();
+    for predicate in predicates {
+        let PredicateExpr::ArrayContains { value, needle } = predicate else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        // A claim array on the left is dynamic `IN`: unnest its bound values
+        // and join the source needle against an element.  This keeps the
+        // entire array parameterized (including string UUID coercion) instead
+        // of baking one identity's array into an OR of literals.
+        if let (NormalizedValueRef::Param(param), Some((field, _, nullable))) =
+            (value, source_join_field(needle, source_id, source)?)
+        {
+            let Some(binding_source_shape) = &request.input.binding.source_shape else {
+                residual.push(predicate.clone());
+                continue;
+            };
+            let domain = parameter_domain_for_request(request)?;
+            let is_claim_param = domain.claim_params.contains_key(param);
+            let binding_descriptor = if is_claim_param {
+                binding_source_descriptor_with_user_params(request, [])?
+            } else {
+                residual.push(predicate.clone());
+                continue;
+            };
+            let element_field = format!("{param}__element");
+            let binding =
+                GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor)
+                    .unnest(param.clone(), element_field.clone());
+            if nullable {
+                graph = graph.unwrap_nullable(field.clone());
+            }
+            graph =
+                policy_join_if_needed(graph, binding, [field.clone()], [element_field], request);
+            let route_field = param.clone();
+            let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+            projection.extend(
+                retained_route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+            );
+            projection.push(ProjectField::renamed(
+                right_field(param),
+                route_field.clone(),
+            ));
+            graph = graph.project_fields(projection);
+            retained_route_fields.insert(route_field);
+            continue;
+        }
+        let (Some((field, _, nullable)), NormalizedValueRef::Param(param)) =
+            (source_join_field(value, source_id, source)?, needle)
+        else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let Some(binding_source_shape) = &request.input.binding.source_shape else {
+            residual.push(predicate.clone());
+            continue;
+        };
+        let domain = parameter_domain_for_request(request)?;
+        let is_claim_param = domain.claim_params.contains_key(param);
+        let binding_descriptor = if is_claim_param {
+            binding_source_descriptor_with_user_params(request, [])?
+        } else {
+            // The validated predicate already establishes the needle type. It
+            // is only used to extend descriptors for user parameters absent
+            // from a local value source.
+            binding_source_descriptor_with_user_params(
+                request,
+                [(
+                    param.clone(),
+                    column_type_from_value_type(
+                        source_field_type(source, &field)
+                            .and_then(|ty| match non_null_value_type(ty) {
+                                ValueType::Array(element) => Some(element.as_ref()),
+                                _ => None,
+                            })
+                            .unwrap_or(&ValueType::Uuid),
+                    ),
+                )],
+            )?
+        };
+        let binding =
+            GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
+        if nullable {
+            graph = graph.unwrap_nullable(field.clone());
+        }
+        graph = policy_join_if_needed(
+            graph,
+            binding,
+            std::iter::empty::<String>(),
+            std::iter::empty::<String>(),
+            request,
+        )
+        .filter(GroovePredicateExpr::ContainsField {
+            field: left_field(&field),
+            needle_field: right_field(param),
+        });
+        let route_field = if is_claim_param {
+            param.clone()
+        } else {
+            route_param_field(param)
+        };
+        let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        projection.extend(
+            retained_route_fields
+                .iter()
+                .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+        );
+        projection.push(ProjectField::renamed(
+            right_field(param),
+            route_field.clone(),
+        ));
+        graph = graph.project_fields(projection);
         retained_route_fields.insert(route_field);
     }
     let residual = match residual.len() {
@@ -5759,40 +5939,6 @@ fn fact_terminal_graph(
             },
         })),
     }
-}
-
-fn route_literal_project_field(
-    route_field: &str,
-    request: &QueryProgramRequest,
-) -> Result<ProjectField, UnsupportedReason> {
-    let domain = parameter_domain_for_request(request)?;
-    if let Some(path) = claim_path_from_param_field(route_field) {
-        let value = claim_value(&path, &request.policy)?;
-        let literal = domain
-            .claim_params
-            .get(route_field)
-            .map(|claim| {
-                coerce_literal_for_value_type(value.clone().into(), &claim.ty.value_type())
-            })
-            .unwrap_or_else(|| value.into());
-        return Ok(ProjectField::literal(route_field.to_owned(), literal));
-    }
-    let Some(param) = route_param_from_field(route_field) else {
-        return Err(UnsupportedReason::Runtime(format!(
-            "authorization route field '{route_field}' is neither a claim nor user parameter"
-        )));
-    };
-    let Some(value) = request.input.binding.values.get(param) else {
-        return Err(UnsupportedReason::Runtime(format!(
-            "authorization route field '{route_field}' refers to unbound parameter '{param}'"
-        )));
-    };
-    let literal = domain
-        .user_params
-        .get(param)
-        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.value_type()))
-        .unwrap_or_else(|| value.clone().into());
-    Ok(ProjectField::literal(route_field.to_owned(), literal))
 }
 
 fn relation_edge_graph(

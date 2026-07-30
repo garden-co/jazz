@@ -5455,9 +5455,38 @@ where
         } else {
             (shape, binding)
         };
-        let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let policy = self.query_program_policy_context(identity);
-        let binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
+        // Policy bypass is decided before discovering prepared claims. A
+        // system read has no authenticated claim binding and therefore must
+        // never acquire declarations from a policy it does not execute.
+        let mut binding_claim_params =
+            prepare_claim_parameters_for_policy(&self.catalogue.schema, &mut input_shape, &policy);
+        // The outer graph must declare policy claims before its source resolver
+        // emits the policy subgraph.  Otherwise that subgraph would introduce
+        // an orphan binding source after the outer prepared descriptor was
+        // chosen.  This root-policy prewalk supplies the shared environment to
+        // both graphs; nested policy sources receive it through the resolver.
+        if !matches!(policy, PolicyContext::System) && shape.params().is_empty() {
+            if let Some(table) = self
+                .catalogue
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == shape.query().table)
+            {
+                let policy_query = authorization_query_from_read_policy(table);
+                let policy_shape = policy_query.validate(&self.catalogue.schema)?;
+                let policy_binding = policy_shape.bind(BTreeMap::new())?;
+                let mut policy_input =
+                    self.normalized_row_set_shape(&policy_shape, &policy_binding)?;
+                binding_claim_params.extend(prepare_claim_parameters_for_policy(
+                    &self.catalogue.schema,
+                    &mut policy_input,
+                    &policy,
+                ));
+            }
+        }
         let source_shape = use_prepared_binding_source
             .then(|| {
                 query_binding_source_shape_for_parts_if_needed(
@@ -5715,7 +5744,7 @@ where
             current = aggregate_node;
         }
 
-        let mut normalized = NormalizedRowSetShape {
+        let normalized = NormalizedRowSetShape {
             identity: NormalizedShapeIdentity {
                 shape_id: shape.shape_id(),
                 canonical: shape.canonical_bytes().to_vec(),
@@ -5731,10 +5760,6 @@ where
             reachable_contributions,
             nodes,
         };
-        let claim_params = binding_claim_params_for_shape(&normalized);
-        let binding_source_shape =
-            query_binding_source_shape_for_parts(shape.params(), &claim_params);
-        retarget_binding_value_sources(&mut normalized, &binding_source_shape);
         Ok(normalized)
     }
 
@@ -8339,18 +8364,6 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
-        collect_reachable_seed_claim_params(
-            policy_schema,
-            policy_shape.query(),
-            &mut claim_params,
-        )?;
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
-        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,
@@ -8365,6 +8378,20 @@ where
             },
             other => other,
         };
+        let claim_params = if binding_source_shape.is_some() && binding_user_params.is_empty() {
+            let mut params =
+                prepare_claim_parameters_for_policy(policy_schema, &mut input_shape, &policy);
+            collect_reachable_seed_claim_params(policy_schema, policy_shape.query(), &mut params)?;
+            params
+        } else {
+            BTreeMap::new()
+        };
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -8479,18 +8506,6 @@ where
         } else {
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
-        collect_reachable_seed_claim_params(
-            policy_schema,
-            policy_shape.query(),
-            &mut claim_params,
-        )?;
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
-        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,
@@ -8505,6 +8520,20 @@ where
             },
             other => other,
         };
+        let claim_params = if binding_source_shape.is_some() && binding_user_params.is_empty() {
+            let mut params =
+                prepare_claim_parameters_for_policy(policy_schema, &mut input_shape, &policy);
+            collect_reachable_seed_claim_params(policy_schema, policy_shape.query(), &mut params)?;
+            params
+        } else {
+            BTreeMap::new()
+        };
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -8567,18 +8596,6 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = binding_claim_params_for_shape(&input_shape);
-        collect_reachable_seed_claim_params(
-            &self.catalogue.schema,
-            policy_shape.query(),
-            &mut claim_params,
-        )?;
-        let binding_source_shape = binding_source_shape.clone().or_else(|| {
-            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
-        });
-        if let Some(source_shape) = binding_source_shape.clone() {
-            retarget_binding_value_sources(&mut input_shape, &source_shape);
-        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,
@@ -8593,6 +8610,27 @@ where
             },
             other => other,
         };
+        let claim_params = if binding_source_shape.is_some() && binding_user_params.is_empty() {
+            let mut params = prepare_claim_parameters_for_policy(
+                &self.catalogue.schema,
+                &mut input_shape,
+                &policy,
+            );
+            collect_reachable_seed_claim_params(
+                &self.catalogue.schema,
+                policy_shape.query(),
+                &mut params,
+            )?;
+            params
+        } else {
+            BTreeMap::new()
+        };
+        let binding_source_shape = binding_source_shape.clone().or_else(|| {
+            authorization_binding_source_shape(&policy_shape, &binding_user_params, &claim_params)
+        });
+        if let Some(source_shape) = binding_source_shape.clone() {
+            retarget_binding_value_sources(&mut input_shape, &source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 &policy_shape,
@@ -9245,6 +9283,326 @@ fn binding_claim_params_for_shape(
         collect_claim_field_params_from_node(node, &mut params);
     }
     params
+}
+
+/// Declare claims before lowering the graph, then turn their IR references into
+/// ordinary binding parameters.  Keeping this at the request boundary makes
+/// the policy-context decision explicit: `System` bypasses policy and never
+/// grows a claim domain it cannot bind.
+fn prepare_claim_parameters_for_policy(
+    schema: &JazzSchema,
+    shape: &mut NormalizedRowSetShape,
+    policy: &PolicyContext,
+) -> BTreeMap<String, ProgramClaimParam> {
+    if matches!(policy, PolicyContext::System) {
+        return BTreeMap::new();
+    }
+
+    let mut params = BTreeMap::new();
+    for node in shape.nodes.values() {
+        collect_claim_params_from_node(schema, node, &mut params);
+    }
+    // Missing optional claims are an authorization non-match, not a failed
+    // prepared binding. Leave those references for the policy lowering path,
+    // which deterministically lowers them to false.
+    params.retain(|_, claim| policy_claim_is_bound(&claim.path, policy));
+    parameterize_claim_references(shape, policy);
+    params
+}
+
+fn policy_claim_is_bound(path: &ClaimPath, policy: &PolicyContext) -> bool {
+    let [name] = path.0.as_slice() else {
+        return false;
+    };
+    match policy {
+        PolicyContext::Identity { claims, .. }
+        | PolicyContext::AuthorizationSubplan { claims, .. } => {
+            claims.contains_key(name) || name == "sub"
+        }
+        PolicyContext::System => false,
+    }
+}
+
+fn collect_claim_params_from_node(
+    schema: &JazzSchema,
+    node: &RowSetExpr,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    match node {
+        RowSetExpr::ValueSource { columns, .. } => {
+            for column in columns {
+                collect_claim_param_ref(&column.value, column.ty.clone(), params);
+            }
+        }
+        RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
+            collect_claim_params_from_predicate(schema, predicate, params);
+        }
+        RowSetExpr::Project { columns, .. } => {
+            for column in columns {
+                collect_claim_param_ref(&column.value, column.output.ty.clone(), params);
+            }
+        }
+        RowSetExpr::OrderBy { keys, .. } => {
+            for key in keys {
+                collect_claim_param_ref(&key.value, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::Slice {
+            partition_by,
+            tie_breaker,
+            ..
+        } => {
+            for value in partition_by.iter().chain(tie_breaker) {
+                collect_claim_param_ref(value, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::RecursiveRelation {
+            frontier_key,
+            dedupe_keys,
+            ..
+        } => {
+            collect_claim_param_ref(frontier_key, ColumnType::Uuid, params);
+            for key in dedupe_keys {
+                collect_claim_param_ref(key, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::Distinct { keys, .. } => {
+            for key in keys {
+                collect_claim_param_ref(key, ColumnType::Uuid, params);
+            }
+        }
+        RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
+            collect_claim_params_from_predicate(schema, correlation, params);
+        }
+        RowSetExpr::Aggregate {
+            group_by, outputs, ..
+        } => {
+            for value in group_by {
+                collect_claim_param_ref(value, ColumnType::Uuid, params);
+            }
+            for output in outputs {
+                if let Some(input) = &output.input {
+                    collect_claim_param_ref(input, output.output.ty.clone(), params);
+                }
+            }
+        }
+        RowSetExpr::FrontierSource { columns, .. } => {
+            for column in columns {
+                collect_claim_param_ref(&column.value, column.ty.clone(), params);
+            }
+        }
+        RowSetExpr::Source { .. } | RowSetExpr::Union { .. } => {}
+    }
+}
+
+fn collect_claim_params_from_predicate(
+    schema: &JazzSchema,
+    predicate: &NormalizedPredicateExpr,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    match predicate {
+        NormalizedPredicateExpr::Compare { left, right, .. } => {
+            collect_claim_param_ref(left, normalized_value_type(schema, right), params);
+            collect_claim_param_ref(right, normalized_value_type(schema, left), params);
+        }
+        NormalizedPredicateExpr::In { value, options } => {
+            for option in options {
+                collect_claim_param_ref(option, normalized_value_type(schema, value), params);
+            }
+            let option_type = options
+                .first()
+                .map(|option| normalized_value_type(schema, option))
+                .unwrap_or(ColumnType::Uuid);
+            collect_claim_param_ref(value, option_type, params);
+        }
+        // `contains(array, claim)` binds the element, not the array.  This is
+        // intentionally separate from ordinary comparison inference.
+        NormalizedPredicateExpr::ArrayContains { value, needle } => {
+            collect_claim_param_ref(
+                needle,
+                array_element_type(normalized_value_type(schema, value)),
+                params,
+            );
+            collect_claim_param_ref(
+                value,
+                ColumnType::Array(Box::new(normalized_value_type(schema, needle))),
+                params,
+            );
+        }
+        NormalizedPredicateExpr::TextContains { value, needle } => {
+            collect_claim_param_ref(value, ColumnType::String, params);
+            collect_claim_param_ref(needle, ColumnType::String, params);
+        }
+        NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
+            collect_claim_param_ref(value, ColumnType::Uuid, params);
+        }
+        NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
+            for child in children {
+                collect_claim_params_from_predicate(schema, child, params);
+            }
+        }
+        NormalizedPredicateExpr::Not(child) => {
+            collect_claim_params_from_predicate(schema, child, params);
+        }
+        NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
+    }
+}
+
+fn normalized_value_type(schema: &JazzSchema, value: &NormalizedValueRef) -> ColumnType {
+    match value {
+        NormalizedValueRef::SourceField { source, field } => schema
+            .tables
+            .iter()
+            .find(|table| table.name == source.table)
+            .and_then(|table| table.columns.iter().find(|column| column.name == *field))
+            .map(|column| column.column_type.clone())
+            .unwrap_or(ColumnType::Uuid),
+        NormalizedValueRef::RowId(_) => ColumnType::Uuid,
+        // Existing parameter references have been validated upstream. Their
+        // exact type is supplied by their own declaration, not guessed here.
+        NormalizedValueRef::Param(_) | NormalizedValueRef::Claim(_) => ColumnType::Uuid,
+        // Predicate normalization has already coerced literals against their
+        // column where necessary. Claims in policy predicates are normally
+        // paired with a source field, which is the authoritative case above.
+        NormalizedValueRef::Literal(_) => ColumnType::Uuid,
+        NormalizedValueRef::FrontierColumn { .. } | NormalizedValueRef::Provenance { .. } => {
+            ColumnType::Uuid
+        }
+    }
+}
+
+fn array_element_type(value_type: ColumnType) -> ColumnType {
+    match value_type {
+        ColumnType::Array(element) => *element,
+        other => other,
+    }
+}
+
+fn collect_claim_param_ref(
+    value: &NormalizedValueRef,
+    ty: ColumnType,
+    params: &mut BTreeMap<String, ProgramClaimParam>,
+) {
+    let (name, path) = match value {
+        NormalizedValueRef::Claim(path) => (claim_param_field(path), path.clone()),
+        NormalizedValueRef::Param(name) => match claim_path_from_param_field(name) {
+            Some(path) => (name.clone(), path),
+            None => return,
+        },
+        _ => return,
+    };
+    params.entry(name).or_insert(ProgramClaimParam { path, ty });
+}
+
+fn parameterize_claim_references(shape: &mut NormalizedRowSetShape, policy: &PolicyContext) {
+    for node in shape.nodes.values_mut() {
+        parameterize_claims_in_node(node, policy);
+    }
+}
+
+fn parameterize_claims_in_node(node: &mut RowSetExpr, policy: &PolicyContext) {
+    let mut parameterize = |value: &mut NormalizedValueRef| {
+        if let NormalizedValueRef::Claim(path) = value
+            && policy_claim_is_bound(path, policy)
+        {
+            *value = NormalizedValueRef::Param(claim_param_field(path));
+        }
+    };
+    match node {
+        RowSetExpr::ValueSource { columns, .. } | RowSetExpr::FrontierSource { columns, .. } => {
+            for column in columns {
+                parameterize(&mut column.value);
+            }
+        }
+        RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
+            parameterize_claims_in_predicate(predicate, &mut parameterize)
+        }
+        RowSetExpr::Project { columns, .. } => {
+            for column in columns {
+                parameterize(&mut column.value);
+            }
+        }
+        RowSetExpr::OrderBy { keys, .. } => {
+            for key in keys {
+                parameterize(&mut key.value);
+            }
+        }
+        RowSetExpr::Slice {
+            partition_by,
+            tie_breaker,
+            ..
+        } => {
+            for value in partition_by.iter_mut().chain(tie_breaker) {
+                parameterize(value);
+            }
+        }
+        RowSetExpr::RecursiveRelation {
+            frontier_key,
+            dedupe_keys,
+            ..
+        } => {
+            parameterize(frontier_key);
+            for key in dedupe_keys {
+                parameterize(key);
+            }
+        }
+        RowSetExpr::Distinct { keys, .. } => {
+            for key in keys {
+                parameterize(key);
+            }
+        }
+        RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
+            parameterize_claims_in_predicate(correlation, &mut parameterize)
+        }
+        RowSetExpr::Aggregate {
+            group_by, outputs, ..
+        } => {
+            for value in group_by {
+                parameterize(value);
+            }
+            for output in outputs {
+                if let Some(input) = &mut output.input {
+                    parameterize(input);
+                }
+            }
+        }
+        RowSetExpr::Source { .. } | RowSetExpr::Union { .. } => {}
+    }
+}
+
+fn parameterize_claims_in_predicate(
+    predicate: &mut NormalizedPredicateExpr,
+    parameterize: &mut impl FnMut(&mut NormalizedValueRef),
+) {
+    match predicate {
+        NormalizedPredicateExpr::Compare { left, right, .. } => {
+            parameterize(left);
+            parameterize(right);
+        }
+        NormalizedPredicateExpr::In { value, options } => {
+            parameterize(value);
+            for option in options {
+                parameterize(option);
+            }
+        }
+        NormalizedPredicateExpr::ArrayContains { value, needle }
+        | NormalizedPredicateExpr::TextContains { value, needle } => {
+            parameterize(value);
+            parameterize(needle);
+        }
+        NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
+            parameterize(value)
+        }
+        NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
+            for child in children {
+                parameterize_claims_in_predicate(child, parameterize);
+            }
+        }
+        NormalizedPredicateExpr::Not(child) => {
+            parameterize_claims_in_predicate(child, parameterize)
+        }
+        NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
+    }
 }
 
 fn collect_reachable_seed_claim_params(

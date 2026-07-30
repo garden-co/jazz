@@ -4383,6 +4383,90 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     );
 }
 
+/// INV-QUERY-1A: policy-claim values bind per execution, while both callers
+/// retain one descriptor-identical prepared graph.
+#[test]
+fn prepared_policy_claims_share_one_shape_and_keep_two_team_results_in_both_orders() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("team", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("todos").filter(eq(col("team"), claim("team"))),
+    ))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let identity_a = user(0xa1);
+    let identity_b = user(0xb2);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x91), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("team-a")),
+            ("team".to_owned(), Value::Uuid(identity_a.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x92), 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("team-b")),
+            ("team".to_owned(), Value::Uuid(identity_b.0)),
+        ])),
+    );
+    core.set_session_claims(
+        identity_a,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(identity_a.0))]),
+    );
+    core.set_session_claims(
+        identity_b,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(identity_b.0))]),
+    );
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    for (first, second, first_row, second_row) in [
+        (identity_a, identity_b, row(0x91), row(0x92)),
+        (identity_b, identity_a, row(0x92), row(0x91)),
+    ] {
+        core.query.query_shape_cache.clear();
+        let (_, prepared_binding, first_plan) = core
+            .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, first)
+            .unwrap();
+        let (_, _, second_plan) = core
+            .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, second)
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first_plan, &second_plan));
+
+        let first_rows = core
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &prepared_binding,
+                DurabilityTier::Global,
+                Some(&first_plan),
+                first,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        let second_rows = core
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &prepared_binding,
+                DurabilityTier::Global,
+                Some(&second_plan),
+                second,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(first_rows, BTreeSet::from([first_row]));
+        assert_eq!(second_rows, BTreeSet::from([second_row]));
+    }
+}
+
 #[test]
 fn nullable_claim_equality_policy_branch_allows_matching_row() {
     let reader = user(0xa1);

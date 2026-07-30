@@ -194,6 +194,13 @@ prepared graph MUST use that one shared declaration environment. A claim in a
 prepared graph MUST lower as a parameter reference and MUST NOT lower as a
 policy-context value literal.
 
+A declared claim with no bound value MUST **deny**: it is a policy non-match,
+not a prepared-binding setup error. The implementation MUST emit a structured
+server-side diagnostic for that reason independently of tracing consumers. An
+unbound-claim reason describes the caller's own binding and MAY be surfaced to
+that caller as a structured diagnostic; row-level denial reasons MUST NOT be
+surfaced this way.
+
 The prepared graph descriptor MUST encode that parameter set -- names and
 types, including claim-path identity where names alone do not establish it --
 but MUST NOT encode the values bound for a particular identity. Parameter
