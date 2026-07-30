@@ -413,6 +413,16 @@ fn peel_relation_output_steps(
     let mut limit = None;
     let mut current = expr;
     loop {
+        if !filters.is_empty()
+            && matches!(
+                current,
+                RelationExpr::Offset { .. } | RelationExpr::Limit { .. }
+            )
+        {
+            return Err(relation_unification_error(
+                "gather output filters cannot wrap limit or offset",
+            ));
+        }
         match current {
             RelationExpr::Filter { input, predicate } => {
                 filters.push(predicate);
