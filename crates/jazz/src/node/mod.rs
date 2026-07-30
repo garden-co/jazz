@@ -226,6 +226,8 @@ pub struct NodeState<S> {
     query_engine_read_metrics: QueryEngineReadMetrics,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
+    /// Monotone revision for each identity's process-local session claims.
+    session_claim_revisions: BTreeMap<AuthorId, u64>,
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
@@ -624,6 +626,7 @@ where
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
+            session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
         };
         node.recover_from_storage()?;
@@ -689,9 +692,24 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) {
+        if self.session_claims.get(&identity) == Some(&claims) {
+            return;
+        }
         self.session_claims.insert(identity, claims);
+        let revision = self.session_claim_revisions.entry(identity).or_default();
+        *revision = revision
+            .checked_add(1)
+            .expect("session claim revision overflow must stop authorization delivery");
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+    }
+
+    /// Return the revision of process-local claims for `identity`.
+    pub(crate) fn session_claim_revision(&self, identity: AuthorId) -> u64 {
+        self.session_claim_revisions
+            .get(&identity)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Gate session-scoped serving until an authority has installed its

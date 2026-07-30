@@ -8,11 +8,13 @@ use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
-    policy_expr,
+    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, SubscriptionStreamItem,
+    TableSchema, Value, policy_expr,
 };
 use serde_json::json;
-use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
+use support::{
+    TestingClient, has_added, has_removed, wait_for_query, wait_for_subscription_update,
+};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -59,6 +61,20 @@ fn role_claims_gated_schema() -> Schema {
                             policy_expr::session_where("claims.role", "admin"),
                             policy_expr::session_where("claims.role", "member"),
                         ])),
+                ),
+        )
+        .build()
+}
+
+fn admin_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admin_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(policy_expr::session_where("claims.admin", true)),
                 ),
         )
         .build()
@@ -564,6 +580,152 @@ async fn subscription_matches_claims_select_query() {
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");
             carol.shutdown().await.expect("shutdown carol");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claim_revocation_stops_existing_subscription_from_serving_future_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = admin_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let writer = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbc1")
+                .as_admin()
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let identity = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbc2";
+            let authorized = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(identity)
+                .with_claims(json!({"admin": true}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let query = QueryBuilder::new("admin_rooms").build();
+
+            let (initial_id, _, initial_batch) = writer
+                .insert(
+                    "admin_rooms",
+                    row_input!("name" => "visible before revocation"),
+                )
+                .expect("writer inserts initially visible room");
+            writer
+                .wait_for_batch(initial_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("initial room reaches edge");
+
+            let mut stream = authorized
+                .subscribe(query.clone())
+                .await
+                .expect("authorized identity subscribes");
+            let mut stream_log = Vec::new();
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "authorized subscription receives its initial room",
+                |updates| has_added(updates, initial_id),
+            )
+            .await;
+
+            let revoked = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(identity)
+                .with_claims(json!({"admin": false}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let revoked_rows = revoked
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("revoked identity performs one-shot read");
+            assert!(
+                revoked_rows.is_empty(),
+                "one-shot read must fail closed after claim revocation: {revoked_rows:?}"
+            );
+
+            // A claim change must rebuild the maintained view under the new
+            // authorization, not merely drain its pending deltas. In
+            // particular, this removal has to arrive before a later write can
+            // trigger another view update.
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "claim revocation removes rows already materialized under the old claim",
+                |updates| has_removed(updates, initial_id),
+            )
+            .await;
+
+            let (future_id, _, future_batch) = writer
+                .insert("admin_rooms", row_input!("name" => "must remain private"))
+                .expect("writer inserts post-revocation room");
+            writer
+                .wait_for_batch(future_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("post-revocation room reaches edge");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while tokio::time::Instant::now() < deadline {
+                let wait = (deadline - tokio::time::Instant::now()).min(Duration::from_millis(50));
+                match tokio::time::timeout(wait, stream.next()).await {
+                    Ok(Some(SubscriptionStreamItem::Delta(delta))) => stream_log.push(delta),
+                    Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+                        panic!(
+                            "claim revocation rejected instead of keeping the stream live: {reason:?}"
+                        )
+                    }
+                    Ok(None) => panic!("claim revocation closed the existing subscription"),
+                    Err(_) => {}
+                }
+            }
+            assert!(
+                !has_added(&stream_log, future_id),
+                "revoked subscription must never receive post-revocation rows: {stream_log:#?}"
+            );
+
+            let restored = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id(identity)
+                .with_claims(json!({"admin": true}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (restored_id, _, restored_batch) = writer
+                .insert(
+                    "admin_rooms",
+                    row_input!("name" => "visible after restoration"),
+                )
+                .expect("writer inserts post-restoration room");
+            writer
+                .wait_for_batch(restored_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("post-restoration room reaches edge");
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "restored claim keeps the existing subscription live",
+                |updates| has_added(updates, restored_id),
+            )
+            .await;
+
+            writer.shutdown().await.expect("shutdown writer");
+            authorized
+                .shutdown()
+                .await
+                .expect("shutdown authorized client");
+            revoked.shutdown().await.expect("shutdown revoked client");
+            restored.shutdown().await.expect("shutdown restored client");
             server.shutdown().await;
         })
         .await;

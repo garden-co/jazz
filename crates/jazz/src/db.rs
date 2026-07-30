@@ -3603,6 +3603,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+            observed_session_claim_revision: Cell::new(0),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Upstream {
                 pending,
@@ -3723,6 +3724,7 @@ where
         peer: PeerState,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
+        let session_claim_revision = self.node.borrow().session_claim_revision(identity);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
@@ -3732,6 +3734,7 @@ where
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+            observed_session_claim_revision: Cell::new(session_claim_revision),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Subscriber {
                 peer,
@@ -4642,6 +4645,7 @@ where
     write_state_waiters: WriteStateWaiters,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
+    observed_session_claim_revision: Cell<u64>,
     next_now_ms: Cell<u64>,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
@@ -4715,6 +4719,76 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Rebuild this subscriber's maintained views if its process-local claims
+    /// changed. Policy claim values are bound when a maintained view opens, so
+    /// retaining the old view after a claim change would retain its authority.
+    fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+        let identity = match &self.link {
+            ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
+            ConnectionLink::Upstream { .. } => return Ok(false),
+        };
+        let current_revision = self.node.borrow().session_claim_revision(identity);
+        if self.observed_session_claim_revision.get() == current_revision {
+            return Ok(false);
+        }
+
+        let ConnectionLink::Subscriber {
+            peer,
+            coverage_groups,
+            served_current_rows,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("subscriber identity requires a subscriber link")
+        };
+        let groups = coverage_groups
+            .iter()
+            .map(|(coverage, group)| {
+                (
+                    coverage.clone(),
+                    group.shape.clone(),
+                    group.binding.clone(),
+                    group.subscribers.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (coverage, shape, binding, subscribers) in groups {
+            let maintained_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let update = {
+                let mut node = self.node.borrow_mut();
+                peer.rehydrate_query_for_subscription_with_opts(
+                    &mut node,
+                    maintained_subscription,
+                    &shape,
+                    &binding,
+                    coverage.opts,
+                )?
+            };
+            for subscription in subscribers {
+                send_with_content_extents(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    retarget_view_update(update.clone(), subscription),
+                )?;
+            }
+        }
+        for table in served_current_rows.values() {
+            let update = {
+                let mut node = self.node.borrow_mut();
+                peer.current_rows_update(&mut node, table)?
+            };
+            send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+        }
+
+        self.observed_session_claim_revision.set(current_revision);
+        Ok(true)
+    }
+
     /// Serve a whole-table current-row view to this subscriber immediately and
     /// refresh it on later ticks.
     pub fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
@@ -4826,6 +4900,7 @@ where
         let mut stats = DbTickStats::default();
         let tick_now_ms = self.next_now_ms();
         self.observe_shared_subscriber_dirty_epoch();
+        self.rebind_subscriber_views_after_claim_change()?;
         match &mut self.link {
             ConnectionLink::Upstream {
                 pending,
