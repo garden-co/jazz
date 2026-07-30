@@ -7,7 +7,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};

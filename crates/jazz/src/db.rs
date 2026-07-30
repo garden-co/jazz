@@ -2067,7 +2067,14 @@ where
             .map(|schema| schema.schema.clone())
     }
 
-    /// Open an owned mergeable transaction handle over the current local snapshot.
+    /// Open a mergeable transaction and return its id.
+    ///
+    /// The caller owns this transaction's lifetime and must commit it with
+    /// [`Db::commit_mergeable_handle`] or abandon it with
+    /// [`Db::abandon_transaction_handle`]. Perform its writes through a
+    /// [`MergeableTxRef`], which can be reconstructed from this id for each
+    /// foreign-function call. Rust callers that want RAII should use
+    /// [`Db::mergeable_tx`] instead.
     pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
         self.node
             .node
@@ -2076,7 +2083,9 @@ where
             .map_err(Into::into)
     }
 
-    /// Open an owned mergeable transaction authored and permission-checked as `author`.
+    /// Open a mergeable transaction authored and permission-checked as `author`.
+    ///
+    /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
     pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
         self.node
             .node
@@ -2085,22 +2094,17 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a full row value in an owned mergeable transaction.
-    /// Stage an insert in an owned mergeable transaction.
+    /// Return a non-owning operations handle for an already-open mergeable transaction.
     ///
-    /// This and its `mergeable_update` / `mergeable_delete` / `mergeable_restore`
-    /// siblings are the single implementation of mergeable staging.
-    /// [`MergeableTx`] is a thin handle that holds an `OpenTxId` and delegates
-    /// to exactly these methods, adding a read overlay and abandon-on-drop.
-    ///
-    /// Both layers exist because callers differ in who owns the transaction's
-    /// lifetime. Rust callers want the RAII handle. The wasm and napi bindings
-    /// cannot hold one: JS keeps the transaction open across separate FFI calls,
-    /// so there is no Rust frame to borrow across, and constructing a
-    /// [`MergeableTx`] per call would abandon the transaction when that handle
-    /// dropped at the end of the call. Those callers own the lifetime themselves
-    /// and drive these primitives by id.
-    pub fn mergeable_insert(
+    /// This handle never closes the transaction when dropped, so it is suitable
+    /// for a single call in a binding that retains `tx_id` between calls. Its
+    /// CRUD API is defined by [`MergeableTxOps`] and is shared with the owning
+    /// [`MergeableTx`] handle.
+    pub fn mergeable_tx_ref(&self, tx_id: OpenTxId) -> MergeableTxRef<'_, S> {
+        MergeableTxRef { db: self, tx_id }
+    }
+
+    fn stage_mergeable_insert(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2116,8 +2120,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage an update patch in an owned mergeable transaction.
-    pub fn mergeable_update(
+    fn stage_mergeable_update(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2132,8 +2135,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a soft delete in an owned mergeable transaction.
-    pub fn mergeable_delete(
+    fn stage_mergeable_delete(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2156,8 +2158,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage paired content and deletion-register restore writes, applying defaults for omitted columns.
-    pub fn mergeable_restore(
+    fn stage_mergeable_restore(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2220,22 +2221,41 @@ where
     }
 
     /// Open an exclusive transaction over the current local snapshot.
+    ///
+    /// This is the owning, RAII flavour. It abandons an uncommitted transaction
+    /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
+    /// `OpenTxId` and owns that lifetime explicitly.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
         let tx_id = self.open_exclusive_handle()?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
-            has_reads: Cell::new(false),
+            committed: false,
         })
     }
 
-    /// Open an owned exclusive transaction handle over the current local snapshot.
+    /// Open an exclusive transaction and return its id.
+    ///
+    /// The caller owns this transaction's lifetime and must commit it with
+    /// [`Db::commit_exclusive_handle`] or abandon it with
+    /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
+    /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
+    /// [`Db::exclusive_tx`] instead.
     pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
         self.open_exclusive_handle()
     }
 
-    /// Read one row inside an owned exclusive transaction handle.
-    pub fn exclusive_read(
+    /// Return a non-owning operations handle for an already-open exclusive transaction.
+    ///
+    /// This handle never closes the transaction when dropped, so it is suitable
+    /// for a single call in a binding that retains `tx_id` between calls. Its
+    /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
+    /// [`ExclusiveTx`] handle.
+    pub fn exclusive_tx_ref(&self, tx_id: OpenTxId) -> ExclusiveTxRef<'_, S> {
+        ExclusiveTxRef { db: self, tx_id }
+    }
+
+    fn exclusive_read(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2248,8 +2268,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Read a prepared query inside an owned exclusive transaction handle.
-    pub fn exclusive_all(
+    fn exclusive_all(
         &self,
         tx_id: OpenTxId,
         prepared: &PreparedQuery,
@@ -2257,8 +2276,7 @@ where
         self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
     }
 
-    /// Read a prepared query inside an owned exclusive transaction handle as `author`.
-    pub fn exclusive_all_for_identity(
+    fn exclusive_all_for_identity(
         &self,
         tx_id: OpenTxId,
         prepared: &PreparedQuery,
@@ -2271,8 +2289,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a full row value inside an owned exclusive transaction handle.
-    pub fn exclusive_write(
+    fn stage_exclusive_insert(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2287,21 +2304,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage an update inside an owned exclusive transaction handle.
-    pub fn exclusive_update(
-        &self,
-        tx_id: OpenTxId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<(), Error> {
-        let mut cells = self.exclusive_read(tx_id, table, row)?.unwrap_or_default();
-        cells.extend(patch);
-        self.exclusive_write(tx_id, table, row, cells)
-    }
-
-    /// Stage a soft delete inside an owned exclusive transaction handle.
-    pub fn exclusive_delete(
+    fn stage_exclusive_delete(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2320,8 +2323,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a restore inside an owned exclusive transaction handle, applying defaults for omitted columns.
-    pub fn exclusive_restore(
+    fn stage_exclusive_restore(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -6700,12 +6702,149 @@ macro_rules! row {
     }};
 }
 
-/// Builder for a group of mergeable writes committed as one transaction.
+/// CRUD operations for an open mergeable transaction.
 ///
-/// This is the Rust-facing handle: it owns the transaction's lifetime and
-/// abandons it on drop. Every method delegates to the `Db::mergeable_*`
-/// primitives, which are the single implementation — see their documentation
-/// for why both layers exist.
+/// [`MergeableTx`] and [`MergeableTxRef`] implement this trait, so mergeable
+/// CRUD has one definition regardless of who owns the transaction lifetime.
+/// Import this trait to call its methods.
+pub trait MergeableTxOps<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
+
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTxId;
+
+    /// Stage an insert with a generated row id.
+    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells)?;
+        Ok(row)
+    }
+
+    /// Stage an insert with a caller-supplied row id.
+    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
+    fn insert_with_id_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
+    }
+
+    /// Stage an update; omitted fields keep the transaction-local value.
+    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, None)
+    }
+
+    /// Stage an update with an explicit millisecond provenance time.
+    fn update_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, Some(now_ms))
+    }
+
+    /// Stage a soft delete.
+    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, None)
+    }
+
+    /// Stage a soft delete with explicit millisecond provenance time.
+    fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, Some(now_ms))
+    }
+
+    /// Stage a restore, applying defaults for omitted columns.
+    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, None)
+    }
+
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
+    fn restore_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, Some(now_ms))
+    }
+
+    /// Read one row with this transaction's pending writes overlaid.
+    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db()
+            .node
+            .node
+            .borrow_mut()
+            .tx_read(self.tx_id(), table, row)
+            .map_err(Into::into)
+    }
+
+    /// Stage an insert with an optional explicit provenance time.
+    fn insert_with_id_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
+    }
+
+    /// Stage an update with an optional explicit provenance time.
+    fn update_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
+    }
+
+    /// Stage a deletion with an optional explicit provenance time.
+    fn delete_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
+    }
+
+    /// Stage a restore with an optional explicit provenance time.
+    fn restore_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
+    }
+}
+
+/// Owning, Rust-facing handle for a group of mergeable writes.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
+/// [`OpenTxId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -6724,122 +6863,11 @@ impl<S> MergeableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Stage an insert with a generated row id.
-    pub fn insert(&mut self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db.row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells)?;
-        Ok(row)
-    }
-
-    /// Stage an insert with a caller-supplied row id.
-    pub fn insert_with_id(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, None)
-    }
-
-    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    pub fn insert_with_id_at_ms(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
-    }
-
-    fn insert_with_id_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db
-            .mergeable_insert(self.tx_id, table, row, cells, now_ms)
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    pub fn update(&mut self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, None)
-    }
-
-    /// Stage an update with an explicit millisecond provenance time.
-    pub fn update_at_ms(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, Some(now_ms))
-    }
-
-    fn update_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db
-            .mergeable_update(self.tx_id, table, row, patch, now_ms)
-    }
-
-    /// Stage a soft delete.
-    pub fn delete(&mut self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, None)
-    }
-
-    /// Stage a soft delete with explicit millisecond provenance time.
-    pub fn delete_at_ms(&mut self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms))
-    }
-
-    fn delete_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db.mergeable_delete(self.tx_id, table, row, now_ms)
-    }
-
-    /// Stage a restore, applying defaults for omitted columns.
-    pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, None)
-    }
-
-    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
-    pub fn restore_at_ms(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, Some(now_ms))
-    }
-
-    fn restore_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db
-            .mergeable_restore(self.tx_id, table, row, cells, now_ms)
-    }
-
     /// Commit all staged writes as one mergeable transaction.
     ///
-    /// On failure the transaction is left open and `Drop` abandons it, so a
-    /// failed commit does not leak an open handle.
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
     pub fn commit(mut self) -> Result<TxId, Error> {
         let result = self.db.commit_mergeable_handle(self.tx_id);
         if result.is_ok() {
@@ -6847,15 +6875,43 @@ where
         }
         result
     }
+}
 
-    /// Read one row with this transaction's pending writes overlaid.
-    pub fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+impl<S> MergeableTxOps<S> for MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
         self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_read(self.tx_id, table, row)
-            .map_err(Into::into)
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
+    }
+}
+
+/// Non-owning operations handle for an already-open mergeable transaction.
+///
+/// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
+/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct MergeableTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+}
+
+impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
     }
 }
 
@@ -6871,93 +6927,162 @@ where
     }
 }
 
-/// Builder for an exclusive transaction over a stable snapshot.
-pub struct ExclusiveTx<'a, S>
+/// CRUD and read operations for an open exclusive transaction.
+///
+/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
+/// operations have one definition regardless of who owns the transaction
+/// lifetime. Import this trait to call its methods.
+pub trait ExclusiveTxOps<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    db: &'a Db<S>,
-    tx_id: OpenTxId,
-    has_reads: Cell<bool>,
-}
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
 
-impl<S> ExclusiveTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTxId;
+
     /// Read one row inside the exclusive transaction.
-    pub fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.has_reads.set(true);
-        self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_read(self.tx_id, table, row)
-            .map_err(Into::into)
+    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db().exclusive_read(self.tx_id(), table, row)
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
-    pub fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.has_reads.set(true);
-        self.db
+    fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
             .node
             .node
             .borrow_mut()
-            .tx_current_rows(self.tx_id, table)
+            .tx_current_rows(self.tx_id(), table)
             .map_err(Into::into)
     }
 
+    /// Read a prepared query inside the exclusive transaction.
+    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.db().exclusive_all(self.tx_id(), prepared)
+    }
+
+    /// Read a prepared query inside the exclusive transaction as `author`.
+    fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+    }
+
     /// Stage an insert with a generated row id.
-    pub fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db.row_id_source.borrow_mut().next_row_id();
+    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
         self.insert_with_id(table, row, cells)?;
         Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id.
-    pub fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        let cells = self.db.apply_insert_defaults(table, cells)?;
-        self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_write(self.tx_id, table, row, cells, None)
-            .map_err(Into::into)
+    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_insert(self.tx_id(), table, row, cells)
     }
 
     /// Stage an update; omitted fields keep the transaction-local value.
-    pub fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
         let mut cells = self.read(table, row)?.unwrap_or_default();
         cells.extend(patch);
         self.insert_with_id(table, row, cells)
     }
 
     /// Stage a soft delete.
-    pub fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_write(
-                self.tx_id,
-                table,
-                row,
-                BTreeMap::<String, Value>::new(),
-                Some(DeletionEvent::Deleted),
-            )
-            .map_err(Into::into)
+    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db().stage_exclusive_delete(self.tx_id(), table, row)
     }
 
+    /// Stage a restore, applying defaults for omitted columns.
+    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+    }
+}
+
+/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
+/// [`OpenTxId`] between calls and must not close the transaction on return.
+pub struct ExclusiveTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+    committed: bool,
+}
+
+impl<S> ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     /// Commit the exclusive transaction.
-    pub fn commit(self) -> Result<TxId, Error> {
-        let (tx_id, unit) = self.db.node.node.borrow_mut().commit_exclusive(
-            self.tx_id,
-            self.db.identity.author,
-            self.db.next_now_ms(),
-        )?;
-        self.db.finalize_local_exclusive_unit(tx_id, unit)?;
-        self.db.refresh_subscriptions()?;
-        Ok(tx_id)
+    ///
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
+    pub fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_exclusive_handle(self.tx_id);
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
+    }
+}
+
+impl<S> Drop for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = self.db.abandon_exclusive_handle(self.tx_id);
+    }
+}
+
+/// Non-owning operations handle for an already-open exclusive transaction.
+///
+/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
+/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct ExclusiveTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
     }
 }
 

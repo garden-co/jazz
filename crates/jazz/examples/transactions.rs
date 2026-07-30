@@ -2,7 +2,9 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, Error, Node, ReadOpts, RowCells, SeededRowIdSource};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, Error, MergeableTxOps, Node, ReadOpts, RowCells, SeededRowIdSource,
+};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -196,7 +198,7 @@ fn write_rejected(reason: RejectionReason) -> RejectionReason {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = open_db()?;
-    let mut mergeable = db.mergeable_tx()?;
+    let mergeable = db.mergeable_tx()?;
     let first = mergeable.insert("todos", todo_cells("write examples", false))?;
     let second = mergeable.insert("todos", todo_cells("run examples", true))?;
     let mergeable_tx = mergeable.commit()?;
