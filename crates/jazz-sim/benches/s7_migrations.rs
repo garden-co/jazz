@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
@@ -184,7 +184,7 @@ fn commit_client_mergeable(
     row: RowUuid,
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
-    let mut tx = client.db.mergeable_tx();
+    let tx = client.db.mergeable_tx().unwrap();
     tx.insert_with_id(table, row, cells).unwrap();
     tx.commit().unwrap();
     client.db.tick().unwrap();
