@@ -118,6 +118,18 @@ schema versions.
 
 The key idea in this proposal is to **distinguish unset fields from default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Default values are only applied when returning rows with unset fields to users. When decoding an older layout, physical columns introduced only by later layouts are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
 
+For every content write, we need to:
+
+- translate that write to the current schema (preserving dropped columns)
+- load the write’s declared causal parent (also translated to the current schema)
+  - if there are multiple parents, synthetize a merge row for them
+- determine each column's value for the new row version, with the following precedence:
+  - explicit value on new version
+  - explicit value from the parent version
+  - otherwise keep unset
+
+**Note:** An inherited value must not become an “explicit setter”; otherwise it may incorrectly compete with real writes during LWW conflict resolution.
+
 When resolving conflicts between row versions:
 
 - set values always take precedence over unset values when using LWW
