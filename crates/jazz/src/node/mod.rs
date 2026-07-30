@@ -226,6 +226,9 @@ pub struct NodeState<S> {
     query_engine_read_metrics: QueryEngineReadMetrics,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
+    /// Whether this authority has installed the permissions head that governs
+    /// session-scoped reads and writes.
+    permissions_ready: bool,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -621,6 +624,7 @@ where
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
+            permissions_ready: true,
         };
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
@@ -688,6 +692,16 @@ where
         self.session_claims.insert(identity, claims);
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+    }
+
+    /// Gate session-scoped serving until an authority has installed its
+    /// permissions head. Local/offline nodes stay ready by default.
+    pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
+        self.permissions_ready = ready;
+    }
+
+    pub(crate) fn permissions_ready(&self) -> bool {
+        self.permissions_ready
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
@@ -3477,8 +3491,11 @@ where
                     .table_lenses
                     .iter()
                     .find(|candidate| candidate.target_table == current_table),
-            }
-            .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            };
+            let Some(table_lens) = table_lens else {
+                self.catalogue.compiled_lens_cache.insert(key, None);
+                return Ok(None);
+            };
             match direction {
                 LensPathDirection::Forward => {
                     for op in &table_lens.ops {

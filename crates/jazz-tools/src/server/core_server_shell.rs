@@ -6,6 +6,7 @@ use jazz::db::{CommitUnitTrust, DbIdentity, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use jazz::node::EdgeCacheBudget;
+use jazz::protocol::MigrationLens;
 use jazz::schema::JazzSchema;
 use jazz_server::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
@@ -32,7 +33,13 @@ impl ServerShellHandle {
         schema: JazzSchema,
         storage_config: StorageConfig,
     ) -> Result<Self, String> {
-        Self::start_with_storage_config(schema, storage_config, NodeRole::Core, None)
+        Self::start_with_storage_config_and_permissions(
+            schema,
+            storage_config,
+            NodeRole::Core,
+            None,
+            false,
+        )
     }
 
     pub(crate) fn start_with_storage_config(
@@ -40,6 +47,22 @@ impl ServerShellHandle {
         storage_config: StorageConfig,
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
+    ) -> Result<Self, String> {
+        Self::start_with_storage_config_and_permissions(
+            schema,
+            storage_config,
+            role,
+            edge_cache_budget,
+            true,
+        )
+    }
+
+    fn start_with_storage_config_and_permissions(
+        schema: JazzSchema,
+        storage_config: StorageConfig,
+        role: NodeRole,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+        permissions_ready: bool,
     ) -> Result<Self, String> {
         let (jobs, receiver) = mpsc::channel::<ServerShellJob>();
         let (started_tx, started_rx) = mpsc::channel();
@@ -63,7 +86,12 @@ impl ServerShellHandle {
                     None => config,
                 };
                 let shell = match InMemoryServerShell::start_with_storage(config, storage_config) {
-                    Ok(shell) => {
+                    Ok(mut shell) => {
+                        if !permissions_ready && let Err(error) = shell.set_permissions_ready(false)
+                        {
+                            let _ = started_tx.send(Err(error.to_string()));
+                            return;
+                        }
                         let _ = started_tx.send(Ok(()));
                         shell
                     }
@@ -104,16 +132,43 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) async fn publish_schema(
+    pub(crate) async fn publish_catalogue_schema(
         &self,
         schema: JazzSchema,
     ) -> Result<SchemaVersionId, String> {
         self.run(move |shell| {
             shell
-                .publish_runtime_schema(schema)
+                .publish_catalogue_schema(schema)
                 .map_err(|error| error.to_string())
         })
         .await
+    }
+
+    pub(crate) async fn publish_lens(&self, lens: MigrationLens) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .publish_runtime_lens(lens)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub(crate) async fn publish_permissions_schema(
+        &self,
+        schema: JazzSchema,
+    ) -> Result<SchemaVersionId, String> {
+        let activity_tx = self.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .publish_permissions_schema(schema)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
     }
 
     pub(crate) async fn receive_tick_take(

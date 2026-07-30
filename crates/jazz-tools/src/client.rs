@@ -1278,6 +1278,9 @@ impl ClientDbInner {
                             jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
                                 detail,
                             } => SubscriptionRejectReason::UnsupportedShapeCapability { detail },
+                            jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+                                SubscriptionRejectReason::ShapeRegistrationPendingCatalogueAdmission
+                            }
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
                     }

@@ -583,56 +583,24 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
-    let public_schema_convert = match state.core_server_shell().is_some()
-        || state.core_server_shell_storage_config.is_some()
+    if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
+        && let Err(err) =
+            crate::server::public_schema_convert::convert_public_schema(&request.schema)
     {
-        true => {
-            match crate::server::public_schema_convert::convert_public_schema(&request.schema) {
-                Ok(schema) => Some(schema),
-                Err(err) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::bad_request(format!(
-                            "schema is not supported by the server shell: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        false => None,
-    };
-
-    let schema_hash = SchemaHash::compute(&request.schema);
-    if let Some(schema) = public_schema_convert.clone() {
-        let core_server_shell = match state.core_server_shell() {
-            Some(core_server_shell) => core_server_shell,
-            None => match state.start_core_server_shell(schema.clone()) {
-                Ok(core_server_shell) => core_server_shell,
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::internal(format!(
-                            "failed to start server shell: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-            },
-        };
-        if let Err(err) = core_server_shell.publish_schema(schema).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to publish schema to server shell: {err}"
-                ))),
-            )
-                .into_response();
-        }
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(format!(
+                "schema is not supported by the server shell: {err}"
+            ))),
+        )
+            .into_response();
     }
+
+    let schema = request.schema;
+    let schema_hash = SchemaHash::compute(&schema);
     let object_id = match state
         .catalogue
-        .publish_schema(&state.catalogue_store, request.schema)
+        .publish_schema(&state.catalogue_store, schema.clone())
     {
         Ok(object_id) => object_id,
         Err(err) => {
@@ -645,6 +613,21 @@ pub(super) async fn publish_schema_handler(
                 .into_response();
         }
     };
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
+        &state,
+        std::slice::from_ref(&schema),
+        &[],
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to bridge schema into server shell: {err}"
+            ))),
+        )
+            .into_response();
+    }
 
     (
         StatusCode::CREATED,
@@ -827,7 +810,7 @@ pub(super) async fn publish_permissions_handler(
         None => None,
     };
 
-    let mut schema_with_permissions = match state
+    let target_schema = match state
         .catalogue
         .known_schema(&state.catalogue_store, &schema_hash)
     {
@@ -852,6 +835,7 @@ pub(super) async fn publish_permissions_handler(
                 .into_response();
         }
     };
+    let mut schema_with_permissions = target_schema.clone();
 
     let permissions = request
         .permissions
@@ -873,27 +857,18 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    let public_schema_convert = match state.core_server_shell().is_some()
-        || state.core_server_shell_storage_config.is_some()
+    if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
+        && let Err(err) =
+            crate::server::public_schema_convert::convert_public_schema(&schema_with_permissions)
     {
-        true => {
-            match crate::server::public_schema_convert::convert_public_schema(
-                &schema_with_permissions,
-            ) {
-                Ok(schema) => Some(schema),
-                Err(err) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse::bad_request(format!(
-                            "permissions schema is not supported by the server shell: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        false => None,
-    };
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(format!(
+                "permissions schema is not supported by the server shell: {err}"
+            ))),
+        )
+            .into_response();
+    }
 
     match state.catalogue.publish_permissions_bundle(
         &state.catalogue_store,
@@ -906,31 +881,17 @@ pub(super) async fn publish_permissions_handler(
             .current_permissions_head(&state.catalogue_store)
         {
             Ok(head) => {
-                if let Some(schema) = public_schema_convert {
-                    let core_server_shell = match state.core_server_shell() {
-                        Some(core_server_shell) => core_server_shell,
-                        None => match state.start_core_server_shell(schema.clone()) {
-                            Ok(core_server_shell) => core_server_shell,
-                            Err(err) => {
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(ErrorResponse::internal(format!(
-                                        "failed to start server shell: {err}"
-                                    ))),
-                                )
-                                    .into_response();
-                            }
-                        },
-                    };
-                    if let Err(err) = core_server_shell.publish_schema(schema).await {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse::internal(format!(
-                                "failed to publish permissions schema to server shell: {err}"
-                            ))),
-                        )
-                            .into_response();
-                    }
+                if let Err(err) =
+                    crate::server::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
+                        .await
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse::internal(format!(
+                            "failed to bridge permissions head into server shell: {err}"
+                        ))),
+                    )
+                        .into_response();
                 }
                 let head = head.map(permissions_head_view);
                 (StatusCode::CREATED, Json(PermissionsHeadResponse { head })).into_response()
@@ -1216,6 +1177,22 @@ pub(super) async fn publish_migration_handler(
                 .into_response();
         }
     };
+
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
+        &state,
+        &[],
+        std::slice::from_ref(&lens),
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to bridge migration lens into server shell: {err}"
+            ))),
+        )
+            .into_response();
+    }
 
     if let Err(err) = state.catalogue.flush(&state.catalogue_store) {
         return (

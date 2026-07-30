@@ -44,6 +44,7 @@ Invariant digest:
   `by_table_global_seq` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
+- `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 
 ## Details
 

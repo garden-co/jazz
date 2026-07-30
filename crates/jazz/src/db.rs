@@ -202,6 +202,19 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
+/// Per-subscriber state for a shape/read-view registration.
+///
+/// A missing runtime shape is ambiguous: catalogue admission is temporary,
+/// whereas a capability rejection is permanent for this connection. Keep the
+/// distinction at the protocol boundary instead of inferring either from the
+/// node's registered-shape map.
+#[derive(Clone)]
+enum SubscriberShapeRegistration {
+    Registered(RegisterShapeOptions),
+    PendingCatalogueAdmission(RegisterShapeOptions),
+    RejectedUnsupportedCapability(String),
+}
+
 fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
     match (column_type, default) {
         (GrooveColumnType::Nullable(_), Value::Nullable(_)) => default.clone(),
@@ -1071,6 +1084,7 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
+            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
             propagates_upstream,
             author,
             read_tier,
@@ -2050,6 +2064,12 @@ where
                 pointer,
             })
             .map_err(Into::into)
+    }
+
+    /// Set whether this authority may settle session-scoped reads and writes.
+    /// Enabling it rehydrates all live subscriber views.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.set_permissions_ready(ready)
     }
 
     /// Return the current write-schema pointer known to this database.
@@ -3392,6 +3412,19 @@ where
         Rc::clone(&self.node)
     }
 
+    /// Change whether subscriber links may serve their registered views.
+    /// Publishing a permissions head always rehydrates every live view, so a
+    /// tighter head retracts rows without requiring a reconnect.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.borrow_mut().set_permissions_ready(ready);
+        if ready {
+            for connection in self.connections.borrow().iter() {
+                connection.borrow_mut().rehydrate_subscriber_views()?;
+            }
+        }
+        Ok(())
+    }
+
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
         self.mark_subscriber_connections_dirty();
@@ -3707,7 +3740,8 @@ where
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
                 coverage_groups: BTreeMap::new(),
-                registered_shape_opts: BTreeMap::new(),
+                shape_registrations: BTreeMap::new(),
+                deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 serve_dirty: true,
             },
@@ -3815,6 +3849,54 @@ where
                 state.author,
             )
         };
+        let groove_runtime_token = node.borrow().groove_runtime_token();
+        if state.borrow().groove_runtime_token != groove_runtime_token {
+            let (shape, binding) = {
+                let state = state.borrow();
+                match &state.kind {
+                    SubscriptionKind::Prepared { shape, binding, .. } => {
+                        (shape.clone(), binding.clone())
+                    }
+                }
+            };
+            let (maintained, snapshot) =
+                node.borrow_mut().open_local_maintained_view_subscription(
+                    &shape, &binding, author, read_tier, &read_view, None,
+                )?;
+            let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled = subscription_is_settled(
+                &node.borrow(),
+                &shape,
+                &binding,
+                settled_tier,
+                read_view.clone(),
+            );
+            let mut state_ref = state.borrow_mut();
+            match &mut state_ref.kind {
+                SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } => *maintained_subscription = Some(maintained),
+            }
+            let event = subscription_delta_event_with_reset(
+                read_tier,
+                settled,
+                &state_ref.snapshot,
+                &snapshot,
+                true,
+            );
+            state_ref.groove_runtime_token = groove_runtime_token;
+            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+            state_ref.settled = settled;
+            if state_ref.sender.unbounded_send(event).is_ok() {
+                changed += 1;
+            }
+            drop(state_ref);
+            retained.push(Rc::downgrade(&state));
+            continue;
+        }
         let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
@@ -4599,8 +4681,12 @@ enum ConnectionLink {
         served: BTreeMap<SubscriptionKey, CoverageKey>,
         /// Shared maintained views keyed by query shape, binding, and options.
         coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
-        /// Options from each subscriber `RegisterShape`, keyed by shape and derived read-view key.
-        registered_shape_opts: BTreeMap<ShapeRegistrationKey, RegisterShapeOptions>,
+        /// Explicit state for each subscriber `RegisterShape`, keyed by shape and read view.
+        shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
+        /// Permanent rejections received as later `Subscribe` messages. These
+        /// wait until an unrelated view update has been flushed, so they cannot
+        /// starve a supported subscription on the same connection.
+        deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
         /// True when this subscriber's maintained views may have queued deltas
@@ -4672,6 +4758,66 @@ where
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
         })
+    }
+
+    /// Rehydrate every view served on this subscriber link. This is used when
+    /// an authority installs its first permissions head or replaces it with a
+    /// tighter one: the client keeps the same subscription, but its visible
+    /// membership must be recalculated immediately.
+    fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let ConnectionLink::Subscriber {
+            peer,
+            coverage_groups,
+            serve_dirty,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        let groups = coverage_groups
+            .iter()
+            .map(|(coverage, group)| {
+                (
+                    coverage.clone(),
+                    group.shape.clone(),
+                    group.binding.clone(),
+                    group.subscribers.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (coverage, shape, binding, subscribers) in groups {
+            let group_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let mut update = {
+                let mut node = self.node.borrow_mut();
+                peer.rehydrate_query_for_subscription_with_opts(
+                    &mut node,
+                    group_subscription,
+                    &shape,
+                    &binding,
+                    coverage.opts.clone(),
+                )?
+            };
+            // A policy-head rehydrate is authoritative. Force reset framing
+            // even when the peer's known-state cursor is current: permissions
+            // are not represented in that cursor.
+            if let SyncMessage::ViewUpdate {
+                reset_result_set, ..
+            } = &mut update
+            {
+                *reset_result_set = true;
+            }
+            for subscription in subscribers {
+                let update = retarget_view_update(update.clone(), subscription);
+                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+            }
+        }
+        *serve_dirty = true;
+        Ok(())
     }
 
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
@@ -4961,12 +5107,14 @@ where
                 upstream_subscriptions,
                 served,
                 coverage_groups,
-                registered_shape_opts,
+                shape_registrations,
+                deferred_subscribe_rejections,
                 served_current_rows,
                 serve_dirty,
             } => {
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
+                let mut sent_view_update = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     applied_inbound = true;
                     #[cfg(feature = "sync-autopsy")]
@@ -4981,7 +5129,14 @@ where
                             opts,
                             ast,
                         } => {
+                            let registration_key = (shape_id, opts.read_view_key());
                             if let Err(message) = validate_shape_ast_size(&ast) {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        message.clone(),
+                                    ),
+                                );
                                 send_unsupported_shape_capability_rejection(
                                     &mut *self.transport,
                                     register_shape_rejection_subscription(
@@ -4994,6 +5149,12 @@ where
                                 continue;
                             }
                             if let Err(error) = ensure_supported_register_shape_options(&opts) {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        error.message.clone(),
+                                    ),
+                                );
                                 send_unsupported_shape_capability_rejection(
                                     &mut *self.transport,
                                     register_shape_rejection_subscription(
@@ -5040,6 +5201,12 @@ where
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
                                     {
+                                        shape_registrations.insert(
+                                            registration_key,
+                                            SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                                detail.clone(),
+                                            ),
+                                        );
                                         let subscription = SubscriptionKey {
                                             shape_id,
                                             binding_id: binding.binding_id(),
@@ -5058,14 +5225,33 @@ where
                                     }
                                 }
                             }
-                            let registration_key = (shape_id, opts.read_view_key());
-                            if let Some(existing) = registered_shape_opts.get(&registration_key)
-                                && existing != &opts
-                            {
-                                drop_peer_request(&self.node);
-                                continue;
+                            let awaiting_catalogue_admission = shape.is_none();
+                            if let Some(existing) = shape_registrations.get(&registration_key) {
+                                match existing {
+                                    SubscriberShapeRegistration::Registered(existing_opts)
+                                    | SubscriberShapeRegistration::PendingCatalogueAdmission(
+                                        existing_opts,
+                                    ) if existing_opts != &opts => {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        detail,
+                                    ) => {
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            register_shape_rejection_subscription(
+                                                shape_id,
+                                                opts.read_view_key(),
+                                            ),
+                                            detail.clone(),
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            registered_shape_opts.insert(registration_key, opts);
                             let register_result = {
                                 self.node.borrow_mut().apply_sync_message(
                                     SyncMessage::RegisterShape {
@@ -5085,6 +5271,12 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let registration = if awaiting_catalogue_admission {
+                                SubscriberShapeRegistration::PendingCatalogueAdmission(opts)
+                            } else {
+                                SubscriberShapeRegistration::Registered(opts)
+                            };
+                            shape_registrations.insert(registration_key, registration);
                         }
                         SyncMessage::Subscribe(subscribe) => {
                             if let Err(message) =
@@ -5098,9 +5290,51 @@ where
                             let subscription = subscribe.subscription;
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
-                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                            let registration_key = (shape_id, subscription.read_view);
+                            let Some(registration) =
+                                shape_registrations.get(&registration_key).cloned()
+                            else {
+                                drop_peer_request(&self.node);
                                 continue;
                             };
+                            let pending_catalogue_admission = matches!(
+                                &registration,
+                                SubscriberShapeRegistration::PendingCatalogueAdmission(_)
+                            );
+                            let opts = match registration {
+                                SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                    detail,
+                                ) => {
+                                    // Keep the original permanent rejection, but let views
+                                    // already served by this connection flush first. A rejected
+                                    // shape must not starve unrelated subscriptions.
+                                    deferred_subscribe_rejections.push_back((subscription, detail));
+                                    continue;
+                                }
+                                SubscriberShapeRegistration::Registered(opts)
+                                | SubscriberShapeRegistration::PendingCatalogueAdmission(opts) => {
+                                    opts
+                                }
+                            };
+                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                                if pending_catalogue_admission {
+                                    self.transport
+                                        .send(SyncMessage::SubscribeRejected {
+                                            subscription,
+                                            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+                                        })
+                                        .map_err(transport_error)?;
+                                } else {
+                                    drop_peer_request(&self.node);
+                                }
+                                continue;
+                            };
+                            if pending_catalogue_admission {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::Registered(opts.clone()),
+                                );
+                            }
                             let value_map = shape
                                 .params()
                                 .keys()
@@ -5109,22 +5343,6 @@ where
                                 .collect::<BTreeMap<_, _>>();
                             let binding = match shape.bind(value_map) {
                                 Ok(binding) => binding,
-                                Err(_) => {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
-                            };
-                            let opts = registered_shape_opts
-                                .get(&(shape_id, subscription.read_view))
-                                .cloned()
-                                .ok_or_else(|| {
-                                    Error::new(
-                                        ErrorCode::Protocol,
-                                        "subscription referenced unregistered shape/read view",
-                                    )
-                                });
-                            let opts = match opts {
-                                Ok(opts) => opts,
                                 Err(_) => {
                                     drop_peer_request(&self.node);
                                     continue;
@@ -5165,7 +5383,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let update = if first_subscriber {
+                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let update = if !permissions_ready {
+                                None
+                            } else if first_subscriber {
                                 peer.declare_known_state(group_subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
                                 let update_result = peer
@@ -5196,7 +5417,7 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                retarget_view_update(update, subscription)
+                                Some(retarget_view_update(update, subscription))
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
@@ -5214,23 +5435,11 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                update
+                                Some(update)
                             };
-                            #[cfg(feature = "sync-autopsy")]
-                            sync_autopsy::record(format!(
-                                "subscriber send rehydrate {}",
-                                summarize_sync_message(&update)
-                            ));
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
-                            self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                            send_with_content_extents(
-                                &self.node,
-                                peer,
-                                self.transport.as_mut(),
-                                update,
-                            )?;
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -5241,6 +5450,21 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             served.insert(subscription, coverage);
+                            if let Some(update) = update {
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber send rehydrate {}",
+                                    summarize_sync_message(&update)
+                                ));
+                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
+                                sent_view_update = true;
+                            }
                             if first_subscriber {
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
@@ -5317,6 +5541,26 @@ where
                                 }
                                 _ => None,
                             };
+                            if let Some((tx_id, _)) = &relay_upload
+                                && !self.node.borrow().permissions_ready()
+                            {
+                                let response = SyncMessage::FateUpdate {
+                                    tx_id: *tx_id,
+                                    fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                                        "permissions_head_missing: no published permissions head"
+                                            .to_owned(),
+                                    )),
+                                    global_seq: None,
+                                    durability: None,
+                                };
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                                continue;
+                            }
                             let write_state_tx_id = write_state_update_tx_id(&other);
                             // RegisterShape (registers the shape ahead of its
                             // binding), plus the write-upload path: any
@@ -5363,7 +5607,7 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty {
+                if *serve_dirty && self.node.borrow().permissions_ready() {
                     for (coverage, group) in coverage_groups.iter() {
                         let group_subscription = SubscriptionKey {
                             shape_id: coverage.shape_id,
@@ -5400,6 +5644,7 @@ where
                                     self.transport.as_mut(),
                                     update,
                                 )?;
+                                sent_view_update = true;
                             }
                         }
                     }
@@ -5415,9 +5660,22 @@ where
                                 self.transport.as_mut(),
                                 update,
                             )?;
+                            sent_view_update = true;
                         }
                     }
                     *serve_dirty = false;
+                }
+                if sent_view_update {
+                    while let Some((subscription, detail)) =
+                        deferred_subscribe_rejections.pop_front()
+                    {
+                        send_unsupported_shape_capability_rejection(
+                            &mut *self.transport,
+                            subscription,
+                            detail,
+                        )
+                        .map_err(transport_error)?;
+                    }
                 }
                 let fate_updates = {
                     let mut node = self.node.borrow_mut();
@@ -7176,6 +7434,7 @@ fn write_rejected(reason: RejectionReason) -> Error {
 
 struct SubscriptionState {
     kind: SubscriptionKind,
+    groove_runtime_token: u64,
     propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
