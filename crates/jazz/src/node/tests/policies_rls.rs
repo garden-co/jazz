@@ -1,4 +1,161 @@
 use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch, Predicate, any_of};
+use std::cell::Cell;
+use std::rc::Rc;
+
+// The injected read failure is necessary to exercise the externally visible
+// retry contract: a failed rejection must leave the transaction pending for a
+// later public `finalize_local_mergeable_commit` call.
+#[derive(Clone)]
+struct FailTransactionReadMemoryStorage {
+    inner: MemoryStorage,
+    fail_after_transaction_reads: Rc<Cell<Option<usize>>>,
+}
+
+impl FailTransactionReadMemoryStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            fail_after_transaction_reads: Rc::new(Cell::new(None)),
+        }
+    }
+
+    fn fail_after_transaction_reads(&self, successful_reads: usize) {
+        self.fail_after_transaction_reads.set(Some(successful_reads));
+    }
+}
+
+impl OrderedKvStorage for FailTransactionReadMemoryStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        if key
+            .windows("jazz_transactions".len())
+            .any(|window| window == b"jazz_transactions")
+            && let Some(remaining) = self.fail_after_transaction_reads.get()
+        {
+            if remaining == 0 {
+                self.fail_after_transaction_reads.set(None);
+                return Err(groove::storage::Error::InvalidStorageLayout(
+                    "injected transaction read failure".to_owned(),
+                ));
+            }
+            self.fail_after_transaction_reads.set(Some(remaining - 1));
+        }
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for FailTransactionReadMemoryStorage {
+    fn reopen(
+        mut self,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        self.inner = self.inner.reopen(column_families)?;
+        Ok(self)
+    }
+}
+
+#[test]
+fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
+    let schema = owner_policy_schema();
+    let backend = user(0xb0);
+    let attributed_user = user(0xa1);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
+    let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x90), 10)
+                .made_by(attributed_user)
+                .permission_subject(backend)
+                .cells(owner_cells(attributed_user, "attributed retry")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.transaction_state(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    ));
+    // The finalizer reads its pending transaction and the policy evaluator reads
+    // its transaction provenance before `ingest_rejected_transaction` retries
+    // that lookup to persist the rejection.
+    storage.fail_after_transaction_reads(2);
+    let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
+    assert!(error.to_string().contains("injected transaction read failure"));
+    let pending_state = core.transaction_state(tx_id);
+    assert!(matches!(
+        pending_state,
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    ), "failed finalization must leave the transaction pending, got {pending_state:?}");
+
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+
+    // The retry must still use the trusted backend as its authenticated subject.
+    // `made_by` owns the row and would incorrectly accept this transaction.
+    assert!(matches!(
+        core.transaction_state(tx_id),
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
+    ));
+    assert!(core
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
 
 #[test]
 fn write_policy_rejection_cleans_up_client() {

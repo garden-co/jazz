@@ -65,6 +65,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     maintained: MaintainedSubscriptionView,
     terminal_schemas: MaintainedTerminalSchemas,
     tables: BTreeMap<String, TableSchema>,
+    result_query: JazzQuery,
     result_table: String,
     result_select: Option<Vec<String>>,
     result_set: BTreeSet<ResultMemberEntry>,
@@ -1414,14 +1415,15 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<CurrentSourceGraph, SourceResolutionError> {
-        let rows = self
-            .node
-            .current_rows_for_schema(&request.source.table, self.read_view.read_schema, tier)
-            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        let graph = inline_current_graph(table, rows)
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(CurrentSourceGraph {
-            graph,
+            // Resolve projected sources directly from their storage partitions.
+            // Calling `current_rows_for_schema` here re-enters query compilation;
+            // a renamed table maps back to this resolver and recurses forever.
+            graph: self
+                .projected_content_current_source_graph(request, table, tier, false)?
+                .project_fields(storage_to_canonical_current_source_fields(
+                    table, true, false,
+                )),
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
@@ -1693,7 +1695,11 @@ fn project_current_content_fields(
                                         candidate.column_type.clone().value_type(),
                                     ))
                                 })
-                                .expect("compiled add lens must target a read-schema column"),
+                                // A multi-lens path can add a temporary column
+                                // and remove it again before reaching the read
+                                // schema. It still needs a type while we carry
+                                // the intermediate projection.
+                                .unwrap_or_else(|| ValueType::Nullable(Box::new(ValueType::Bytes))),
                         ),
                     );
                 }
@@ -5027,6 +5033,10 @@ where
             row_keys.insert((row.table().to_owned(), row.row_uuid()));
             rows.push(row);
         }
+        // Result-member ordering is for identity and deduplication, not public
+        // query rank. Membership/windowing is already lowered; only restore the
+        // selected roots to their advertised order before sending a reset.
+        self.apply_query_order(shape.query(), &mut rows)?;
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
@@ -7041,6 +7051,7 @@ where
             maintained,
             terminal_schemas,
             tables,
+            result_query: shape.query().clone(),
             result_table: shape.query().table.clone(),
             result_select: shape.query().select.clone(),
             result_set: BTreeSet::new(),
@@ -7294,6 +7305,10 @@ where
                 rows.push(row);
             }
         }
+        // `result_set` is keyed by member identity, so its BTreeSet iteration
+        // order cannot be exposed as a query reset order. Do not re-window: the
+        // maintained program already chose this result set.
+        self.apply_query_order(&local.result_query, &mut rows)?;
         let root_count = rows.len();
         let mut edges = Vec::with_capacity(local.program_facts.len());
         for fact in &local.program_facts {
@@ -8202,6 +8217,9 @@ where
                 rows.push(self.materialize_current_row(&table, row)?);
             }
         }
+        // Multisink records are transport-key ordered. Restore public root rank
+        // while retaining the lowered program's membership and window.
+        self.apply_query_order(shape.query(), &mut rows)?;
         Ok(rows)
     }
 
