@@ -109,7 +109,7 @@ pub struct NodeOpenReceipt {
     pub recover_storage: Duration,
     /// Recover close markers, aliases, branches, and transaction-clock bounds.
     pub recover_catalogue_state: Duration,
-    /// Validate persisted current rows and rebuild the ahead-current indexes.
+    /// Validate representative persisted current rows for storage-layout compatibility.
     pub validate_current_rows: Duration,
     /// Recover the accepted-global-sequence watermark set.
     pub recover_global_sequences: Duration,
@@ -121,14 +121,14 @@ pub struct NodeOpenReceipt {
     pub recover_known_state: Duration,
     /// Ensure aliases and persist any missing base catalogue records.
     pub finalize_catalogue: Duration,
-    /// Current rows decoded by startup layout validation.
+    /// Representative current rows decoded by startup layout validation.
     pub validated_current_rows: usize,
     /// Accepted global sequence records consumed during recovery.
     pub accepted_global_sequences: usize,
     /// Transaction-index records scanned while recovering global sequences.
     pub global_sequence_records_scanned: usize,
-    /// Ahead-current records consumed while rebuilding in-memory indexes.
-    pub ahead_current_entries: usize,
+    /// Representative ahead-current rows decoded by startup layout validation.
+    pub validated_ahead_current_rows: usize,
 }
 
 #[cfg(test)]

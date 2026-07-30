@@ -74,7 +74,10 @@ fn recovery_reads_latest_ahead_current_and_fallback_versions_from_storage() {
     let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
 
     #[cfg(feature = "testing")]
-    assert_eq!(receipt.ahead_current_entries, 2);
+    {
+        assert_eq!(receipt.validated_current_rows, 1);
+        assert_eq!(receipt.validated_ahead_current_rows, 1);
+    }
     reopened.reset_storage_read_metrics();
     assert_eq!(
         reopened
@@ -114,6 +117,48 @@ fn recovery_reads_latest_ahead_current_and_fallback_versions_from_storage() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(11), title_cells("first"))])
+    );
+}
+
+#[test]
+fn opening_rejects_malformed_representative_ahead_current_row() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        node.commit_mergeable(MergeableCommit::new("todos", row(0xff), 10).cells(title_cells(
+            "latest",
+        )))
+            .unwrap();
+        let table = schema.tables[0].ahead_current_storage_tables()[0]
+            .name
+            .clone();
+        let (key, raw) = node
+            .database
+            .primary_key_last_raw(&table, &[])
+            .unwrap()
+            .unwrap()
+            .into_parts();
+        node.database.close().unwrap();
+        drop(node);
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        let storage =
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        storage.set(&table, &key, &raw[..1]).unwrap();
+        storage.close().unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let Err(error) = NodeState::new(node(1), schema, storage) else {
+        panic!("malformed representative current row must fail open");
+    };
+    assert!(
+        matches!(error, Error::Record(_)),
+        "unexpected open error: {error}"
     );
 }
 

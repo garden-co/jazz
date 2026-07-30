@@ -129,14 +129,14 @@ where
         #[cfg(feature = "testing")]
         let mut validated_current_rows = 0usize;
         #[cfg(feature = "testing")]
-        let mut ahead_current_entries = 0usize;
+        let mut validated_ahead_current_rows = 0usize;
         for table in self.catalogue.schema.tables.clone() {
             #[cfg(feature = "testing")]
             {
                 self.validate_current_row_storage_layout(
                     &table,
                     &mut validated_current_rows,
-                    &mut ahead_current_entries,
+                    &mut validated_ahead_current_rows,
                 )?;
             }
             #[cfg(not(feature = "testing"))]
@@ -162,7 +162,7 @@ where
         if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
             receipt.validate_current_rows = started.elapsed();
             receipt.validated_current_rows = validated_current_rows;
-            receipt.ahead_current_entries = ahead_current_entries;
+            receipt.validated_ahead_current_rows = validated_ahead_current_rows;
         }
         #[cfg(feature = "testing")]
         let stage_started = receipt.as_ref().map(|_| Instant::now());
@@ -314,6 +314,12 @@ where
         #[cfg(feature = "testing")] rows: &mut usize,
         #[cfg(feature = "testing")] ahead_rows: &mut usize,
     ) -> Result<(), Error> {
+        // This treats startup validation as a storage-format compatibility
+        // check, not a full integrity scan. Under the supported lifecycle, one
+        // binary writes one current-row layout and open completes before writes
+        // are accepted. Decode one representative row from each non-empty table
+        // so uniformly old-format stores still fail loudly without making every
+        // open O(current rows). Isolated corruption is detected when accessed.
         let storage_tables = table.global_current_storage_tables();
         self.validate_content_current_rows(
             &storage_tables[0],
@@ -354,19 +360,16 @@ where
         #[cfg(feature = "testing")] ahead_row_count: &mut usize,
     ) -> Result<(), Error> {
         let descriptor = storage_table.record_schema();
-        let rows = self
+        if let Some(raw) = self
             .database
-            .primary_key_scan_raw(&storage_table.name, &[])?
-            .into_iter()
-            .map(|raw| raw.raw().to_vec())
-            .collect::<Vec<_>>();
-        #[cfg(feature = "testing")]
+            .primary_key_last_raw(&storage_table.name, &[])?
         {
-            *row_count += rows.len();
-            *ahead_row_count += rows.len();
-        }
-        for raw in rows {
-            let record = BorrowedRecord::new(&raw, &descriptor);
+            #[cfg(feature = "testing")]
+            {
+                *row_count += 1;
+                *ahead_row_count += 1;
+            }
+            let record = BorrowedRecord::new(raw.raw(), &descriptor);
             match layer {
                 VersionLayer::Content => {
                     record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
@@ -396,14 +399,14 @@ where
         #[cfg(feature = "testing")] row_count: &mut usize,
     ) -> Result<(), Error> {
         let descriptor = storage_table.record_schema();
-        let rows = self
+        if let Some(raw) = self
             .database
-            .primary_key_scan_raw(&storage_table.name, &[])?;
-        #[cfg(feature = "testing")]
+            .primary_key_last_raw(&storage_table.name, &[])?
         {
-            *row_count += rows.len();
-        }
-        for raw in rows {
+            #[cfg(feature = "testing")]
+            {
+                *row_count += 1;
+            }
             let record = BorrowedRecord::new(raw.raw(), &descriptor);
             record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
             record.get_idx(GlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
@@ -418,14 +421,14 @@ where
         #[cfg(feature = "testing")] row_count: &mut usize,
     ) -> Result<(), Error> {
         let descriptor = storage_table.record_schema();
-        let rows = self
+        if let Some(raw) = self
             .database
-            .primary_key_scan_raw(&storage_table.name, &[])?;
-        #[cfg(feature = "testing")]
+            .primary_key_last_raw(&storage_table.name, &[])?
         {
-            *row_count += rows.len();
-        }
-        for raw in rows {
+            #[cfg(feature = "testing")]
+            {
+                *row_count += 1;
+            }
             let record = BorrowedRecord::new(raw.raw(), &descriptor);
             record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;
             record.get_idx(RegisterGlobalCurrentRowRecord::FIELD_PARENTS_IDX)?;
