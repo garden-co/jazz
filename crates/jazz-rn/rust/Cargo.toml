@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 uniffi = "0.30.0"
 thiserror = "1.0.64"
-jazz_tools = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
+jazz = { path = "../../jazz", default-features = false, features = [
   "sqlite",
 ] }
 tokio = { version = "1", features = ["rt"] }

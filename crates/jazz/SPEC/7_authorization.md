@@ -14,25 +14,28 @@ Invariant digest:
 - `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
-- `INV-RLS-1`: A non-system commit unit MUST be rejected with `Fate::Rejected(RejectionReason::AuthorizationDenied)` and MUST NOT ingest accepted version rows when any version in the unit fails its table write policy evaluated against `Transaction.made_by`.
-- `INV-RLS-2`: `AuthorId::SYSTEM` MUST bypass both read and write policy checks.
-- `INV-RLS-3`: `Policy::owner_only(table, column)` MUST compare the named column to `claim("sub")`, where `claim("sub")` is bound from the authenticated `AuthorId`, not from caller-provided query params.
+- `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
+- `INV-RLS-2`: AuthorId::SYSTEM MUST bypass both read and write policy checks.
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("sub"), where claim("sub") is bound from the authenticated AuthorId, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
-- `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer identity's read policy.
+- `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
-- `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current global content version, the delete MUST be denied.
-- `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read policy for that identity.
-- `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated identity.
-- `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen visibility by supplying claim params.
-- `INV-RLS-11`: Relay peer links MUST use `AuthorId::SYSTEM`; edge-client peer links MUST use the terminated client `AuthorId` for policy-composed reads.
-- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or program fact from an exclusive transaction unless all versions required for that view are readable to that recipient.
+- `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
+- `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
+- `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
+- `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
+- `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
+- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
-- `INV-RLS-17`: A write whose `Transaction.made_by` differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge `Node` accepting a `TrustedBackend` link, ch. 9), never from a client `Db`; the write policy is evaluated against the permission subject, while `made_by` remains provenance metadata.
-- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a `Session` link's `made_by` MUST equal that identity or be rejected, while a `TrustedBackend` link MAY attribute with `made_by != identity` and write policy evaluated against the link identity. This is the sync-ingest counterpart to facade attribution (`INV-RLS-17`).
-- `INV-RLS-19`: A required include (an `Include` with `JoinMode::Inner` or `require: true`) MUST be treated as resolvable for a non-system reader only when its target row exists as a current row AND satisfies the target table's read policy for that reader. A parent row whose required include target is missing OR unreadable to the reader MUST be dropped from the result set, so required-include membership cannot reveal the existence of a target the reader may not read. `AuthorId::SYSTEM` bypasses (INV-RLS-2); optional/`Holes` includes keep the parent and withhold an unreadable target (INV-RLS-5).
+- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
+- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
+  reader only when its target row exists as a current row AND satisfies the target
+  table's read policy for that reader; a parent whose required target is missing or
+  unreadable MUST be dropped from the result set.
 
 ## Details
 
@@ -57,17 +60,29 @@ it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
 
 Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
-a policy predicate is satisfied (`INV-RLS-14`). Policy claims come from the
-trusted admission/session layer, never from client-supplied query bindings.
+a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
+this is enforced during policy compilation and claim binding: unsupported
+authorization forms compile to no authorized rows in
+`NodeState::policy_filtered_current_source_graph_via_query_engine`, and
+`NodeState::program_binding_for_shape_and_policy` calls `prepared_claim_value`,
+which refuses an unresolved claim rather than binding it as an allowance. The
+compiler currently lowers equality and inequality, membership/containment,
+boolean composition, columns, literals, and authenticated,
+admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
+column / literal / `claim(...)`. `claim("sub")` resolves to the authenticated
+`AuthorId`. Additional claim names are session claims supplied by the trusted
+admission/session layer and must not be client-supplied query bindings. Predicate
+forms the compiler cannot authorize, such as range and null checks, deny until
+explicitly supported.
 
-**Implementation status (verified 2026-07-27).** The direct evaluator currently
-recognizes equality, inequality, membership/containment, boolean composition,
-columns, literals, and `claim(...)`; range and null forms deny. This is covered
-by `unsupported_policy_predicates_deny_instead_of_allowing` and
-`unresolved_policy_operands_deny_instead_of_allowing`
-(`crates/jazz/src/node/tests/policies_rls.rs`). The public DSL currently lowers
-scalar session-claim checks, including `SessionInList`, to this subset; its
-accepted path forms are an implementation boundary, not a policy contract.
+At the public policy DSL boundary, scalar session-claim checks lower into that
+same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
+to claim/literal equality, and `SessionInList { path: ["claims", "role"],
+values: [...] }` lowers to a scalar claim membership check equivalent to an
+`OR` of claim/literal equality predicates. The core server shell accepts
+`session.user_id` / `session.userId` and one-level `session.claims.<name>` paths
+for these predicates; deeper claim paths and non-scalar session predicates remain
+unsupported at this boundary.
 
 ### 7.2 Write authorization
 
@@ -222,11 +237,9 @@ it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested
 cut**. An ownership change across cuts therefore changes visibility at those
-cuts (`INV-RLS-13`, ch. 5, ch. 11). This is covered by
-`query_rows_at_for_link_evaluates_read_policy_at_historical_cut`
-(`crates/jazz/src/node/tests/time_travel.rs`).
+cuts (`INV-RLS-13`, ch. 5, ch. 11).
 
-### 7.9 Implementation status: provenance and permission vocabulary
+### 7.9 Subsumed provenance and permission notes
 
 The former principal-authorship TODO is now part of this chapter's backlog:
 commit provenance must identify the Jazz principal that performed the write, not
@@ -241,11 +254,6 @@ Auth-mode gating belongs in permissions rather than process-global flags. A
 policy should be able to distinguish anonymous/local/authenticated/backend/system
 admission modes through trusted session claims or first-class admission facts;
 client-supplied values must not widen those facts.
-
-Permission introspection is a dry-run API, not magic columns: `$can*` columns
-cannot express can-insert or richer probes. The facade methods (`can_insert`,
-`can_read`, `can_update`, `can_delete`; ch. 13) evaluate policy without ingest
-(`INV-API-28`).
 
 ## Open Questions
 
@@ -269,6 +277,9 @@ cannot express can-insert or richer probes. The facade methods (`can_insert`,
   composition. Range/null predicates remain fail-closed. Decide whether to add
   direct support for the remaining query predicates or reject them earlier in
   policy-specific validation.
+- 🔶 **History visibility rule.** Decide whether current-row readability should
+  imply visibility for all historical versions of that row, or whether history
+  sync/read must evaluate read policy per historical cut.
 - 🔶 **Permission subscriptions and TTL.** Edge mergeable authorization uses
   upstream permission-scope subscriptions (ch. 9). The current contract is
   sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
@@ -293,6 +304,12 @@ cannot express can-insert or richer probes. The facade methods (`can_insert`,
   checks are valid policy atoms, how to bound them, and how to lower them
   without creating accidental whole-table authority scans. Exposed by
   `world-tour`'s band-member policy.
+- ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
+  columns cannot express _can-insert_ or richer probes; a dry-run is policy
+  evaluation _without ingest_ — the write-validation machinery applied
+  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
+  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
+  (`INV-API-28`).
 - 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
   representation for commit authorship, how old self-authored commit encodings
   are rejected or migrated, and where backend attribution helpers are permitted.
