@@ -93,6 +93,12 @@ where
 /// ```
 #[tokio::test]
 async fn fresh_client_resolves_object_with_deep_update_history() {
+    tokio::task::LocalSet::new()
+        .run_until(fresh_client_resolves_object_with_deep_update_history_impl())
+        .await
+}
+
+async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     const DEEP_HISTORY_UPDATES: usize = 100;
 
     let schema = test_schema();
@@ -305,6 +311,12 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 
 #[tokio::test]
 async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results() {
+    tokio::task::LocalSet::new()
+        .run_until(update_through_one_client_waits_for_ack_and_updates_peer_query_results_impl())
+        .await
+}
+
+async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_a = JazzClient::connect(
@@ -377,6 +389,12 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results(
 
 #[tokio::test]
 async fn delete_through_one_client_removes_row_from_peer_query_results() {
+    tokio::task::LocalSet::new()
+        .run_until(delete_through_one_client_removes_row_from_peer_query_results_impl())
+        .await
+}
+
+async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_a = JazzClient::connect(
@@ -537,6 +555,12 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
 
 #[tokio::test]
 async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
+    tokio::task::LocalSet::new()
+        .run_until(caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl())
+        .await
+}
+
+async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     publish_allow_all_permissions(
@@ -612,6 +636,12 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
 
 #[tokio::test]
 async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
+    tokio::task::LocalSet::new()
+        .run_until(upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl())
+        .await
+}
+
+async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     publish_allow_all_permissions(
@@ -688,6 +718,12 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
 
 #[tokio::test]
 async fn jazz_tools_cli_two_different_users_sync_values() {
+    tokio::task::LocalSet::new()
+        .run_until(jazz_tools_cli_two_different_users_sync_values_impl())
+        .await
+}
+
+async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let client_alice =
