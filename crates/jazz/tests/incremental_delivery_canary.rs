@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, Transport,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, Transport,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};

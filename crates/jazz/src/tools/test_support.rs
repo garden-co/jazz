@@ -8,9 +8,6 @@ use crate::tools::object::ObjectId;
 use crate::tools::public_api::query::Query;
 #[cfg(feature = "test-utils")]
 use crate::tools::public_api::types::Value;
-#[cfg(feature = "test-utils")]
-use crate::tools::public_schema::SchemaHash;
-#[cfg(feature = "test-utils")]
 use crate::tools::schema_lens::Lens;
 #[cfg(feature = "test-utils")]
 use crate::tools::server::ServerState;
@@ -131,10 +128,7 @@ pub async fn push_catalogue_in_memory(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut schema_by_hash: std::collections::HashMap<SchemaHash, &Schema> =
-        std::collections::HashMap::with_capacity(schemas.len());
     for schema in schemas {
-        schema_by_hash.insert(SchemaHash::compute(schema), schema);
         state
             .catalogue
             .publish_schema(&state.catalogue_store, schema.clone())
@@ -142,18 +136,16 @@ pub async fn push_catalogue_in_memory(
     }
 
     for lens in lenses {
-        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
-            format!(
-                "No schema provided for lens source hash {}",
-                lens.source_hash
-            )
-        })?;
-        let _ = (source_schema, app_id, env, user_branch);
         state
             .catalogue
             .publish_lens(&state.catalogue_store, lens)
             .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
     }
+
+    let _ = (app_id, env, user_branch);
+    crate::tools::server::runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
+        .await
+        .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
 
     state
         .catalogue

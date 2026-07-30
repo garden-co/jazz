@@ -144,6 +144,53 @@ fn inherited_select_schema() -> jazz::tools::Schema {
         .build()
 }
 
+fn reverse_inherited_select_schema() -> jazz::tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("organizations")
+                .column("owner_id", ColumnType::Uuid)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("teams")
+                .fk_column("organization_id", "organizations")
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Select, "organization_id"))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("attachments")
+                .fk_column("file_id", "files")
+                .fk_column("team_id", "teams")
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Select, "team_id"))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("files")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::InheritsReferencing {
+                            operation: Operation::Select,
+                            source_table: "attachments".to_owned(),
+                            via_column: "file_id".to_owned(),
+                            max_depth: None,
+                        })
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .build()
+}
+
 async fn publish_schema(server: &JazzServer, schema: &jazz::tools::Schema) {
     push_catalogue_in_memory(
         server.server_state(),
@@ -272,6 +319,96 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
             )
             .await;
             assert!(bob_rows.is_empty());
+
+            alice.shutdown().await.expect("shutdown alice");
+            bob.shutdown().await.expect("shutdown bob");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+/// Exercises reverse inherited SELECT through a source policy that itself
+/// inherits from a parent.
+///
+/// Alice owns an organization. A team inherits SELECT from that organization,
+/// and an attachment inherits SELECT from the team before pointing at a file.
+/// The file inherits SELECT in reverse through attachments, so Alice may read
+/// it and Bob may not; the outer policy must retain the complete source
+/// inheritance chain.
+///
+/// ```text
+/// alice ──insert organization(owner=alice)──► team(org) ──► attachment(team, file) ──► file
+/// alice ──query files──────────────────────────────────────────► sees file
+/// bob   ──query files──────────────────────────────────────────► ✗ empty
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn reverse_inherited_select_retains_nested_source_inheritance() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = JazzServer::start().await;
+            let schema = reverse_inherited_select_schema();
+            publish_schema(&server, &schema).await;
+
+            let alice_owner_id = test_author_id("alice");
+            let alice_user_id = test_user_id("alice");
+            let bob_user_id = test_user_id("bob");
+            let alice = connect_ready_user(&server, schema.clone(), &alice_user_id, "files").await;
+            let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "files").await;
+            let alice_session = alice.for_session(Session::new(alice_user_id));
+
+            let (organization_id, _, organization_batch) = alice_session
+                .insert("organizations", row_input!("owner_id" => alice_owner_id))
+                .expect("alice inserts organization");
+            alice
+                .wait_for_batch(organization_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("organization reaches edge");
+
+            let (team_id, _, team_batch) = alice_session
+                .insert("teams", row_input!("organization_id" => organization_id))
+                .expect("alice inserts team");
+            alice
+                .wait_for_batch(team_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("team reaches edge");
+
+            let (file_id, _, file_batch) = alice_session
+                .insert("files", row_input!("name" => "team file"))
+                .expect("alice inserts file");
+            alice
+                .wait_for_batch(file_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("file reaches edge");
+
+            let (_, _, attachment_batch) = alice_session
+                .insert(
+                    "attachments",
+                    row_input!("file_id" => file_id, "team_id" => team_id),
+                )
+                .expect("alice attaches file to team");
+            alice
+                .wait_for_batch(attachment_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("attachment reaches edge");
+
+            let query = QueryBuilder::new("files").build();
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "alice sees file through the attachment's inherited organization policy",
+                |rows| rows.iter().any(|(id, _)| *id == file_id).then_some(()),
+            )
+            .await;
+            let bob_rows = bob
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("bob queries files");
+            assert!(
+                bob_rows.iter().all(|(id, _)| *id != file_id),
+                "bob must not see a file whose attachment inherits from alice's organization: {bob_rows:?}"
+            );
 
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");

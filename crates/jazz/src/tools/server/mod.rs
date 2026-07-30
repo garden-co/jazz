@@ -13,6 +13,7 @@ mod core_server_shell;
 pub mod core_websocket_transport;
 pub(crate) mod public_schema_convert;
 pub mod routes;
+pub(crate) mod runtime_catalogue;
 mod shutdown;
 #[cfg(feature = "test-utils")]
 mod testing;

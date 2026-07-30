@@ -161,6 +161,8 @@ pub enum SubscriptionRejectReason {
         /// Human-readable diagnostic. Not part of semantic compatibility.
         detail: String,
     },
+    /// The shape is valid, but its schema has not yet reached the serving runtime.
+    ShapeRegistrationPendingCatalogueAdmission,
 }
 
 /// Item yielded by a public subscription stream.

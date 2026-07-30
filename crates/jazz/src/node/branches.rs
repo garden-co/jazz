@@ -5,7 +5,6 @@
 //! global/local currency logic remains in [`super::currency`]. It is a node
 //! sublayer beside the main global history path.
 
-use super::policy::{policy_join_row_value, policy_value_key};
 use super::*;
 use crate::schema::{
     branch_metadata_table_schema, branch_partition_history_table_name,
@@ -23,27 +22,6 @@ pub struct BranchRecord {
     pub base: Option<Snapshot>,
     /// Branch lifecycle state.
     pub state: codec::BranchState,
-}
-
-#[derive(Default)]
-struct BranchEvaluationContext {
-    policy_join_rows_by_value:
-        BTreeMap<BranchPolicyJoinRowsKey, BTreeMap<Vec<u8>, Vec<CurrentRow>>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct BranchPolicyJoinRowsKey {
-    branch_id: BranchId,
-    table: String,
-    on_column: String,
-}
-
-struct BranchPolicyRequest<'a> {
-    table: &'a TableSchema,
-    policy: &'a crate::query::Query,
-    row_uuid: RowUuid,
-    identity: AuthorId,
-    branch: &'a BranchRecord,
 }
 
 impl<S> NodeState<S>
@@ -198,8 +176,7 @@ where
     {
         commit.validate()?;
         self.ensure_branch_open(branch_id)?;
-        let mut context = BranchEvaluationContext::default();
-        if !self.branch_write_policy_allows(branch_id, commit.made_by, &mut context)? {
+        if !self.branch_write_policy_allows(branch_id, commit.made_by)? {
             return Err(Error::AuthorizationDenied);
         }
         for parent in &commit.parents {
@@ -227,13 +204,11 @@ where
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
         let version = VersionRecord::from_commit(&commit, &table_schema, write_schema_version)?;
-        let mut context = BranchEvaluationContext::default();
         if !self.branch_table_write_policy_allows_version_record(
             &branch,
             &table_schema,
             &version,
             commit.made_by,
-            &mut context,
         )? {
             return Err(Error::AuthorizationDenied);
         }
@@ -327,8 +302,7 @@ where
             .get(&branch_id)
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
-        let mut context = BranchEvaluationContext::default();
-        if !self.branch_read_policy_allows(&branch, identity, &mut context)? {
+        if !self.branch_read_policy_allows(&branch, identity)? {
             return Ok(Vec::new());
         }
         let mut rows =
@@ -341,7 +315,6 @@ where
         &mut self,
         branch: &BranchRecord,
         identity: AuthorId,
-        _context: &mut BranchEvaluationContext,
     ) -> Result<bool, Error> {
         if identity == AuthorId::SYSTEM {
             return Ok(true);
@@ -354,7 +327,6 @@ where
         &mut self,
         branch_id: BranchId,
         identity: AuthorId,
-        context: &mut BranchEvaluationContext,
     ) -> Result<bool, Error> {
         if identity == AuthorId::SYSTEM {
             return Ok(true);
@@ -369,16 +341,22 @@ where
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
         let table = branch_metadata_table_schema();
-        self.branch_policy_allows(
-            BranchPolicyRequest {
-                table: &table,
-                policy: &policy,
-                row_uuid: RowUuid(branch.branch_id.0),
-                identity,
-                branch: &branch,
-            },
-            context,
-            |column| branch_metadata_value(&branch, column),
+        let cells = table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                branch_metadata_value(&branch, &column.name)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect();
+        self.branch_write_policy_query_allows_candidate(
+            branch_id,
+            &table,
+            &policy,
+            RowUuid(branch.branch_id.0),
+            &cells,
+            identity,
+            false,
         )
     }
 
@@ -388,7 +366,6 @@ where
         table: &TableSchema,
         version: &VersionRecord,
         author: AuthorId,
-        context: &mut BranchEvaluationContext,
     ) -> Result<bool, Error> {
         if author == AuthorId::SYSTEM {
             return Ok(true);
@@ -400,31 +377,44 @@ where
             let Some(row) = self.branch_delete_subject_row(branch, table, version)? else {
                 return Ok(false);
             };
-            return self.branch_policy_allows(
-                BranchPolicyRequest {
-                    table,
-                    policy: &policy,
-                    row_uuid: row.row_uuid(),
-                    identity: author,
-                    branch,
-                },
-                context,
-                |column| row.cell(table, column),
+            let cells = table
+                .columns
+                .iter()
+                .filter_map(|column| {
+                    row.cell(table, &column.name)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect();
+            return self.branch_write_policy_query_allows_candidate(
+                branch.branch_id,
+                table,
+                &policy,
+                row.row_uuid(),
+                &cells,
+                author,
+                false,
             );
         }
         let previous = self.branch_delete_subject_row(branch, table, version)?;
         if let Some(previous) = previous {
+            let previous_cells = table
+                .columns
+                .iter()
+                .filter_map(|column| {
+                    previous
+                        .cell(table, &column.name)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect();
             if let Some(policy) = table.write_policies.update_using.clone() {
-                if !self.branch_policy_allows(
-                    BranchPolicyRequest {
-                        table,
-                        policy: &policy,
-                        row_uuid: previous.row_uuid(),
-                        identity: author,
-                        branch,
-                    },
-                    context,
-                    |column| previous.cell(table, column),
+                if !self.branch_write_policy_query_allows_candidate(
+                    branch.branch_id,
+                    table,
+                    &policy,
+                    previous.row_uuid(),
+                    &previous_cells,
+                    author,
+                    false,
                 )? {
                     return Ok(false);
                 }
@@ -432,43 +422,47 @@ where
             let Some(policy) = table.write_policies.update_check.clone() else {
                 return Ok(false);
             };
-            return self.branch_policy_allows(
-                BranchPolicyRequest {
-                    table,
-                    policy: &policy,
-                    row_uuid: version.row_uuid(),
-                    identity: author,
-                    branch,
-                },
-                context,
-                |column| {
-                    table
-                        .columns
-                        .iter()
-                        .position(|candidate| candidate.name == column)
-                        .and_then(|idx| version.cell_at(idx))
-                },
+            let cells = table
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    version
+                        .cell_at(idx)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect();
+            return self.branch_write_policy_query_allows_candidate(
+                branch.branch_id,
+                table,
+                &policy,
+                version.row_uuid(),
+                &cells,
+                author,
+                false,
             );
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(true);
         };
-        self.branch_policy_allows(
-            BranchPolicyRequest {
-                table,
-                policy: &policy,
-                row_uuid: version.row_uuid(),
-                identity: author,
-                branch,
-            },
-            context,
-            |column| {
-                table
-                    .columns
-                    .iter()
-                    .position(|candidate| candidate.name == column)
-                    .and_then(|idx| version.cell_at(idx))
-            },
+        let cells = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| {
+                version
+                    .cell_at(idx)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect();
+        self.branch_write_policy_query_allows_candidate(
+            branch.branch_id,
+            table,
+            &policy,
+            version.row_uuid(),
+            &cells,
+            author,
+            true,
         )
     }
 
@@ -503,188 +497,13 @@ where
         Ok(None)
     }
 
-    fn branch_policy_allows(
+    #[cfg(test)]
+    pub(crate) fn evaluate_branch_metadata_write_policy_for_test(
         &mut self,
-        request: BranchPolicyRequest<'_>,
-        context: &mut BranchEvaluationContext,
-        mut column_value: impl FnMut(&str) -> Option<Value>,
+        branch_id: BranchId,
+        identity: AuthorId,
     ) -> Result<bool, Error> {
-        if !request.policy.policy_branches.is_empty() {
-            if self.branch_policy_base_allows(
-                BranchPolicyRequest {
-                    table: request.table,
-                    policy: request.policy,
-                    row_uuid: request.row_uuid,
-                    identity: request.identity,
-                    branch: request.branch,
-                },
-                context,
-                &mut column_value,
-            )? {
-                return Ok(true);
-            }
-            for branch in &request.policy.policy_branches {
-                let branch_policy = branch.as_query(&request.policy.table);
-                if self.branch_policy_base_allows(
-                    BranchPolicyRequest {
-                        table: request.table,
-                        policy: &branch_policy,
-                        row_uuid: request.row_uuid,
-                        identity: request.identity,
-                        branch: request.branch,
-                    },
-                    context,
-                    &mut column_value,
-                )? {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
-        }
-        self.branch_policy_base_allows(request, context, &mut column_value)
-    }
-
-    fn branch_policy_base_allows(
-        &mut self,
-        request: BranchPolicyRequest<'_>,
-        context: &mut BranchEvaluationContext,
-        column_value: &mut dyn FnMut(&str) -> Option<Value>,
-    ) -> Result<bool, Error> {
-        if !self.policy_filters_allow(
-            request.table,
-            request.policy,
-            request.identity,
-            &mut *column_value,
-        )? {
-            return Ok(false);
-        }
-        self.branch_policy_joins_allow(request, context, column_value)
-    }
-
-    fn branch_policy_joins_allow(
-        &mut self,
-        request: BranchPolicyRequest<'_>,
-        context: &mut BranchEvaluationContext,
-        column_value: &mut dyn FnMut(&str) -> Option<Value>,
-    ) -> Result<bool, Error> {
-        for join in &request.policy.joins {
-            let join_table = self.table(&join.table)?.clone();
-            let target = self.branch_policy_join_target_value(&request, join, column_value)?;
-            let Some(target) = target else {
-                return Ok(false);
-            };
-            let Some(target_key) = policy_value_key(&target) else {
-                return Ok(false);
-            };
-            let join_policy = crate::query::Query {
-                table: join.table.clone(),
-                filters: join.filters.clone(),
-                joins: join.nested_joins.clone(),
-                policy_branches: Vec::new(),
-                reachable: Vec::new(),
-                inherits: Vec::new(),
-                includes: Vec::new(),
-                array_subqueries: Vec::new(),
-                select: None,
-                order_by: Vec::new(),
-                aggregate: None,
-                limit: None,
-                offset: 0,
-            };
-            let mut found = false;
-            let candidates = self.branch_policy_join_rows_by_target_memo(
-                &join_table,
-                join,
-                request.branch,
-                context,
-            )?;
-            if let Some(rows) = candidates.get(&target_key).cloned() {
-                for row in rows {
-                    if self.branch_policy_base_allows(
-                        BranchPolicyRequest {
-                            branch: request.branch,
-                            table: &join_table,
-                            policy: &join_policy,
-                            row_uuid: row.row_uuid(),
-                            identity: request.identity,
-                        },
-                        context,
-                        &mut |column| row.cell(&join_table, column),
-                    )? {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    fn branch_policy_join_target_value(
-        &mut self,
-        request: &BranchPolicyRequest<'_>,
-        join: &crate::query::JoinVia,
-        column_value: &mut dyn FnMut(&str) -> Option<Value>,
-    ) -> Result<Option<Value>, Error> {
-        if let Some(lookup) = &join.source_lookup {
-            let Some(Value::Uuid(parent_row_uuid)) = column_value(&lookup.row_id_source_column)
-            else {
-                return Ok(None);
-            };
-            let lookup_table = self.table(&lookup.table)?.clone();
-            let Some(parent_row) = self
-                .branch_current_rows(&lookup.table, request.branch)?
-                .into_iter()
-                .find(|row| row.row_uuid() == RowUuid(parent_row_uuid))
-            else {
-                return Ok(None);
-            };
-            if lookup.value_column == "id" {
-                return Ok(Some(Value::Uuid(parent_row.row_uuid().0)));
-            }
-            return Ok(parent_row.cell(&lookup_table, &lookup.value_column));
-        }
-        if let Some(source_column) = &join.source_column {
-            if source_column == "id" {
-                return Ok(Some(Value::Uuid(request.row_uuid.0)));
-            }
-            return Ok(column_value(source_column));
-        }
-        Ok(Some(Value::Uuid(request.row_uuid.0)))
-    }
-
-    fn branch_policy_join_rows_by_target_memo<'a>(
-        &mut self,
-        join_table: &TableSchema,
-        join: &crate::query::JoinVia,
-        branch: &BranchRecord,
-        context: &'a mut BranchEvaluationContext,
-    ) -> Result<&'a BTreeMap<Vec<u8>, Vec<CurrentRow>>, Error> {
-        let key = BranchPolicyJoinRowsKey {
-            branch_id: branch.branch_id,
-            table: join.table.clone(),
-            on_column: join.on_column.clone(),
-        };
-        if !context.policy_join_rows_by_value.contains_key(&key) {
-            let mut rows_by_target: BTreeMap<Vec<u8>, Vec<CurrentRow>> = BTreeMap::new();
-            for row in self.branch_current_rows(&join.table, branch)? {
-                if let Some(value) = policy_join_row_value(&row, join_table, &join.on_column)
-                    && let Some(key) = policy_value_key(&value)
-                {
-                    rows_by_target.entry(key).or_default().push(row);
-                }
-            }
-            context
-                .policy_join_rows_by_value
-                .insert(key.clone(), rows_by_target);
-        }
-        Ok(context
-            .policy_join_rows_by_value
-            .get(&key)
-            .expect("branch policy join rows memo populated"))
+        self.branch_write_policy_allows(branch_id, identity)
     }
 
     pub(super) fn branch_current_rows(

@@ -245,6 +245,14 @@ required-features = ["test"]
 name = "query_membership_filters"
 required-features = ["test"]
 
+[[test]]
+name = "rename_write_authorization"
+required-features = ["test"]
+
+[[test]]
+name = "parameterized_subscription_routing"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
