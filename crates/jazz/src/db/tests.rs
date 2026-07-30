@@ -5501,7 +5501,21 @@ fn oversized_view_update_splits_into_bounded_final_settling_chunks() {
     };
     assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
 
+    let materialized_reference = split_oversized_view_update_materialized_reference(update.clone())
+        .expect("materialized reference splitter should succeed");
     let chunks = split_oversized_view_update(update).unwrap();
+    let optimized_payloads = chunks
+        .iter()
+        .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+        .collect::<Vec<_>>();
+    let reference_payloads = materialized_reference
+        .iter()
+        .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+        .collect::<Vec<_>>();
+    // Internal protocol test: this compares the old materialized splitter and
+    // the optimized sizing path at the emitted payload-byte boundary. Public
+    // APIs expose only the applied result, not chunk boundaries or bytes.
+    assert_eq!(optimized_payloads, reference_payloads);
     assert!(chunks.len() > 1);
     for (idx, chunk) in chunks.iter().enumerate() {
         assert!(serialized_sync_message_len(chunk) <= MAX_SYNC_MESSAGE_BYTES);
@@ -5566,7 +5580,20 @@ fn view_update_chunking_budgets_full_wire_frame_boundary() {
     assert!(serialized_sync_message_len(&update) <= MAX_SYNC_MESSAGE_BYTES);
     assert!(serialized_uncompressed_wire_message_len(&update) > MAX_WIRE_FRAME_BYTES);
 
+    let materialized_reference = split_oversized_view_update_materialized_reference(update.clone())
+        .expect("materialized reference splitter should succeed");
     let chunks = split_oversized_view_update(update).unwrap();
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+            .collect::<Vec<_>>(),
+        materialized_reference
+            .iter()
+            .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+            .collect::<Vec<_>>(),
+        "optimized sizing must preserve packed-carrier payload bytes"
+    );
     assert!(chunks.len() > 1);
     for chunk in &chunks {
         assert!(
@@ -5675,7 +5702,20 @@ fn view_update_chunking_keeps_result_adds_with_referenced_versions() {
     };
     assert!(serialized_sync_message_len(&update) > MAX_SYNC_MESSAGE_BYTES);
 
+    let materialized_reference = split_oversized_view_update_materialized_reference(update.clone())
+        .expect("materialized reference splitter should succeed");
     let chunks = split_oversized_view_update(update).unwrap();
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+            .collect::<Vec<_>>(),
+        materialized_reference
+            .iter()
+            .map(|chunk| encode_sync_message(chunk).expect("chunk should encode"))
+            .collect::<Vec<_>>(),
+        "optimized sizing must preserve packed-carrier payload bytes"
+    );
     assert!(chunks.len() > 1);
     let mut total_adds = 0;
     let mut saw_version_carrier = false;

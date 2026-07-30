@@ -22,6 +22,8 @@ use futures_core::Stream;
 use groove::records::Value;
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use serde::ser::{SerializeSeq, SerializeStruct, SerializeStructVariant};
+use serde::{Serialize, Serializer};
 use thiserror::Error;
 use web_time::Instant;
 
@@ -47,7 +49,7 @@ use crate::protocol::{
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
     Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
-    build_version_carriers_from_singletons, expand_version_carriers,
+    build_version_carriers_from_singletons, expand_version_carriers, version_carriers_are_packed,
 };
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
@@ -5729,6 +5731,453 @@ struct ViewUpdateChunkUnit {
     items: Vec<ViewUpdateChunkItem>,
 }
 
+/// Borrowed postcard shape of a chunk candidate.
+///
+/// The splitter only needs the encoded frame length while it searches for a
+/// boundary. Serializing this shape with postcard's counting flavor avoids the
+/// cloned `SyncMessage`, packed-run allocations, payload allocation, and frame
+/// allocation that the materialized candidate path required.
+struct ViewUpdateChunkCandidate<'a> {
+    subscription: SubscriptionKey,
+    settled_through: GlobalSeq,
+    reset_result_set: bool,
+    units: &'a [ViewUpdateChunkUnit],
+}
+
+fn view_update_chunk_candidate_wire_len(
+    subscription: SubscriptionKey,
+    settled_through: GlobalSeq,
+    reset_result_set: bool,
+    units: &[ViewUpdateChunkUnit],
+) -> usize {
+    let candidate = ViewUpdateChunkCandidate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        units,
+    };
+    let Ok(payload_len) =
+        postcard::serialize_with_flavor(&candidate, postcard::ser_flavors::Size::default())
+    else {
+        return usize::MAX;
+    };
+
+    // `WireFrame::Message(WireEnvelope::new(...))` is its one-byte enum tag,
+    // the one-byte protocol version/features/session fields, then postcard's
+    // varint Vec length and the opaque payload itself. Keep the arithmetic
+    // covered by the byte-for-byte materialized-candidate regression below.
+    let Ok(payload_len_prefix) =
+        postcard::serialize_with_flavor(&payload_len, postcard::ser_flavors::Size::default())
+    else {
+        return usize::MAX;
+    };
+    payload_len
+        .checked_add(payload_len_prefix)
+        .and_then(|len| len.checked_add(4))
+        .unwrap_or(usize::MAX)
+}
+
+impl Serialize for ViewUpdateChunkCandidate<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Keep this in lockstep with SyncMessage::ViewUpdateChunk. Postcard
+        // represents enum variants by their declaration index (12 here).
+        let mut state =
+            serializer.serialize_struct_variant("SyncMessage", 12, "ViewUpdateChunk", 11)?;
+        state.serialize_field("subscription", &self.subscription)?;
+        state.serialize_field("settled_through", &self.settled_through)?;
+        state.serialize_field("reset_result_set", &self.reset_result_set)?;
+        state.serialize_field("final_chunk", &false)?;
+        state.serialize_field(
+            "version_carriers",
+            &ViewUpdateChunkVersionCarriers { units: self.units },
+        )?;
+        state.serialize_field("version_bundles", &[] as &[VersionBundle])?;
+        state.serialize_field(
+            "peer_payload_inventory",
+            &ViewUpdateChunkPayloadInventory { units: self.units },
+        )?;
+        state.serialize_field(
+            "result_member_adds",
+            &ViewUpdateChunkResultMemberAdds { units: self.units },
+        )?;
+        state.serialize_field(
+            "result_member_removes",
+            &ViewUpdateChunkResultMemberRemoves { units: self.units },
+        )?;
+        state.serialize_field(
+            "program_fact_adds",
+            &ViewUpdateChunkProgramFactAdds { units: self.units },
+        )?;
+        state.serialize_field(
+            "program_fact_removes",
+            &ViewUpdateChunkProgramFactRemoves { units: self.units },
+        )?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkVersionCarriers<'a> {
+    units: &'a [ViewUpdateChunkUnit],
+}
+
+impl Serialize for ViewUpdateChunkVersionCarriers<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bundle_count = self
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.items
+                    .iter()
+                    .any(|item| matches!(item, ViewUpdateChunkItem::VersionBundle(_)))
+            })
+            .count();
+        let packed = version_carriers_are_packed(bundle_count);
+        let mut sequence = serializer.serialize_seq(Some(if packed { 1 } else { bundle_count }))?;
+        if packed {
+            sequence.serialize_element(&ViewUpdateChunkVersionRun { units: self.units })?;
+        } else {
+            for bundle in self.units.iter().flat_map(|unit| {
+                unit.items.iter().filter_map(|item| match item {
+                    ViewUpdateChunkItem::VersionBundle(bundle) => Some(bundle),
+                    _ => None,
+                })
+            }) {
+                sequence.serialize_element(&ViewUpdateChunkVersionBundle { bundle })?;
+            }
+        }
+        sequence.end()
+    }
+}
+
+struct ViewUpdateChunkVersionBundle<'a> {
+    bundle: &'a VersionBundle,
+}
+
+impl Serialize for ViewUpdateChunkVersionBundle<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_newtype_variant("VersionCarrier", 0, "Bundle", self.bundle)
+    }
+}
+
+struct ViewUpdateChunkVersionRun<'a> {
+    units: &'a [ViewUpdateChunkUnit],
+}
+
+impl ViewUpdateChunkVersionRun<'_> {
+    fn bundles(&self) -> impl Iterator<Item = &VersionBundle> {
+        self.units.iter().flat_map(|unit| {
+            unit.items.iter().filter_map(|item| match item {
+                ViewUpdateChunkItem::VersionBundle(bundle) => Some(bundle),
+                _ => None,
+            })
+        })
+    }
+
+    fn bundle_count(&self) -> usize {
+        self.bundles().count()
+    }
+}
+
+impl Serialize for ViewUpdateChunkVersionRun<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_newtype_variant(
+            "VersionCarrier",
+            1,
+            "Run",
+            &ViewUpdateChunkVersionBundleRun { run: self },
+        )
+    }
+}
+
+struct ViewUpdateChunkVersionBundleRun<'a> {
+    run: &'a ViewUpdateChunkVersionRun<'a>,
+}
+
+impl Serialize for ViewUpdateChunkVersionBundleRun<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VersionBundleRun", 3)?;
+        state.serialize_field("header", &ViewUpdateChunkVersionRunHeader { run: self.run })?;
+        state.serialize_field("bodies", &ViewUpdateChunkVersionRunBodies { run: self.run })?;
+        state.serialize_field(
+            "overrides",
+            &ViewUpdateChunkVersionRunOverrides { run: self.run },
+        )?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkVersionRunHeader<'a> {
+    run: &'a ViewUpdateChunkVersionRun<'a>,
+}
+
+impl Serialize for ViewUpdateChunkVersionRunHeader<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let first = self
+            .run
+            .bundles()
+            .next()
+            .expect("packed version run has at least two bundles");
+        let mut state = serializer.serialize_struct("VersionBundleRunHeader", 6)?;
+        state.serialize_field("table", &ViewUpdateChunkCommonRunTable { run: self.run })?;
+        state.serialize_field("tx", &first.tx)?;
+        state.serialize_field("body_count", &(self.run.bundle_count() as u32))?;
+        state.serialize_field("fate", &first.fate)?;
+        state.serialize_field("global_seq", &first.global_seq)?;
+        state.serialize_field("durability", &first.durability)?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkCommonRunTable<'a> {
+    run: &'a ViewUpdateChunkVersionRun<'a>,
+}
+
+impl Serialize for ViewUpdateChunkCommonRunTable<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut table = None;
+        for version in self.run.bundles().flat_map(|bundle| &bundle.versions) {
+            match table {
+                None => table = Some(version.table()),
+                Some(current) if current == version.table() => {}
+                Some(_) => return serializer.serialize_none(),
+            }
+        }
+        match table {
+            Some(table) => serializer.serialize_some(table),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+struct ViewUpdateChunkVersionRunBodies<'a> {
+    run: &'a ViewUpdateChunkVersionRun<'a>,
+}
+
+impl Serialize for ViewUpdateChunkVersionRunBodies<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.run.bundle_count()))?;
+        for bundle in self.run.bundles() {
+            sequence.serialize_element(&ViewUpdateChunkVersionRunBody { bundle })?;
+        }
+        sequence.end()
+    }
+}
+
+struct ViewUpdateChunkVersionRunBody<'a> {
+    bundle: &'a VersionBundle,
+}
+
+impl Serialize for ViewUpdateChunkVersionRunBody<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VersionBundleRunBody", 1)?;
+        state.serialize_field("versions", &self.bundle.versions)?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkVersionRunOverrides<'a> {
+    run: &'a ViewUpdateChunkVersionRun<'a>,
+}
+
+impl Serialize for ViewUpdateChunkVersionRunOverrides<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let first = self
+            .run
+            .bundles()
+            .next()
+            .expect("packed version run has at least two bundles");
+        let override_count = self
+            .run
+            .bundles()
+            .filter(|bundle| view_update_chunk_run_override_needed(first, bundle))
+            .count();
+        let mut sequence = serializer.serialize_seq(Some(override_count))?;
+        for (body_index, bundle) in self.run.bundles().enumerate() {
+            if view_update_chunk_run_override_needed(first, bundle) {
+                sequence.serialize_element(&ViewUpdateChunkVersionRunOverride {
+                    body_index: body_index as u32,
+                    first,
+                    bundle,
+                })?;
+            }
+        }
+        sequence.end()
+    }
+}
+
+fn view_update_chunk_run_override_needed(first: &VersionBundle, bundle: &VersionBundle) -> bool {
+    bundle.tx != first.tx
+        || bundle.fate != first.fate
+        || bundle.global_seq != first.global_seq
+        || bundle.durability != first.durability
+}
+
+struct ViewUpdateChunkVersionRunOverride<'a> {
+    body_index: u32,
+    first: &'a VersionBundle,
+    bundle: &'a VersionBundle,
+}
+
+impl Serialize for ViewUpdateChunkVersionRunOverride<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VersionBundleRunOverride", 5)?;
+        state.serialize_field("body_index", &self.body_index)?;
+        state.serialize_field(
+            "tx",
+            &if self.bundle.tx != self.first.tx {
+                Some(&self.bundle.tx)
+            } else {
+                None
+            },
+        )?;
+        state.serialize_field(
+            "fate",
+            &if self.bundle.fate != self.first.fate {
+                Some(&self.bundle.fate)
+            } else {
+                None
+            },
+        )?;
+        state.serialize_field(
+            "global_seq",
+            &if self.bundle.global_seq != self.first.global_seq {
+                Some(self.bundle.global_seq)
+            } else {
+                None
+            },
+        )?;
+        state.serialize_field(
+            "durability",
+            &if self.bundle.durability != self.first.durability {
+                Some(self.bundle.durability)
+            } else {
+                None
+            },
+        )?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkPayloadInventory<'a> {
+    units: &'a [ViewUpdateChunkUnit],
+}
+
+impl Serialize for ViewUpdateChunkPayloadInventory<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let count = self
+            .units
+            .iter()
+            .flat_map(|unit| &unit.items)
+            .filter(|item| matches!(item, ViewUpdateChunkItem::CompleteTxPayload(_)))
+            .count();
+        let mut state = serializer.serialize_struct("PeerPayloadInventory", 1)?;
+        state.serialize_field(
+            "complete_tx_payloads",
+            &ViewUpdateChunkCompleteTxPayloads {
+                units: self.units,
+                count,
+            },
+        )?;
+        state.end()
+    }
+}
+
+struct ViewUpdateChunkCompleteTxPayloads<'a> {
+    units: &'a [ViewUpdateChunkUnit],
+    count: usize,
+}
+
+impl Serialize for ViewUpdateChunkCompleteTxPayloads<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.count))?;
+        for tx_id in self.units.iter().flat_map(|unit| {
+            unit.items.iter().filter_map(|item| match item {
+                ViewUpdateChunkItem::CompleteTxPayload(tx_id) => Some(tx_id),
+                _ => None,
+            })
+        }) {
+            sequence.serialize_element(tx_id)?;
+        }
+        sequence.end()
+    }
+}
+
+macro_rules! view_update_chunk_item_sequence {
+    ($name:ident, $variant:ident) => {
+        struct $name<'a> {
+            units: &'a [ViewUpdateChunkUnit],
+        }
+
+        impl Serialize for $name<'_> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                let count = self
+                    .units
+                    .iter()
+                    .flat_map(|unit| &unit.items)
+                    .filter(|item| matches!(item, ViewUpdateChunkItem::$variant(_)))
+                    .count();
+                let mut sequence = serializer.serialize_seq(Some(count))?;
+                for item in self.units.iter().flat_map(|unit| {
+                    unit.items.iter().filter_map(|item| match item {
+                        ViewUpdateChunkItem::$variant(item) => Some(item),
+                        _ => None,
+                    })
+                }) {
+                    sequence.serialize_element(item)?;
+                }
+                sequence.end()
+            }
+        }
+    };
+}
+
+view_update_chunk_item_sequence!(ViewUpdateChunkResultMemberAdds, ResultMemberAdd);
+view_update_chunk_item_sequence!(ViewUpdateChunkResultMemberRemoves, ResultMemberRemove);
+view_update_chunk_item_sequence!(ViewUpdateChunkProgramFactAdds, ProgramFactAdd);
+view_update_chunk_item_sequence!(ViewUpdateChunkProgramFactRemoves, ProgramFactRemove);
+
 fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
     let initial_encoded_bytes = serialized_uncompressed_wire_message_len(&message);
     if validate_wire_frame_len(initial_encoded_bytes).is_ok() {
@@ -5781,19 +6230,11 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         let mut best_encoded_bytes = 0;
         while low <= high {
             let mid = low + (high - low) / 2;
-            #[cfg(feature = "cold-settle-attribution")]
-            let candidate_started = Instant::now();
-            let candidate = view_update_chunk_from_units(
+            let encoded_bytes = view_update_chunk_candidate_wire_len(
                 subscription,
                 settled_through,
                 reset_chunk,
                 &units[start..start + mid],
-            );
-            let encoded_bytes = serialized_uncompressed_wire_message_len(&candidate);
-            #[cfg(feature = "cold-settle-attribution")]
-            crate::cold_settle_attribution::record_candidate(
-                encoded_bytes,
-                candidate_started.elapsed().as_nanos() as u64,
             );
             if encoded_bytes <= MAX_WIRE_FRAME_BYTES {
                 best = mid;
@@ -5820,6 +6261,83 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         ));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_selected_payload(best_encoded_bytes);
+        start += best;
+    }
+    if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {
+        *final_chunk = true;
+    }
+    Ok(chunks)
+}
+
+#[cfg(test)]
+fn split_oversized_view_update_materialized_reference(
+    message: SyncMessage,
+) -> Result<Vec<SyncMessage>, Error> {
+    if validate_wire_frame_len(serialized_uncompressed_wire_message_len(&message)).is_ok() {
+        return Ok(vec![message]);
+    }
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        version_carriers,
+        mut version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+    } = message
+    else {
+        return Ok(vec![message]);
+    };
+    version_bundles.extend(
+        expand_version_carriers(&version_carriers)
+            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
+    );
+    let units = view_update_chunk_units(
+        version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        program_fact_adds,
+        program_fact_removes,
+    );
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < units.len() {
+        let reset_chunk = chunks.is_empty() && reset_result_set;
+        let mut low = 1;
+        let mut high = units.len() - start;
+        let mut best = 0;
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let candidate = view_update_chunk_from_units(
+                subscription,
+                settled_through,
+                reset_chunk,
+                &units[start..start + mid],
+            );
+            if serialized_uncompressed_wire_message_len(&candidate) <= MAX_WIRE_FRAME_BYTES {
+                best = mid;
+                low = mid + 1;
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        }
+        if best == 0 {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "single view update chunk unit exceeds wire frame limit",
+            ));
+        }
+        chunks.push(view_update_chunk_from_units(
+            subscription,
+            settled_through,
+            reset_chunk,
+            &units[start..start + best],
+        ));
         start += best;
     }
     if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {

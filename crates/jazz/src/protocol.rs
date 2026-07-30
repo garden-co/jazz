@@ -980,12 +980,20 @@ pub fn build_version_bundle_runs_from_singletons(
 pub fn build_version_carriers_from_singletons(
     bundles: Vec<VersionBundle>,
 ) -> Result<Vec<VersionCarrier>, VersionBundleRunError> {
-    if force_singleton_version_carriers() || bundles.len() <= 1 {
+    if !version_carriers_are_packed(bundles.len()) {
         return Ok(bundles.into_iter().map(VersionCarrier::Bundle).collect());
     }
     Ok(vec![VersionCarrier::Run(
         VersionBundleRun::from_adjacent_singletons(&bundles)?,
     )])
+}
+
+/// Whether an outbound sequence uses the packed-run carrier representation.
+///
+/// Every non-empty singleton sequence can form a valid run; this predicate is
+/// kept beside the materializer so sizing paths use exactly the same mode.
+pub(crate) fn version_carriers_are_packed(bundle_count: usize) -> bool {
+    !force_singleton_version_carriers() && bundle_count > 1
 }
 
 fn force_singleton_version_carriers() -> bool {
