@@ -1,0 +1,279 @@
+# jazz — Design exploration · Shared storage across schema versions
+
+## Overview
+
+> **Status:** Early, non-normative proposal. If accepted, its decisions should
+> be folded into the normative schema-evolution, data-model, and groove-lowering
+> chapters.
+
+Jazz currently gives each schema version its own physical storage tables. This
+keeps every stored row tied to the descriptor under which it was written, but it
+also makes a logical-table read span every schema-version partition that may
+contain data. Physical tables and their indexes accumulate as the schema
+evolves, even when a migration only renames a table or column.
+
+This proposal replaces that layout with one shared physical storage lineage for
+each logical table. Schema versions remain immutable application-facing views,
+but they no longer define separate physical tables. Table and column renames
+change the logical-to-physical mapping; adding a column extends the shared
+physical representation; dropping a column removes it from newer logical views
+without immediately removing its stored values. Writes authored against any
+supported schema are translated into this shared representation, while reads
+resolve the relevant current or historical row once and project it into the
+requested schema.
+
+“Shared physical storage” does not mean collapsing all Jazz storage into one
+literal table. Content history, deletion/restore history, and derived current
+state remain separate physical structures. The intended change is that
+those structures are shared by all versions of a logical table instead of being
+duplicated once per schema version.
+
+## Motivation
+
+The primary motivation is to make read cost independent of the number of schema
+versions that have existed. A shared lineage removes schema-partition fanout and
+allows compatible schema versions to reuse the same physical indexes. It also
+reduces table proliferation and avoids rebuilding equivalent storage structures
+for migrations that do not materially change a table.
+
+The importance of reusing indexes must not be understated: currently we keep a separate
+indexes for each table version, and they are not combined into a useful logical cross-version index.
+Once a table has schema partitions, Jazz disables the ordinary prepared-query fast path.
+
+Keeping retired columns in the shared representation can also prevent avoidable
+data loss: newer schemas can hide those columns, while older supported schemas
+can continue to read or update them according to the migration and authorization
+rules. The same separation between logical schemas and physical storage could
+later support type changes and data transformations without requiring another
+physical table for every schema version.
+
+**TODO: how do we solve this?**
+The shared representation will grow as columns are introduced. Physical
+cleanup, schema support cutoffs, indexing of defaults, and the exact semantics
+of writes that omit hidden columns are deliberately left for the fuller design.
+
+## Details
+
+### Row translation
+
+Consider:
+
+```
+v1: { title }
+v2: { title, body = "" }
+
+v2 writes body = "important"
+an offline v1 client later updates title
+```
+
+Today, forward translation inserts the `body` default into the old client’s version, replacing `"important"` with `""`.
+
+To preserve `body`, when applying lenses to writes we must rename columns but **NOT** apply lens default/backwards default values (keeping existing values for dropped columns and marking new columns as unset
+unless they're explicitly written to).
+
+The same issue appears after a drop:
+
+```
+v1: { title, legacy }
+v2: { title }  // legacy dropped
+```
+
+After a v2 title update, a v1 reader should see the old legacy value, not the backwards default (which is the current semantics). The backwards default should only be used when projecting columns that miss a real value.
+
+### Row storage
+
+Groove records are schema-driven typed tuples whose physical layout can reorder fixed- and variable-width fields ([storage model (line 86)](../../groove/SPEC/2_storage_model.md#L86)). Existing history tables encode user fields according to that version’s `TableSchema` ([schema.rs (line 905)](../src/schema.rs#L905)).
+
+Shared storage will use **versioned physical layouts**. Every encoded history and
+current row begins with a stable envelope that can be decoded without knowing the
+row's application schema or payload layout. At minimum, the envelope identifies
+the envelope format version and the `PhysicalLayoutId`. Jazz first decodes this
+envelope, resolves the layout id, and only then decodes the typed tuple payload
+using that layout's Groove descriptor.
+
+A physical layout describes the tuple representation and maps its slots to stable
+physical column ids. When a migration changes that representation, Jazz publishes
+a new layout; existing rows remain encoded in their previous layouts and coexist
+in the same physical table. A rename does not require a new layout when the
+underlying physical ids and types are unchanged.
+
+The physical layout id is distinct from schema identity:
+
+- the authored `SchemaVersionId` (or `SchemaVersionAlias`) records the application schema against which the
+  write was produced;
+- the `PhysicalLayoutId` selects the decoder for the stored payload;
+- the requested `SchemaVersionId` selects the logical projection returned by a
+  read and is not stored in the row.
+
+The layout registry must be durable and recovered before rows that reference it
+can be decoded. Publishing or activating a schema that introduces a layout must
+install that layout before any writer can use it. A layout registry entry cannot
+be removed while any retained history, current row, branch, or snapshot may still
+reference it. The exact binary encoding and allocation scheme for
+`PhysicalLayoutId` remain to be specified.
+
+Jazz currently selects a winning content version across all writes. If that version omits a retired column,
+the schema's default value is returned to the user. That leads to frequent data loss for columns dropped across
+schema versions.
+
+The key idea in this proposal is to **distinguish unset fields from default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Default values are only applied when returning rows with unset fields to users. When decoding an older layout, physical columns introduced only by later layouts are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
+
+When resolving conflicts between row versions:
+
+- set values always take precedence over unset values when using LWW
+- for counters, a missing field is equivalent to 0
+
+#### Storage keys
+
+Schema versions currently partition application data in the KV keyspace, even
+though `SchemaVersionId` is not a column of the history or current-row primary
+keys. Non-base schema partitions include the schema-version UUID in their
+logical Groove table names, for example
+`jazz_<table>_<schema-version>_history` and
+`jazz_<table>_<schema-version>_global_current`. Groove's class-CF layout embeds
+that logical table name in the physical KV key prefix. Durable secondary-index
+keys likewise begin with the logical table name and index name. Branch history
+and register table names contain both the branch id and schema version.
+
+Shared storage removes the schema-version dimension from all application-data
+row and index keys, inclusing history, global current, ahead current, secondary
+indexes and branch overlays. Keys should be scoped by stable physical identity instead.
+
+### Sync
+
+The current proposal does not modify the sync protocol in any way.
+
+A commit's `VersionRecord` already carries:
+
+- the authored `SchemaVersionId`;
+- the authored logical table name;
+- parents and provenance;
+- optional cells, where absence is distinguishable from explicit null.
+
+That is sufficient for a receiver to resolve logical names to physical IDs and encode the row using its own local physical layout. `PhysicalLayoutId` and the storage envelope should remain entirely local.
+
+When receiving rows written in a schema different from the current one, missing columns are preserved as unset
+(instead of using the schema default values).
+
+Ideally, fields should not be sent to a consumer unless they're required by their schema, since doing so could expose unwanted information and potentially be a security hazard (see related open question). We currently do send them: if a v2 version contains a later-retired column and a v3 client subscribes to that row, sending the raw v2 version also sends the retired column, even though v3 does not expose it.
+
+Downstream clients do not NEED to receive retired columns for sync and conflict resolution to work properly.
+Changing this to avoid leaking unnecessary data should be easy, as the server already takes care of applying the necessary lenses to convert data to the version required by the client.
+
+### Table and column identity
+
+Names are application-facing aliases, not physical identities. Referring to
+tables and columns by name alone fails for:
+
+- dropping `x` and later adding a semantically unrelated `x`;
+- table or column name reuse after a rename;
+- `CopyColumn`, where source and target must subsequently diverge;
+- column type changes;
+- two schema branches independently adding a same-named table or column.
+
+The catalogue therefore maintains a resolved physical-identity mapping for every
+schema version:
+
+- `PhysicalTableId` identifies one shared table-storage lineage;
+- `PhysicalColumnId` identifies one physical column within that lineage;
+- each logical table and column name in a `SchemaVersionId` maps to one of those
+  physical ids.
+
+These are opaque, globally stable catalogue ids. Physical layouts refer to
+`PhysicalColumnId`s, while query planning, projection, and index lookup resolve
+application names through the requested schema's identity mapping.
+
+Identity follows these rules:
+
+- An unchanged table or `RenameTable` preserves its `PhysicalTableId`.
+- A newly added table receives a fresh `PhysicalTableId`. Dropping and later
+  adding a table with the same name also creates a fresh id.
+- An unchanged column or `RenameColumn` preserves its `PhysicalColumnId`.
+- `AddColumn` creates a fresh `PhysicalColumnId`.
+- `CopyColumn` preserves the source id and creates a fresh target id. The initial
+  target value may be copied by the lens, but later writes to either column are
+  independent.
+- `DropColumn` retires the column from the target schema view without deleting or
+  reassigning its physical id. A later same-named `AddColumn` receives a fresh id;
+  it does not revive the retired column.
+- A change that is not representation- and semantics-preserving creates a new
+  physical column epoch, represented by a fresh `PhysicalColumnId`. This includes
+  incompatible type or large-value-kind changes and merge-strategy changes. A
+  future transform lens may relate the two epochs, but they do not share storage
+  or indexes merely because their logical names match.
+- Independently introduced same-named entities receive different physical ids.
+  Name and shape equality alone never merges identities.
+
+This identity model is inspired by PostgreSQL's stable relation and attribute
+catalogue identities:
+
+- https://www.postgresql.org/docs/current/catalog-pg-class.html
+- https://www.postgresql.org/docs/current/catalog-pg-attribute.html
+
+A new schema may be (and usually is) published before the lens mapping it to an existing schema,
+so it will receive fresh physical ids. If a lens is published after both sides have already acquired independent physical lineages containing data, identity resolution is not a metadata-only relabel. It
+requires either:
+
+- discarding data from the physical table corresponding to the "new" schema
+- migrating data from one physical table to another (we'd need to determine how that migration happens)
+
+### Indexing
+
+Indexes are reused across schema versions, so in cases where indexed columns are not modified by a migration,
+existing indexes "just work". Similarly, renamed physical IDs can share equality indexes, but transformed types may not.
+
+Jazz does not currently support transforming columns through lenses, so this is a problem we can defer solving.
+
+For dropped indexed columns, writes coming from previous schemas but translated to the new schema can still modify the "dropped" index (as they preserve the dropped columns from the previous schema).
+
+**TODO: Handle adding a new indexed column to tables with existing data**
+
+### Branches
+
+Branch identity remains a separate key/prefix dimension. We just need to make sure it continues to work properly by removing the schema-partitioning from branches as well.
+
+## Open Questions
+
+### Conflicting lens paths may assign different physical identities
+
+A schema may be reachable through multiple lens paths. Those paths could disagree
+about whether a target table or column preserves an existing physical id or
+introduces a new one. The physical mapping cannot depend on whichever path a node
+happens to traverse: replicas must resolve a `SchemaVersionId` to the same
+physical identities.
+
+This proposal defers the graph-consistency rule. Possible solutions include:
+
+- reject publication unless every path produces the same identity mapping;
+- assign each schema one authoritative resolved mapping and validate later lenses
+  against it;
+- add an explicit identity-merge operation backed by a physical lineage
+  migration.
+
+Until this is resolved, the design assumes that all lens paths published for a
+storage-resolved schema agree on its physical table and column identities.
+
+### Allowing old clients to update retired fields is a security decision
+
+Which policy authorizes old-schema writes to retired columns?
+
+Consider dropping `owner_id`, `is_admin`, or sensitive PII.
+
+If an old client can continue changing that retired field:
+
+- which policy authorizes it—the authored schema policy, current policy, pinned policy, or all of them?
+- can the value affect an old pinned RLS policy?
+- could a later schema accidentally re-expose attacker-written retired data?
+
+### Column cleanup conflicts with indefinite offline compatibility
+
+Safe physical cleanup requires proving that:
+
+- no accepted writer may use the retired schema;
+- no branch base or retained historical query needs the values;
+- no policy pin references them;
+- no pending/retry/offline transaction can reintroduce them;
+- all relevant replicas have crossed a cutoff watermark;
+- old-schema reads are no longer promised.
+
+Jazz currently deliberately forbids automatic schema-partition GC for these reasons ([lens spec (line 218)](./10_lenses_migrations.md#L218)).
