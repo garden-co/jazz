@@ -45,10 +45,9 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
-fn recovery_rebuilds_ahead_current_latest_and_fallback_versions() {
-    // This is intentionally internal: rejecting the latest local version must
-    // expose the prior pending version, which relies on both the full key set
-    // and the per-row latest-key index rebuilt during open.
+fn recovery_reads_latest_ahead_current_and_fallback_versions_from_storage() {
+    // Rejecting the latest local version must expose the prior pending version,
+    // including after reopening the storage.
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let latest;
@@ -76,6 +75,19 @@ fn recovery_rebuilds_ahead_current_latest_and_fallback_versions() {
 
     #[cfg(feature = "testing")]
     assert_eq!(receipt.ahead_current_entries, 2);
+    reopened.reset_storage_read_metrics();
+    assert_eq!(
+        reopened
+            .local_current_row("todos", row(11))
+            .unwrap()
+            .map(current_row_pair),
+        Some((row(11), title_cells("latest")))
+    );
+    let point_read_metrics = reopened.take_storage_read_metrics();
+    assert_eq!(
+        point_read_metrics.other.ranges, 2,
+        "point lookup should use one bounded range per ahead-current layer"
+    );
     assert_eq!(
         reopened
             .current_rows("todos", DurabilityTier::Local)
@@ -102,6 +114,74 @@ fn recovery_rebuilds_ahead_current_latest_and_fallback_versions() {
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(11), title_cells("first"))])
+    );
+}
+
+#[test]
+fn recovery_uses_storage_fallback_for_deletion_versions() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let restored;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        node.commit_mergeable(
+            MergeableCommit::new("todos", row(12), 9).cells(title_cells("persisted")),
+        )
+        .unwrap();
+        node.commit_mergeable(
+            MergeableCommit::new("todos", row(12), 10).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+        restored = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(12), 11)
+                    .deletion(DeletionEvent::Restored),
+            )
+            .unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+
+    reopened.reset_storage_read_metrics();
+    assert_eq!(
+        reopened
+            .local_current_row("todos", row(12))
+            .unwrap()
+            .map(current_row_pair),
+        Some((row(12), title_cells("persisted")))
+    );
+    let point_read_metrics = reopened.take_storage_read_metrics();
+    assert_eq!(
+        point_read_metrics.other.ranges, 2,
+        "point lookup should use one bounded range per ahead-current layer"
+    );
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(12), title_cells("persisted"))])
+    );
+
+    reopened
+        .apply_fate_update(
+            restored,
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty(),
+        "rejecting the restore must expose the prior pending deletion"
     );
 }
 

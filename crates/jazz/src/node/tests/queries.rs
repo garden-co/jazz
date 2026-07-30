@@ -275,7 +275,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
 }
 
 #[test]
-fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
+fn local_current_from_ahead_storage_matches_history_argmax_for_seeded_commits() {
     for seed in 0..16_u64 {
         let (_temp_dir, mut node) = open_node();
         let mut parents = BTreeMap::<RowUuid, TxId>::new();
