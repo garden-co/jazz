@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
+    Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, RowCells, SeededRowIdSource,
+    SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -80,7 +81,7 @@ fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error:
     for batch in 0..(max_rows / BATCH_SIZE) {
         let rows_before = batch * BATCH_SIZE;
         let rows_after = rows_before + BATCH_SIZE;
-        let mut tx = db.mergeable_tx();
+        let tx = db.mergeable_tx()?;
         let stage_start = Instant::now();
         for row in rows_before..rows_after {
             tx.insert("todos", todo_cells(format!("todo {row:06}"), false))?;

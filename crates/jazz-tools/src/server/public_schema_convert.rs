@@ -646,6 +646,21 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
+    convert_policy_with_native_select_inherits(schema, table_schema, table, path, expr, true)
+}
+
+/// Convert a policy for a location where native SELECT inherits may or may not
+/// be representable. A top-level policy keeps the native atom so lowering can
+/// use derivation collapse. An `INHERITS_REFERENCING` source policy is embedded
+/// in a join, where that atom applies to the wrong row and must be expanded.
+fn convert_policy_with_native_select_inherits(
+    schema: &Schema,
+    table_schema: &TableSchema,
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+    native_select_inherits: bool,
+) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::And(exprs) => {
             if !exprs.iter().any(is_core_policy_clause) {
@@ -663,6 +678,7 @@ fn convert_policy(
                     &format!("{path}.And[{index}]"),
                     query,
                     expr,
+                    native_select_inherits,
                 )?;
             }
             Ok(query)
@@ -670,12 +686,13 @@ fn convert_policy(
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
             for (index, expr) in exprs.iter().enumerate() {
-                let branch = convert_policy(
+                let branch = convert_policy_with_native_select_inherits(
                     schema,
                     table_schema,
                     table,
                     &format!("{path}.Or[{index}]"),
                     expr,
+                    native_select_inherits,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -696,6 +713,7 @@ fn convert_policy(
             *operation,
             via_column,
             *max_depth,
+            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -761,6 +779,7 @@ fn append_policy_clause(
     path: &str,
     query: Query,
     expr: &PolicyExpr,
+    native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
         PolicyExpr::Inherits {
@@ -776,6 +795,7 @@ fn append_policy_clause(
             *operation,
             via_column,
             *max_depth,
+            native_select_inherits,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -903,12 +923,13 @@ fn append_inherited_referencing_policy(
     match source_filter {
         Ok(source_filter) => Ok(query.join_via(source_table, via_column, [source_filter])),
         Err(_) if policy_requires_branch(source_policy) => {
-            let source_query = convert_policy(
+            let source_query = convert_policy_with_native_select_inherits(
                 schema,
                 source_schema,
                 &source_table_name,
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
+                false,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -1739,7 +1760,8 @@ fn append_inherited_policy(
     query: Query,
     operation: Operation,
     via_column: &str,
-    _max_depth: Option<usize>,
+    max_depth: Option<usize>,
+    native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -1764,20 +1786,45 @@ fn append_inherited_policy(
             format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
         )
     })?;
-    let _parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
+    let parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
         err(
             format!("$.{}.{}", table.as_str(), path),
             format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
-    // Native SELECT inherits now lowers through the derivation-collapse path
-    // documented in crates/jazz/SPEC/14_lowering_to_groove.md section 14.7.
-    // The expansion fallback predates that and multiplies per-derivation work;
-    // keep the helper code below as dead fallback pending removal.
-    Ok(query.inherits_operation(via_column, convert_inherits_operation(operation)))
+    // A top-level SELECT inherit lowers through derivation collapse. When its
+    // policy is embedded under INHERITS_REFERENCING, though, an inherit atom
+    // would be evaluated against the outer row; expand it into the source join
+    // chain instead.
+    if operation == Operation::Select && !native_select_inherits {
+        if max_depth.is_some() {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth",
+            ));
+        }
+        return append_inherited_policy_expanded_fallback(
+            schema,
+            parent_schema,
+            table,
+            path,
+            query,
+            parent_table,
+            via_column,
+            parent_policy,
+        );
+    }
+
+    Ok(match max_depth {
+        Some(max_depth) => query.inherits_operation_with_depth(
+            via_column,
+            convert_inherits_operation(operation),
+            max_depth,
+        ),
+        None => query.inherits_operation(via_column, convert_inherits_operation(operation)),
+    })
 }
 
-#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn append_inherited_policy_expanded_fallback(
     schema: &Schema,
@@ -1799,12 +1846,13 @@ fn append_inherited_policy_expanded_fallback(
             Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
         }
         Err(_) if policy_requires_branch(parent_policy) => {
-            let parent_query = convert_policy(
+            let parent_query = convert_policy_with_native_select_inherits(
                 schema,
                 parent_schema,
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
+                false,
             )?;
             append_inherited_policy_branches(
                 table,
@@ -2978,6 +3026,7 @@ mod tests {
         assert_eq!(policy.inherits.len(), 1);
         assert_eq!(policy.inherits[0].parent_column, "target_team");
         assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
+        assert_eq!(policy.inherits[0].max_depth, Some(32));
     }
 
     #[test]
@@ -3613,6 +3662,44 @@ mod tests {
                 Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
             )]
         );
+    }
+
+    // This conversion-boundary test is intentionally internal: the important
+    // contract is that an unrepresentable public policy is rejected before it
+    // can be published as a native schema with different traversal semantics.
+    #[test]
+    fn rejects_depth_limited_inherited_select_in_reverse_source_policy() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("teams")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("fileId", "files")
+                    .fk_column("teamId", "teams")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "teamId".to_owned(),
+                        max_depth: Some(1),
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("files").policies(TablePolicies::new().with_select(
+                    PolicyExpr::InheritsReferencing {
+                        operation: Operation::Select,
+                        source_table: "attachments".to_owned(),
+                        via_column: "fileId".to_owned(),
+                        max_depth: None,
+                    },
+                )),
+            )
+            .build();
+
+        let error = convert_public_schema(&schema).unwrap_err();
+        assert!(error.to_string().contains(
+            "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth"
+        ));
     }
 
     #[test]

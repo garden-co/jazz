@@ -26,7 +26,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, RowUuid, SchemaVersionId};
 use jazz::node::EdgeCacheBudget;
-use jazz::protocol::{CatalogueAck, CurrentWriteSchema, SchemaVersion, SyncMessage};
+use jazz::protocol::{CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage};
 use jazz::schema::JazzSchema;
 use jazz::wire::{TransportError, WireTransport};
 
@@ -307,6 +307,14 @@ impl ShellDb {
         }
     }
 
+    fn publish_lens(&self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
+        match self {
+            Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.publish_lens(lens).map_err(Into::into),
+        }
+    }
+
     fn set_current_write_schema(
         &self,
         pointer: CurrentWriteSchema,
@@ -315,6 +323,14 @@ impl ShellDb {
             Self::Memory(db) => db.set_current_write_schema(pointer).map_err(Into::into),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db.set_current_write_schema(pointer).map_err(Into::into),
+        }
+    }
+
+    fn set_permissions_ready(&self, ready: bool) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db.set_permissions_ready(ready).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.set_permissions_ready(ready).map_err(Into::into),
         }
     }
 
@@ -599,6 +615,58 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision = current.revision;
         self.runtime_schema_state.last_published_schema = Some(schema_id);
         Ok(schema_id)
+    }
+
+    /// Publish a schema to the runtime catalogue without changing the current
+    /// write-schema pointer.
+    pub fn publish_catalogue_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
+        let schema_version = SchemaVersion::new(schema);
+        let schema_id = schema_version.id;
+        let expected_schema = schema_version.schema.clone();
+        if self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema) {
+            return Ok(schema_id);
+        }
+
+        let publish_acks = catalogue_acks_from_messages(self.db.publish_schema(schema_version)?);
+        let publish_applied = publish_acks
+            .iter()
+            .any(|ack| ack.applied && ack.schema == Some(schema_id));
+        if !publish_applied
+            || self.db.catalogue_schema(schema_id).as_ref() != Some(&expected_schema)
+        {
+            return Err(ShellError::MissingEvent("CatalogueAck"));
+        }
+        Ok(schema_id)
+    }
+
+    /// Publish a migration lens to the runtime catalogue.
+    pub fn publish_runtime_lens(&mut self, lens: MigrationLens) -> ShellResult<()> {
+        let lens_id = lens.id;
+        let publish_acks = catalogue_acks_from_messages(self.db.publish_lens(lens)?);
+        if !publish_acks
+            .iter()
+            .any(|ack| ack.applied && ack.lens == Some(lens_id))
+        {
+            return Err(ShellError::MissingEvent("CatalogueAck"));
+        }
+        Ok(())
+    }
+
+    /// Publish a schema derived from the authoritative permissions head and
+    /// release parked session-scoped reads and writes.
+    pub fn publish_permissions_schema(
+        &mut self,
+        schema: JazzSchema,
+    ) -> ShellResult<SchemaVersionId> {
+        let schema_id = self.publish_runtime_schema(schema)?;
+        self.db.set_permissions_ready(true)?;
+        Ok(schema_id)
+    }
+
+    /// Prevent session-scoped reads and writes from settling until the
+    /// authority has installed a permissions head.
+    pub fn set_permissions_ready(&mut self, ready: bool) -> ShellResult<()> {
+        self.db.set_permissions_ready(ready)
     }
 
     /// Accept one subscriber byte session under the supplied author identity.

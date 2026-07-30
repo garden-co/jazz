@@ -1193,7 +1193,7 @@ fn relation_hop_schema() -> JazzSchema {
             "teams",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("org_id", ColumnType::Uuid),
+                ColumnSchema::new("org_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("org_id", "orgs")
@@ -1203,7 +1203,7 @@ fn relation_hop_schema() -> JazzSchema {
             "users",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("team_id", ColumnType::Uuid),
+                ColumnSchema::new("team_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("team_id", "teams")
@@ -2107,7 +2107,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2116,7 +2119,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2202,6 +2208,10 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
 fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = users_to_orgs_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
     db.insert_with_id(
         "orgs",
         row(0x01),
@@ -2213,7 +2223,10 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2222,14 +2235,14 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
 
-    let query = users_to_orgs_relation_query();
-
-    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     let opened = opened_rows(stream.try_next_event().expect("opened event"));
     assert_eq!(row_ids(&opened), vec![row(0x01)]);
 }
@@ -2239,9 +2252,22 @@ fn users_to_orgs_relation_query() -> RelationQuery {
         rel: RelationExpr::Project {
             input: Box::new(RelationExpr::Join {
                 left: Box::new(RelationExpr::Join {
-                    left: Box::new(RelationExpr::TableScan {
-                        table: "users".to_owned(),
-                        alias: None,
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "users".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("users".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::Literal(serde_json::json!({
+                                "type": "Uuid",
+                                "value": row(0x21).0.to_string(),
+                            })),
+                        },
                     }),
                     right: Box::new(RelationExpr::TableScan {
                         table: "teams".to_owned(),
@@ -2291,6 +2317,142 @@ fn users_to_orgs_relation_query() -> RelationQuery {
                     }),
                 },
             ],
+        },
+    }
+}
+
+#[test]
+fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscriptions() {
+    // This is an integration-level facade test: the public relation-query read
+    // and subscription APIs must both use the same maintained reachability
+    // program for the canonical gather IR emitted by the TypeScript builder.
+    let schema = JazzSchema::new([TableSchema::new(
+        "teams",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new(
+                "parent_id",
+                ColumnType::Nullable(Box::new(ColumnType::Uuid)),
+            ),
+        ],
+    )
+    .with_reference("parent_id", "teams")
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = teams_gather_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
+    let root = row(0x01);
+    let middle = row(0x02);
+    let leaf = row(0x03);
+    db.insert_with_id(
+        "teams",
+        root,
+        BTreeMap::from([("name".to_owned(), Value::String("root".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        middle,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("middle".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        leaf,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("leaf".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(middle.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let changed = opened_rows(stream.try_next_event().expect("gathered rows event"));
+    assert_eq!(
+        row_ids(&changed).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+}
+
+fn teams_gather_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("teams".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::Value::String("leaf".to_owned())),
+                },
+            }),
+            step: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "teams".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::And(vec![RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("teams".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                        }]),
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "teams".to_owned(),
+                        alias: Some("__recursive_hop_0".to_owned()),
+                    }),
+                    on: vec![crate::query::RelationJoinCondition {
+                        left: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "parent_id".to_owned(),
+                        },
+                        right: RelationColumnRef {
+                            scope: Some("__recursive_hop_0".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__recursive_hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                }],
+            }),
+            frontier_key: crate::query::RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: crate::query::RecursionBound::MaxDepth(10),
+            dedupe_key: vec![crate::query::RelationKeyRef::RowId(
+                RelationRowIdRef::Current,
+            )],
         },
     }
 }
@@ -3514,7 +3676,7 @@ fn mergeable_tx_commits_multiple_writes_under_one_tx_id() {
     let table = &doctest_support::schema().tables[0];
     let row_one = row(1);
     let row_two = row(2);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row_one, doctest_support::todo_cells("one", false))
         .unwrap();
@@ -3548,7 +3710,7 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("draft", false))
         .unwrap();
@@ -3588,7 +3750,7 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     db.delete("todos", row).unwrap();
     assert!(prepared_read(&db, &db.table("todos")).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     tx.restore("todos", row, doctest_support::todo_cells("restored", false))
         .unwrap();
     tx.update(
@@ -3635,7 +3797,7 @@ fn mergeable_tx_coalesces_repeated_same_row_updates() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("first", false))
         .unwrap();
@@ -3677,7 +3839,7 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
 
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     tx.update(
         "todos",
         row,
@@ -3695,6 +3857,183 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
     assert_eq!(tx.tx_id, tx_id);
     assert_eq!(tx.n_total_writes, 1);
     assert_eq!(versions.len(), 1);
+}
+
+#[test]
+fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
+    let builder = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let handle = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let restored = row(1);
+    let reinserted = row(2);
+
+    for db in [&builder, &handle] {
+        db.insert_with_id(
+            "todos",
+            restored,
+            doctest_support::todo_cells("archived", false),
+        )
+        .unwrap();
+        db.delete("todos", restored).unwrap();
+        db.insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("original", false),
+        )
+        .unwrap();
+    }
+
+    let builder_tx = builder.mergeable_tx().unwrap();
+    builder_tx
+        .restore(
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+        )
+        .unwrap();
+    builder_tx
+        .update(
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    builder_tx.delete("todos", reinserted).unwrap();
+    builder_tx
+        .insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+        )
+        .unwrap();
+    builder_tx.commit().unwrap();
+
+    let open_tx = handle.begin_mergeable().unwrap();
+    {
+        let tx = handle.mergeable_tx_ref(open_tx);
+        tx.restore(
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+        )
+        .unwrap();
+        tx.update(
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+        tx.delete("todos", reinserted).unwrap();
+        tx.insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+        )
+        .unwrap();
+    }
+    handle.commit_mergeable_handle(open_tx).unwrap();
+
+    let read_state = |db: &Db<_>| {
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        doctest_support::block_on(db.all(
+            &query,
+            ReadOpts {
+                include_deleted: true,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                (
+                    row.is_deleted(),
+                    row.cell(table, "title"),
+                    row.cell(table, "done"),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
+    };
+
+    let builder_state = read_state(&builder);
+    let handle_state = read_state(&handle);
+    assert_eq!(builder_state, handle_state);
+    assert_eq!(
+        builder_state.get(&restored),
+        Some(&(
+            false,
+            Some(Value::String("restored".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+    assert_eq!(
+        builder_state.get(&reinserted),
+        Some(&(
+            true,
+            Some(Value::String("reinserted".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+}
+
+#[test]
+fn mergeable_tx_read_observes_its_staged_restore() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(1);
+
+    db.insert_with_id("todos", row, doctest_support::todo_cells("archived", false))
+        .unwrap();
+    db.delete("todos", row).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.restore("todos", row, doctest_support::todo_cells("restored", false))
+        .unwrap();
+    tx.update(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        tx.read("todos", row).unwrap(),
+        Some(doctest_support::todo_cells("restored", true))
+    );
+}
+
+#[test]
+fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let row = row(1);
+
+    db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
+        .unwrap();
+
+    let open_tx = db.begin_exclusive().unwrap();
+    {
+        let tx = db.exclusive_tx_ref(open_tx);
+        assert_eq!(
+            tx.read("todos", row).unwrap(),
+            Some(doctest_support::todo_cells("base", false))
+        );
+        tx.update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    }
+    db.commit_exclusive_handle(open_tx).unwrap();
+
+    let current = prepared_one(&db, &db.table("todos")).unwrap();
+    assert_eq!(
+        current.cell(table, "title"),
+        Some(Value::String("base".to_owned()))
+    );
+    assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
 }
 
 #[test]
@@ -4153,7 +4492,7 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     for index in 0..100u8 {
         tx.insert_with_id(
             "todos",
