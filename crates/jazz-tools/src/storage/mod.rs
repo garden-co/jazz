@@ -2180,7 +2180,7 @@ pub(super) fn load_history_row_batch_row_bytes_with_storage<H: Storage + ?Sized>
 
 pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
     storage: &H,
-    _table: &str,
+    table: &str,
     branch: &str,
     row_id: ObjectId,
 ) -> Result<Option<OwnedVisibleRowBytes>, StorageError> {
@@ -2207,28 +2207,51 @@ pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
         }
     }
 
-    let Some(locator) = storage.load_visible_row_table_locator(branch, row_id)? else {
-        return Ok(None);
-    };
-    let resolved = resolved_row_table_from_locator(storage, &locator)?
-        .expect("locator-resolved row table must exist");
-    let row_raw_table = locator.row_raw_table.to_string();
-    Ok(storage
-        .raw_table_get(&row_raw_table, &key)?
-        .map(|bytes| OwnedVisibleRowBytes {
-            row_raw_table_id: RowRawTableId {
-                kind: RowRawTableKind::Visible,
-                table_name: locator.table_name.clone(),
-                schema_hash: locator.schema_hash,
-                raw_table_name: locator.row_raw_table.clone(),
-            },
-            row_raw_table,
-            user_descriptor: resolved.user_descriptor,
-            branch: branch.to_string(),
-            row_id,
-            needs_exact_locator: true,
-            bytes,
-        }))
+    if let Some(locator) = storage.load_visible_row_table_locator(branch, row_id)? {
+        let resolved = resolved_row_table_from_locator(storage, &locator)?
+            .expect("locator-resolved row table must exist");
+        let row_raw_table = locator.row_raw_table.to_string();
+        if let Some(bytes) = storage.raw_table_get(&row_raw_table, &key)? {
+            return Ok(Some(OwnedVisibleRowBytes {
+                row_raw_table_id: RowRawTableId {
+                    kind: RowRawTableKind::Visible,
+                    table_name: locator.table_name.clone(),
+                    schema_hash: locator.schema_hash,
+                    raw_table_name: locator.row_raw_table.clone(),
+                },
+                row_raw_table,
+                user_descriptor: resolved.user_descriptor,
+                branch: branch.to_string(),
+                row_id,
+                needs_exact_locator: true,
+                bytes,
+            }));
+        }
+    }
+
+    // Scans union every schema generation's raw table, so a seek must too:
+    // a wrong locator can point away from the generation that holds the
+    // row. The exact-locator request repairs the seek for the next access.
+    for row_raw_table_id in row_raw_table_ids_for_table(storage, RowRawTableKind::Visible, table)? {
+        if let Some(bytes) = storage.raw_table_get(row_raw_table_id.raw_table_name(), &key)? {
+            let Some(resolved) = resolved_row_table_from_id(storage, row_raw_table_id.clone())?
+            else {
+                continue;
+            };
+            let row_raw_table = row_raw_table_id.raw_table_name().to_string();
+            return Ok(Some(OwnedVisibleRowBytes {
+                row_raw_table_id: row_raw_table_id.clone(),
+                row_raw_table,
+                user_descriptor: resolved.user_descriptor,
+                branch: branch.to_string(),
+                row_id,
+                needs_exact_locator: true,
+                bytes,
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 fn scan_history_row_batches_for_schema_hash<H: Storage + ?Sized>(

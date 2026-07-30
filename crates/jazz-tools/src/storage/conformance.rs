@@ -603,6 +603,80 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(
     );
 }
 
+pub fn test_visible_row_seek_falls_back_when_locator_is_wrong(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "tasks");
+    let schema = row_history_test_schema("tasks");
+    let descriptor = row_history_user_descriptor();
+    let row_id = ObjectId::new();
+
+    let row = StoredRowBatch::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(&descriptor, &[Value::Text("survive".to_string())]).unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+        .unwrap();
+
+    // Corrupt the row locator the way a failed pre-repair write did, and
+    // drop the branch-exact locator so neither resolution path can find the
+    // row. Scans would still see it; the seek must not see less.
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(SchemaHash::from_bytes([9u8; 32])),
+            }),
+        )
+        .unwrap();
+    storage
+        .raw_table_delete(
+            super::VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+            &super::visible_row_table_locator_key("main", row_id),
+        )
+        .unwrap();
+
+    let encoded = storage
+        .load_visible_region_row_bytes("tasks", "main", row_id)
+        .unwrap()
+        .expect("a seek with a wrong locator must fall back to the raw tables");
+
+    assert_eq!(
+        decode_flat_visible_row_entry(&descriptor, row_id, "main", &encoded).unwrap(),
+        entry
+    );
+}
+
 pub fn test_visible_region_does_not_write_separate_batch_side_index(
     factory: &dyn Fn() -> Box<dyn Storage>,
 ) {
@@ -1466,6 +1540,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn row_locator_isolation() {
                 conformance::test_row_locator_isolation(&$factory);
+            }
+
+            #[test]
+            fn visible_row_seek_falls_back_when_locator_is_wrong() {
+                conformance::test_visible_row_seek_falls_back_when_locator_is_wrong(&$factory);
             }
 
             #[test]

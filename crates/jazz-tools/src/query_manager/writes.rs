@@ -416,18 +416,31 @@ impl QueryManager {
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
 
-        if storage
+        let minted_row_locator = if storage
             .load_row_locator(row_id)
             .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
             .is_none()
         {
             let row_locator = self.row_locator_for_branch(table, branch_name.as_str());
             self.persist_row_locator(storage, row_id, &row_locator);
-        }
+            true
+        } else {
+            false
+        };
 
         let forwarded_row = row.clone();
-        let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
-            .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
+        let applied = match apply_row_batch(storage, row_id, branch_name, row, index_mutations) {
+            Ok(applied) => applied,
+            Err(error) => {
+                // A failed apply did not establish the row; a locator minted
+                // for it would misdirect every id-seek once the real row
+                // syncs in.
+                if minted_row_locator {
+                    let _ = storage.put_row_locator(row_id, None);
+                }
+                return Err(Self::query_error_for_local_row_history_write(row_id, error));
+            }
+        };
 
         self.finish_local_row_history_write(storage, table, row_id, forwarded_row, applied)
     }

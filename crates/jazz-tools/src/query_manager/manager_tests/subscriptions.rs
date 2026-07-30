@@ -1200,6 +1200,144 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
 }
 
 #[test]
+fn failed_update_on_unknown_row_leaves_no_row_locator() {
+    use crate::object::ObjectId;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let unknown_row = ObjectId::new();
+    let result = qm.update(
+        &mut storage,
+        unknown_row,
+        &[Value::Text("ghost".into()), Value::Integer(1)],
+    );
+    assert!(result.is_err(), "updating an unknown row must fail");
+
+    // The failed write must not leave a locator behind: one minted here
+    // would claim the row originates locally at the current schema hash and
+    // misdirect every id-seek once the real row syncs in from upstream.
+    assert_eq!(
+        storage.load_row_locator(unknown_row).unwrap(),
+        None,
+        "a failed write must not mint a row locator"
+    );
+}
+
+#[test]
+fn incoming_row_metadata_repairs_divergent_row_locator() {
+    use crate::storage::RowLocator;
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema.clone());
+
+    // Seed a row through the normal local path, then corrupt its locator the
+    // way a failed pre-fix write did: wrong origin schema hash.
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let row_id = handle.row_id;
+    qm.process(&mut storage);
+
+    let correct = storage.load_row_locator(row_id).unwrap().unwrap();
+    let wrong_hash = crate::query_manager::types::SchemaHash::from_bytes([9u8; 32]);
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: correct.table.clone(),
+                origin_schema_hash: Some(wrong_hash),
+            }),
+        )
+        .unwrap();
+
+    // A row batch arriving with authoritative metadata must repair the
+    // locator, not merely note the divergence.
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice Synced".into()), Value::Integer(200)],
+    )
+    .unwrap();
+    let branch = qm.current_branch();
+    let commit = stored_row_commit(smallvec![], data, 42, row_id.to_string());
+    let row = commit.to_row(row_id, &branch, RowState::VisibleDirect);
+    let metadata = crate::storage::metadata_from_row_locator(&correct);
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId(Uuid::new_v7(uuid::Timestamp::now(
+            uuid::NoContext,
+        )))),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(crate::sync_manager::RowMetadata {
+                id: row_id,
+                metadata: metadata.clone(),
+            }),
+            row,
+        },
+    });
+    qm.process(&mut storage);
+
+    assert_eq!(
+        storage.load_row_locator(row_id).unwrap(),
+        Some(correct.clone()),
+        "server metadata must repair a divergent row locator"
+    );
+
+    // The same metadata arriving from a downstream client must not rewrite
+    // the locator: clients get no authority over where rows live.
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: correct.table.clone(),
+                origin_schema_hash: Some(wrong_hash),
+            }),
+        )
+        .unwrap();
+    let client_id = crate::sync_manager::ClientId::new();
+    connect_client(&mut qm, &storage, client_id);
+    let data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice Client".into()), Value::Integer(300)],
+    )
+    .unwrap();
+    let commit = stored_row_commit(smallvec![], data, 43, row_id.to_string());
+    let row = commit.to_row(row_id, &branch, RowState::VisibleDirect);
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: Some(crate::sync_manager::RowMetadata {
+                id: row_id,
+                metadata,
+            }),
+            row,
+        },
+    });
+    qm.process(&mut storage);
+
+    assert_eq!(
+        storage
+            .load_row_locator(row_id)
+            .unwrap()
+            .unwrap()
+            .origin_schema_hash,
+        Some(wrong_hash),
+        "client metadata must not rewrite the locator"
+    );
+}
+
+#[test]
 fn local_durability_tier_subscription_ignores_stale_upstream_scope() {
     use crate::sync_manager::{DurabilityTier, InboxEntry, QueryId, ServerId, Source, SyncPayload};
     use uuid::Uuid;

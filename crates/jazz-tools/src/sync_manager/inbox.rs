@@ -226,6 +226,7 @@ impl SyncManager {
         storage: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
+        metadata_is_authoritative: bool,
     ) -> (bool, bool) {
         let existing_row_locator = storage.load_row_locator(object_id).ok().flatten();
         let Some(metadata_row_locator) = crate::storage::row_locator_from_metadata(&metadata)
@@ -234,10 +235,18 @@ impl SyncManager {
         };
         let metadata_schema_hash = metadata_row_locator.origin_schema_hash;
         match existing_row_locator {
-            Some(existing_row_locator) => (
-                false,
-                existing_row_locator.origin_schema_hash != metadata_schema_hash,
-            ),
+            Some(existing_row_locator) => {
+                let diverged = existing_row_locator.origin_schema_hash != metadata_schema_hash;
+                if diverged && metadata_is_authoritative {
+                    // An upstream server is authoritative about where the
+                    // row's data lives: repair a divergent local locator
+                    // (typically minted by a local write that raced the
+                    // row's arrival). Downstream client metadata gets no
+                    // such trust.
+                    let _ = storage.put_row_locator(object_id, Some(&metadata_row_locator));
+                }
+                (false, diverged)
+            }
             None => {
                 let _ = storage.put_row_locator(object_id, Some(&metadata_row_locator));
                 (true, false)
@@ -399,6 +408,7 @@ impl SyncManager {
         metadata: Option<RowMetadata>,
         mut row: StoredRowBatch,
         fate_recording: AuthoritativeFateRecording,
+        metadata_is_authoritative: bool,
     ) -> Option<AppliedRowBatch> {
         let authoritative_tier = match (row.confirmed_tier, self.max_local_durability_tier()) {
             (Some(incoming), Some(local)) => Some(incoming.max(local)),
@@ -429,8 +439,12 @@ impl SyncManager {
             }
             row.state = RowState::Rejected;
         }
-        let (is_newly_located_object, needs_exact_locator) =
-            self.ensure_object_metadata(storage, row.row_id, metadata.clone());
+        let (is_newly_located_object, needs_exact_locator) = self.ensure_object_metadata(
+            storage,
+            row.row_id,
+            metadata.clone(),
+            metadata_is_authoritative,
+        );
         let branch_name = BranchName::new(&row.branch);
         let visibility_change =
             match self.row_context_from_metadata(storage, &metadata, needs_exact_locator) {
@@ -1348,6 +1362,7 @@ impl SyncManager {
                     metadata,
                     row.clone(),
                     AuthoritativeFateRecording::AcceptedByLocalAuthority,
+                    true,
                 ) {
                     self.apply_authoritative_transaction_fate_for_row(
                         storage,
@@ -1880,7 +1895,7 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) =
-                    self.apply_row_updated(storage, metadata, row.clone(), fate_recording)
+                    self.apply_row_updated(storage, metadata, row.clone(), fate_recording, false)
                 {
                     self.forward_row_batch_to_servers(
                         storage,
