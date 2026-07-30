@@ -54,6 +54,9 @@ pub(crate) struct OutgoingQuerySubscription {
 /// - Downstream clients (untrusted, receive query-filtered subsets)
 #[derive(Clone)]
 pub struct SyncManager {
+    /// Whether the local store is authoritative for reads at this node's
+    /// identity tiers. Servers own their stores; replica clients do not.
+    read_frontier_authority: bool,
     pub(super) clock: MonotonicClock,
     pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
@@ -232,6 +235,7 @@ impl SyncManager {
     pub fn new() -> Self {
         Self {
             clock: MonotonicClock::new(),
+            read_frontier_authority: true,
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
@@ -291,6 +295,22 @@ impl SyncManager {
     /// (worker/edge/global) rather than a top-level client.
     pub fn has_durability_identity(&self) -> bool {
         !self.my_tiers.is_empty()
+    }
+
+    /// Mark this node as a replica client: its durability identity still
+    /// settles the writes it accepts, but tier reads must wait for the
+    /// upstream query frontier.
+    pub fn as_replica_client(mut self) -> Self {
+        self.read_frontier_authority = false;
+        self
+    }
+
+    /// True when this node's local store is authoritative for reads at its
+    /// identity tiers (servers). Replica clients return false: an answer
+    /// served before the frontier is confirmed would present "not synced
+    /// yet" as "does not exist".
+    pub fn read_frontier_authority(&self) -> bool {
+        self.read_frontier_authority
     }
 
     /// True when this node can satisfy acknowledgements for the requested tier

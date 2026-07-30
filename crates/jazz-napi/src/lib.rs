@@ -370,8 +370,10 @@ fn build_napi_runtime(
     // Parse optional tier
     let node_tiers = parse_node_durability_tier(tier)?;
 
-    // Create sync manager
-    let mut sync_manager = SyncManager::new();
+    // The runtime's durability identity settles its own writes, but its
+    // store replicates any upstream server, so it is never a read-frontier
+    // authority.
+    let mut sync_manager = SyncManager::new().as_replica_client();
     if !node_tiers.is_empty() {
         sync_manager = sync_manager.with_durability_tiers(node_tiers);
     }

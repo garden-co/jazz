@@ -1200,6 +1200,56 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
 }
 
 #[test]
+fn replica_client_subscription_waits_for_upstream_frontier() {
+    use crate::sync_manager::{DurabilityTier, InboxEntry, QueryId, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    // Same durability identity as an edge server, but marked as a replica
+    // client: reads must wait for the upstream query frontier.
+    let sync_manager = SyncManager::new()
+        .with_durability_tier(DurabilityTier::EdgeServer)
+        .as_replica_client();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut qm, &storage, upstream_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let query = qm.query("users").build();
+    let sub_id = qm
+        .subscribe_with_sync(query, None, Some(DurabilityTier::EdgeServer))
+        .unwrap();
+    qm.process(&mut storage);
+
+    assert!(
+        qm.take_updates().is_empty(),
+        "a replica client must not deliver a cold local answer before the \
+         upstream confirms the query frontier"
+    );
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(upstream_id),
+        payload: SyncPayload::QuerySettled {
+            query_id: QueryId(sub_id.0),
+            tier: DurabilityTier::GlobalServer,
+            scope: vec![],
+            through_seq: 0,
+        },
+    });
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(
+        updates.len(),
+        1,
+        "the settled frontier must deliver the initial (empty) result"
+    );
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert!(updates[0].delta.added.is_empty());
+}
+
+#[test]
 fn local_durability_tier_subscription_ignores_stale_upstream_scope() {
     use crate::sync_manager::{DurabilityTier, InboxEntry, QueryId, ServerId, Source, SyncPayload};
     use uuid::Uuid;
