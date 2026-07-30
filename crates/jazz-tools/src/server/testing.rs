@@ -419,6 +419,13 @@ impl JazzServer {
         user_id: impl AsRef<str>,
     ) -> AppContext {
         self.require_built_in_jwt_helpers();
+        let user_id = user_id.as_ref();
+        // WebSocket sessions validate principals as UUIDs. Preserve concise,
+        // symbolic identities in test call sites by deriving a stable wire
+        // principal for them; callers already using UUIDs retain that value.
+        let user_id = Uuid::parse_str(user_id)
+            .map(|uuid| uuid.to_string())
+            .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, user_id.as_bytes()).to_string());
 
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
@@ -429,7 +436,7 @@ impl JazzServer {
 
         let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
         let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
-            user_id.as_ref(),
+            &user_id,
             json!({"role": "user"}),
             TestJwtOptions::default(),
             now,
