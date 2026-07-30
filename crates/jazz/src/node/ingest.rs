@@ -599,7 +599,6 @@ where
             if !self.version_satisfies_write_policy(version, permission_subject) {
                 let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
                 self.ingest_rejected_transaction(stored.tx, fate)?;
-                self.open_tx.local_permission_subjects.remove(&tx_id);
                 return Ok(());
             }
         }
@@ -612,9 +611,7 @@ where
             Some(DurabilityTier::Global),
         )?;
         self.create_merge_versions_for(&records)?;
-        self.checkpoint_large_values_for_tx(tx_id)?;
-        self.open_tx.local_permission_subjects.remove(&tx_id);
-        Ok(())
+        self.checkpoint_large_values_for_tx(tx_id)
     }
 
     /// Finalize a locally-authored pending exclusive commit as the global
@@ -1628,6 +1625,28 @@ where
         global_seq: Option<GlobalSeq>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
+        let mut terminal_fate_persisted = false;
+        let result = self.apply_fate_update_once(
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+            &mut terminal_fate_persisted,
+        );
+        if terminal_fate_persisted {
+            self.open_tx.local_permission_subjects.remove(&tx_id);
+        }
+        result
+    }
+
+    fn apply_fate_update_once(
+        &mut self,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: Option<DurabilityTier>,
+        terminal_fate_persisted: &mut bool,
+    ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -1730,6 +1749,7 @@ where
             None
         };
         self.database.commit_batch(batch)?;
+        *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
             self.persist_storage_consistency_marker_through(tx_id.time)?;
         }
