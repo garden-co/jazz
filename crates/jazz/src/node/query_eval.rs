@@ -9,6 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::time::Instant;
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
@@ -5919,6 +5920,25 @@ where
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 
+    pub(crate) fn query_rows_local_preview_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        let mut profile = QueryReadProfile::default();
+        let rows = self.query_rows_with_options_for_identity_profiled(
+            shape,
+            binding,
+            DurabilityTier::Local,
+            prepared_plan,
+            AuthorId::SYSTEM,
+            false,
+            Some(&mut profile),
+        )?;
+        Ok((rows, profile))
+    }
+
     pub(crate) fn query_rows_including_deleted_for_identity(
         &mut self,
         shape: &ValidatedQuery,
@@ -5946,6 +5966,28 @@ where
         identity: AuthorId,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_with_options_for_identity_profiled(
+            shape,
+            binding,
+            tier,
+            prepared_plan,
+            identity,
+            include_deleted,
+            None,
+        )
+    }
+
+    fn query_rows_with_options_for_identity_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+        identity: AuthorId,
+        include_deleted: bool,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let total_started = profile.is_some().then(Instant::now);
         if include_deleted {
             let mut rows = self
                 .query_rows_including_deleted_with_query_engine(shape, binding, tier, identity)?;
@@ -5954,12 +5996,18 @@ where
             self.apply_projection(query, &mut rows)?;
             return Ok(rows);
         }
+        let phase_started = profile.is_some().then(Instant::now);
         let settled_binding_view = (tier == DurabilityTier::Global)
             .then(|| self.settled_binding_view_key_for_query(shape, binding))
             .transpose()?
             .flatten();
         let prepared_plan = prepared_plan
             .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.resolve_view = started.elapsed();
+        }
+
+        let phase_started = profile.is_some().then(Instant::now);
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -5971,6 +6019,11 @@ where
                 settled_binding_view,
             )?)
         };
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.compile_program = started.elapsed();
+        }
+
+        let phase_started = profile.is_some().then(Instant::now);
         let needs_binding = || {
             let parameters = &program
                 .as_ref()
@@ -6001,6 +6054,11 @@ where
         };
         let policy = self.query_program_policy_context(identity);
         let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.select_plan = started.elapsed();
+        }
+
+        let phase_started = profile.is_some().then(Instant::now);
         let deltas_result = match plan {
             None => self
                 .database
@@ -6033,6 +6091,11 @@ where
             },
         };
         let deltas = deltas_result?;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.execute_plan = started.elapsed();
+        }
+
+        let phase_started = profile.is_some().then(Instant::now);
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
         } else {
@@ -6045,9 +6108,25 @@ where
             }
             rows
         };
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.decode_materialize = started.elapsed();
+        }
+
         let query = shape.query();
+        let phase_started = profile.is_some().then(Instant::now);
         self.finish_engine_query_rows(query, &mut rows)?;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.finish_rows = started.elapsed();
+        }
+
+        let phase_started = profile.is_some().then(Instant::now);
         self.apply_projection(query, &mut rows)?;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), phase_started) {
+            profile.apply_projection = started.elapsed();
+        }
+        if let (Some(profile), Some(started)) = (profile, total_started) {
+            profile.total = started.elapsed();
+        }
         Ok(rows)
     }
 

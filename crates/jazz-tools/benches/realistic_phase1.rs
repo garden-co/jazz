@@ -1114,6 +1114,14 @@ struct R3PhaseSample {
     jazz_open: Duration,
     prepare: Duration,
     first_read: Duration,
+    first_read_resolve_view: Duration,
+    first_read_compile_program: Duration,
+    first_read_select_plan: Duration,
+    first_read_execute_plan: Duration,
+    first_read_decode_materialize: Duration,
+    first_read_finish_rows: Duration,
+    first_read_apply_projection: Duration,
+    first_read_unattributed: Duration,
     rows: usize,
 }
 
@@ -1252,7 +1260,9 @@ fn measure_r3_phase_sample(
     let prepare = prepare_started.elapsed();
 
     let read_started = Instant::now();
-    let rows = db.read(&query).expect("read warm-cache project board");
+    let (rows, read_profile) = db
+        .read_profiled(&query)
+        .expect("read warm-cache project board");
     let first_read = read_started.elapsed();
     assert_eq!(
         rows.len(),
@@ -1265,6 +1275,14 @@ fn measure_r3_phase_sample(
         jazz_open,
         prepare,
         first_read,
+        first_read_resolve_view: read_profile.resolve_view,
+        first_read_compile_program: read_profile.compile_program,
+        first_read_select_plan: read_profile.select_plan,
+        first_read_execute_plan: read_profile.execute_plan,
+        first_read_decode_materialize: read_profile.decode_materialize,
+        first_read_finish_rows: read_profile.finish_rows,
+        first_read_apply_projection: read_profile.apply_projection,
+        first_read_unattributed: first_read.saturating_sub(read_profile.total),
         rows: rows.len(),
     }
 }
@@ -1316,6 +1334,14 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                 "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
                 "prepare_p50_us": median_us(&samples, |sample| sample.prepare),
                 "first_read_p50_us": median_us(&samples, |sample| sample.first_read),
+                "first_read_resolve_view_p50_us": median_us(&samples, |sample| sample.first_read_resolve_view),
+                "first_read_compile_program_p50_us": median_us(&samples, |sample| sample.first_read_compile_program),
+                "first_read_select_plan_p50_us": median_us(&samples, |sample| sample.first_read_select_plan),
+                "first_read_execute_plan_p50_us": median_us(&samples, |sample| sample.first_read_execute_plan),
+                "first_read_decode_materialize_p50_us": median_us(&samples, |sample| sample.first_read_decode_materialize),
+                "first_read_finish_rows_p50_us": median_us(&samples, |sample| sample.first_read_finish_rows),
+                "first_read_apply_projection_p50_us": median_us(&samples, |sample| sample.first_read_apply_projection),
+                "first_read_unattributed_p50_us": median_us(&samples, |sample| sample.first_read_unattributed),
             })
         );
     }

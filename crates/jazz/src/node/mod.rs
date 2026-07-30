@@ -4288,6 +4288,31 @@ pub struct QueryEngineReadMetrics {
     pub source_full_scans: u64,
 }
 
+/// Wall-clock attribution for one synchronous query materialization.
+///
+/// This is intended for benchmark diagnostics. The phases cover work inside
+/// the node query path; facade borrowing and error conversion remain outside
+/// `total`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryReadProfile {
+    /// Resolve the settled view and choose whether a supplied prepared plan is usable.
+    pub resolve_view: std::time::Duration,
+    /// Lower the current query into a one-shot query program when no prepared plan applies.
+    pub compile_program: std::time::Duration,
+    /// Select or construct the executable plan and resolve policy/output schema context.
+    pub select_plan: std::time::Duration,
+    /// Execute the selected Groove graph or prepared shape and collect output deltas.
+    pub execute_plan: std::time::Duration,
+    /// Decode positive output records and materialize Jazz current rows.
+    pub decode_materialize: std::time::Duration,
+    /// Apply query-engine post-processing such as includes, ordering, offset, and limit.
+    pub finish_rows: std::time::Duration,
+    /// Apply the requested output projection.
+    pub apply_projection: std::time::Duration,
+    /// Total time spent in the profiled node query path.
+    pub total: std::time::Duration,
+}
+
 /// Deterministic counters for large-value materialization and checkpoint use.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LargeValueMetrics {

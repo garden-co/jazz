@@ -69,8 +69,11 @@ cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- realist
 R3 preserves the historical combined Criterion measurement and also emits one
 JSON phase receipt per selected profile/cache mode. The receipt separates
 RocksDB storage open, Jazz `Db` open, query preparation, and first
-materialization. Its default is the existing 120-task CI profile with the OS
-page cache left uncontrolled after fixture seeding:
+materialization. First materialization is further split into view resolution,
+program compilation, plan selection, Groove execution, row
+decode/materialization, row finishing, projection, and an unattributed
+facade/clock residual. Its default is the existing 120-task CI profile with the
+OS page cache left uncontrolled after fixture seeding:
 
 ```bash
 JAZZ_R3_PROFILES=ci \

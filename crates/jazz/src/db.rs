@@ -38,8 +38,8 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, RelationEdge, RelationSnapshot, RowProvenance,
-    ViewUpdateParts,
+    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    RowProvenance, ViewUpdateParts,
 };
 use crate::peer::PeerState;
 use crate::protocol::{
@@ -558,6 +558,26 @@ where
             .node
             .borrow_mut()
             .query_rows_local_preview(
+                &prepared.shape,
+                &prepared.binding,
+                prepared.plan_for_tier(DurabilityTier::Local),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Synchronously read rows and attribute work inside the node query path.
+    ///
+    /// The returned rows are identical to [`Self::read`]. This diagnostic
+    /// variant exists so persisted-read benchmarks can locate first-read cost
+    /// without adding clocks to the ordinary read path.
+    pub fn read_profiled(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .query_rows_local_preview_profiled(
                 &prepared.shape,
                 &prepared.binding,
                 prepared.plan_for_tier(DurabilityTier::Local),
