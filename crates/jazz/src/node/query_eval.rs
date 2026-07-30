@@ -4467,7 +4467,7 @@ where
             .filter(|member| member.table_name() == Some(result_table))
         {
             let Some(row) =
-                self.materialize_authoritative_reset_member(shape, member, &result_payloads, true)?
+                self.materialize_authoritative_reset_member(member, &result_payloads)?
             else {
                 continue;
             };
@@ -4478,6 +4478,7 @@ where
         // query rank. Membership/windowing is already lowered; only restore the
         // selected roots to their advertised order before sending a reset.
         self.apply_query_order(shape.query(), &mut rows)?;
+        self.apply_projection(shape.query(), &mut rows)?;
         let root_count = rows.len();
         let mut edges = Vec::new();
         for fact in program_facts {
@@ -4512,26 +4513,21 @@ where
 
     fn materialize_authoritative_reset_member(
         &mut self,
-        shape: &ValidatedQuery,
         member: &ResultMemberEntry,
         result_payloads: &BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
-        apply_root_projection: bool,
     ) -> Result<Option<CurrentRow>, Error> {
-        if let Some(payload) = result_payloads.get(member) {
+        if member.as_row().is_none()
+            && let Some(payload) = result_payloads.get(member)
+        {
             let Some(table_name) = member.table_name() else {
                 return Err(Error::InvalidStoredValue(
                     "result payload member must name a table",
                 ));
             };
             let table = self.table(table_name)?.clone();
-            let mut row = self.current_row_from_result_payload(&table, payload)?;
-            if apply_root_projection
-                && table.name == shape.query().table
-                && let Some(columns) = &shape.query().select
-            {
-                row = row.project(&table, columns)?;
-            }
-            return Ok(Some(row));
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
         }
 
         let Some((table_name, row_uuid, tx_id)) = member.as_row() else {
@@ -4539,24 +4535,12 @@ where
                 "authoritative reset cannot materialize non-row result without payload",
             ));
         };
-        let projection = (apply_root_projection && table_name.as_str() == shape.query().table)
-            .then(|| shape.query().select.as_deref())
-            .flatten();
-        if let Some(mut row) =
+        if let Some(row) =
             self.materialize_authoritative_reset_current_row(table_name.as_str(), row_uuid)?
         {
-            if let Some(columns) = projection {
-                let table = self.table(table_name.as_str())?.clone();
-                row = row.project(&table, columns)?;
-            }
             return Ok(Some(row));
         }
-        self.materialize_authoritative_reset_version_row(
-            table_name.as_str(),
-            row_uuid,
-            tx_id,
-            projection,
-        )
+        self.materialize_authoritative_reset_version_row(table_name.as_str(), row_uuid, tx_id, None)
     }
 
     fn materialize_authoritative_reset_current_row(
@@ -6673,8 +6657,10 @@ where
         }
         // `result_set` is keyed by member identity, so its BTreeSet iteration
         // order cannot be exposed as a query reset order. Do not re-window: the
-        // maintained program already chose this result set.
+        // maintained program already chose this result set. Materialize full
+        // rows first, because an order key may not be in the public projection.
         self.apply_query_order(&local.result_query, &mut rows)?;
+        self.apply_projection(&local.result_query, &mut rows)?;
         let root_count = rows.len();
         let mut edges = Vec::with_capacity(local.program_facts.len());
         for fact in &local.program_facts {
@@ -6840,15 +6826,6 @@ where
             ));
         };
         let table = self.table(entry.0.as_str())?.clone();
-        if local.result_select.is_some()
-            && let Some(payload) = local.result_payloads.get(member)
-        {
-            let mut row = self.current_row_from_result_payload(&table, payload)?;
-            if let Some(columns) = &local.result_select {
-                row = row.project(&table, columns)?;
-            }
-            return Ok(Some(row));
-        }
         let tx_versions = self.local_maintained_tx_versions(local, entry.2, cache);
         let version = if let Some(version) =
             local_maintained_view_content_witness(tx_versions, entry.0.as_str(), entry.1)
@@ -6869,13 +6846,10 @@ where
                 .ok_or(Error::MissingTransaction(entry.2))?
                 .clone()
         };
-        let mut row = self.current_row_from_materialized_version_with_materialization_cache(
+        self.current_row_from_materialized_version_with_materialization_cache(
             &table, &version, cache,
-        )?;
-        if let Some(columns) = &local.result_select {
-            row = row.project(&table, columns)?;
-        }
-        Ok(Some(row))
+        )
+        .map(Some)
     }
 
     fn local_maintained_tx_versions<'a>(

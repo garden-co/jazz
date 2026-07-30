@@ -32,6 +32,70 @@ fn todo_schema() -> Schema {
         .build()
 }
 
+fn ranked_todo_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("rank", ColumnType::Integer),
+        )
+        .build()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscription_orders_by_unprojected_field() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = ranked_todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000011")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let mut ids = Vec::new();
+            for (title, rank) in [("charlie", 3), ("alpha", 1), ("bravo", 2)] {
+                let (id, _, batch_id) = client
+                    .insert("todos", row_input!("title" => title, "rank" => rank))
+                    .expect("insert ranked todo");
+                client
+                    .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                    .await
+                    .expect("ranked todo settles at edge");
+                ids.push(id);
+            }
+
+            let mut stream = client
+                .subscribe(
+                    QueryBuilder::new("todos")
+                        .select(&["title"])
+                        .order_by("rank")
+                        .build(),
+                )
+                .await
+                .expect("subscribe to projected ranked todos");
+            let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("initial subscription reset arrives")
+                .expect("subscription stream remains open");
+            let SubscriptionStreamItem::Delta(delta) = item else {
+                panic!("projected ranked subscription was rejected");
+            };
+
+            assert_eq!(
+                delta.added.iter().map(|added| added.id).collect::<Vec<_>>(),
+                vec![ids[1], ids[2], ids[0]],
+                "subscription reset must follow rank even when rank is not projected"
+            );
+
+            client.shutdown().await.expect("shutdown test client");
+            server.shutdown().await;
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn edge_tier_public_subscription_opens_and_receives_rows() {
     tokio::task::LocalSet::new()
