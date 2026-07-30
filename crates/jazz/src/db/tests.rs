@@ -2389,6 +2389,25 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
         row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([root, middle, leaf])
     );
+
+    let filtered_query = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Ne,
+                right: RelationValueRef::Literal(serde_json::Value::String("middle".to_owned())),
+            },
+        },
+    };
+    let filtered = block_on(db.all_relation_query(&filtered_query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&filtered.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, leaf])
+    );
 }
 
 fn teams_gather_relation_query() -> RelationQuery {
