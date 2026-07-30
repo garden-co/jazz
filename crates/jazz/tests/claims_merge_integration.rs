@@ -62,6 +62,12 @@ fn claims_gated_schema() -> Schema {
 
 #[tokio::test]
 async fn ephemeral_claims_merged_into_session() {
+    tokio::task::LocalSet::new()
+        .run_until(ephemeral_claims_merged_into_session_impl())
+        .await
+}
+
+async fn ephemeral_claims_merged_into_session_impl() {
     let server = JazzServer::start_with_schema(claims_gated_schema()).await;
     let schema = claims_gated_schema();
 
