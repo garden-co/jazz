@@ -5463,9 +5463,9 @@ where
         let mut binding_claim_params =
             prepare_claim_parameters_for_policy(&self.catalogue.schema, &mut input_shape, &policy);
         // The outer graph must declare policy claims before its source resolver
-        // emits the policy subgraph.  Otherwise that subgraph would introduce
+        // emits the policy subgraph. Otherwise that subgraph would introduce
         // an orphan binding source after the outer prepared descriptor was
-        // chosen.  This root-policy prewalk supplies the shared environment to
+        // chosen. This root-policy prewalk supplies the shared environment to
         // both graphs; nested policy sources receive it through the resolver.
         if !matches!(policy, PolicyContext::System) && shape.params().is_empty() {
             if let Some(table) = self
@@ -5495,6 +5495,9 @@ where
                 )
             })
             .flatten();
+        if let Some(source_shape) = &source_shape {
+            retarget_binding_value_sources(&mut input_shape, source_shape);
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape_and_policy(
                 shape,
