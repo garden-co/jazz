@@ -4,7 +4,7 @@
 
 #[path = "../src/client_worker.rs"]
 mod client_worker;
-#[path = "../../../../crates/jazz-tools/tests/support/permissions.rs"]
+#[path = "../../../../crates/jazz/tests/support/permissions.rs"]
 mod permissions_support;
 
 use std::convert::Infallible;
@@ -21,7 +21,7 @@ use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
-use jazz_tools::{
+use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
     TableSchema,
 };
@@ -65,7 +65,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> jazz_tools::Schema {
+fn test_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -116,7 +116,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz_tools::{ObjectId, QueryBuilder, Value};
+use jazz::tools::{ObjectId, QueryBuilder, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -146,7 +146,7 @@ fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 /// Broadcast current todos to all SSE connections.
@@ -674,7 +674,7 @@ impl TestServer {
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }

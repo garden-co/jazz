@@ -1,4 +1,161 @@
 use crate::query::{Include, JoinMode, OrderDirection, PolicyBranch, Predicate, any_of};
+use std::cell::Cell;
+use std::rc::Rc;
+
+// The injected read failure is necessary to exercise the externally visible
+// retry contract: a failed rejection must leave the transaction pending for a
+// later public `finalize_local_mergeable_commit` call.
+#[derive(Clone)]
+struct FailTransactionReadMemoryStorage {
+    inner: MemoryStorage,
+    fail_after_transaction_reads: Rc<Cell<Option<usize>>>,
+}
+
+impl FailTransactionReadMemoryStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            fail_after_transaction_reads: Rc::new(Cell::new(None)),
+        }
+    }
+
+    fn fail_after_transaction_reads(&self, successful_reads: usize) {
+        self.fail_after_transaction_reads.set(Some(successful_reads));
+    }
+}
+
+impl OrderedKvStorage for FailTransactionReadMemoryStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        if key
+            .windows("jazz_transactions".len())
+            .any(|window| window == b"jazz_transactions")
+            && let Some(remaining) = self.fail_after_transaction_reads.get()
+        {
+            if remaining == 0 {
+                self.fail_after_transaction_reads.set(None);
+                return Err(groove::storage::Error::InvalidStorageLayout(
+                    "injected transaction read failure".to_owned(),
+                ));
+            }
+            self.fail_after_transaction_reads.set(Some(remaining - 1));
+        }
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for FailTransactionReadMemoryStorage {
+    fn reopen(
+        mut self,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        self.inner = self.inner.reopen(column_families)?;
+        Ok(self)
+    }
+}
+
+#[test]
+fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
+    let schema = owner_policy_schema();
+    let backend = user(0xb0);
+    let attributed_user = user(0xa1);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
+    let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x90), 10)
+                .made_by(attributed_user)
+                .permission_subject(backend)
+                .cells(owner_cells(attributed_user, "attributed retry")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.transaction_state(tx_id),
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    ));
+    // The finalizer reads its pending transaction and the policy evaluator reads
+    // its transaction provenance before `ingest_rejected_transaction` retries
+    // that lookup to persist the rejection.
+    storage.fail_after_transaction_reads(2);
+    let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
+    assert!(error.to_string().contains("injected transaction read failure"));
+    let pending_state = core.transaction_state(tx_id);
+    assert!(matches!(
+        pending_state,
+        Some((Fate::Pending, None, DurabilityTier::Local))
+    ), "failed finalization must leave the transaction pending, got {pending_state:?}");
+
+    core.finalize_local_mergeable_commit(tx_id).unwrap();
+
+    // The retry must still use the trusted backend as its authenticated subject.
+    // `made_by` owns the row and would incorrectly accept this transaction.
+    assert!(matches!(
+        core.transaction_state(tx_id),
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
+    ));
+    assert!(core
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
 
 #[test]
 fn write_policy_rejection_cleans_up_client() {
@@ -5002,4 +5159,60 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
             "content extent is not visible for row"
         ))
     ));
+}
+
+#[test]
+fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_binding() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("updated_at", ColumnType::U64),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("documents", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+
+    for index in 0..100_u64 {
+        accept_global(
+            &mut core,
+            MergeableCommit::new("documents", row(index as u8), index).cells(BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner_a.0)),
+                ("updated_at".to_owned(), Value::U64(index)),
+            ])),
+        );
+        accept_global(
+            &mut core,
+            MergeableCommit::new("documents", row((index + 100) as u8), index + 100)
+                .cells(BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(owner_b.0)),
+                    ("updated_at".to_owned(), Value::U64(index + 100)),
+                ])),
+        );
+    }
+
+    let shape = Query::from("documents")
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(100)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let mut peer_b = PeerState::for_author(owner_b);
+    let update_b = peer_b
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+    let mut peer_a = PeerState::for_author(owner_a);
+    let update_a = peer_a
+        .rehydrate_query(&mut core, &shape, &binding)
+        .unwrap();
+
+    let (adds_a, removes_a) = canonical_view_update_rows(&update_a);
+    let (adds_b, removes_b) = canonical_view_update_rows(&update_b);
+    assert!(removes_a.is_empty());
+    assert!(removes_b.is_empty());
+    assert_eq!(adds_a.len(), 100, "owner A should receive its own full window");
+    assert_eq!(adds_b.len(), 100, "owner B should receive its own full window");
 }

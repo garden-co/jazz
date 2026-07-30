@@ -1,0 +1,231 @@
+//! Bridge the administrative catalogue into the WebSocket-serving core shell.
+
+use std::collections::{BTreeMap, HashMap};
+
+use crate::groove::records::Value as CoreValue;
+use crate::protocol::{LensOp as CoreLensOp, MigrationLens, TableLens};
+
+use crate::tools::public_api::types::{Schema, SchemaHash, TableName, Value};
+use crate::tools::schema_lens::{Lens, LensOp};
+
+use super::{ServerState, core_server_shell::ServerShellHandle, public_schema_convert};
+
+/// Publish newly admitted catalogue entries into the active runtime shell.
+///
+/// The caller persists administrative entries first. This shared bridge then
+/// admits schemas in source order, lenses after both endpoints exist, and the
+/// current permissions head last so it alone selects the write schema.
+pub(crate) async fn publish_runtime_catalogue(
+    state: &ServerState,
+    schemas: &[Schema],
+    lenses: &[Lens],
+) -> Result<(), String> {
+    if state.core_server_shell().is_none() && state.core_server_shell_storage_config.is_none() {
+        return Ok(());
+    }
+
+    let mut shell = state.core_server_shell();
+    let supplied_schemas = schemas
+        .iter()
+        .cloned()
+        .map(|schema| (SchemaHash::compute(&schema), schema))
+        .collect::<HashMap<_, _>>();
+    for schema in schemas {
+        let runtime_schema = public_schema_convert::convert_public_schema(schema)
+            .map_err(|error| format!("convert catalogue schema for runtime: {error}"))?;
+        let runtime_shell = runtime_shell(state, &mut shell, runtime_schema.clone())?;
+        runtime_shell
+            .publish_catalogue_schema(runtime_schema)
+            .await
+            .map_err(|error| format!("publish catalogue schema to runtime shell: {error}"))?;
+    }
+
+    for lens in lenses {
+        let source_schema = known_schema(state, &supplied_schemas, lens.source_hash)?;
+        let target_schema = known_schema(state, &supplied_schemas, lens.target_hash)?;
+        let runtime_lens = convert_lens(lens, &source_schema, &target_schema)?;
+        let initial_schema = public_schema_convert::convert_public_schema(&source_schema)
+            .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
+        let runtime_shell = runtime_shell(state, &mut shell, initial_schema)?;
+        runtime_shell
+            .publish_lens(runtime_lens)
+            .await
+            .map_err(|error| format!("publish migration lens to runtime shell: {error}"))?;
+    }
+
+    let permissions = state
+        .catalogue
+        .current_permissions(&state.catalogue_store)
+        .map_err(|error| format!("read permissions head for runtime: {error}"))?;
+    let Some(permissions) = permissions else {
+        return Ok(());
+    };
+    let mut schema = known_schema(state, &supplied_schemas, permissions.head.schema_hash)?;
+    for (table_name, policies) in permissions.permissions {
+        let table = schema.get_mut(&table_name).ok_or_else(|| {
+            format!(
+                "permissions head references table {} absent from schema {}",
+                table_name.as_str(),
+                permissions.head.schema_hash
+            )
+        })?;
+        table.policies = policies;
+    }
+    let runtime_schema = public_schema_convert::convert_public_schema(&schema)
+        .map_err(|error| format!("convert permissions head schema for runtime: {error}"))?;
+    let runtime_shell = runtime_shell(state, &mut shell, runtime_schema.clone())?;
+    runtime_shell
+        .publish_permissions_schema(runtime_schema)
+        .await
+        .map_err(|error| format!("publish permissions head to runtime shell: {error}"))?;
+    Ok(())
+}
+
+fn runtime_shell(
+    state: &ServerState,
+    shell: &mut Option<ServerShellHandle>,
+    initial_schema: crate::schema::JazzSchema,
+) -> Result<ServerShellHandle, String> {
+    if let Some(shell) = shell.clone() {
+        return Ok(shell);
+    }
+    let started = state.start_core_server_shell(initial_schema)?;
+    *shell = Some(started.clone());
+    Ok(started)
+}
+
+fn known_schema(
+    state: &ServerState,
+    supplied_schemas: &HashMap<SchemaHash, Schema>,
+    hash: SchemaHash,
+) -> Result<Schema, String> {
+    if let Some(schema) = state
+        .catalogue
+        .known_schema(&state.catalogue_store, &hash)
+        .map_err(|error| format!("read catalogue schema {hash}: {error}"))?
+        .or_else(|| supplied_schemas.get(&hash).cloned())
+    {
+        return Ok(schema);
+    }
+
+    let empty_schema = Schema::new();
+    if hash == SchemaHash::compute(&empty_schema) {
+        return Ok(empty_schema);
+    }
+
+    Err(format!("catalogue schema {hash} is missing"))
+}
+
+fn convert_lens(lens: &Lens, source: &Schema, target: &Schema) -> Result<MigrationLens, String> {
+    let source_runtime = public_schema_convert::convert_public_schema(source)
+        .map_err(|error| format!("convert lens source schema: {error}"))?;
+    let target_runtime = public_schema_convert::convert_public_schema(target)
+        .map_err(|error| format!("convert lens target schema: {error}"))?;
+
+    let renamed_tables = lens
+        .forward
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            LensOp::RenameTable { old_name, new_name } => {
+                Some((old_name.as_str(), new_name.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut table_lenses = source
+        .iter()
+        .filter_map(|(source_name, _)| {
+            let source_name = source_name.as_str();
+            let target_name = renamed_tables
+                .get(source_name)
+                .copied()
+                .unwrap_or(source_name);
+            target
+                .contains_key(&TableName::from(target_name))
+                .then(|| TableLens {
+                    source_table: source_name.to_owned(),
+                    target_table: target_name.to_owned(),
+                    ops: Vec::new(),
+                })
+        })
+        .collect::<Vec<_>>();
+
+    for op in &lens.forward.ops {
+        let (table_name, runtime_op) = match op {
+            LensOp::RenameTable { .. } | LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
+                continue;
+            }
+            LensOp::AddColumn {
+                table,
+                column,
+                default,
+                ..
+            } => (
+                table.as_str(),
+                CoreLensOp::AddColumn {
+                    column: column.clone(),
+                    default: public_value_to_core(default.clone())?,
+                },
+            ),
+            LensOp::RemoveColumn {
+                table,
+                column,
+                default,
+                ..
+            } => (
+                table.as_str(),
+                CoreLensOp::DropColumn {
+                    column: column.clone(),
+                    backwards_default: public_value_to_core(default.clone())?,
+                },
+            ),
+            LensOp::RenameColumn {
+                table,
+                old_name,
+                new_name,
+            } => (
+                table.as_str(),
+                CoreLensOp::RenameColumn {
+                    from: old_name.clone(),
+                    to: new_name.clone(),
+                },
+            ),
+        };
+        let table_lens = table_lenses
+            .iter_mut()
+            .find(|candidate| {
+                candidate.source_table == table_name || candidate.target_table == table_name
+            })
+            .ok_or_else(|| format!("lens operation references unknown table {table_name}"))?;
+        table_lens.ops.push(runtime_op);
+    }
+
+    Ok(MigrationLens::new(
+        source_runtime.version_id(),
+        target_runtime.version_id(),
+        table_lenses,
+    ))
+}
+
+fn public_value_to_core(value: Value) -> Result<CoreValue, String> {
+    match value {
+        Value::Boolean(value) => Ok(CoreValue::Bool(value)),
+        Value::Text(value) => Ok(CoreValue::String(value)),
+        Value::Integer(value) => Ok(CoreValue::U32((value as u32) ^ 0x8000_0000)),
+        Value::BigInt(value) => Ok(CoreValue::I64(value)),
+        Value::Double(value) => Ok(CoreValue::F64(value)),
+        Value::Timestamp(value) => Ok(CoreValue::U64(value)),
+        Value::Uuid(value) => Ok(CoreValue::Uuid(*value.uuid())),
+        Value::Bytea(value) => Ok(CoreValue::Bytes(value)),
+        Value::Null => Ok(CoreValue::Nullable(None)),
+        Value::Array(values) => values
+            .into_iter()
+            .map(public_value_to_core)
+            .collect::<Result<Vec<_>, _>>()
+            .map(CoreValue::Array),
+        Value::BatchId(_) | Value::LargeValue(_) | Value::Row { .. } => {
+            Err("migration lens default is not supported by the runtime core".to_owned())
+        }
+    }
+}

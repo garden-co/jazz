@@ -826,6 +826,7 @@ where
                     &output_desc,
                     &left_on,
                     &right_on,
+                    join.comparison,
                     &left.deltas,
                     &right.deltas,
                     SubTick {

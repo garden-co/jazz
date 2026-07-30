@@ -76,12 +76,15 @@ where
                 ))?;
             let source_table = self.table_in_schema(version.table(), source_schema)?;
             let mut cells = self.materialized_cells_for_version(&source_table, &version)?;
-            let projected_table = self.translate_cells(
+            let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
                 version.table(),
                 &mut cells,
-            )?;
+            )?
+            else {
+                continue;
+            };
             if projected_table == table {
                 rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
             }
@@ -144,12 +147,15 @@ where
                 ))?;
             let source_table = self.table_in_schema(content.table(), source_schema)?;
             let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
-            let projected_table = self.translate_cells(
+            let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
                 content.table(),
                 &mut cells,
-            )?;
+            )?
+            else {
+                continue;
+            };
             if projected_table == table {
                 rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
             }
@@ -211,12 +217,15 @@ where
                 ))?;
             let source_table = self.table_in_schema(version.table(), source_schema)?;
             let mut cells = self.materialized_cells_for_version(&source_table, &version)?;
-            let projected_table = self.translate_cells(
+            let Some(projected_table) = self.translate_cells(
                 source_schema,
                 read_schema_version,
                 version.table(),
                 &mut cells,
-            )?;
+            )?
+            else {
+                continue;
+            };
             if projected_table == table {
                 let deleted = deletions.get(&row_uuid).is_some_and(|deletion| {
                     deletion.deletion() == Some(DeletionEvent::Deleted)
@@ -243,23 +252,23 @@ where
         target: SchemaVersionId,
         table: &str,
         cells: &mut BTreeMap<String, Value>,
-    ) -> Result<String, Error> {
+    ) -> Result<Option<String>, Error> {
         if source == target {
-            return Ok(table.to_owned());
+            return Ok(Some(table.to_owned()));
         }
         if let Some(path) =
             self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
         {
             let forward_table = apply_compiled_lens_path(&path, cells);
-            return Ok(forward_table);
+            return Ok(Some(forward_table));
         }
 
         if let Some(path) =
             self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
         {
             let reverse_table = apply_compiled_lens_path(&path, cells);
-            return Ok(reverse_table);
+            return Ok(Some(reverse_table));
         }
-        Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
+        Ok(None)
     }
 }

@@ -35,6 +35,7 @@ Invariant digest:
 - `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them by folding over the de-duplicated raw head set (not by re-merging merged values), so `Counter` never double-counts a shared ancestor.
 - `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("sub")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
+- `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -246,6 +247,16 @@ authorized links to `Node`/peer state; it does not own a parallel query,
 transaction, or sync engine. CORS, WebSocket paths, health endpoints, quota
 limits, and dashboard or deployment configuration are shell/product concerns
 around this role ladder.
+
+**Dynamic-catalogue bootstrap.** Publishing a schema alone does not make a
+dynamically catalogued serving authority ready to serve session writes. Before
+it accepts an uploaded commit unit, an authority MUST publish a permissions head
+that selects the write schema and its table policies (`INV-EDGE-19`). Until that
+head exists, the authority MUST reject the unit as
+`Fate::Rejected(RejectionReason::MalformedCommit("permissions_head_missing: no
+published permissions head"))`; it MUST neither silently accept the write nor
+defer it as though a policy basis existed. Publishing the first permissions head
+rehydrates live session views under the selected policy.
 
 Client and edge cache limits are topology policy. Storage may evict cold
 coverage only when doing so preserves fate-pending units, authority evidence,

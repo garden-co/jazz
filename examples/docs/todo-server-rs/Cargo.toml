@@ -8,7 +8,7 @@ name = "todo-server-docs"
 path = "src/main.rs"
 
 [dependencies]
-jazz_tools = { package = "jazz-tools", path = "../../../crates/jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
+jazz = { path = "../../../crates/jazz", default-features = false, features = [
   "client",
 ] }
 
@@ -24,7 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 
 [dev-dependencies]
-jazz_tools = { package = "jazz-tools", path = "../../../crates/jazz-tools", features = [
+jazz = { path = "../../../crates/jazz", default-features = false, features = [
   "rocksdb",
   "test-utils",
 ] }

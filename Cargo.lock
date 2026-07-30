@@ -1936,18 +1936,54 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jazz"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
+ "axum",
+ "base64 0.22.1",
  "blake3",
+ "bytes",
+ "clap",
+ "criterion",
+ "ed25519-dalek",
+ "futures",
  "futures-channel",
  "futures-core",
+ "futures-util",
  "groove",
  "hdrhistogram",
+ "hex",
+ "insta",
+ "internment",
+ "jsonschema",
+ "jsonwebtoken",
  "lz4_flex 0.11.6",
+ "mimalloc",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry-stdout",
+ "opentelemetry_sdk",
  "postcard",
+ "rand 0.8.5",
+ "rcgen",
+ "reqwest",
+ "rusqlite",
+ "rust-rocksdb",
  "ruzstd",
  "serde",
+ "serde_bytes",
  "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "tungstenite 0.29.0",
  "uuid",
  "web-time",
  "zstd",
@@ -1959,8 +1995,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "jazz",
- "jazz-server",
- "jazz-tools",
  "mimalloc-safe",
  "napi",
  "napi-build",
@@ -1972,24 +2006,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "jazz-server"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "hex",
- "jazz",
- "jsonwebtoken",
- "postcard",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tungstenite 0.29.0",
  "uuid",
 ]
 
@@ -2017,56 +2033,6 @@ name = "jazz-storage-bench-core"
 version = "0.0.0"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "jazz-tools"
-version = "2.0.0-alpha.0"
-dependencies = [
- "async-stream",
- "axum",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "clap",
- "criterion",
- "ed25519-dalek",
- "futures",
- "hex",
- "insta",
- "internment",
- "jazz",
- "jazz-server",
- "jsonschema",
- "jsonwebtoken",
- "lz4_flex 0.13.1",
- "mimalloc",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry-stdout",
- "opentelemetry_sdk",
- "postcard",
- "rand 0.8.5",
- "rcgen",
- "reqwest",
- "rusqlite",
- "rust-rocksdb",
- "serde",
- "serde_bytes",
- "serde_json",
- "sha2 0.10.9",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tower",
- "tower-http 0.5.2",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2348,15 +2314,6 @@ name = "lz4_flex"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
-dependencies = [
- "twox-hash 2.1.2",
-]
-
-[[package]]
-name = "lz4_flex"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash 2.1.2",
 ]

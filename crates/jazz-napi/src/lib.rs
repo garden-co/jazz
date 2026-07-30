@@ -43,7 +43,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    LocalUpdates as CoreLocalUpdates, MergeableTxOps, PeerConnection as CorePeerConnection,
     PreparedQuery as PreparedQueryInner, Propagation as CorePropagation,
     QueryAttachment as CoreQueryAttachment, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
     SeededRowIdSource as CoreSeededRowIdSource, SubscriptionEvent, SubscriptionStream,
@@ -58,19 +58,20 @@ use jazz::groove::storage::{
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::node::OpenTxId as CoreOpenTxId;
 use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
-use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
-use jazz_tools::AppId;
-use jazz_tools::identity;
-use jazz_tools::middleware::AuthConfig;
-use jazz_tools::server::{
+use jazz::tools::AppId;
+use jazz::tools::identity;
+use jazz::tools::middleware::AuthConfig;
+use jazz::tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::wire::{TransportError, WireTransport as CoreWireTransport};
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -173,38 +174,6 @@ enum NapiWrite {
     },
 }
 
-enum NapiTxWrite {
-    Insert {
-        table: String,
-        row_id: CoreRowUuid,
-        cells: CoreRowCells,
-        now_ms: Option<u64>,
-    },
-    Update {
-        table: String,
-        row_id: CoreRowUuid,
-        patch: CoreRowCells,
-        now_ms: Option<u64>,
-    },
-    Upsert {
-        table: String,
-        row_id: CoreRowUuid,
-        cells: CoreRowCells,
-        now_ms: Option<u64>,
-    },
-    Delete {
-        table: String,
-        row_id: CoreRowUuid,
-        now_ms: Option<u64>,
-    },
-    Restore {
-        table: String,
-        row_id: CoreRowUuid,
-        cells: CoreRowCells,
-        now_ms: Option<u64>,
-    },
-}
-
 #[derive(Clone, Default)]
 struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
@@ -290,8 +259,24 @@ enum NapiSubscription {
 #[napi(js_name = "Tx")]
 pub struct Tx {
     db: NapiDbInnerStorage,
-    identity: Option<CoreAuthorId>,
-    writes: Option<Vec<NapiTxWrite>>,
+    open_tx: Option<CoreOpenTxId>,
+}
+
+macro_rules! with_napi_mergeable_tx {
+    ($transaction:expr, |$tx:ident| $operation:expr) => {{
+        let open_tx = $transaction.open_tx()?;
+        match &$transaction.db {
+            NapiDbInnerStorage::Memory(db) => {
+                let $tx = db.mergeable_tx_ref(open_tx);
+                $operation
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let $tx = db.mergeable_tx_ref(open_tx);
+                $operation
+            }
+        }
+        .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
+    }};
 }
 
 #[napi]
@@ -461,13 +446,10 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        self.pending_writes()?.push(NapiTxWrite::Insert {
-            table,
-            row_id,
-            cells,
-            now_ms,
-        });
-        Ok(())
+        with_napi_mergeable_tx!(self, |tx| match now_ms {
+            Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+            None => tx.insert_with_id(&table, row_id, cells),
+        })
     }
 
     #[napi(js_name = "updateEncoded")]
@@ -481,13 +463,10 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        self.pending_writes()?.push(NapiTxWrite::Update {
-            table,
-            row_id,
-            patch,
-            now_ms,
-        });
-        Ok(())
+        with_napi_mergeable_tx!(self, |tx| match now_ms {
+            Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
+            None => tx.update(&table, row_id, patch),
+        })
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -501,13 +480,10 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        self.pending_writes()?.push(NapiTxWrite::Upsert {
-            table,
-            row_id,
-            cells,
-            now_ms,
-        });
-        Ok(())
+        with_napi_mergeable_tx!(self, |tx| match now_ms {
+            Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
+            None => tx.update(&table, row_id, cells),
+        })
     }
 
     #[napi(js_name = "delete")]
@@ -518,12 +494,12 @@ impl Tx {
         updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        self.pending_writes()?.push(NapiTxWrite::Delete {
-            table,
-            row_id,
-            now_ms: updated_at_ms.map(|value| value as u64),
-        });
-        Ok(())
+        match updated_at_ms.map(|value| value as u64) {
+            Some(now_ms) => {
+                with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
+            }
+            None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
+        }
     }
 
     #[napi(js_name = "restoreEncoded")]
@@ -537,43 +513,53 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        self.pending_writes()?.push(NapiTxWrite::Restore {
-            table,
-            row_id,
-            cells,
-            now_ms,
-        });
-        Ok(())
+        with_napi_mergeable_tx!(self, |tx| match now_ms {
+            Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
+            None => tx.restore(&table, row_id, cells),
+        })
     }
 
     #[napi]
     pub fn commit(&mut self) -> napi::Result<Write> {
-        let writes = self
-            .writes
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
-        match &self.db {
-            NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, self.identity, writes),
-            NapiDbInnerStorage::Persistent(db) => {
-                core_commit_tx_persistent(db, self.identity, writes)
-            }
-        }
+        let open_tx = self.open_tx()?;
+        let write = match &self.db {
+            NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, open_tx),
+            NapiDbInnerStorage::Persistent(db) => core_commit_tx_persistent(db, open_tx),
+        }?;
+        self.open_tx.take();
+        Ok(write)
     }
 
     #[napi]
     pub fn rollback(&mut self) -> napi::Result<()> {
-        self.writes
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))?;
+        let open_tx = self.open_tx()?;
+        self.abandon(open_tx)?;
+        self.open_tx.take();
         Ok(())
     }
 }
 
 impl Tx {
-    fn pending_writes(&mut self) -> napi::Result<&mut Vec<NapiTxWrite>> {
-        self.writes
-            .as_mut()
+    fn open_tx(&self) -> napi::Result<CoreOpenTxId> {
+        self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
+    }
+
+    fn abandon(&self, open_tx: CoreOpenTxId) -> napi::Result<()> {
+        match &self.db {
+            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
+            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+}
+
+impl Drop for Tx {
+    fn drop(&mut self) {
+        let Some(open_tx) = self.open_tx.take() else {
+            return;
+        };
+        let _ = self.abandon(open_tx);
     }
 }
 
@@ -1452,14 +1438,22 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        Ok(Tx {
-            db: match db {
-                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
-                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
-            identity: None,
-            writes: Some(Vec::new()),
-        })
+        match db {
+            NapiDbInnerStorage::Memory(db) => Ok(Tx {
+                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                open_tx: Some(
+                    db.begin_mergeable()
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                ),
+            }),
+            NapiDbInnerStorage::Persistent(db) => Ok(Tx {
+                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                open_tx: Some(
+                    db.begin_mergeable()
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                ),
+            }),
+        }
     }
 
     #[napi(js_name = "mergeableTxForIdentity")]
@@ -1469,14 +1463,22 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        Ok(Tx {
-            db: match db {
-                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
-                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
-            },
-            identity: Some(author),
-            writes: Some(Vec::new()),
-        })
+        match db {
+            NapiDbInnerStorage::Memory(db) => Ok(Tx {
+                db: NapiDbInnerStorage::Memory(Rc::clone(db)),
+                open_tx: Some(
+                    db.begin_mergeable_for_identity(author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                ),
+            }),
+            NapiDbInnerStorage::Persistent(db) => Ok(Tx {
+                db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
+                open_tx: Some(
+                    db.begin_mergeable_for_identity(author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                ),
+            }),
+        }
     }
 
     #[napi]
@@ -1719,82 +1721,19 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     }
 }
 
-fn core_commit_tx<S>(
-    db: &CoreDb<S>,
-    identity: Option<CoreAuthorId>,
-    writes: Vec<NapiTxWrite>,
-) -> napi::Result<TxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTxId) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut tx = if let Some(identity) = identity {
-        db.mergeable_tx_for_identity(identity)
-    } else {
-        db.mergeable_tx()
-    };
-    for write in writes {
-        match write {
-            NapiTxWrite::Insert {
-                table,
-                row_id,
-                cells,
-                now_ms,
-            } => match now_ms {
-                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                None => tx.insert_with_id(&table, row_id, cells),
-            }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            NapiTxWrite::Update {
-                table,
-                row_id,
-                patch,
-                now_ms,
-            } => match now_ms {
-                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
-                None => tx.update(&table, row_id, patch),
-            }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            NapiTxWrite::Upsert {
-                table,
-                row_id,
-                cells,
-                now_ms,
-            } => match now_ms {
-                Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
-                None => tx.update(&table, row_id, cells),
-            }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            NapiTxWrite::Delete {
-                table,
-                row_id,
-                now_ms,
-            } => match now_ms {
-                Some(now_ms) => tx.delete_at_ms(&table, row_id, now_ms),
-                None => tx.delete(&table, row_id),
-            }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            NapiTxWrite::Restore {
-                table,
-                row_id,
-                cells,
-                now_ms,
-            } => match now_ms {
-                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
-                None => tx.restore(&table, row_id, cells),
-            }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        }
-    }
-    tx.commit()
+    db.commit_mergeable_handle(open_tx)
         .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    identity: Option<CoreAuthorId>,
-    writes: Vec<NapiTxWrite>,
+    open_tx: CoreOpenTxId,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, identity, writes)?;
+    let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Memory {
@@ -1806,10 +1745,9 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    identity: Option<CoreAuthorId>,
-    writes: Vec<NapiTxWrite>,
+    open_tx: CoreOpenTxId,
 ) -> napi::Result<Write> {
-    let tx_id = core_commit_tx(db, identity, writes)?;
+    let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Persistent {
@@ -2042,6 +1980,15 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                         "detail": detail,
                     })
                 }
+                // Transient: the shape is awaiting catalogue admission and may
+                // yet be served. Surfaced distinctly so a caller cannot mistake
+                // it for an unsupported capability, which is permanent — that
+                // conflation is the bug this variant was introduced to fix.
+                jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+                    serde_json::json!({
+                        "type": "ShapeRegistrationPendingCatalogueAdmission",
+                    })
+                }
             };
             Ok(serde_json::json!({
                 "type": "rejected",
@@ -2108,10 +2055,10 @@ fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     JAZZ_SERVER_TELEMETRY_INIT.get_or_init(|| {
         use tracing_subscriber::layer::SubscriberExt as _;
 
-        let endpoint = jazz_tools::otel::normalize_otlp_traces_endpoint(collector_url);
+        let endpoint = jazz::tools::otel::normalize_otlp_traces_endpoint(collector_url);
         let provider =
-            jazz_tools::otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
-        let otel_layer = jazz_tools::otel::layer(&provider);
+            jazz::tools::otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
+        let otel_layer = jazz::tools::otel::layer(&provider);
         let filter = tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("jazz_tools=trace".parse().expect("valid tracing directive"))
             .add_directive("tower_http=debug".parse().expect("valid tracing directive"));
@@ -2433,7 +2380,7 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use crate::core_read_opts_from_json;
     use jazz::db::Propagation as CorePropagation;
-    use jazz_tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use serde_json::json;
 
     #[test]

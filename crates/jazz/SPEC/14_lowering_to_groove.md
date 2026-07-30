@@ -44,6 +44,7 @@ Invariant digest:
   `by_table_global_seq` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-sequence range.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
+- `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 
 ## Details
 
@@ -217,14 +218,16 @@ frontier machinery and depth/dedupe facts; fourth add array-membership join
 facts and extend the incremental-delivery canaries to cover scalar-hop,
 array-hop, union/dedup, and recursive-gather single-row updates.
 
-The current implementation split is explicit. Read policy now lowers through the
-`node/query_engine` path described above. Write-time acceptance still evaluates
-policy predicates directly in `node/policy.rs`: the ingest/dry-run path enters
-`NodeState::write_policy_allows_version_record`, which dispatches insert,
-update, and delete checks through `policy_allows*` helpers before accepting a
-version. Moving read policy into the query engine therefore did not silently
-change write acceptance semantics; `INV-LOWER-20` names that remaining direct
-write-policy boundary.
+Read and write policies both lower through the `node/query_engine` path described
+above. Write-time admission enters
+`NodeState::write_policy_allows_version_record`, projects old and candidate data
+into the policy-pinned schema, selects the matching insert/update/delete clause,
+and supplies that row as an inline root source to the identity-aware
+authorization subplan. Branch writes use the same program over the branch read
+view. Plain child-insert `inherits(parent_col)` selects the parent's
+`update_using` clause; explicit `InheritsOperation::{Insert, Update, Delete}`
+selects the matching parent write clause. There is no direct predicate
+interpreter fallback (`INV-LOWER-20`).
 
 Identity and execution are separate concerns: aggregation and non-maintained
 `order_by` are part of a shape's _semantic identity_ (canonicalized into the
@@ -362,12 +365,11 @@ policy filtering, pagination, and live subscription maintenance.
 
 ### Open questions
 
-- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy now lowers through
-  `node/query_engine` as part of the policy-composed query graph. Write-time
-  acceptance still evaluates directly in `node/policy.rs` via
-  `NodeState::write_policy_allows_version_record` and its `policy_allows*`
-  helpers, so the spec states the implemented split rather than leaving the
-  former prepared-shape policy question open.
+- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy and write admission both
+  lower through `node/query_engine`. Write admission supplies policy-pinned
+  old/candidate rows as inline roots and evaluates them with the authenticated
+  identity over current or branch sources; the former direct interpreter has
+  been removed.
 - 🔶 **Bytes primary keys.** The README lists bytes PKs as a "new" groove ask, but
   the implementation already uses `PrimaryKeyColumn::bytes` in several lowered
   tables — treat as satisfied rather than pending.
