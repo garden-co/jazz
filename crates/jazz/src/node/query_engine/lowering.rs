@@ -793,7 +793,10 @@ fn analyze_query_plan(
             continue;
         };
         if !matches!(projection.schema_family, SchemaFamilySelection::Current)
-            || !matches!(projection.storage, StorageSchemaSelection::Single(_))
+            || !matches!(
+                projection.storage,
+                StorageSchemaSelection::Single(_) | StorageSchemaSelection::CompatiblePartitions
+            )
             || !matches!(projection.lens, LensSelection::Canonical)
         {
             gaps.push(UnsupportedReason::Source(SourceGap::SchemaProjection));

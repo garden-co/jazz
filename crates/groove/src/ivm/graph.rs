@@ -543,6 +543,20 @@ impl ProjectField {
         }
     }
 
+    pub fn literal_typed(
+        output_name: impl Into<String>,
+        value: impl Into<LiteralValue>,
+        value_type: ValueType,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::TypedLiteral {
+                value: value.into(),
+                value_type,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     /// Create a null projection with the legacy default type `Nullable(Bytes)`.
     /// Use [`Self::null_typed`] when the output schema matters.
     pub fn null(output_name: impl Into<String>) -> Self {
@@ -582,7 +596,9 @@ impl ProjectField {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source) => Some(source),
-            ProjectExpr::Literal(_) | ProjectExpr::Null(_) => None,
+            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
+                None
+            }
         }
     }
 }
@@ -591,6 +607,10 @@ impl ProjectField {
 pub enum ProjectExpr {
     Field(FieldRef),
     Literal(LiteralValue),
+    TypedLiteral {
+        value: LiteralValue,
+        value_type: ValueType,
+    },
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),

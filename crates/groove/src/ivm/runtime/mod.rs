@@ -3660,6 +3660,13 @@ fn lift_literal_filter(
                             field.output_name.clone(),
                             value.clone(),
                         )),
+                        ProjectExpr::TypedLiteral { value, value_type } => {
+                            Ok(ProjectField::literal_typed(
+                                field.output_name.clone(),
+                                value.clone(),
+                                value_type.clone(),
+                            ))
+                        }
                         ProjectExpr::Null(value_type) => Ok(ProjectField::null_typed(
                             field.output_name.clone(),
                             value_type.clone(),
@@ -3958,7 +3965,9 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
-                ProjectExpr::Literal(_) | ProjectExpr::Null(_) => return Ok(field.clone()),
+                ProjectExpr::Literal(_)
+                | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source = field_ref_name(&original_output, field_ref)?;
             if rewritten_output.field_index(&source).is_none() {
@@ -6315,6 +6324,7 @@ fn project_descriptor(
                 ProjectExpr::Literal(value) => value
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                ProjectExpr::TypedLiteral { value_type, .. } => value_type.clone(),
                 ProjectExpr::Null(value_type) => value_type.clone(),
                 ProjectExpr::Nullable(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -6353,6 +6363,7 @@ fn project_field_expr(
     match &field.expression {
         ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
         ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
+        ProjectExpr::TypedLiteral { value, .. } => Ok(PlanExpr::literal(value.clone())),
         ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
         ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
         ProjectExpr::NullableFlat(source) => {
@@ -8910,6 +8921,58 @@ mod tests {
                     -3,
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn project_typed_literal_preserves_nested_nullable_null_type() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage = crate::storage::MemoryStorage::new(&["albums"]);
+        let subscription = runtime
+            .subscribe_one_sink(
+                GraphBuilder::table("albums").project_fields([
+                    ProjectField::renamed("id", "id"),
+                    ProjectField::literal_typed(
+                        "default_value",
+                        LiteralValue::Nullable(Some(Box::new(LiteralValue::Nullable(None)))),
+                        ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(
+                            ValueType::String,
+                        )))),
+                    ),
+                ]),
+                &storage,
+            )
+            .unwrap();
+
+        assert!(subscription.recv().unwrap().is_empty());
+        let albums = schema.table("albums").unwrap().record_schema();
+        runtime
+            .tick(
+                vec![TableDelta {
+                    table: "albums".to_owned(),
+                    descriptor: albums,
+                    deltas: vec![RecordDelta {
+                        record: albums
+                            .create(&[Value::U64(1), Value::String("one".to_owned())])
+                            .unwrap()
+                            .into(),
+                        weight: 1,
+                    }],
+                }],
+                &storage,
+            )
+            .unwrap();
+
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            vec![(
+                vec![
+                    Value::U64(1),
+                    Value::Nullable(Some(Box::new(Value::Nullable(None)))),
+                ],
+                1,
+            )],
         );
     }
 

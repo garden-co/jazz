@@ -381,7 +381,7 @@ surface. The test plan below records additional intended coverage.
   allocation/byte expectation so ordered insertion remains covered by
   `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 - Keep Rust tests aligned with
-  `crates/jazz-tools/TESTING_GUIDELINES.md`: prefer black-box integration tests
+  `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.

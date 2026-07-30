@@ -1494,6 +1494,8 @@ pub enum SubscribeRejectReason {
         /// Human-readable diagnostic. Not part of semantic compatibility.
         detail: String,
     },
+    /// The shape is valid, but its schema has not yet reached this runtime.
+    ShapeRegistrationPendingCatalogueAdmission,
 }
 
 /// Legacy-compatible table-qualified current content row entry:

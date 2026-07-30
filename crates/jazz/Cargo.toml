@@ -2,19 +2,46 @@
 name = "jazz"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+autobenches = false
+autotests = false
 
 [features]
 default = ["rocksdb", "transport-compression-zstd"]
-rocksdb = ["groove/rocksdb"]
+rocksdb = ["groove/rocksdb", "dep:rocksdb"]
+sqlite = ["dep:rusqlite"]
+client = ["server"]
+server = [
+  "dep:axum",
+  "dep:tracing-subscriber",
+  "dep:tower-http",
+  "dep:async-stream",
+  "dep:reqwest",
+]
+cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 sync-autopsy = []
 testing = []
 transport-compression-lz4 = ["dep:lz4_flex"]
 transport-compression-zstd = ["dep:zstd"]
 transport-compression-ruzstd = ["dep:ruzstd"]
+test-utils = ["server", "client", "sqlite", "sync-autopsy"]
+test = ["test-utils", "cli"]
+otel-core = [
+  "server",
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:opentelemetry-stdout",
+  "dep:opentelemetry-appender-tracing",
+  "dep:tracing-opentelemetry",
+]
+otel = ["cli", "otel-core"]
 
 [dependencies]
 futures-core = "0.3.31"
 futures-channel = "0.3.31"
+futures = "0.3"
+futures-util = "0.3"
 blake3 = "1"
 groove = { workspace = true, default-features = false }
 lz4_flex = { version = "0.11.5", default-features = false, features = ["frame"], optional = true }
@@ -23,13 +50,64 @@ ruzstd = { version = "0.8.2", default-features = false, optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
-uuid = { version = "1.18.1", features = ["serde", "v5", "v7"] }
+uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"
 zstd = { version = "0.13.3", optional = true }
+tracing = "0.1"
+hex = "0.4"
+rand = "0.8"
+serde_bytes = "0.11"
+jsonschema = { version = "0.42", default-features = false }
+internment = "0.8"
+smallvec = { version = "1.11", features = ["serde"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"], optional = true }
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
+axum = { version = "0.7", features = ["ws"], optional = true }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots", "handshake"] }
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+bytes = { version = "1", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
+async-stream = { version = "0.3", optional = true }
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-json", "reqwest-blocking-client", "logs", "metrics"], optional = true }
+opentelemetry-stdout = { version = "0.31", optional = true }
+opentelemetry-appender-tracing = { version = "0.31", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
+opentelemetry_sdk = { version = "0.31", features = ["testing"] }
+criterion = "0.5"
+insta = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+bytes = "1"
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+futures = "0.3"
+tokio = { version = "1", features = ["test-util", "full"] }
+tower = { version = "0.5", features = ["util"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+
+[[bin]]
+name = "jazz-tools"
+path = "src/bin/jazz-tools.rs"
+required-features = ["cli"]
+test = false
+
+[[bin]]
+name = "jazz-server"
+path = "src/bin/jazz-server.rs"
 
 [[bench]]
 name = "validation"
@@ -54,3 +132,127 @@ harness = false
 [[bench]]
 name = "relation_include_delivery"
 harness = false
+
+[[bench]]
+name = "observer_write_path"
+harness = false
+
+[[bench]]
+name = "db_benchmark"
+harness = false
+
+[[bench]]
+name = "authorization_scope_benchmark"
+harness = false
+
+[[bench]]
+name = "realistic_phase1"
+harness = false
+
+[[bench]]
+name = "insert_benchmark"
+harness = false
+
+[[bench]]
+name = "update_benchmark"
+harness = false
+
+[[bench]]
+name = "subscription_benchmark"
+harness = false
+
+[[test]]
+name = "column_defaults"
+
+[[test]]
+name = "fate_regressions"
+
+[[test]]
+name = "four_tier"
+
+[[test]]
+name = "incremental_delivery_canary"
+
+[[test]]
+name = "row_provenance"
+
+[[test]]
+name = "shared_coverage_differential"
+
+[[test]]
+name = "threaded_four_tier"
+
+[[test]]
+name = "warm_reopen_differential"
+
+[[test]]
+name = "wire_fixtures"
+
+[[test]]
+name = "admin_schema_api"
+
+[[test]]
+name = "auth_admission"
+
+[[test]]
+name = "cli_dry_run"
+
+[[test]]
+name = "large_blob_permissions"
+required-features = ["test"]
+
+[[test]]
+name = "branch_claims_integration"
+required-features = ["test"]
+
+[[test]]
+name = "inherited_policies"
+required-features = ["test"]
+
+[[test]]
+name = "scope_revocation"
+required-features = ["test"]
+
+[[test]]
+name = "aggregate_subscriptions"
+required-features = ["test-utils"]
+
+[[test]]
+name = "transactions"
+required-features = ["test-utils"]
+
+[[test]]
+name = "text_document_merge"
+required-features = ["test-utils"]
+
+[[test]]
+name = "edge_server_mode"
+required-features = ["test"]
+
+[[test]]
+name = "bigint_integration"
+required-features = ["test"]
+
+[[test]]
+name = "nullable_writes"
+required-features = ["test-utils"]
+
+[[test]]
+name = "policy_branch_closure"
+required-features = ["test"]
+
+[[test]]
+name = "query_membership_filters"
+required-features = ["test"]
+
+[[test]]
+name = "rename_write_authorization"
+required-features = ["test"]
+
+[[test]]
+name = "parameterized_subscription_routing"
+required-features = ["test"]
+
+[[example]]
+name = "realistic_bench"
+required-features = ["client"]

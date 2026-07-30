@@ -30,7 +30,7 @@ This requires a working C/C++ toolchain and `libclang` for `bindgen`:
 
 ```sh
 pnpm test          # everything (via turbo)
-cargo test -p jazz-tools --features test   # rust core only
+cargo test -p jazz --no-default-features --features test   # rust core only
 ```
 
 ### Snapshot testing with insta in rust
@@ -51,7 +51,7 @@ When a snapshot doesn't match, the test fails and insta records the new value. T
 cargo install cargo-insta
 
 # Run the failing tests
-cargo test -p jazz-tools --features test
+cargo test -p jazz --no-default-features --features test
 
 # Review each pending change interactively — shows a diff, asks accept/reject
 cargo insta review

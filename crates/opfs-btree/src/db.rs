@@ -122,7 +122,10 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
-    // Pages >= active.total_pages are WAL tail pages, not home locations.
+    // The home-file boundary recorded by the latest checkpoint superblock.
+    // Physical pages at or beyond this boundary are WAL-only. `active` tracks
+    // the latest logical state and can include pages allocated in the WAL.
+    checkpointed_pages: u64,
     // Page ids in wal_pages have newer bytes only in the cache/WAL and must
     // not be evicted until a checkpoint writes them to their home locations.
     persisted_pages: u64,
@@ -176,6 +179,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             SuperblockSlot::A,
             Superblock::new(options.page_size as u32, 0, 0, 0, 0),
         ));
+        let checkpointed_pages = active.total_pages.max(2);
 
         let mut tree = Self {
             file,
@@ -184,6 +188,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
+            checkpointed_pages,
             persisted_pages,
             pages: OpfsMap::default(),
             blob_pages: OpfsSet::default(),
@@ -213,6 +218,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
             tree.total_pages = 2;
+            tree.checkpointed_pages = 2;
             tree.persisted_pages = 2;
             return Ok(tree);
         }
@@ -1529,7 +1535,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn wal_tail_pages(&self) -> u64 {
-        self.persisted_pages.saturating_sub(self.total_pages)
+        self.persisted_pages.saturating_sub(self.checkpointed_pages)
     }
 
     fn flush_for_write(&self) -> Result<(), BTreeError> {
@@ -2022,6 +2028,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         self.active_slot = target_slot;
         self.active = next;
+        self.checkpointed_pages = total_pages;
         Ok(())
     }
 }
@@ -2947,6 +2954,50 @@ mod tests {
                 "key {i} should survive automatic checkpointing"
             );
         }
+    }
+
+    #[test]
+    fn flush_wal_counts_newly_allocated_pages_in_tail_threshold() {
+        // This uses OpfsBTree's public write/flush API. The physical WAL
+        // boundary and automatic-checkpoint outcome are storage-internal, so
+        // they cannot be observed through a higher-level client API.
+        let file = MemoryFile::new();
+        let options = small_options();
+        let mut tree = OpfsBTree::open(file, options.clone()).expect("open tree");
+        let checkpointed_pages = tree.checkpoint_state().total_pages;
+
+        // One root page plus 500 blob pages produces 501 WAL frames. WAL
+        // framing adds 1,004 physical pages: below the checkpoint threshold,
+        // but well above the incorrect count that subtracts the new pages.
+        tree.put(
+            b"allocated-in-wal",
+            &deterministic_bytes(0, 500 * options.page_size),
+        )
+        .expect("put overflow value");
+        tree.flush_wal().expect("flush wal");
+
+        let durable_tail_pages = tree.persisted_pages - checkpointed_pages;
+        assert_eq!(durable_tail_pages, WAL_CHECKPOINT_THRESHOLD_PAGES - 20);
+        assert_eq!(
+            tree.wal_tail_pages(),
+            durable_tail_pages,
+            "tail accounting must include pages allocated by the WAL commit"
+        );
+
+        // The next allocation-heavy commit adds 12 frames (11 blobs and the
+        // rewritten root), crossing the threshold and requiring a checkpoint.
+        tree.put(
+            b"crosses-tail-threshold",
+            &deterministic_bytes(1, 11 * options.page_size),
+        )
+        .expect("put second overflow value");
+        tree.flush_wal().expect("flush wal crossing threshold");
+
+        assert!(
+            tree.wal_pages.is_empty() && tree.dirty_pages.is_empty(),
+            "tail at the threshold must trigger an automatic checkpoint"
+        );
+        assert_eq!(tree.persisted_pages, tree.checkpointed_pages);
     }
 
     #[test]

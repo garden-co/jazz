@@ -34,7 +34,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz_tools::{AppContext, AppId, ClientStorage, Schema};
+use jazz::tools::{AppContext, AppId, ClientStorage, Schema};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;

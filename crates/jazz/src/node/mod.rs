@@ -194,7 +194,7 @@ pub struct NodeState<S> {
     parking: Parking,
     /// Query registration, binding, cache, graph, and settled-result state.
     query: QueryServing,
-    /// Locally opened exclusive transactions and authoring attribution state.
+    /// Locally opened transactions and authoring attribution state.
     open_tx: OpenTxState,
     /// Rejected transaction records and pending-cascade parent/child indexes.
     rejections: RejectionTracking,
@@ -228,6 +228,9 @@ pub struct NodeState<S> {
     session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
     session_claim_revisions: BTreeMap<AuthorId, u64>,
+    /// Whether this authority has installed the permissions head that governs
+    /// session-scoped reads and writes.
+    permissions_ready: bool,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -398,11 +401,11 @@ struct RegisteredBinding {
     binding_view_key: BindingViewKey,
 }
 
-/// Locally open exclusive transactions and local-only permission attribution.
+/// Locally open transactions and local-only permission attribution.
 struct OpenTxState {
-    /// Open exclusive transaction handles keyed by local handle ID.
-    open_exclusive: BTreeMap<OpenTxId, OpenExclusive>,
-    /// Next local exclusive transaction handle ID to allocate.
+    /// Open transaction handles keyed by local handle ID.
+    open_transactions: BTreeMap<OpenTxId, OpenTransaction>,
+    /// Next local transaction handle ID to allocate.
     next_open_tx_id: u64,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
@@ -604,7 +607,7 @@ where
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
             },
             open_tx: OpenTxState {
-                open_exclusive: BTreeMap::new(),
+                open_transactions: BTreeMap::new(),
                 next_open_tx_id: 1,
                 local_permission_subjects: BTreeMap::new(),
             },
@@ -624,6 +627,7 @@ where
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
+            permissions_ready: true,
         };
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
@@ -706,6 +710,16 @@ where
             .get(&identity)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Gate session-scoped serving until an authority has installed its
+    /// permissions head. Local/offline nodes stay ready by default.
+    pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
+        self.permissions_ready = ready;
+    }
+
+    pub(crate) fn permissions_ready(&self) -> bool {
+        self.permissions_ready
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
@@ -3495,8 +3509,11 @@ where
                     .table_lenses
                     .iter()
                     .find(|candidate| candidate.target_table == current_table),
-            }
-            .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            };
+            let Some(table_lens) = table_lens else {
+                self.catalogue.compiled_lens_cache.insert(key, None);
+                return Ok(None);
+            };
             match direction {
                 LensPathDirection::Forward => {
                     for op in &table_lens.ops {
@@ -4323,7 +4340,7 @@ pub struct LargeValueMetrics {
     pub checkpoint_writes: u64,
 }
 
-/// Handle for an open exclusive transaction.
+/// Handle for an open transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpenTxId(u64);
 
