@@ -874,16 +874,7 @@ where
             let descriptor = current_row_descriptor(&table);
             (graph, descriptor, BTreeMap::new(), BTreeSet::new())
         } else if request.visibility == RowVisibility::Visible
-            && (self.read_view.read_schema != self.node.catalogue.current_schema_version_id
-                || self
-                    .node
-                    .catalogue
-                    .partitions
-                    .iter()
-                    .any(|(logical, version)| {
-                        logical == &request.source.table
-                            && *version != self.node.catalogue.current_schema_version_id
-                    }))
+            && self.needs_projected_current_source(&request.source.table)
         {
             if !request.requirements.metadata.is_empty() {
                 let source = self.projected_maintained_visible_current_source_graph(
@@ -11302,11 +11293,12 @@ mod tests {
     use groove::storage::{Durability, RocksDbStorage};
 
     use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
-    use crate::node::query_engine::{CoverageScope, ProgramFactOutput};
+    use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{
-        ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage,
+        CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
+        SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
         Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
@@ -11348,6 +11340,96 @@ mod tests {
         assert_eq!(
             contact_email.expression,
             ProjectExpr::Field(FieldRef::name(user_column_field("email"))),
+        );
+    }
+
+    #[test]
+    fn reverse_table_lens_projects_membership_and_content_version_sources() {
+        // This is intentionally an internal assertion: the public subscription
+        // regression proves the observable row result, while this checks that
+        // both inputs to its content-version semi-join select the same source.
+        let base = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("email", ColumnType::String)],
+        )]);
+        let evolved = JazzSchema::new([TableSchema::new(
+            "people",
+            [ColumnSchema::new("email", ColumnType::String)],
+        )]);
+        let evolved_payload = SchemaVersion::new(evolved);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
+        node.apply_sync_message(SyncMessage::PublishSchema {
+            author: AuthorId::SYSTEM,
+            schema: Box::new(evolved_payload.clone()),
+        })
+        .unwrap();
+        node.apply_sync_message(SyncMessage::PublishLens {
+            author: AuthorId::SYSTEM,
+            lens: MigrationLens::new(
+                base.version_id(),
+                evolved_payload.id,
+                vec![TableLens {
+                    source_table: "users".to_owned(),
+                    target_table: "people".to_owned(),
+                    ops: vec![],
+                }],
+            ),
+        })
+        .unwrap();
+        node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_payload.id,
+            },
+        })
+        .unwrap();
+
+        let shape = Query::from("users").validate(&base).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let query_request = node
+            .current_query_program_request(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::MaintainedView,
+                &ReadViewSpec::default(),
+                None,
+            )
+            .unwrap();
+        let read_view = query_request.reads.primary;
+        let source_request = SourceRequest {
+            source: root_source_id("users"),
+            visibility: RowVisibility::Visible,
+            authorization: SourceAuthorizationRequest::System,
+            requirements: SourceRequirements {
+                app_fields: FieldRequirement::All,
+                metadata: BTreeSet::from([SourceMetadataRequirement::VersionPayloads]),
+            },
+        };
+        let expected_people_current =
+            global_current_table_name_for_schema("people", evolved_payload.id, evolved_payload.id);
+        let mut resolver = CurrentQuerySourceResolver {
+            node: &mut node,
+            read_view: &read_view,
+            inline_sources: BTreeMap::new(),
+            access_paths: BTreeMap::new(),
+        };
+
+        assert!(resolver.needs_projected_current_source("users"));
+        let resolved = resolver.resolve_source(&source_request).unwrap();
+        let content_version = resolved
+            .content_version
+            .expect("version-payload requirements need a content-version source");
+
+        assert!(
+            format!("{:?}", resolved.graph).contains(&expected_people_current),
+            "membership source must include the reverse-lens people partition"
+        );
+        assert!(
+            format!("{:?}", content_version.graph).contains(&expected_people_current),
+            "content-version source must include the reverse-lens people partition"
         );
     }
 
