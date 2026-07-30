@@ -195,10 +195,7 @@ class MessageWebSocket {
     type: "close",
     listener: (event: { code: number; reason: string }) => void,
   ): void;
-  addEventListener(
-    type: string,
-    listener: ((event: { data: unknown }) => void) | ((event: unknown) => void),
-  ): void {
+  addEventListener(type: string, listener: unknown): void {
     if (type === "message") {
       this.messageListeners.push(listener as (event: { data: unknown }) => void);
     }
