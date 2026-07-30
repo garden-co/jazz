@@ -281,6 +281,18 @@ where
         }
     }
 
+    pub(super) fn read_policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
+        let write_schema = self.catalogue.current_write_schema.schema;
+        if self
+            .table_in_schema(table, write_schema)
+            .is_ok_and(|table| table.read_policy.is_some() || table.write_policies.any().is_some())
+        {
+            write_schema
+        } else {
+            self.catalogue.current_schema_version_id
+        }
+    }
+
     fn policy_target_schema_for_source(
         &mut self,
         source: SchemaVersionId,
