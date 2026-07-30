@@ -2518,6 +2518,17 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                     )?;
                     set_prop(&reason_object, "detail", JsValue::from_str(&detail))?;
                 }
+                // Transient: the shape is awaiting catalogue admission and may
+                // yet be served. Surfaced distinctly so a caller cannot mistake
+                // it for an unsupported capability, which is permanent — that
+                // conflation is the bug this variant was introduced to fix.
+                jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+                    set_prop(
+                        &reason_object,
+                        "type",
+                        JsValue::from_str("ShapeRegistrationPendingCatalogueAdmission"),
+                    )?;
+                }
             }
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason_object.into())?;

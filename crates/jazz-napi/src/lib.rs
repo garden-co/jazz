@@ -2042,6 +2042,15 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                         "detail": detail,
                     })
                 }
+                // Transient: the shape is awaiting catalogue admission and may
+                // yet be served. Surfaced distinctly so a caller cannot mistake
+                // it for an unsupported capability, which is permanent — that
+                // conflation is the bug this variant was introduced to fix.
+                jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+                    serde_json::json!({
+                        "type": "ShapeRegistrationPendingCatalogueAdmission",
+                    })
+                }
             };
             Ok(serde_json::json!({
                 "type": "rejected",
