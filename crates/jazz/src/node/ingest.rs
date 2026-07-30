@@ -4116,30 +4116,10 @@ where
     pub(super) fn cleanup_settled_ahead_current_leftovers(
         &mut self,
         already_consistent_through: Option<TxTime>,
+        mut tx_ids: BTreeSet<TxId>,
     ) -> Result<(), Error> {
-        let mut tx_ids = Vec::new();
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
-        {
-            let record = raw.record();
-            let fate = fate_from_encoded_fields(record)?;
-            let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
-            if !matches!(fate, Fate::Rejected(_)) && global_seq.is_none() {
-                continue;
-            }
-            let tx_time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
-            if already_consistent_through.is_some_and(|through| tx_time <= through) {
-                continue;
-            }
-            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
-            let node = self
-                .node_for_alias(node_alias)
-                .ok_or(Error::InvalidStoredValue(
-                    "transaction node alias must exist",
-                ))?;
-            tx_ids.push(TxId::new(tx_time, node));
-        }
+        tx_ids
+            .retain(|tx_id| already_consistent_through.is_none_or(|through| tx_id.time > through));
         if tx_ids.is_empty() {
             return Ok(());
         }

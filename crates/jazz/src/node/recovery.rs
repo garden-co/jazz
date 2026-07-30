@@ -167,8 +167,8 @@ where
         #[cfg(feature = "testing")]
         let stage_started = receipt.as_ref().map(|_| Instant::now());
         let mut accepted_global_seqs = Vec::new();
-        #[cfg(feature = "testing")]
         let mut global_sequence_records_scanned = 0usize;
+        let mut settled_cleanup_candidates = BTreeSet::new();
         // Nullable index keys order `None` before `Some`. Range over only the
         // `Some` bucket so local pending/rejected transactions cannot make
         // recovery O(total transactions). The range end is exclusive, hence
@@ -187,10 +187,7 @@ where
             std::slice::from_ref(&last_global_seq),
         )?);
         for raw in sequenced_transactions {
-            #[cfg(feature = "testing")]
-            {
-                global_sequence_records_scanned += 1;
-            }
+            global_sequence_records_scanned += 1;
             let record = raw.record();
             if !matches!(fate_from_encoded_fields(record)?, Fate::Accepted) {
                 continue;
@@ -199,6 +196,17 @@ where
                 record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
             {
                 accepted_global_seqs.push(GlobalSeq(global_seq));
+                let node_alias =
+                    NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+                let node = *alias_to_node
+                    .get(&node_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "accepted transaction node alias must exist",
+                    ))?;
+                settled_cleanup_candidates.insert(TxId::new(
+                    TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                    node,
+                ));
             }
         }
         accepted_global_seqs.sort();
@@ -261,10 +269,12 @@ where
         }
 
         let mut rejected_headers = Vec::new();
+        let mut rejected_transaction_records_scanned = 0usize;
         for raw in self
             .database
             .primary_key_scan_raw("jazz_rejected_transactions", &[])?
         {
+            rejected_transaction_records_scanned += 1;
             let record = raw.record();
             let node_alias =
                 NodeAlias(record.get_u64(RejectedTransactionRowRecord::FIELD_NODE_ID_IDX)?);
@@ -273,13 +283,14 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "rejected transaction node alias must exist",
                 ))?;
-            if node != self.node_uuid {
-                continue;
-            }
             let tx_id = TxId::new(
                 TxTime(record.get_u64(RejectedTransactionRowRecord::FIELD_TIME_IDX)?),
                 node,
             );
+            settled_cleanup_candidates.insert(tx_id);
+            if node != self.node_uuid {
+                continue;
+            }
             rejected_headers.push((
                 node_alias,
                 tx_id,
@@ -298,12 +309,21 @@ where
         }
         #[cfg(feature = "testing")]
         let stage_started = receipt.as_ref().map(|_| Instant::now());
-        if !cleanly_closed {
-            self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
-        }
+        let unclean_candidate_records_scanned = if cleanly_closed {
+            0
+        } else {
+            self.cleanup_settled_ahead_current_leftovers(
+                storage_consistent_through,
+                settled_cleanup_candidates,
+            )?;
+            global_sequence_records_scanned + rejected_transaction_records_scanned
+        };
+        #[cfg(not(feature = "testing"))]
+        let _ = unclean_candidate_records_scanned;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
             receipt.recover_unclean_close = started.elapsed();
+            receipt.unclean_candidate_records_scanned = unclean_candidate_records_scanned;
         }
         Ok(())
     }

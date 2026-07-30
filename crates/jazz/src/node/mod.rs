@@ -127,6 +127,8 @@ pub struct NodeOpenReceipt {
     pub accepted_global_sequences: usize,
     /// Transaction-index records scanned while recovering global sequences.
     pub global_sequence_records_scanned: usize,
+    /// Settled-candidate records scanned while cleaning up after an unclean close.
+    pub unclean_candidate_records_scanned: usize,
     /// Ahead-current records consumed while rebuilding in-memory indexes.
     pub ahead_current_entries: usize,
 }

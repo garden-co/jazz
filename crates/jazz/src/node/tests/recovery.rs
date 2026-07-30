@@ -358,7 +358,19 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
     }
 
     reset_query_versions_for_tx_call_count();
-    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    let (mut reopened, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024).unwrap();
+    #[cfg(not(feature = "testing"))]
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+    #[cfg(feature = "testing")]
+    assert_eq!(
+        receipt.unclean_candidate_records_scanned, 21,
+        "recovery should inspect the settled index rather than pending transactions"
+    );
     assert_eq!(
         query_versions_for_tx_call_count(),
         1,
@@ -375,6 +387,109 @@ fn unclean_reopen_sweeps_only_transactions_after_consistency_marker() {
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(row(200), title_cells("after marker crash window"))])
     );
+}
+
+#[test]
+fn unclean_reopen_accepts_max_consistency_marker_without_scanning() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let node = open_node_at(&temp_dir, schema.clone());
+        node.persist_storage_consistency_marker_through(TxTime(u64::MAX))
+            .unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    {
+        let (_reopened, receipt) =
+            NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024)
+                .unwrap();
+        assert_eq!(receipt.unclean_candidate_records_scanned, 0);
+    }
+    #[cfg(not(feature = "testing"))]
+    {
+        NodeState::new(node(1), schema, storage).unwrap();
+    }
+}
+
+#[test]
+fn unclean_reopen_does_not_scan_pending_transactions_as_cleanup_candidates() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        for offset in 0_u8..5 {
+            node.commit_mergeable(
+                MergeableCommit::new("todos", row(210 + offset), 10 + u64::from(offset))
+                    .cells(title_cells("pending")),
+            )
+            .unwrap();
+        }
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    {
+        let (_reopened, receipt) =
+            NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024)
+                .unwrap();
+        assert_eq!(receipt.unclean_candidate_records_scanned, 0);
+    }
+    #[cfg(not(feature = "testing"))]
+    {
+        NodeState::new(node(1), schema, storage).unwrap();
+    }
+}
+
+#[test]
+fn unclean_reopen_sweeps_rejected_candidate_without_full_transaction_scan() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(220), 10).cells(title_cells("rejected")),
+            )
+            .unwrap();
+        let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
+        let reason = RejectionReason::ExclusiveConflict;
+        stored.fate = Fate::Rejected(reason.clone());
+        let mut batch = node.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate.clone(),
+                stored.global_seq,
+                stored.durability,
+            ),
+        );
+        batch.insert(
+            "jazz_rejected_transactions",
+            rejected_transaction_values(stored.node_alias, &stored.tx, reason),
+        );
+        node.database.commit_batch(batch).unwrap();
+        assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    #[cfg(feature = "testing")]
+    let (mut reopened, receipt) =
+        NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024).unwrap();
+    #[cfg(not(feature = "testing"))]
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+    #[cfg(feature = "testing")]
+    assert_eq!(receipt.unclean_candidate_records_scanned, 1);
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
 }
 
 #[test]

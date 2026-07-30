@@ -1168,6 +1168,7 @@ struct R3OpenBreakdown {
     validated_current_rows: usize,
     accepted_global_sequences: usize,
     global_sequence_records_scanned: usize,
+    unclean_candidate_records_scanned: usize,
     ahead_current_entries: usize,
 }
 
@@ -1338,6 +1339,7 @@ fn open_rocks_db_with_phases(
                 validated_current_rows: receipt.validated_current_rows,
                 accepted_global_sequences: receipt.accepted_global_sequences,
                 global_sequence_records_scanned: receipt.global_sequence_records_scanned,
+                unclean_candidate_records_scanned: receipt.unclean_candidate_records_scanned,
                 ahead_current_entries: receipt.ahead_current_entries,
             }),
         )
@@ -1576,6 +1578,10 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                     .open_breakdown
                     .as_ref()
                     .map(|receipt| receipt.global_sequence_records_scanned),
+                "unclean_candidate_records_scanned": samples[0]
+                    .open_breakdown
+                    .as_ref()
+                    .map(|receipt| receipt.unclean_candidate_records_scanned),
                 "ahead_current_entries": samples[0]
                     .open_breakdown
                     .as_ref()
