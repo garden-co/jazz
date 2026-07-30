@@ -209,6 +209,25 @@ mod tests {
         create_router(state)
     }
 
+    async fn publish_schema_for_test(app: &axum::Router, schema: Schema) {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": schema }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("publish schema through admin route");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
     async fn post_internal_shutdown(
         app: axum::Router,
         admin_secret: Option<&str>,
@@ -1360,11 +1379,8 @@ mod tests {
         let v2_hash = SchemaHash::compute(&v2);
 
         let state = make_state_with_schema(v2).await;
-        state
-            .catalogue_store
-            .add_known_schema(v1)
-            .expect("seed known schema for connectivity test");
         let app = make_test_router(state.clone());
+        publish_schema_for_test(&app, v1).await;
 
         let disconnected = app
             .clone()
@@ -1583,11 +1599,8 @@ mod tests {
         let v2_hash = SchemaHash::compute(&v2);
 
         let state = make_state_with_schema(v2).await;
-        state
-            .catalogue_store
-            .add_known_schema(v1)
-            .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
+        publish_schema_for_test(&app, v1).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1668,11 +1681,8 @@ mod tests {
         let v2_hash = SchemaHash::compute(&v2);
 
         let state = make_state_with_schema(v2).await;
-        state
-            .catalogue_store
-            .add_known_schema(v1)
-            .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
+        publish_schema_for_test(&app, v1).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -1757,11 +1767,8 @@ mod tests {
         let v2_hash = SchemaHash::compute(&v2);
 
         let state = make_state_with_schema(v2.clone()).await;
-        state
-            .catalogue_store
-            .add_known_schema(v1.clone())
-            .expect("seed known schema for publish test");
         let app = make_test_router(state.clone());
+        publish_schema_for_test(&app, v1.clone()).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
