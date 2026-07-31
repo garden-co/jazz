@@ -50,10 +50,10 @@ boundary for selective hydration work.
 A single default-ladder run on the local development box produced:
 
 | Total rows | Selected rows | Result rows | Open row reads | Prepare row reads | Query row reads | Query index reads | Query time |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 100 | 50 | 1,000 | 0 | 1,100 | 100 | 2.443 ms |
-| 10,000 | 100 | 50 | 10,000 | 0 | 10,100 | 100 | 15.793 ms |
-| 100,000 | 100 | 50 | 100,000 | 0 | 100,100 | 100 | 174.877 ms |
+| ---------: | ------------: | ----------: | -------------: | ----------------: | --------------: | ----------------: | ---------: |
+|      1,000 |           100 |          50 |          1,000 |                 0 |           1,100 |               100 |   2.443 ms |
+|     10,000 |           100 |          50 |         10,000 |                 0 |          10,100 |               100 |  15.793 ms |
+|    100,000 |           100 |          50 |        100,000 |                 0 |         100,100 |               100 | 174.877 ms |
 
 All three rungs returned the same ordered-ID digest,
 `1ab7cbe99449f81b16f1375ce2f8ff751f03940a6f1287b6d561c0146ec9be3d`.
