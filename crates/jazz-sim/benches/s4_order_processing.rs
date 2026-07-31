@@ -14,11 +14,11 @@ use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::SyncMessage;
+use jazz::protocol::{SyncMessage, expand_version_carriers};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
-use jazz::wire::TransportError;
+use jazz::wire::{TransportError, encode_sync_message};
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
@@ -41,8 +41,14 @@ const TABLES: [&str; 8] = [
     ORDER_LINES,
     PAYMENTS,
 ];
+// A postcard u64 can grow from one to ten bytes in each view-update envelope.
+const MAX_SETTLED_THROUGH_FRAMING_DELTA_PER_HOP: u64 = TABLES.len() as u64 * 9;
 
 fn main() {
+    if std::env::var("JAZZ_S4_PROPAGATION_SCALE_ONLY").is_ok() {
+        run_fixed_delta_scaling(&fixed_delta_rungs());
+        return;
+    }
     if std::env::var("JAZZ_SMOKE").is_ok() {
         smoke();
         return;
@@ -311,6 +317,21 @@ pub fn smoke() {
         &hot_items.accepted_schedule,
         &hot_items.final_totals,
     );
+    run_fixed_delta_scaling(&[2, 20, 200]);
+}
+
+fn fixed_delta_rungs() -> Vec<usize> {
+    std::env::var("JAZZ_S4_PROPAGATION_CUSTOMERS")
+        .unwrap_or_else(|_| "10,1000,10000".to_owned())
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid JAZZ_S4_PROPAGATION_CUSTOMERS: {value}"))
+                .max(1)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1141,6 +1162,278 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
         client.inbound.borrow_mut().push_back(update);
     }
     client.db.tick().unwrap();
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PropagationWork {
+    wire_bytes: u64,
+    result_adds: usize,
+    result_removes: usize,
+    program_fact_adds: usize,
+    program_fact_removes: usize,
+    version_bundles: usize,
+    version_records: usize,
+}
+
+impl PropagationWork {
+    fn record(&mut self, update: &SyncMessage) {
+        self.wire_bytes += encode_sync_message(update)
+            .expect("encode S4 view update")
+            .len() as u64;
+        let SyncMessage::ViewUpdate {
+            version_carriers,
+            version_bundles,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } = update
+        else {
+            panic!("S4 propagation must emit a view update");
+        };
+        self.result_adds += result_member_adds.len();
+        self.result_removes += result_member_removes.len();
+        self.program_fact_adds += program_fact_adds.len();
+        self.program_fact_removes += program_fact_removes.len();
+        let expanded_carriers =
+            expand_version_carriers(version_carriers).expect("expand S4 version carriers");
+        self.version_bundles += version_bundles.len() + expanded_carriers.len();
+        self.version_records += version_bundles
+            .iter()
+            .chain(expanded_carriers.iter())
+            .map(|bundle| bundle.versions.len())
+            .sum::<usize>();
+    }
+
+    fn assert_delta_bounded(&self, expected: &Self, hop: &str) {
+        assert_eq!(self.result_adds, expected.result_adds, "{hop} result adds");
+        assert_eq!(
+            self.result_removes, expected.result_removes,
+            "{hop} result removes"
+        );
+        assert_eq!(
+            self.program_fact_adds, expected.program_fact_adds,
+            "{hop} program fact adds"
+        );
+        assert_eq!(
+            self.program_fact_removes, expected.program_fact_removes,
+            "{hop} program fact removes"
+        );
+        assert_eq!(
+            self.version_bundles, expected.version_bundles,
+            "{hop} version bundles"
+        );
+        assert_eq!(
+            self.version_records, expected.version_records,
+            "{hop} version records"
+        );
+        assert!(
+            self.wire_bytes.abs_diff(expected.wire_bytes)
+                <= MAX_SETTLED_THROUGH_FRAMING_DELTA_PER_HOP,
+            "{hop} wire bytes exceeded the fixed settled-through framing allowance: actual={}, expected={}",
+            self.wire_bytes,
+            expected.wire_bytes
+        );
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PropagationSignature {
+    core_to_edge: PropagationWork,
+    edge_to_client: PropagationWork,
+    core_reads: usize,
+    core_ranges: usize,
+    edge_reads: usize,
+    edge_ranges: usize,
+}
+
+impl PropagationSignature {
+    fn assert_delta_bounded(&self, expected: &Self) {
+        self.core_to_edge
+            .assert_delta_bounded(&expected.core_to_edge, "core-to-edge");
+        self.edge_to_client
+            .assert_delta_bounded(&expected.edge_to_client, "edge-to-client");
+        assert_eq!(self.core_reads, expected.core_reads, "core storage reads");
+        assert_eq!(
+            self.core_ranges, expected.core_ranges,
+            "core storage ranges"
+        );
+        assert_eq!(self.edge_reads, expected.edge_reads, "edge storage reads");
+        assert_eq!(
+            self.edge_ranges, expected.edge_ranges,
+            "edge storage ranges"
+        );
+    }
+}
+
+fn propagate_client(
+    core: &mut NodeState<RocksDbStorage>,
+    client: &mut ClientHarness,
+) -> PropagationSignature {
+    let mut signature = PropagationSignature::default();
+    core.reset_storage_read_metrics();
+    client.edge.reset_storage_read_metrics();
+    for table in TABLES {
+        let update = client.edge_peer.current_rows_update(core, table).unwrap();
+        client.hydration_bytes += view_update_bytes(&update);
+        client.hydration_rows += result_row_count(&update);
+        signature.core_to_edge.record(&update);
+        client.edge.apply_sync_message(update).unwrap();
+    }
+    for table in TABLES {
+        let update = client
+            .client_peer
+            .current_rows_update(&mut client.edge, table)
+            .unwrap();
+        signature.edge_to_client.record(&update);
+        client.inbound.borrow_mut().push_back(update);
+    }
+    client.db.tick().unwrap();
+    let core_reads = core.storage_read_metrics();
+    let edge_reads = client.edge.storage_read_metrics();
+    signature.core_reads = core_reads.total.reads;
+    signature.core_ranges = core_reads.total.ranges;
+    signature.edge_reads = edge_reads.total.reads;
+    signature.edge_ranges = edge_reads.total.ranges;
+    signature
+}
+
+fn run_fixed_delta_scaling(customer_rungs: &[usize]) {
+    assert!(
+        !customer_rungs.is_empty(),
+        "S4 propagation ladder is non-empty"
+    );
+    let mut expected_signature = None;
+    for &customers in customer_rungs {
+        let config = Config {
+            seed: 0x5400_0001,
+            profile: "s4-fixed-delta".to_owned(),
+            warehouses: 1,
+            districts_per_warehouse: 1,
+            customers_per_district: customers,
+            items: 1,
+            clients: 1,
+            throughput_commits: 1,
+            slo_commits: 1,
+            order_lines: 1,
+            new_order_pct: 0,
+            delivery_pct: 0,
+            stock_level_pct: 0,
+            per_warehouse_rate: 1,
+        };
+        let schema = schema();
+        let (_core_dir, mut core) = open_node(node(250), schema.clone());
+        seed_jazz_fixture(&config, &mut core);
+        let mut clients = open_clients(1, 20, &schema, &mut core);
+        let mut edge_acceptance = Histogram::new(3).unwrap();
+        let op = Op::Payment {
+            warehouse: 0,
+            district: 0,
+            customer: 0,
+            amount: 1.0,
+        };
+        assert!(
+            apply_jazz_op(
+                &mut clients[0],
+                &mut core,
+                &op,
+                10_000,
+                &mut edge_acceptance,
+            )
+            .expect("apply fixed S4 payment")
+        );
+
+        let started = Instant::now();
+        let signature = propagate_client(&mut core, &mut clients[0]);
+        let wall_us = started.elapsed().as_micros();
+        let view_rows = customers + 5;
+        assert_eq!(
+            TABLES
+                .iter()
+                .map(|table| {
+                    core.current_rows(table, DurabilityTier::Global)
+                        .expect("read S4 gate current rows")
+                        .len()
+                })
+                .sum::<usize>(),
+            view_rows
+        );
+        assert_sqlite_replay_matches(
+            &config,
+            std::slice::from_ref(&op),
+            &jazz_totals(&config, &schema, &mut core),
+        );
+        if let Some(expected) = &expected_signature {
+            signature.assert_delta_bounded(expected);
+        } else {
+            expected_signature = Some(signature.clone());
+        }
+
+        let mut fields = metadata_fields(
+            "s4_order_processing",
+            "synchronous",
+            config.seed,
+            &config.profile,
+        );
+        fields.insert("phase".to_owned(), json!("fixed_delta_propagation_scaling"));
+        fields.insert("customers".to_owned(), json!(customers));
+        fields.insert("view_rows".to_owned(), json!(view_rows));
+        fields.insert("changed_rows".to_owned(), json!(4));
+        fields.insert("fixed_delta_op".to_owned(), json!("payment"));
+        fields.insert(
+            "wire_byte_allowance_per_hop".to_owned(),
+            json!(MAX_SETTLED_THROUGH_FRAMING_DELTA_PER_HOP),
+        );
+        fields.insert("wall_us".to_owned(), json!(wall_us));
+        insert_propagation_work(&mut fields, "core_to_edge", &signature.core_to_edge);
+        insert_propagation_work(&mut fields, "edge_to_client", &signature.edge_to_client);
+        fields.insert("core_storage_reads".to_owned(), json!(signature.core_reads));
+        fields.insert(
+            "core_storage_ranges".to_owned(),
+            json!(signature.core_ranges),
+        );
+        fields.insert("edge_storage_reads".to_owned(), json!(signature.edge_reads));
+        fields.insert(
+            "edge_storage_ranges".to_owned(),
+            json!(signature.edge_ranges),
+        );
+        fields.insert("same_schedule_replay".to_owned(), json!("matched"));
+        fields.insert("structural_gate".to_owned(), json!("delta_bounded"));
+        emit_json_line(
+            "s4_order_processing",
+            &JsonValue::Object(fields).to_string(),
+        );
+    }
+}
+
+fn insert_propagation_work(
+    fields: &mut serde_json::Map<String, JsonValue>,
+    prefix: &str,
+    work: &PropagationWork,
+) {
+    fields.insert(format!("{prefix}_wire_bytes"), json!(work.wire_bytes));
+    fields.insert(format!("{prefix}_result_adds"), json!(work.result_adds));
+    fields.insert(
+        format!("{prefix}_result_removes"),
+        json!(work.result_removes),
+    );
+    fields.insert(
+        format!("{prefix}_program_fact_adds"),
+        json!(work.program_fact_adds),
+    );
+    fields.insert(
+        format!("{prefix}_program_fact_removes"),
+        json!(work.program_fact_removes),
+    );
+    fields.insert(
+        format!("{prefix}_version_bundles"),
+        json!(work.version_bundles),
+    );
+    fields.insert(
+        format!("{prefix}_version_records"),
+        json!(work.version_records),
+    );
 }
 
 fn seed_jazz_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>) {

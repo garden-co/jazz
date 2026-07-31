@@ -123,6 +123,11 @@ latency numbers. #1224 adds B7 for public relation-result hydration coverage.
    Exact result equality is hard-gated; maintained output and storage work stay
    flat while full-rehydrate bytes and reads grow linearly. The lane also
    exposes a separate O(view) metrics-footprint refresh on the maintained path.
+8. **S4 fixed-delta propagation:** `s4_order_processing` now holds one accepted
+   four-row Payment delta fixed across increasing unrelated retained views. A
+   smoke-enforced gate requires identical reads, ranges, results, facts, and
+   bundles across both propagation hops, with only a fixed cursor-framing byte
+   allowance.
 
 ### Important negative results retained
 
@@ -147,12 +152,9 @@ Ranked by their ability to change an engineering decision:
    full-source version/replacement witness state.
 2. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
    state over increasing view sizes while asserting identical results.
-3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
-   propagation; add a deterministic structural bound proving propagation stays
-   proportional to the affected delta.
-4. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
+3. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
    reconnect, merge-back, conflicts, and payload reuse end to end.
-5. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
+4. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
    for S5, full-history memory for S6, and native-versus-lens plus migration-wave
    costs for S7.
 
@@ -164,7 +166,7 @@ Ranked by their ability to change an engineering decision:
 | PERF-4 known-state payload dedup           | retained exact-coverage sweep with bytes, bundles, reads, and correctness digest | profile the coverage-invariant serving work only if a user-facing cost justifies it            |
 | PERF-5 maintained converges to rehydrate   | exact-result, cost, bytes, reads, and retained-state scale receipt               | optimize the O(view) metrics-footprint refresh if its measured latency warrants it             |
 | PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches                        | retained filtered/indexed-read slope where selection is held fixed                             |
-| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                                           | fixed-delta/varying-view structural gate                                                       |
+| S4 post-acceptance propagation is O(delta) | smoke-enforced fixed-delta/varying-view gate over both propagation hops          | profile the residual view-sized CPU bookkeeping only if its measured latency warrants it       |
 
 Targets should come from specification properties and measured deterministic
 spread, not from an arbitrary percentage around today’s laptop timing.
@@ -176,8 +178,7 @@ spread, not from an arbitrary percentage around today’s laptop timing.
    its durable-format decision has team agreement.
 2. Extract focused policy/selective-hydration receipts from #1170 rather than
    merging one omnibus benchmark investigation.
-3. Add the S4 structural gate.
-4. Build S8, then fill the remaining S5–S7 dimensions.
+3. Build S8, then fill the remaining S5–S7 dimensions.
 
 Add retention alongside each lane. A broad receipt-unification project is no
 longer a prerequisite for useful performance work.
