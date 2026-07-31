@@ -130,6 +130,7 @@ where
         let mut validated_current_rows = 0usize;
         #[cfg(feature = "testing")]
         let mut ahead_current_entries = 0usize;
+        let mut ahead_current_tx_ids = BTreeSet::new();
         for table in self.catalogue.schema.tables.clone() {
             #[cfg(feature = "testing")]
             {
@@ -137,10 +138,11 @@ where
                     &table,
                     &mut validated_current_rows,
                     &mut ahead_current_entries,
+                    &mut ahead_current_tx_ids,
                 )?;
             }
             #[cfg(not(feature = "testing"))]
-            self.validate_current_row_storage_layout(&table)?;
+            self.validate_current_row_storage_layout(&table, &mut ahead_current_tx_ids)?;
             if let Some(raw) =
                 self.database
                     .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
@@ -169,6 +171,14 @@ where
         let mut accepted_global_seqs = Vec::new();
         let mut global_sequence_records_scanned = 0usize;
         let mut settled_cleanup_candidates = BTreeSet::new();
+        for tx_id in ahead_current_tx_ids {
+            if self
+                .query_transaction(tx_id)?
+                .is_some_and(|tx| matches!(tx.fate, Fate::Accepted | Fate::Rejected(_)))
+            {
+                settled_cleanup_candidates.insert(tx_id);
+            }
+        }
         // Nullable index keys order `None` before `Some`. Range over only the
         // `Some` bucket so local pending/rejected transactions cannot make
         // recovery O(total transactions). The range end is exclusive, hence
@@ -333,6 +343,7 @@ where
         table: &TableSchema,
         #[cfg(feature = "testing")] rows: &mut usize,
         #[cfg(feature = "testing")] ahead_rows: &mut usize,
+        ahead_current_tx_ids: &mut BTreeSet<TxId>,
     ) -> Result<(), Error> {
         let storage_tables = table.global_current_storage_tables();
         self.validate_content_current_rows(
@@ -354,6 +365,7 @@ where
             rows,
             #[cfg(feature = "testing")]
             ahead_rows,
+            ahead_current_tx_ids,
         )?;
         self.validate_ahead_current_rows(
             &storage_tables[1],
@@ -362,6 +374,7 @@ where
             rows,
             #[cfg(feature = "testing")]
             ahead_rows,
+            ahead_current_tx_ids,
         )?;
         Ok(())
     }
@@ -372,6 +385,7 @@ where
         layer: VersionLayer,
         #[cfg(feature = "testing")] row_count: &mut usize,
         #[cfg(feature = "testing")] ahead_row_count: &mut usize,
+        ahead_current_tx_ids: &mut BTreeSet<TxId>,
     ) -> Result<(), Error> {
         let descriptor = storage_table.record_schema();
         let rows = self
@@ -387,6 +401,17 @@ where
         }
         for raw in rows {
             let record = BorrowedRecord::new(&raw, &descriptor);
+            let node_alias =
+                NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let node = self
+                .node_for_alias(node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "ahead-current transaction node alias must exist",
+                ))?;
+            ahead_current_tx_ids.insert(TxId::new(
+                TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
+                node,
+            ));
             match layer {
                 VersionLayer::Content => {
                     record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?;

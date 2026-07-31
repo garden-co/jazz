@@ -493,6 +493,44 @@ fn unclean_reopen_sweeps_rejected_candidate_without_full_transaction_scan() {
 }
 
 #[test]
+fn unclean_reopen_sweeps_remote_rejected_ahead_row_without_retry_record() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut origin = open_node_at(&temp_dir, schema.clone());
+        let tx_id = origin
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(221), 10).cells(title_cells("remote rejected")),
+            )
+            .unwrap();
+        let mut stored = origin.query_transaction(tx_id).unwrap().unwrap();
+        stored.fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+        let mut batch = origin.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_seq,
+                stored.durability,
+            ),
+        );
+        // Simulate the crash/legacy state seen by a non-origin node: the
+        // settled transaction and stale ahead-current row are durable, but
+        // foreign rejected payloads have no local retry-store record.
+        origin.database.commit_batch(batch).unwrap();
+        assert_eq!(ahead_current_row_count(&mut origin, "todos"), 1);
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut reopened = NodeState::new(node(2), schema, storage).unwrap();
+    assert_eq!(ahead_current_row_count(&mut reopened, "todos"), 0);
+}
+
+#[test]
 fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
