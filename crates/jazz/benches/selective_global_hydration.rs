@@ -228,6 +228,17 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let query_us = query_started.elapsed().as_micros();
     let query_metrics = db.take_storage_read_metrics_for_test();
 
+    assert!(
+        query_metrics.global_current_rows.reads <= config.target_rows,
+        "selective Global hydration read {} current rows for {} indexed candidates at table size {table_rows}",
+        query_metrics.global_current_rows.reads,
+        config.target_rows,
+    );
+    assert!(
+        (1..=config.target_rows).contains(&query_metrics.global_current_indexes.reads),
+        "selective Global hydration must use the declared index without reading more than the fixed candidate set"
+    );
+
     let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
     let expected = (config.target_rows - config.result_rows..config.target_rows)
         .rev()
