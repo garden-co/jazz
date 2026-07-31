@@ -451,6 +451,23 @@ where
         Ok(tx_id)
     }
 
+    #[cfg(feature = "testing")]
+    /// Test/bench-only authority finalization for a locally committed mergeable
+    /// transaction.
+    ///
+    /// This allows scale fixtures to use the ordinary batched transaction API
+    /// before performing the same self-acceptance step as
+    /// [`Db::seed_settled_mergeable_for_bootstrap`].
+    pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .finalize_local_mergeable_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
+        Ok(())
+    }
+
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
         let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
@@ -3033,6 +3050,18 @@ where
     /// storage path immediately after a synthetic lifecycle transition.
     pub fn flush_for_test(&self) -> Result<(), Error> {
         Ok(self.node.node.borrow_mut().flush_query_runtime()?)
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only reset for logical storage-read attribution.
+    pub fn reset_storage_read_metrics_for_test(&self) {
+        self.node.node.borrow().reset_storage_read_metrics();
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only drain for logical storage-read attribution.
+    pub fn take_storage_read_metrics_for_test(&self) -> groove::db::StorageReadMetrics {
+        self.node.node.borrow().take_storage_read_metrics()
     }
 
     #[cfg(feature = "testing")]
