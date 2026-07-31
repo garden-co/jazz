@@ -163,6 +163,49 @@ fn opening_rejects_malformed_representative_ahead_current_row() {
 }
 
 #[test]
+fn opening_defers_isolated_non_representative_corruption_until_read() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        node.commit_mergeable(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("corrupt me")),
+        )
+        .unwrap();
+        node.commit_mergeable(
+            MergeableCommit::new("todos", row(0xff), 11).cells(title_cells("representative")),
+        )
+        .unwrap();
+        let table = schema.tables[0].ahead_current_storage_tables()[0]
+            .name
+            .clone();
+        let (key, raw) = node
+            .database
+            .primary_key_scan_raw(&table, &[])
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_parts();
+        node.database.close().unwrap();
+        drop(node);
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        let storage =
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        storage.set(&table, &key, &raw[..1]).unwrap();
+        storage.close().unwrap();
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert!(
+        reopened.local_current_row("todos", row(1)).is_err(),
+        "isolated corruption outside the representative row must fail when read"
+    );
+}
+
+#[test]
 fn recovery_uses_storage_fallback_for_deletion_versions() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
