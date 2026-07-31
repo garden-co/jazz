@@ -3729,6 +3729,10 @@ function materializeRelationRow(
   const rowKeyValue = rowKey(row.table, row.id);
   const cached = materialized.get(rowKeyValue);
   if (cached) return { row: cached, satisfiesRequirements: true };
+  if (subqueries.length === 0) {
+    materialized.set(rowKeyValue, row);
+    return { row, satisfiesRequirements: true };
+  }
   materialized.set(rowKeyValue, row);
   const valuesByColumn = new Map(row.valuesByColumn ?? []);
   const relationValues: Value[] = [];
