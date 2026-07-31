@@ -26,7 +26,7 @@ pub struct GlobalSeq(pub u64);
 impl GlobalSeq {
     /// Return the next global sequence value.
     pub fn next(self) -> Self {
-        Self(self.0 + 1)
+        Self(self.0.saturating_add(1))
     }
 }
 
