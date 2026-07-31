@@ -15,6 +15,7 @@ import {
   formatUuid,
   parseUuid,
 } from "./native-runtime-adapter.js";
+import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
 type PendingCall = {
   resolve: (value: unknown) => void;
@@ -567,6 +568,7 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (!pending) return;
     this.pending.delete(message.id);
     if (message.ok) {
+      setNamedRowValuesEnumerable(message.result, false);
       pending.resolve(message.result);
     } else {
       const error = new Error(message.error.message ?? "Persistent browser worker call failed");
