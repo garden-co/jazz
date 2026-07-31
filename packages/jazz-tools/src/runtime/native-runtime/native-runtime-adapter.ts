@@ -326,6 +326,7 @@ type NativeRowFieldPlan = {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
@@ -4523,10 +4524,28 @@ function deterministicBytes(seed: string): Uint8Array {
 }
 
 export function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
+  return (
+    byteHex[bytes[0]!] +
+    byteHex[bytes[1]!] +
+    byteHex[bytes[2]!] +
+    byteHex[bytes[3]!] +
+    "-" +
+    byteHex[bytes[4]!] +
+    byteHex[bytes[5]!] +
+    "-" +
+    byteHex[bytes[6]!] +
+    byteHex[bytes[7]!] +
+    "-" +
+    byteHex[bytes[8]!] +
+    byteHex[bytes[9]!] +
+    "-" +
+    byteHex[bytes[10]!] +
+    byteHex[bytes[11]!] +
+    byteHex[bytes[12]!] +
+    byteHex[bytes[13]!] +
+    byteHex[bytes[14]!] +
+    byteHex[bytes[15]!]
   );
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {
