@@ -167,6 +167,7 @@ Current browser scenarios:
 - `B4`: fanout delivery latency/throughput across many subscribers
 - `B5`: recursive policy schema read/update stress
 - `B6`: hotspot deep-history update stress with storage usage sampling
+- `B7`: large relation-result hydration over the project-board dataset
 
 ## CI / Runner
 
