@@ -2187,10 +2187,13 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
   const appId = await benchmarkAppId("b7");
   const dbName = uniqueDbName("b7");
   const cycles = Math.min(b7.read_cycles, CI_BROWSER_LIMITS.b7ReadCycles);
-  const largeConfig = scaledLargeProfile(
-    config,
-    Math.min(b7.large_multiplier, CI_BROWSER_LIMITS.b7LargeMultiplier),
-  );
+  const largeConfig = {
+    ...scaledLargeProfile(
+      config,
+      Math.min(b7.large_multiplier, CI_BROWSER_LIMITS.b7LargeMultiplier),
+    ),
+    seed: b7.seed,
+  };
   const rootTaskLimit = Math.min(
     largeConfig.tasks,
     b7.root_task_limit,
@@ -2222,6 +2225,13 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
       expect(rows.length).toBe(rootRows);
     }
     const wallMs = performance.now() - wallStart;
+    const validationRows = await db.all(hydrationQuery, "local");
+    const relationIdentity = (rows: typeof warmRows) =>
+      rows.map((row) => [row.id, (row.task_commentsViaTask ?? []).map((comment) => comment.id)]);
+    expect(relationIdentity(validationRows)).toEqual(relationIdentity(warmRows));
+    expect(
+      validationRows.reduce((total, row) => total + (row.task_commentsViaTask?.length ?? 0), 0),
+    ).toBe(commentRows);
 
     return {
       scenario_id: b7.id,
