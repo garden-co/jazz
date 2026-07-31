@@ -171,12 +171,14 @@ where
         let mut accepted_global_seqs = Vec::new();
         let mut global_sequence_records_scanned = 0usize;
         let mut settled_cleanup_candidates = BTreeSet::new();
-        for tx_id in ahead_current_tx_ids {
-            if self
-                .query_transaction(tx_id)?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Accepted | Fate::Rejected(_)))
-            {
-                settled_cleanup_candidates.insert(tx_id);
+        if !cleanly_closed {
+            for tx_id in ahead_current_tx_ids {
+                if self
+                    .query_transaction(tx_id)?
+                    .is_some_and(|tx| matches!(tx.fate, Fate::Accepted | Fate::Rejected(_)))
+                {
+                    settled_cleanup_candidates.insert(tx_id);
+                }
             }
         }
         // Nullable index keys order `None` before `Some`. Range over only the
