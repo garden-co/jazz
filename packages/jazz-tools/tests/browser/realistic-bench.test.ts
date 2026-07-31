@@ -2585,6 +2585,8 @@ describe("realistic browser benchmark harness", () => {
         { id: "B4", run: async (): Promise<ScenarioResult> => runB4(cfg) },
         { id: "B5", run: async (): Promise<ScenarioResult> => runB5(cfg) },
         { id: "B6", run: async (): Promise<ScenarioResult> => runB6(cfg) },
+        // B7 applies browser scaling inside scaledLargeProfile; passing cfg would scale twice
+        // and erase the relation density this scenario is intended to measure.
         { id: "B7", run: async (): Promise<ScenarioResult> => runB7(profile) },
       ];
       const knownIds = new Set(runners.map((runner) => runner.id));
