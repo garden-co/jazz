@@ -1906,6 +1906,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       type: "Text",
       value: "Ship relation reads",
     });
+
+    const unrelated = { valuesByColumn: "application data" };
+    setNamedRowValuesEnumerable(unrelated, false);
+    expect(Object.getOwnPropertyDescriptor(unrelated, "valuesByColumn")?.enumerable).toBe(true);
   });
 
   it("decodes native subscription chunks", async () => {

@@ -12,7 +12,7 @@ function visit(value: unknown, enumerable: boolean, seen: WeakSet<object>): void
   }
 
   const descriptor = Object.getOwnPropertyDescriptor(value, "valuesByColumn");
-  if (descriptor) {
+  if (descriptor?.value instanceof Map) {
     Object.defineProperty(value, "valuesByColumn", { ...descriptor, enumerable });
     visit(descriptor.value, enumerable, seen);
   }
