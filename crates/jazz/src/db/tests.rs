@@ -2410,6 +2410,32 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
         BTreeSet::from([root, leaf])
     );
 
+    let or_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Or(vec![
+                RelationPredicate::True,
+                RelationPredicate::False,
+            ]),
+        },
+    };
+    let unfiltered = block_on(db.all_relation_query(&or_true, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&unfiltered.rows)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let not_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Not(Box::new(RelationPredicate::True)),
+        },
+    };
+    let empty = block_on(db.all_relation_query(&not_true, ReadOpts::default())).unwrap();
+    assert!(empty.rows.is_empty());
+
     let filter_after_limit = RelationQuery {
         rel: RelationExpr::Filter {
             input: Box::new(RelationExpr::Limit {

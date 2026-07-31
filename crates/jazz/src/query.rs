@@ -946,12 +946,15 @@ fn relation_predicate_to_query_predicate(
                 relation_value_to_operand(right)?,
             ),
         ))),
-        RelationPredicate::And(predicates) => relation_predicate_list(predicates, Predicate::All),
-        RelationPredicate::Or(predicates) => relation_predicate_list(predicates, Predicate::Any),
+        RelationPredicate::And(predicates) => relation_predicate_list(predicates, true),
+        RelationPredicate::Or(predicates) => relation_predicate_list(predicates, false),
         RelationPredicate::Not(predicate) => {
             let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
-                return Ok(None);
+                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
             };
+            if is_always_false(&predicate) {
+                return Ok(None);
+            }
             Ok(Some((scope, Predicate::Not(Box::new(predicate)))))
         }
         RelationPredicate::True => Ok(None),
@@ -961,15 +964,24 @@ fn relation_predicate_to_query_predicate(
 
 fn relation_predicate_list(
     predicates: &[RelationPredicate],
-    wrap: impl FnOnce(Vec<Predicate>) -> Predicate,
+    is_and: bool,
 ) -> Result<Option<(String, Predicate)>, QueryError> {
     let mut scope = None::<String>;
     let mut items = Vec::new();
     for predicate in predicates {
         let Some((predicate_scope, predicate)) = relation_predicate_to_query_predicate(predicate)?
         else {
-            continue;
+            if is_and {
+                continue;
+            }
+            return Ok(None);
         };
+        if is_always_false(&predicate) {
+            if is_and {
+                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
+            }
+            continue;
+        }
         if predicate_scope.is_empty() {
             items.push(predicate);
             continue;
@@ -986,9 +998,22 @@ fn relation_predicate_list(
         items.push(predicate);
     }
     let Some(scope) = scope else {
-        return Ok(None);
+        return if is_and {
+            Ok(None)
+        } else {
+            Ok(Some((String::new(), Predicate::Any(Vec::new()))))
+        };
     };
-    Ok(Some((scope, wrap(items))))
+    let predicate = if is_and {
+        Predicate::All(items)
+    } else {
+        Predicate::Any(items)
+    };
+    Ok(Some((scope, predicate)))
+}
+
+fn is_always_false(predicate: &Predicate) -> bool {
+    matches!(predicate, Predicate::Any(predicates) if predicates.is_empty())
 }
 
 fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryError> {
@@ -4252,6 +4277,33 @@ mod tests {
         assert_eq!(validated.params()["user"], ColumnType::Uuid);
         assert_eq!(validated.params()["tag"], ColumnType::Uuid);
         assert!(!validated.canonical_bytes().is_empty());
+    }
+
+    #[test]
+    fn relation_predicate_or_true_is_always_true() {
+        let predicate = RelationPredicate::Or(vec![
+            RelationPredicate::True,
+            RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("issues".to_owned()),
+                    column: "state".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("open".to_owned())),
+            },
+        ]);
+
+        assert_eq!(relation_predicate_to_query_predicate(&predicate).unwrap(), None);
+    }
+
+    #[test]
+    fn relation_predicate_not_true_is_always_false() {
+        let predicate = RelationPredicate::Not(Box::new(RelationPredicate::True));
+
+        assert_eq!(
+            relation_predicate_to_query_predicate(&predicate).unwrap(),
+            Some((String::new(), Predicate::Any(Vec::new())))
+        );
     }
 
     #[test]
