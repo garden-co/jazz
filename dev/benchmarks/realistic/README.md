@@ -75,6 +75,11 @@ decode/materialization, row finishing, projection, and an unattributed
 facade/clock residual. Its default is the existing 120-task CI profile with the
 OS page cache left uncontrolled after fixture seeding:
 
+Each `*_p50_us` field is the median of that field across all samples. These
+independent medians describe the typical cost of each phase, but they need not
+add up to `total_p50_us` or `first_read_p50_us`; use an individual sample when
+an exactly balanced timing decomposition is required.
+
 ```bash
 JAZZ_R3_PROFILES=ci \
   cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
