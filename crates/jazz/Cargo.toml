@@ -7,7 +7,7 @@ autobenches = false
 autotests = false
 
 [features]
-default = ["rocksdb", "transport-compression-zstd"]
+default = ["rocksdb", "server", "transport-compression-zstd"]
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 client = ["server"]
