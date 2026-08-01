@@ -60,16 +60,12 @@ describe("dev catalogue API exports", () => {
     expect(typeof dev.deploy).toBe("function");
   });
 
-  it(
-    "keeps deploy compatible across dev and testing entrypoints",
-    { timeout: 30_000 },
-    async () => {
-      const dev = await import("./index.js");
-      const testing = await import("../testing/index.js");
+  it("keeps deploy compatible across dev and testing entrypoints", async () => {
+    const dev = await import("./index.js");
+    const testing = await import("../testing/index.js");
 
-      expect(testing.deploy).toBe(dev.deploy);
-    },
-  );
+    expect(testing.deploy).toBe(dev.deploy);
+  });
 });
 
 describe("dev catalogue push behavior", () => {
