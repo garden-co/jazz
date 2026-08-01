@@ -11,13 +11,7 @@ default = ["rocksdb", "transport-compression-zstd"]
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 client = ["server"]
-server = [
-  "dep:axum",
-  "dep:tracing-subscriber",
-  "dep:tower-http",
-  "dep:async-stream",
-  "dep:reqwest",
-]
+server = ["dep:axum", "dep:tracing-subscriber", "dep:tower-http", "dep:async-stream", "dep:reqwest", "dep:tokio", "dep:tokio-tungstenite", "dep:tungstenite"]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 sync-autopsy = []
 testing = []
@@ -61,12 +55,19 @@ jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = ["lz4", "zstd"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 axum = { version = "0.7", features = ["ws"], optional = true }
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots", "handshake"] }
-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.29", features = [
+  "rustls-tls-native-roots",
+  "rustls-tls-webpki-roots",
+  "handshake",
+], optional = true }
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -76,10 +77,24 @@ jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls",
+], optional = true }
 opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs", "metrics"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-json", "reqwest-blocking-client", "logs", "metrics"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = [
+  "rt-tokio",
+  "logs",
+  "metrics",
+], optional = true }
+opentelemetry-otlp = { version = "0.31", features = [
+  "grpc-tonic",
+  "http-json",
+  "reqwest-blocking-client",
+  "logs",
+  "metrics",
+], optional = true }
 opentelemetry-stdout = { version = "0.31", optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
@@ -91,7 +106,11 @@ opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls",
+] }
 bytes = "1"
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 futures = "0.3"
