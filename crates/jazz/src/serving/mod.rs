@@ -20,16 +20,24 @@ use crate::db::{
     CommitUnitTrust, Db, DbConfig, DbIdentity, Error as DbError, PeerConnection, ResumeCursor,
     RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
+#[cfg(feature = "server")]
+use crate::db::{LocalUpdates, Propagation, ReadOpts};
 use crate::groove::records::Value;
 use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage;
 use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
+#[cfg(feature = "server")]
+use crate::node::CurrentRow;
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage,
 };
+#[cfg(feature = "server")]
+use crate::query::Query;
 use crate::schema::JazzSchema;
+#[cfg(feature = "server")]
+use crate::tx::DurabilityTier;
 use crate::wire::{TransportError, WireTransport};
 
 mod admin_schema_convert;
@@ -293,6 +301,43 @@ impl ShellDb {
         }
     }
 
+    #[cfg(feature = "server")]
+    fn read_as_system(
+        &self,
+        query: &Query,
+        bindings: BTreeMap<String, Value>,
+    ) -> ShellResult<Vec<CurrentRow>> {
+        let opts = ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            read_view: Default::default(),
+        };
+        match self {
+            Self::Memory(db) => {
+                let prepared = db.prepare_query_bound(query, bindings)?;
+                crate::db::block_on(db.all_for_identity(&prepared, opts, AuthorId::SYSTEM))
+                    .map_err(Into::into)
+            }
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => {
+                let prepared = db.prepare_query_bound(query, bindings)?;
+                crate::db::block_on(db.all_for_identity(&prepared, opts, AuthorId::SYSTEM))
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn hydrate_large_value_handle(&self, handle: &[u8]) -> ShellResult<Vec<u8>> {
+        match self {
+            Self::Memory(db) => db.hydrate_large_value_handle(handle).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.hydrate_large_value_handle(handle).map_err(Into::into),
+        }
+    }
+
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
@@ -547,6 +592,37 @@ impl InMemoryServerShell {
     /// Return the current write-schema pointer revision last applied through this shell.
     pub fn runtime_write_schema_revision(&self) -> u64 {
         self.runtime_schema_state.current_write_revision
+    }
+
+    /// Resolve the runtime catalogue schema used by the server's read-only
+    /// administrative interfaces.
+    #[cfg(feature = "server")]
+    pub(crate) fn current_runtime_schema(&self) -> ShellResult<JazzSchema> {
+        let current = self.db.current_write_schema();
+        self.db.catalogue_schema(current.schema).ok_or_else(|| {
+            ShellError::Db(format!(
+                "current runtime schema {:?} is missing from the catalogue",
+                current.schema
+            ))
+        })
+    }
+
+    /// Execute a one-shot query as the system identity against the complete
+    /// core-server store.
+    #[cfg(feature = "server")]
+    pub(crate) fn read_as_system(
+        &self,
+        query: &Query,
+        bindings: BTreeMap<String, Value>,
+    ) -> ShellResult<Vec<CurrentRow>> {
+        self.db.read_as_system(query, bindings)
+    }
+
+    /// Resolve a large-value handle before returning it through an
+    /// administrative interface.
+    #[cfg(feature = "server")]
+    pub(crate) fn hydrate_large_value_handle(&self, handle: &[u8]) -> ShellResult<Vec<u8>> {
+        self.db.hydrate_large_value_handle(handle)
     }
 
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {

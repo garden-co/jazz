@@ -12,7 +12,13 @@ rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 client = ["server"]
 server = [
+  "dep:async-trait",
   "dep:axum",
+  "dep:bytes",
+  "dep:pgwire",
+  "dep:postgres-types",
+  "dep:sqlparser",
+  "dep:tokio-util",
   "dep:tracing-subscriber",
   "dep:tower-http",
   "dep:async-stream",
@@ -72,11 +78,16 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
 async-stream = { version = "0.3", optional = true }
+async-trait = { version = "0.1", optional = true }
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+pgwire = { version = "0.40.5", default-features = false, features = ["server-api-ring"], optional = true }
+postgres-types = { version = "0.2.14", features = ["with-uuid-1"], optional = true }
+sqlparser = { version = "0.62.0", optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs", "metrics"], optional = true }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-json", "reqwest-blocking-client", "logs", "metrics"], optional = true }
@@ -96,6 +107,7 @@ bytes = "1"
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 futures = "0.3"
 tokio = { version = "1", features = ["test-util", "full"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
@@ -251,6 +263,10 @@ required-features = ["test"]
 
 [[test]]
 name = "parameterized_subscription_routing"
+required-features = ["test"]
+
+[[test]]
+name = "postgres_interface"
 required-features = ["test"]
 
 [[example]]

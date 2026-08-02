@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use crate::db::{CommitUnitTrust, DbIdentity, Transport};
@@ -7,12 +7,16 @@ use crate::groove::records::Value;
 use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::MigrationLens;
-use crate::schema::JazzSchema;
+use crate::query::Query;
+use crate::schema::{JazzSchema, TableSchema};
 use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
-use tokio::sync::{oneshot, watch};
+use crate::tools::server::shutdown::ActivePostgresQueryGuard;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
+
+const MAX_ADMITTED_POSTGRES_OWNER_JOBS: usize = 8;
 
 /// Sendable handle for the thread that owns the in-memory server shell.
 ///
@@ -24,9 +28,21 @@ use tokio::sync::{oneshot, watch};
 pub(crate) struct ServerShellHandle {
     jobs: mpsc::Sender<ServerShellJob>,
     activity_tx: watch::Sender<u64>,
+    postgres_job_slots: Arc<Semaphore>,
 }
 
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct PostgresRow {
+    pub(crate) values: Vec<Option<Value>>,
+}
+
+pub(crate) struct PostgresQueryResult {
+    pub(crate) table: TableSchema,
+    pub(crate) rows: Vec<PostgresRow>,
+    pub(crate) response_permit: OwnedSemaphorePermit,
+}
 
 impl ServerShellHandle {
     pub(crate) fn start_with_storage(
@@ -111,7 +127,11 @@ impl ServerShellHandle {
         started_rx
             .recv()
             .map_err(|_| "server shell thread exited before startup".to_owned())??;
-        Ok(Self { jobs, activity_tx })
+        Ok(Self {
+            jobs,
+            activity_tx,
+            postgres_job_slots: Arc::new(Semaphore::new(MAX_ADMITTED_POSTGRES_OWNER_JOBS)),
+        })
     }
 
     pub(crate) fn subscribe_activity(&self) -> watch::Receiver<u64> {
@@ -169,6 +189,117 @@ impl ServerShellHandle {
             notify_shell_activity(&activity_tx);
         }
         result
+    }
+
+    pub(crate) async fn postgres_schema(&self) -> Result<JazzSchema, String> {
+        self.run_cancelable(move |shell| {
+            shell
+                .current_runtime_schema()
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub(crate) async fn postgres_query(
+        &self,
+        query: Query,
+        expected_schema_version: SchemaVersionId,
+        columns: Vec<String>,
+        bindings: BTreeMap<String, Value>,
+        database_job_permit: OwnedSemaphorePermit,
+        response_permit: OwnedSemaphorePermit,
+        query_guard: ActivePostgresQueryGuard,
+        max_response_bytes: usize,
+    ) -> Result<PostgresQueryResult, String> {
+        self.run_cancelable(move |shell| {
+            let _database_job_permit = database_job_permit;
+            let _query_guard = query_guard;
+            let schema = shell
+                .current_runtime_schema()
+                .map_err(|error| error.to_string())?;
+            if schema.version_id() != expected_schema_version {
+                return Err("PostgreSQL schema changed while planning the query; retry".to_owned());
+            }
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == query.table)
+                .cloned()
+                .ok_or_else(|| format!("unknown table {}", query.table))?;
+            let current_rows = shell
+                .read_as_system(&query, bindings)
+                .map_err(|error| error.to_string())?;
+            let mut rows = Vec::with_capacity(current_rows.len());
+            let mut response_bytes = 0_usize;
+            for row in current_rows {
+                let row_container_bytes = std::mem::size_of::<PostgresRow>().saturating_add(
+                    columns
+                        .len()
+                        .saturating_mul(std::mem::size_of::<Option<Value>>()),
+                );
+                response_bytes = response_bytes
+                    .checked_add(row_container_bytes)
+                    .ok_or_else(|| {
+                        "PostgreSQL response exceeds configured byte limit".to_owned()
+                    })?;
+                if response_bytes > max_response_bytes {
+                    return Err(format!(
+                        "PostgreSQL response exceeds configured {max_response_bytes}-byte limit"
+                    ));
+                }
+                let mut values = Vec::with_capacity(columns.len());
+                for column_name in &columns {
+                    if column_name == "id" {
+                        values.push(Some(Value::Uuid(row.row_uuid().0)));
+                        continue;
+                    }
+
+                    let column = table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == *column_name)
+                        .ok_or_else(|| format!("unknown column {}.{}", table.name, column_name))?;
+                    let mut value = row.cell(&table, column_name);
+                    if column.large_value.is_some()
+                        && let Some(Value::Bytes(handle)) = value.as_ref()
+                    {
+                        let declared_len = crate::node::large_value_handle_len(handle)
+                            .map_err(|error| error.to_string())?;
+                        let declared_len = usize::try_from(declared_len).unwrap_or(usize::MAX);
+                        if response_bytes.saturating_add(declared_len) > max_response_bytes {
+                            return Err(format!(
+                                "PostgreSQL response exceeds configured {max_response_bytes}-byte limit"
+                            ));
+                        }
+                        value = Some(Value::Bytes(
+                            shell
+                                .hydrate_large_value_handle(handle)
+                                .map_err(|error| error.to_string())?,
+                        ));
+                    }
+                    if let Some(value) = &value {
+                        response_bytes = response_bytes
+                            .checked_add(postgres_value_size(value))
+                            .ok_or_else(|| {
+                                "PostgreSQL response exceeds configured byte limit".to_owned()
+                            })?;
+                        if response_bytes > max_response_bytes {
+                            return Err(format!(
+                                "PostgreSQL response exceeds configured {max_response_bytes}-byte limit"
+                            ));
+                        }
+                    }
+                    values.push(value);
+                }
+                rows.push(PostgresRow { values });
+            }
+            Ok(PostgresQueryResult {
+                table,
+                rows,
+                response_permit,
+            })
+        })
+        .await
     }
 
     pub(crate) async fn receive_tick_take(
@@ -248,15 +379,79 @@ impl ServerShellHandle {
     where
         T: Send + 'static,
     {
+        self.run_inner(run_on_shell, false).await
+    }
+
+    async fn run_cancelable<T>(
+        &self,
+        run_on_shell: impl FnOnce(&mut InMemoryServerShell) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        // The owner thread uses an unbounded std channel for ordinary server
+        // work. Bound PostgreSQL admission before enqueueing and move the
+        // permit into the queued closure. If the client disconnects or sends
+        // CancelRequest, its future can disappear without freeing a slot for
+        // another closure until the abandoned job is actually skipped.
+        let job_permit = self
+            .postgres_job_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "PostgreSQL owner-job admission is closed".to_owned())?;
+        self.run_inner(
+            move |shell| {
+                let _job_permit = job_permit;
+                run_on_shell(shell)
+            },
+            true,
+        )
+        .await
+    }
+
+    async fn run_inner<T>(
+        &self,
+        run_on_shell: impl FnOnce(&mut InMemoryServerShell) -> Result<T, String> + Send + 'static,
+        skip_if_response_closed: bool,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
         let (reply, response) = oneshot::channel();
         self.jobs
             .send(Box::new(move |shell| {
+                if skip_if_response_closed && reply.is_closed() {
+                    return;
+                }
                 let _ = reply.send(run_on_shell(shell));
             }))
             .map_err(|_| "server shell thread is not running".to_owned())?;
         response
             .await
             .map_err(|_| "server shell thread dropped response".to_owned())?
+    }
+}
+
+fn postgres_value_size(value: &Value) -> usize {
+    match value {
+        Value::U8(_) | Value::Bool(_) | Value::Enum(_) => 1,
+        Value::U16(_) => 2,
+        Value::U32(_) | Value::I32(_) => 4,
+        Value::U64(_) | Value::I64(_) | Value::F64(_) => 8,
+        Value::Uuid(_) => 16,
+        Value::String(value) => value.len(),
+        Value::Bytes(value) => value.len(),
+        Value::Tuple(values) | Value::Array(values) => values
+            .len()
+            .saturating_mul(std::mem::size_of::<Value>())
+            .saturating_add(values.iter().fold(0_usize, |total, value| {
+                total.saturating_add(postgres_value_size(value))
+            })),
+        Value::Nullable(Some(value)) => {
+            std::mem::size_of::<Value>().saturating_add(postgres_value_size(value))
+        }
+        Value::Nullable(None) => 0,
     }
 }
 

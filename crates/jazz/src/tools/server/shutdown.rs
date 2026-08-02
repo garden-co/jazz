@@ -35,6 +35,8 @@ struct ShutdownInner {
     drain_notify: Notify,
     active_app_requests: AtomicUsize,
     active_websockets: AtomicUsize,
+    active_postgres_connections: AtomicUsize,
+    active_postgres_queries: AtomicUsize,
 }
 
 pub struct ActiveAppRequestGuard {
@@ -42,6 +44,14 @@ pub struct ActiveAppRequestGuard {
 }
 
 pub struct ActiveWebSocketGuard {
+    controller: ShutdownController,
+}
+
+pub(crate) struct ActivePostgresConnectionGuard {
+    controller: ShutdownController,
+}
+
+pub(crate) struct ActivePostgresQueryGuard {
     controller: ShutdownController,
 }
 
@@ -57,6 +67,8 @@ impl ShutdownController {
                 drain_notify: Notify::new(),
                 active_app_requests: AtomicUsize::new(0),
                 active_websockets: AtomicUsize::new(0),
+                active_postgres_connections: AtomicUsize::new(0),
+                active_postgres_queries: AtomicUsize::new(0),
             }),
         }
     }
@@ -153,6 +165,58 @@ impl ShutdownController {
         self.inner.active_websockets.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn try_enter_postgres_connection(&self) -> Option<ActivePostgresConnectionGuard> {
+        if self.is_shutting_down() {
+            return None;
+        }
+
+        self.inner
+            .active_postgres_connections
+            .fetch_add(1, Ordering::SeqCst);
+        if self.is_shutting_down() {
+            self.inner
+                .active_postgres_connections
+                .fetch_sub(1, Ordering::SeqCst);
+            self.inner.drain_notify.notify_waiters();
+            return None;
+        }
+
+        Some(ActivePostgresConnectionGuard {
+            controller: self.clone(),
+        })
+    }
+
+    pub(crate) fn active_postgres_connections(&self) -> usize {
+        self.inner
+            .active_postgres_connections
+            .load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn try_enter_postgres_query(&self) -> Option<ActivePostgresQueryGuard> {
+        if self.is_shutting_down() {
+            return None;
+        }
+
+        self.inner
+            .active_postgres_queries
+            .fetch_add(1, Ordering::SeqCst);
+        if self.is_shutting_down() {
+            self.inner
+                .active_postgres_queries
+                .fetch_sub(1, Ordering::SeqCst);
+            self.inner.drain_notify.notify_waiters();
+            return None;
+        }
+
+        Some(ActivePostgresQueryGuard {
+            controller: self.clone(),
+        })
+    }
+
+    pub(crate) fn active_postgres_queries(&self) -> usize {
+        self.inner.active_postgres_queries.load(Ordering::SeqCst)
+    }
+
     pub async fn wait_for_websocket_drain(&self) -> bool {
         let deadline = tokio::time::Instant::now() + self.timeout();
         let notified = self.inner.drain_notify.notified();
@@ -204,6 +268,33 @@ impl ShutdownController {
             }
         }
     }
+
+    pub(crate) async fn wait_for_postgres_connection_drain(&self) -> bool {
+        let deadline = tokio::time::Instant::now() + self.timeout();
+        let notified = self.inner.drain_notify.notified();
+        tokio::pin!(notified);
+
+        loop {
+            notified.as_mut().enable();
+            if self.active_postgres_connections() == 0 && self.active_postgres_queries() == 0 {
+                return true;
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+
+            let sleep = tokio::time::sleep_until(deadline);
+            tokio::select! {
+                _ = notified.as_mut() => {
+                    notified.set(self.inner.drain_notify.notified());
+                }
+                _ = sleep => return self.active_postgres_connections() == 0
+                    && self.active_postgres_queries() == 0,
+            }
+        }
+    }
 }
 
 impl Drop for ActiveAppRequestGuard {
@@ -221,6 +312,26 @@ impl Drop for ActiveWebSocketGuard {
         self.controller
             .inner
             .active_websockets
+            .fetch_sub(1, Ordering::SeqCst);
+        self.controller.inner.drain_notify.notify_waiters();
+    }
+}
+
+impl Drop for ActivePostgresConnectionGuard {
+    fn drop(&mut self) {
+        self.controller
+            .inner
+            .active_postgres_connections
+            .fetch_sub(1, Ordering::SeqCst);
+        self.controller.inner.drain_notify.notify_waiters();
+    }
+}
+
+impl Drop for ActivePostgresQueryGuard {
+    fn drop(&mut self) {
+        self.controller
+            .inner
+            .active_postgres_queries
             .fetch_sub(1, Ordering::SeqCst);
         self.controller.inner.drain_notify.notify_waiters();
     }
@@ -266,8 +377,12 @@ mod tests {
         assert!(controller.is_shutting_down());
         assert!(controller.try_enter_app_request().is_none());
         assert!(controller.try_enter_websocket().is_none());
+        assert!(controller.try_enter_postgres_connection().is_none());
+        assert!(controller.try_enter_postgres_query().is_none());
         assert_eq!(controller.active_app_requests(), 0);
         assert_eq!(controller.active_websockets(), 0);
+        assert_eq!(controller.active_postgres_connections(), 0);
+        assert_eq!(controller.active_postgres_queries(), 0);
     }
 
     #[tokio::test]
@@ -347,5 +462,29 @@ mod tests {
             .expect("running server accepts websocket");
 
         assert!(!controller.wait_for_websocket_drain().await);
+    }
+
+    #[tokio::test]
+    async fn postgres_drain_waits_for_connections_and_owner_thread_queries() {
+        let controller = ShutdownController::new(std::time::Duration::from_secs(30));
+        let connection = controller
+            .try_enter_postgres_connection()
+            .expect("running server accepts PostgreSQL connection");
+        let query = controller
+            .try_enter_postgres_query()
+            .expect("running server accepts PostgreSQL query");
+        let waiter = controller.clone();
+        let task = tokio::spawn(async move { waiter.wait_for_postgres_connection_drain().await });
+
+        tokio::task::yield_now().await;
+        drop(connection);
+        assert!(!task.is_finished());
+        drop(query);
+
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("PostgreSQL drain should complete after both guards drop")
+            .expect("wait task");
+        assert!(drained);
     }
 }

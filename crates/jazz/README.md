@@ -26,6 +26,9 @@ cargo run -p jazz --example transactions
 cargo run -p jazz --example permissions
 ```
 
+Server operators can use the [environment reference](ENV.md) and the
+[read-only PostgreSQL interface guide](POSTGRES.md).
+
 Operational and in-flight material now lives _inside_ the spec, in each chapter's
 clearly-marked `In flight` section after its normative content (benchmark
 specifics in [appendix B](SPEC/B_benchmarks.md), the performance backlog in

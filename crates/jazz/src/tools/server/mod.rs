@@ -11,6 +11,7 @@ mod catalogue_entry;
 mod catalogue_storage;
 mod core_server_shell;
 pub mod core_websocket_transport;
+pub(crate) mod postgres;
 pub(crate) mod public_schema_convert;
 pub mod routes;
 pub(crate) mod runtime_catalogue;
@@ -110,7 +111,11 @@ impl ServerState {
 
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
         let mut failed = false;
-        let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
+        let (websockets_drained, app_requests_drained, postgres_connections_drained) = tokio::join!(
+            self.shutdown.wait_for_websocket_drain(),
+            self.shutdown.wait_for_app_request_drain(),
+            self.shutdown.wait_for_postgres_connection_drain(),
+        );
         if !websockets_drained {
             tracing::warn!(
                 active_websockets = self.shutdown.active_websockets(),
@@ -119,11 +124,19 @@ impl ServerState {
             failed = true;
         }
 
-        let app_requests_drained = self.shutdown.wait_for_app_request_drain().await;
         if !app_requests_drained {
             tracing::warn!(
                 active_app_requests = self.shutdown.active_app_requests(),
                 "shutdown app request drain timed out"
+            );
+            failed = true;
+        }
+
+        if !postgres_connections_drained {
+            tracing::warn!(
+                active_postgres_connections = self.shutdown.active_postgres_connections(),
+                active_postgres_queries = self.shutdown.active_postgres_queries(),
+                "shutdown PostgreSQL connection drain timed out"
             );
             failed = true;
         }

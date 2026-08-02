@@ -23,6 +23,9 @@ pub async fn run(
     upstream_url: Option<String>,
     edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
+    postgres_port: Option<u16>,
+    postgres_secret: Option<String>,
+    postgres_bound_port_file: Option<String>,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
@@ -76,6 +79,30 @@ pub async fn run(
     }
 
     let state = built.state.clone();
+    let postgres_server = match postgres_port {
+        Some(port) => {
+            let postgres_secret = postgres_secret
+                .ok_or("PostgreSQL interface requires a read-only PostgreSQL secret")?;
+            let postgres = crate::tools::server::postgres::PostgresServerHandle::start(
+                state.clone(),
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                postgres_secret,
+            )
+            .await?;
+            if let Some(path) = postgres_bound_port_file {
+                std::fs::write(&path, postgres.addr().port().to_string()).map_err(|error| {
+                    format!("failed to write PostgreSQL bound port file {path}: {error}")
+                })?;
+            }
+            info!(
+                "PostgreSQL interface listening on postgresql://jazz@{}/{} (password: JAZZ_POSTGRES_SECRET)",
+                postgres.addr(),
+                app_id_string
+            );
+            Some(postgres)
+        }
+        None => None,
+    };
     let shutdown = state.shutdown.clone();
     // Report the current inbound WebSocket count as an OTel gauge. Held for the
     // server's lifetime; dropped when `run` returns. Only active when otel is
@@ -170,6 +197,7 @@ pub async fn run(
         abort_task(&mut shutdown_task).await;
     }
     abort_task(&mut sigterm_task).await;
+    drop(postgres_server);
 
     Ok(())
 }

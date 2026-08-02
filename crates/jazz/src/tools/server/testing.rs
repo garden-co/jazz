@@ -27,6 +27,7 @@ const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 #[derive(Default)]
 pub struct JazzServerBuilder {
     port: Option<u16>,
+    postgres_port: Option<u16>,
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
@@ -44,6 +45,7 @@ impl std::fmt::Debug for JazzServerBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JazzServerBuilder")
             .field("port", &self.port)
+            .field("postgres_port", &self.postgres_port)
             .field("app_id", &self.app_id)
             .field("persistent_storage", &self.persistent_storage)
             .finish()
@@ -58,6 +60,13 @@ impl JazzServerBuilder {
 
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
+        self
+    }
+
+    /// Enable the read-only PostgreSQL interface. Pass `0` to use an
+    /// operating-system-assigned loopback port.
+    pub fn with_postgres_port(mut self, port: u16) -> Self {
+        self.postgres_port = Some(port);
         self
     }
 
@@ -226,6 +235,7 @@ pub struct JazzServer {
     task: Option<JoinHandle<()>>,
     shutdown_task: Option<JoinHandle<()>>,
     port: u16,
+    postgres: Option<super::postgres::PostgresServerHandle>,
     app_id: AppId,
     data_dir: ServerDataDir,
     admin_secret: String,
@@ -238,6 +248,7 @@ pub struct JazzServer {
 impl JazzServer {
     pub const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
     pub const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
+    pub const POSTGRES_SECRET: &str = "postgres-secret-for-integration-tests";
 
     /// Creates a builder for configuring a Jazz server before startup.
     pub fn builder() -> JazzServerBuilder {
@@ -255,6 +266,7 @@ impl JazzServer {
     async fn from_builder(builder: JazzServerBuilder) -> Self {
         let JazzServerBuilder {
             port,
+            postgres_port,
             app_id,
             data_dir,
             schema,
@@ -318,6 +330,17 @@ impl JazzServer {
 
         let mut server =
             Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await;
+        if let Some(postgres_port) = postgres_port {
+            server.postgres = Some(
+                super::postgres::PostgresServerHandle::start(
+                    server.state.clone(),
+                    std::net::SocketAddr::from(([127, 0, 0, 1], postgres_port)),
+                    Self::POSTGRES_SECRET.to_owned(),
+                )
+                .await
+                .expect("start test PostgreSQL interface"),
+            );
+        }
         server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
         server
@@ -363,6 +386,7 @@ impl JazzServer {
             task: Some(task),
             shutdown_task: Some(shutdown_task),
             port,
+            postgres: None,
             app_id,
             data_dir,
             admin_secret,
@@ -389,6 +413,24 @@ impl JazzServer {
 
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Return the bound PostgreSQL port when the interface is enabled.
+    pub fn postgres_port(&self) -> Option<u16> {
+        self.postgres.as_ref().map(|server| server.addr().port())
+    }
+
+    /// Build a test-only PostgreSQL connection URL containing its read-only
+    /// database secret.
+    pub fn postgres_url(&self) -> Option<String> {
+        self.postgres_port().map(|port| {
+            format!(
+                "postgresql://jazz:{}@127.0.0.1:{}/{}?sslmode=disable",
+                Self::POSTGRES_SECRET,
+                port,
+                self.app_id
+            )
+        })
     }
 
     pub fn admin_secret(&self) -> &str {

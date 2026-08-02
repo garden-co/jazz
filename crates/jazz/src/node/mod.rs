@@ -4742,6 +4742,13 @@ struct DecodedLargeValueHandle {
     column: String,
     tx_id: TxId,
     kind: LargeValueKind,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    len: u64,
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn large_value_handle_len(bytes: &[u8]) -> Result<u64, Error> {
+    decode_large_value_handle(bytes).map(|handle| handle.len)
 }
 
 fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Error> {
@@ -4760,7 +4767,7 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
         2 => LargeValueKind::Blob,
         _ => return Err(Error::InvalidStoredValue("invalid large-value handle kind")),
     };
-    let _len = cursor.read_u64()?;
+    let len = cursor.read_u64()?;
     let refs = cursor.read_u64()?;
     for _ in 0..refs {
         let _writer = AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?));
@@ -4780,6 +4787,7 @@ fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Er
         column,
         tx_id: TxId::new(tx_time, tx_node),
         kind,
+        len,
     })
 }
 

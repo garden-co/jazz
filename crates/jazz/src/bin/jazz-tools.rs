@@ -141,6 +141,14 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
+        /// Enable the read-only PostgreSQL interface on this loopback port.
+        #[arg(long, env = "JAZZ_POSTGRES_PORT")]
+        postgres_port: Option<u16>,
+
+        /// Password for the read-only PostgreSQL interface.
+        #[arg(long, env = "JAZZ_POSTGRES_SECRET")]
+        postgres_secret: Option<String>,
+
         /// Upstream server URL. When set, this server runs as an edge.
         #[arg(long, env = "JAZZ_UPSTREAM_URL")]
         upstream_url: Option<String>,
@@ -161,6 +169,10 @@ enum Commands {
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
+
+        /// Internal testing hook: write the resolved PostgreSQL port after binding.
+        #[arg(long, env = "JAZZ_POSTGRES_BOUND_PORT_FILE", hide = true)]
+        postgres_bound_port_file: Option<String>,
     },
 }
 
@@ -203,10 +215,13 @@ async fn main() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            postgres_port,
+            postgres_secret,
             upstream_url,
             edge_cache_budget_bytes,
             shutdown_timeout_secs,
             bound_port_file,
+            postgres_bound_port_file,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let explicitly_allowed = allow_local_first_auth;
@@ -252,6 +267,9 @@ async fn main() {
                 upstream_url,
                 edge_cache_budget,
                 bound_port_file,
+                postgres_port,
+                postgres_secret,
+                postgres_bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
             )
             .await
@@ -269,6 +287,8 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
         upstream_url,
         admin_secret,
+        postgres_port,
+        postgres_secret,
         ..
     } = command
     else {
@@ -277,6 +297,16 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
 
     if upstream_url.is_some() && admin_secret.is_none() {
         return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
+    }
+
+    if postgres_port.is_some() && postgres_secret.as_deref().is_none_or(str::is_empty) {
+        return Err("--postgres-secret / JAZZ_POSTGRES_SECRET is required when --postgres-port / JAZZ_POSTGRES_PORT is set".to_string());
+    }
+
+    if postgres_port.is_some() && upstream_url.is_some() {
+        return Err(
+            "--postgres-port / JAZZ_POSTGRES_PORT is only supported on a core server".to_string(),
+        );
     }
 
     Ok(())
@@ -512,6 +542,51 @@ mod tests {
 
         assert!(error.contains("--admin-secret"));
         assert!(error.contains("--upstream-url"));
+    }
+
+    #[test]
+    fn server_command_parses_postgres_port() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--postgres-port",
+            "5433",
+            "--postgres-secret",
+            "postgres-secret",
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                postgres_port,
+                postgres_secret,
+                ..
+            } => {
+                assert_eq!(postgres_port, Some(5433));
+                assert_eq!(postgres_secret.as_deref(), Some("postgres-secret"));
+            }
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_cli_validation_requires_postgres_secret() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--postgres-port",
+            "5433",
+        ])
+        .expect("server command should parse");
+
+        let error = validate_server_cli_options(&cli.command)
+            .expect_err("PostgreSQL without its read-only secret should fail validation");
+        assert!(error.contains("--postgres-secret"));
+        assert!(error.contains("--postgres-port"));
     }
 
     #[test]
