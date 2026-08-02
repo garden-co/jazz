@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use groove::db::{Database, GraphBuilder, PrimaryKeyValue};
+use groove::db::{Database, GraphBuilder, MultisinkDeltas, PredicateExpr, PrimaryKeyValue};
 use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -54,6 +54,46 @@ fn anti_join() -> GraphBuilder {
         ["artist_id"],
         ["artist_id"],
     )
+}
+
+fn assert_sink_values(deltas: &MultisinkDeltas, sinks: [&str; 2], expected: &[(Vec<Value>, i64)]) {
+    for sink in sinks {
+        assert_eq!(
+            deltas.get(sink).unwrap().to_values().unwrap(),
+            expected,
+            "unexpected delta for {sink}"
+        );
+    }
+}
+
+const SHARED_LEFT_SINKS: [&str; 2] = ["a_id_filter", "z_artist_filter"];
+
+fn shared_left_sinks(semi: bool) -> [(&'static str, GraphBuilder); 2] {
+    let left = GraphBuilder::table("albums");
+    let join = |left, right| {
+        if semi {
+            GraphBuilder::semi_join(left, right, ["artist_id"], ["artist_id"])
+        } else {
+            GraphBuilder::anti_join(left, right, ["artist_id"], ["artist_id"])
+        }
+    };
+    [
+        (
+            SHARED_LEFT_SINKS[0],
+            join(
+                left.clone(),
+                GraphBuilder::table("blockers").filter(PredicateExpr::gt("id", Value::U64(0))),
+            ),
+        ),
+        (
+            SHARED_LEFT_SINKS[1],
+            join(
+                left,
+                GraphBuilder::table("blockers")
+                    .filter(PredicateExpr::gt("artist_id", Value::U64(0))),
+            ),
+        ),
+    ]
 }
 
 #[test]
@@ -115,5 +155,217 @@ fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
             (format!("{:?}", vec![Value::U64(2), Value::U64(11)]), 1),
         ]),
         "both albums must surface with weight exactly 1"
+    );
+}
+
+#[test]
+fn shared_right_arrangement_retracts_every_anti_join_consumer() {
+    let (_dir, mut db) = open_db();
+    let right = GraphBuilder::table("blockers");
+    let sub = db
+        .subscribe([
+            (
+                "a_projected",
+                GraphBuilder::anti_join(
+                    GraphBuilder::table("albums").project(["id", "artist_id"]),
+                    right.clone(),
+                    ["artist_id"],
+                    ["artist_id"],
+                ),
+            ),
+            (
+                "z_filtered",
+                GraphBuilder::anti_join(
+                    GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(0))),
+                    right,
+                    ["artist_id"],
+                    ["artist_id"],
+                ),
+            ),
+        ])
+        .unwrap();
+    let _initial = sub.recv().unwrap();
+
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let inserted = sub.recv().unwrap();
+    assert_eq!(
+        inserted.get("a_projected").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(11)], 1)]
+    );
+    assert_eq!(
+        inserted.get("z_filtered").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1), Value::U64(11)], 1)]
+    );
+
+    let mut batch = db.open_batch();
+    batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let blocked = sub.recv().unwrap();
+    for sink in ["a_projected", "z_filtered"] {
+        assert_eq!(
+            blocked.get(sink).unwrap().to_values().unwrap(),
+            [(vec![Value::U64(1), Value::U64(11)], -1)],
+            "every anti-join consumer sharing the blocker arrangement must retract"
+        );
+    }
+
+    let mut batch = db.open_batch();
+    batch.delete("blockers", PrimaryKeyValue::U64(1));
+    db.commit_batch(batch).unwrap();
+    let restored = sub.recv().unwrap();
+    for sink in ["a_projected", "z_filtered"] {
+        assert_eq!(
+            restored.get(sink).unwrap().to_values().unwrap(),
+            [(vec![Value::U64(1), Value::U64(11)], 1)],
+            "every anti-join consumer sharing the blocker arrangement must restore"
+        );
+    }
+}
+
+#[test]
+fn shared_right_arrangement_updates_every_semi_join_consumer() {
+    let (_dir, mut db) = open_db();
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+
+    let right = GraphBuilder::table("blockers");
+    let sub = db
+        .subscribe([
+            (
+                "a_projected",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("albums").project(["id", "artist_id"]),
+                    right.clone(),
+                    ["artist_id"],
+                    ["artist_id"],
+                ),
+            ),
+            (
+                "z_filtered",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(0))),
+                    right,
+                    ["artist_id"],
+                    ["artist_id"],
+                ),
+            ),
+        ])
+        .unwrap();
+    let initial = sub.recv().unwrap();
+    assert!(initial.get("a_projected").unwrap().is_empty());
+    assert!(initial.get("z_filtered").unwrap().is_empty());
+
+    let mut batch = db.open_batch();
+    batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let unblocked = sub.recv().unwrap();
+    for sink in ["a_projected", "z_filtered"] {
+        assert_eq!(
+            unblocked.get(sink).unwrap().to_values().unwrap(),
+            [(vec![Value::U64(1), Value::U64(11)], 1)],
+            "every semi-join consumer sharing the blocker arrangement must update"
+        );
+    }
+
+    let mut batch = db.open_batch();
+    batch.delete("blockers", PrimaryKeyValue::U64(1));
+    db.commit_batch(batch).unwrap();
+    let blocked = sub.recv().unwrap();
+    for sink in ["a_projected", "z_filtered"] {
+        assert_eq!(
+            blocked.get(sink).unwrap().to_values().unwrap(),
+            [(vec![Value::U64(1), Value::U64(11)], -1)],
+            "every semi-join consumer sharing the blocker arrangement must retract"
+        );
+    }
+}
+
+#[test]
+fn shared_left_arrangement_updates_every_anti_join_consumer() {
+    let (_dir, mut db) = open_db();
+    let sub = db.subscribe(shared_left_sinks(false)).unwrap();
+    let _initial = sub.recv().unwrap();
+
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let inserted = sub.recv().unwrap();
+    assert_sink_values(
+        &inserted,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], 1)],
+    );
+
+    // The new album is blocked on arrival, while the previously visible album
+    // retracts. A consumer must not reconstruct the shared left side as if the
+    // new album had been visible before this tick.
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(2), Value::U64(11)]);
+    batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let blocked = sub.recv().unwrap();
+    assert_sink_values(
+        &blocked,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], -1)],
+    );
+
+    let mut batch = db.open_batch();
+    batch.delete("blockers", PrimaryKeyValue::U64(1));
+    batch.delete("albums", PrimaryKeyValue::U64(2));
+    db.commit_batch(batch).unwrap();
+    let restored = sub.recv().unwrap();
+    assert_sink_values(
+        &restored,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], 1)],
+    );
+}
+
+#[test]
+fn shared_left_arrangement_updates_every_semi_join_consumer() {
+    let (_dir, mut db) = open_db();
+    let mut batch = db.open_batch();
+    batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+
+    let sub = db.subscribe(shared_left_sinks(true)).unwrap();
+    let _initial = sub.recv().unwrap();
+
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(1), Value::U64(11)]);
+    db.commit_batch(batch).unwrap();
+    let inserted = sub.recv().unwrap();
+    assert_sink_values(
+        &inserted,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], 1)],
+    );
+
+    // Removing the match while another left row arrives retracts only the row
+    // that was previously visible; the new row never enters the semi-join.
+    let mut batch = db.open_batch();
+    batch.insert("albums", vec![Value::U64(2), Value::U64(11)]);
+    batch.delete("blockers", PrimaryKeyValue::U64(1));
+    db.commit_batch(batch).unwrap();
+    let unmatched = sub.recv().unwrap();
+    assert_sink_values(
+        &unmatched,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], -1)],
+    );
+
+    let mut batch = db.open_batch();
+    batch.insert("blockers", vec![Value::U64(1), Value::U64(11)]);
+    batch.delete("albums", PrimaryKeyValue::U64(2));
+    db.commit_batch(batch).unwrap();
+    let matched = sub.recv().unwrap();
+    assert_sink_values(
+        &matched,
+        SHARED_LEFT_SINKS,
+        &[(vec![Value::U64(1), Value::U64(11)], 1)],
     );
 }

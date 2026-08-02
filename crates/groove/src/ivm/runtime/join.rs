@@ -219,6 +219,14 @@ impl AntiJoinState {
             keyed_join_deltas(&left_descriptor, left_on, left_delta, comparison)?;
         let keyed_right_delta =
             keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?;
+        let left_already_advanced = update_mode == ArrangementUpdateMode::Accumulate
+            && left_arrangement.as_of() == Some(left_sub_tick);
+        let right_already_advanced = update_mode == ArrangementUpdateMode::Accumulate
+            && right_arrangement.as_of() == Some(right_sub_tick);
+        let left_delta_index =
+            left_already_advanced.then(|| build_join_delta_index(&keyed_left_delta));
+        let right_delta_index =
+            right_already_advanced.then(|| build_join_delta_index(&keyed_right_delta));
         let mut affected_keys = HashSet::<JoinKey>::default();
         let mut old_right_counts = HashMap::<JoinKey, i64>::default();
         let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -226,28 +234,42 @@ impl AntiJoinState {
             for delta in &keyed_left_delta {
                 let key = &delta.key;
                 if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_right_counts.insert(
+                        key.clone(),
+                        key_count_before_delta(
+                            right_arrangement.value(),
+                            right_delta_index.as_ref(),
+                            key,
+                        ),
+                    );
                     old_left_buckets.insert(
                         key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
+                        bucket_before_delta(
+                            left_arrangement.value(),
+                            left_delta_index.as_ref(),
+                            key,
+                        ),
                     );
                 }
             }
             for delta in &keyed_right_delta {
                 let key = &delta.key;
                 if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_right_counts.insert(
+                        key.clone(),
+                        key_count_before_delta(
+                            right_arrangement.value(),
+                            right_delta_index.as_ref(),
+                            key,
+                        ),
+                    );
                     old_left_buckets.insert(
                         key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
+                        bucket_before_delta(
+                            left_arrangement.value(),
+                            left_delta_index.as_ref(),
+                            key,
+                        ),
                     );
                 }
             }
@@ -329,6 +351,14 @@ impl AntiJoinState {
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
         let keyed_right_delta =
             keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
+        let left_already_advanced = update_mode == ArrangementUpdateMode::Accumulate
+            && left_arrangement.as_of() == Some(left_sub_tick);
+        let right_already_advanced = update_mode == ArrangementUpdateMode::Accumulate
+            && right_arrangement.as_of() == Some(right_sub_tick);
+        let left_delta_index =
+            left_already_advanced.then(|| build_join_delta_index(&keyed_left_delta));
+        let right_delta_index =
+            right_already_advanced.then(|| build_join_delta_index(&keyed_right_delta));
         let mut affected_keys = HashSet::<JoinKey>::default();
         let mut old_right_counts = HashMap::<JoinKey, i64>::default();
         let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -336,28 +366,42 @@ impl AntiJoinState {
             for delta in &keyed_left_delta {
                 let key = &delta.key;
                 if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_right_counts.insert(
+                        key.clone(),
+                        key_count_before_delta(
+                            right_arrangement.value(),
+                            right_delta_index.as_ref(),
+                            key,
+                        ),
+                    );
                     old_left_buckets.insert(
                         key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
+                        bucket_before_delta(
+                            left_arrangement.value(),
+                            left_delta_index.as_ref(),
+                            key,
+                        ),
                     );
                 }
             }
             for delta in &keyed_right_delta {
                 let key = &delta.key;
                 if affected_keys.insert(key.clone()) {
-                    old_right_counts.insert(key.clone(), right_arrangement.value().key_count(key));
+                    old_right_counts.insert(
+                        key.clone(),
+                        key_count_before_delta(
+                            right_arrangement.value(),
+                            right_delta_index.as_ref(),
+                            key,
+                        ),
+                    );
                     old_left_buckets.insert(
                         key.clone(),
-                        left_arrangement
-                            .value()
-                            .bucket(key)
-                            .cloned()
-                            .unwrap_or_default(),
+                        bucket_before_delta(
+                            left_arrangement.value(),
+                            left_delta_index.as_ref(),
+                            key,
+                        ),
                     );
                 }
             }
@@ -618,6 +662,47 @@ fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
     let mut index = HashMap::default();
     apply_join_delta_to_index(&mut index, deltas);
     index
+}
+
+/// Read one arrangement bucket as it was before this tick's delta.
+///
+/// Arrangements are shared across join consumers. A sibling consumer may have
+/// already advanced the shared arrangement to `SubTick`, even though this
+/// anti/semi join still needs the old bucket to calculate its threshold
+/// transition. In that case `delta_index` contains the same input delta that
+/// was already applied, so subtracting it reconstructs the pre-tick bucket
+/// without cloning the whole arrangement or making arrangements consumer-local.
+fn bucket_before_delta(
+    arrangement: &ArrangementState,
+    delta_index: Option<&JoinIndex>,
+    key: &JoinKey,
+) -> JoinBucket {
+    let mut bucket = arrangement.bucket(key).cloned().unwrap_or_default();
+    let Some(delta_bucket) = delta_index.and_then(|index| index.get(key)) else {
+        return bucket;
+    };
+    for (record, delta_weight) in delta_bucket {
+        let previous = bucket.get(record).copied().unwrap_or_default() - delta_weight;
+        if previous == 0 {
+            bucket.remove(record);
+        } else {
+            bucket.insert(record.clone(), previous);
+        }
+    }
+    bucket
+}
+
+fn key_count_before_delta(
+    arrangement: &ArrangementState,
+    delta_index: Option<&JoinIndex>,
+    key: &JoinKey,
+) -> i64 {
+    arrangement.key_count(key)
+        - delta_index
+            .and_then(|index| index.get(key))
+            .into_iter()
+            .flat_map(|bucket| bucket.values())
+            .sum::<i64>()
 }
 
 fn keyed_join_deltas<'a>(
