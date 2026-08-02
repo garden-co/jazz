@@ -63,7 +63,7 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Enable the read-only PostgreSQL interface. Pass `0` to use an
+    /// Enable the administrative PostgreSQL interface. Pass `0` to use an
     /// operating-system-assigned loopback port.
     pub fn with_postgres_port(mut self, port: u16) -> Self {
         self.postgres_port = Some(port);
@@ -420,7 +420,7 @@ impl JazzServer {
         self.postgres.as_ref().map(|server| server.addr().port())
     }
 
-    /// Build a test-only PostgreSQL connection URL containing its read-only
+    /// Build a test-only PostgreSQL connection URL containing its dedicated
     /// database secret.
     pub fn postgres_url(&self) -> Option<String> {
         self.postgres_port().map(|port| {

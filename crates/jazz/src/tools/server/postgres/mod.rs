@@ -16,7 +16,7 @@ use pgwire::api::auth::{
     AuthSource, DefaultServerParameterProvider, LoginInfo, Password, StartupHandler,
 };
 use pgwire::api::cancel::DefaultCancelHandler;
-use pgwire::api::portal::{Format, Portal};
+use pgwire::api::portal::{Format, Portal, PortalExecutionState};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo,
@@ -46,18 +46,20 @@ use tokio::sync::Semaphore;
 
 use crate::groove::records::Value;
 use crate::groove::schema::ColumnType;
-use crate::ids::SchemaVersionId;
+use crate::ids::{RowUuid, SchemaVersionId};
 use crate::query::{
     OrderDirection, Predicate, Query, all_of, any_of, col, eq, gt, gte, in_list, is_null, lit, lt,
     lte, ne, not, param,
 };
 use crate::schema::{JazzSchema, LargeValueKind, TableSchema};
-use crate::tools::server::core_server_shell::{PostgresQueryResult, ServerShellHandle};
+use crate::tools::server::core_server_shell::{
+    PostgresMutation, PostgresQueryResult, ServerShellHandle,
+};
 use crate::tools::server::{ServerState, ServerTopology};
 
 use self::sql::{
-    Command, CompareOp, FilterExpr, PageValue, ParsedStatement, ProjectedExpr, SelectPlan,
-    SelectSource, SessionFunction, SqlLiteral,
+    Command, CompareOp, FilterExpr, InsertPlan, MutationKind, MutationPlan, PageValue,
+    ParsedStatement, ProjectedExpr, SelectPlan, SelectSource, SessionFunction, SqlLiteral,
 };
 
 const POSTGRES_USER: &str = "jazz";
@@ -89,6 +91,25 @@ const MAX_STORED_PORTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESULT_COLUMNS: usize = 1_664;
 const MAX_SIMPLE_BATCH_STATEMENTS: usize = 64;
 const INCOMPLETE_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn is_mutation(statement: &ParsedStatement) -> bool {
+    matches!(statement, ParsedStatement::Mutation(_))
+}
+
+fn returns_rows(statement: &ParsedStatement) -> bool {
+    matches!(
+        statement,
+        ParsedStatement::Select(_)
+            | ParsedStatement::Command(Command::Show(_))
+            | ParsedStatement::Mutation(MutationPlan {
+                kind: MutationKind::Insert(InsertPlan {
+                    returning: Some(_),
+                    ..
+                }),
+                ..
+            })
+    )
+}
 
 pub(crate) struct PostgresServerHandle {
     addr: SocketAddr,
@@ -566,7 +587,7 @@ impl PgWireServerHandlers for PostgresHandlerFactory {
     fn startup_handler(&self) -> Arc<impl StartupHandler> {
         let mut parameters = DefaultServerParameterProvider::default();
         parameters.server_version = "16.6".to_owned();
-        parameters.default_transaction_read_only = true;
+        parameters.default_transaction_read_only = false;
         parameters.search_path = "public".to_owned();
         Arc::new(
             CleartextPasswordAuthStartupHandler::new((*self.auth).clone(), parameters)
@@ -848,6 +869,12 @@ impl SimpleQueryHandler for PostgresBackend {
                 ),
             ));
         }
+        if statements.len() > 1 && statements.iter().any(is_mutation) {
+            return Err(user_error(
+                "0A000",
+                "PostgreSQL mutations must be sent as individual autocommit statements",
+            ));
+        }
         if statements.len() > 1
             && statements.iter().any(|statement| {
                 matches!(
@@ -875,6 +902,14 @@ impl SimpleQueryHandler for PostgresBackend {
             }
             return Err(failed_transaction_error());
         }
+        if client.transaction_status() != TransactionStatus::Idle
+            && statements.iter().any(is_mutation)
+        {
+            return Err(user_error(
+                "0A000",
+                "PostgreSQL mutations are currently supported in autocommit mode only",
+            ));
+        }
         let application_table_reads = statements
             .iter()
             .filter(|statement| {
@@ -895,12 +930,7 @@ impl SimpleQueryHandler for PostgresBackend {
         }
         let row_responses = statements
             .iter()
-            .filter(|statement| {
-                matches!(
-                    statement,
-                    ParsedStatement::Select(_) | ParsedStatement::Command(Command::Show(_))
-                )
-            })
+            .filter(|statement| returns_rows(statement))
             .count();
         if row_responses > MAX_BUFFERED_RESPONSES {
             return Err(user_error(
@@ -1139,18 +1169,26 @@ impl ExtendedQueryHandler for PostgresBackend {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let portal_name = message.name.as_deref().unwrap_or(DEFAULT_NAME).to_owned();
-        let ends_transaction =
-            client
-                .portal_store()
-                .get_portal(&portal_name)
-                .is_some_and(|portal| {
+        let (ends_transaction, completes_mutation) = client
+            .portal_store()
+            .get_portal(&portal_name)
+            .map(|portal| {
+                let parsed = &portal.statement.statement.parsed;
+                (
                     matches!(
-                        portal.statement.statement.parsed,
+                        parsed,
                         ParsedStatement::Command(Command::Commit | Command::Rollback)
-                    )
-                });
+                    ),
+                    is_mutation(parsed),
+                )
+            })
+            .unwrap_or((false, false));
         let result = self._on_execute(client, message).await;
         connection_resources(client).release_response(&portal_name);
+        if result.is_ok() && completes_mutation {
+            connection_resources(client).release_portal(&portal_name);
+            client.portal_store().rm_portal(&portal_name);
+        }
         if result.is_ok() && ends_transaction {
             clear_connection_portals(client);
         }
@@ -1206,6 +1244,13 @@ impl ExtendedQueryHandler for PostgresBackend {
                 _ => Err(failed_transaction_error()),
             };
         }
+        if client.transaction_status() != TransactionStatus::Idle && is_mutation(&statement.parsed)
+        {
+            return Err(user_error(
+                "0A000",
+                "PostgreSQL mutations are currently supported in autocommit mode only",
+            ));
+        }
         let current_parameter_kinds = self.parameter_kinds(&statement.parsed).await?;
         let current_result_columns = self
             .describe(&statement.parsed, &portal.result_column_format)
@@ -1227,6 +1272,12 @@ impl ExtendedQueryHandler for PostgresBackend {
                 statement.schema_version,
             )
             .await?;
+        if is_mutation(&statement.parsed)
+            && !returns_rows(&statement.parsed)
+            && matches!(&executed.response, Response::Execution(_))
+        {
+            *portal.state().lock().await = PortalExecutionState::Finished;
+        }
         if let Some(response_permit) = executed.response_permit {
             connection_resources(client).retain_response(&portal.name, response_permit);
         }
@@ -1320,7 +1371,8 @@ impl PostgresBackend {
             ParsedStatement::Select(SelectPlan {
                 source: SelectSource::Table(_),
                 ..
-            }) => Ok(Some(self.schema().await?.version_id())),
+            })
+            | ParsedStatement::Mutation(_) => Ok(Some(self.schema().await?.version_id())),
             _ => Ok(None),
         }
     }
@@ -1339,6 +1391,10 @@ impl PostgresBackend {
                     .await?;
                 output.into_response(format)
             }
+            ParsedStatement::Mutation(plan) => {
+                self.execute_mutation(plan, parameters, format, expected_schema_version)
+                    .await
+            }
             ParsedStatement::Command(command) => self.execute_command(command, format),
         }
     }
@@ -1349,7 +1405,7 @@ impl PostgresBackend {
                 let value = match setting.to_ascii_lowercase().as_str() {
                     "server_version" => "16.6",
                     "search_path" => "public",
-                    "transaction_read_only" | "default_transaction_read_only" => "on",
+                    "transaction_read_only" | "default_transaction_read_only" => "off",
                     "standard_conforming_strings" => "on",
                     "client_encoding" | "server_encoding" => "UTF8",
                     "timezone" | "time.zone" => "Etc/UTC",
@@ -1364,6 +1420,7 @@ impl PostgresBackend {
                     columns: vec![OutputColumn::new(setting, ColumnKind::Text)],
                     rows: vec![vec![Cell::Text(value.to_owned())]],
                     response_permit: None,
+                    command_tag: None,
                 }
                 .into_response(format)
             }
@@ -1377,6 +1434,148 @@ impl PostgresBackend {
                 Tag::new("ROLLBACK"),
             ))),
         }
+    }
+
+    async fn execute_mutation(
+        &self,
+        plan: MutationPlan,
+        parameters: &[ParameterValue],
+        format: &Format,
+        expected_schema_version: Option<SchemaVersionId>,
+    ) -> PgWireResult<ExecutedResponse> {
+        let database_job_permit = self
+            .database_job
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| internal_error("PostgreSQL database mutation gate is closed"))?;
+        let query_guard = self
+            .state
+            .shutdown
+            .try_enter_postgres_query()
+            .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
+        let schema = self.schema().await?;
+        let schema_version = schema.version_id();
+        if expected_schema_version.is_some_and(|expected| expected != schema_version) {
+            return Err(user_error(
+                "0A000",
+                "cached PostgreSQL plan changed after a Jazz schema update; prepare it again",
+            ));
+        }
+        let table = table_by_name(&schema, &plan.table)?;
+        let (mutation, command, returning_alias) = match plan.kind {
+            MutationKind::Insert(insert) => {
+                let mut cells = BTreeMap::new();
+                let mut row = None;
+                for (column_name, value) in insert.columns.iter().zip(&insert.values) {
+                    if column_name == "id" {
+                        row = Some(resolve_mutation_row_id(value, parameters)?);
+                        continue;
+                    }
+                    let column = ensure_table_column(table, column_name)?
+                        .expect("non-id column has a schema entry");
+                    ensure_mutation_column_supported(column)?;
+                    cells.insert(
+                        column_name.clone(),
+                        resolve_mutation_value(value, column, parameters)?,
+                    );
+                }
+                for column in &table.columns {
+                    if cells.contains_key(&column.name) || column.default.is_some() {
+                        continue;
+                    }
+                    if matches!(column.column_type, ColumnType::Nullable(_)) {
+                        cells.insert(column.name.clone(), Value::Nullable(None));
+                    } else {
+                        return Err(user_error(
+                            "23502",
+                            format!(
+                                "null value in column {} violates not-null constraint",
+                                column.name
+                            ),
+                        ));
+                    }
+                }
+                let row = row.unwrap_or_else(|| RowUuid(uuid::Uuid::now_v7()));
+                (
+                    PostgresMutation::Insert { row, cells },
+                    "INSERT",
+                    insert.returning.map(|returning| returning.alias),
+                )
+            }
+            MutationKind::Update(update) => {
+                let row = resolve_mutation_row_id(&update.row_id, parameters)?;
+                let mut patch = BTreeMap::new();
+                for assignment in update.assignments {
+                    if assignment.column == "id" {
+                        return Err(user_error("428C9", "row id cannot be updated"));
+                    }
+                    let column = ensure_table_column(table, &assignment.column)?
+                        .expect("non-id column has a schema entry");
+                    ensure_mutation_column_supported(column)?;
+                    patch.insert(
+                        assignment.column,
+                        resolve_mutation_value(&assignment.value, column, parameters)?,
+                    );
+                }
+                (PostgresMutation::Update { row, patch }, "UPDATE", None)
+            }
+            MutationKind::Delete(delete) => (
+                PostgresMutation::Delete {
+                    row: resolve_mutation_row_id(&delete.row_id, parameters)?,
+                },
+                "DELETE",
+                None,
+            ),
+        };
+        let returning_permit = if returning_alias.is_some() {
+            Some(
+                self.buffered_responses
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        user_error(
+                            "53000",
+                            "too many PostgreSQL responses are still being consumed; finish or close an existing result before retrying",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let result = self
+            .shell()?
+            .postgres_mutate(
+                plan.table,
+                schema_version,
+                mutation,
+                database_job_permit,
+                query_guard,
+            )
+            .await
+            .map_err(postgres_database_mutation_error)?;
+        if let Some(alias) = returning_alias {
+            let row = result
+                .row
+                .ok_or_else(|| internal_error("INSERT RETURNING did not produce a row id"))?;
+            return QueryOutput {
+                columns: vec![OutputColumn::new(
+                    alias.unwrap_or_else(|| "id".to_owned()),
+                    ColumnKind::Uuid,
+                )],
+                rows: vec![vec![Cell::Uuid(row.0)]],
+                response_permit: returning_permit.map(Arc::new),
+                command_tag: Some("INSERT 0".to_owned()),
+            }
+            .into_response(format);
+        }
+        let tag = Tag::new(command).with_rows(result.affected_rows);
+        let tag = if command == "INSERT" {
+            tag.with_oid(0)
+        } else {
+            tag
+        };
+        Ok(ExecutedResponse::without_permit(Response::Execution(tag)))
     }
 
     async fn execute_select(
@@ -1595,7 +1794,7 @@ impl PostgresBackend {
                 ProjectedExpr::SessionFunction(SessionFunction::Version) => (
                     "version",
                     ColumnKind::Text,
-                    Cell::Text("PostgreSQL 16.6 compatible Jazz read-only interface".to_owned()),
+                    Cell::Text("PostgreSQL 16.6 compatible Jazz interface".to_owned()),
                 ),
                 ProjectedExpr::SessionFunction(SessionFunction::CurrentDatabase) => (
                     "current_database",
@@ -1641,6 +1840,7 @@ impl PostgresBackend {
             columns,
             rows,
             response_permit: None,
+            command_tag: None,
         })
     }
 
@@ -1654,6 +1854,18 @@ impl PostgresBackend {
                 Ok(vec![OutputColumn::new(setting.clone(), ColumnKind::Text)])
             }
             ParsedStatement::Command(_) => Ok(Vec::new()),
+            ParsedStatement::Mutation(MutationPlan {
+                kind:
+                    MutationKind::Insert(InsertPlan {
+                        returning: Some(returning),
+                        ..
+                    }),
+                ..
+            }) => Ok(vec![OutputColumn::new(
+                returning.alias.clone().unwrap_or_else(|| "id".to_owned()),
+                ColumnKind::Uuid,
+            )]),
+            ParsedStatement::Mutation(_) => Ok(Vec::new()),
             ParsedStatement::Select(plan) => match &plan.source {
                 SelectSource::Table(table_name) => {
                     let schema = self.schema().await?;
@@ -1681,20 +1893,27 @@ impl PostgresBackend {
     }
 
     async fn parameter_kinds(&self, statement: &ParsedStatement) -> PgWireResult<Vec<ColumnKind>> {
-        let ParsedStatement::Select(plan) = statement else {
-            return Ok(Vec::new());
-        };
-        let column_kinds = match &plan.source {
-            SelectSource::Table(table_name) => {
+        match statement {
+            ParsedStatement::Select(plan) => {
+                let column_kinds = match &plan.source {
+                    SelectSource::Table(table_name) => {
+                        let schema = self.schema().await?;
+                        table_column_kinds(table_by_name(&schema, table_name)?)
+                    }
+                    SelectSource::Databases | SelectSource::Tables | SelectSource::Columns => {
+                        catalogue_column_kinds(&plan.source)
+                    }
+                    SelectSource::Session => BTreeMap::new(),
+                };
+                infer_parameter_kinds(plan, &column_kinds)
+            }
+            ParsedStatement::Mutation(plan) => {
                 let schema = self.schema().await?;
-                table_column_kinds(table_by_name(&schema, table_name)?)
+                let table = table_by_name(&schema, &plan.table)?;
+                infer_mutation_parameter_kinds(plan, table)
             }
-            SelectSource::Databases | SelectSource::Tables | SelectSource::Columns => {
-                catalogue_column_kinds(&plan.source)
-            }
-            SelectSource::Session => BTreeMap::new(),
-        };
-        infer_parameter_kinds(plan, &column_kinds)
+            ParsedStatement::Command(_) => Ok(Vec::new()),
+        }
     }
 }
 
@@ -1829,6 +2048,7 @@ struct QueryOutput {
     columns: Vec<OutputColumn>,
     rows: Vec<Vec<Cell>>,
     response_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    command_tag: Option<String>,
 }
 
 struct ExecutedResponse {
@@ -1891,8 +2111,12 @@ impl QueryOutput {
                 rows.next().map(|row| (row, (rows, response_permit)))
             },
         );
+        let mut response = QueryResponse::new(fields, rows);
+        if let Some(command_tag) = self.command_tag {
+            response.set_command_tag(&command_tag);
+        }
         Ok(ExecutedResponse {
-            response: Response::Query(QueryResponse::new(fields, rows)),
+            response: Response::Query(response),
             response_permit,
         })
     }
@@ -2040,6 +2264,7 @@ fn table_query_output(
         columns: output_columns,
         rows,
         response_permit: Some(Arc::new(result.response_permit)),
+        command_tag: None,
     })
 }
 
@@ -2357,6 +2582,80 @@ fn resolve_page_value(value: &PageValue, parameters: &[ParameterValue]) -> PgWir
     }
 }
 
+fn resolve_mutation_row_id(
+    literal: &SqlLiteral,
+    parameters: &[ParameterValue],
+) -> PgWireResult<RowUuid> {
+    let value = match literal {
+        SqlLiteral::Placeholder(position) => {
+            let parameter = parameters
+                .get(position - 1)
+                .ok_or_else(|| user_error("08P01", format!("missing parameter ${position}")))?;
+            if matches!(parameter, ParameterValue::Null) {
+                return Err(user_error("23502", "row id cannot be NULL"));
+            }
+            parameter_to_jazz_value(parameter, None)?
+        }
+        SqlLiteral::Null => return Err(user_error("23502", "row id cannot be NULL")),
+        other => sql_literal_to_jazz_value(other, None)?,
+    };
+    match value {
+        Value::Uuid(value) => Ok(RowUuid(value)),
+        _ => Err(user_error("42804", "row id must have UUID type")),
+    }
+}
+
+fn resolve_mutation_value(
+    literal: &SqlLiteral,
+    column: &crate::schema::ColumnSchema,
+    parameters: &[ParameterValue],
+) -> PgWireResult<Value> {
+    match literal {
+        SqlLiteral::Null => null_mutation_value(column),
+        SqlLiteral::Placeholder(position) => {
+            let parameter = parameters
+                .get(position - 1)
+                .ok_or_else(|| user_error("08P01", format!("missing parameter ${position}")))?;
+            if matches!(parameter, ParameterValue::Null) {
+                return null_mutation_value(column);
+            }
+            parameter_to_jazz_value(parameter, Some(column))
+        }
+        other => sql_literal_to_jazz_value(other, Some(column))
+            .map(|value| wrap_non_null_for_column(value, &column.column_type)),
+    }
+}
+
+fn null_mutation_value(column: &crate::schema::ColumnSchema) -> PgWireResult<Value> {
+    if matches!(column.column_type, ColumnType::Nullable(_)) {
+        Ok(Value::Nullable(None))
+    } else {
+        Err(user_error(
+            "23502",
+            format!(
+                "null value in column {} violates not-null constraint",
+                column.name
+            ),
+        ))
+    }
+}
+
+fn ensure_mutation_column_supported(column: &crate::schema::ColumnSchema) -> PgWireResult<()> {
+    if matches!(
+        unwrap_nullable(&column.column_type),
+        ColumnType::Tuple(_) | ColumnType::Array(_)
+    ) {
+        return Err(user_error(
+            "0A000",
+            format!(
+                "PostgreSQL mutations do not yet support composite column {}",
+                column.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn lower_table_filter<'a>(
     filter: &FilterExpr,
     table: &'a TableSchema,
@@ -2558,6 +2857,16 @@ fn sql_literal_to_jazz_value(
             )),
         };
     };
+    if column.large_value == Some(LargeValueKind::Text) {
+        return match literal {
+            SqlLiteral::String(value) => Ok(Value::Bytes(value.as_bytes().to_vec())),
+            SqlLiteral::Placeholder(_) => unreachable!("placeholder handled by caller"),
+            _ => Err(user_error(
+                "42804",
+                format!("literal is incompatible with column {}", column.name),
+            )),
+        };
+    }
     let column_type = unwrap_nullable(&column.column_type);
     match (literal, column_type) {
         (SqlLiteral::String(value), ColumnType::String) => Ok(Value::String(value.clone())),
@@ -2619,6 +2928,18 @@ fn parameter_to_jazz_value(
     let column = column.expect("checked above");
     if matches!(parameter, ParameterValue::Null) {
         return Ok(Value::Nullable(None));
+    }
+    if column.large_value == Some(LargeValueKind::Text) {
+        let value = match parameter {
+            ParameterValue::Text(value) => Value::Bytes(value.as_bytes().to_vec()),
+            _ => {
+                return Err(user_error(
+                    "42804",
+                    format!("parameter is incompatible with column {}", column.name),
+                ));
+            }
+        };
+        return Ok(wrap_non_null_for_column(value, &column.column_type));
     }
     let value = match parameter {
         ParameterValue::Null => unreachable!("handled above"),
@@ -2794,6 +3115,63 @@ fn infer_parameter_kinds(
             "source-less SELECT parameters are not supported",
         ));
     }
+    finish_inferred_parameter_kinds(inferred)
+}
+
+fn infer_mutation_parameter_kinds(
+    plan: &MutationPlan,
+    table: &TableSchema,
+) -> PgWireResult<Vec<ColumnKind>> {
+    let columns = table_column_kinds(table);
+    let mut inferred = BTreeMap::<usize, ColumnKind>::new();
+    match &plan.kind {
+        MutationKind::Insert(insert) => {
+            for (column, value) in insert.columns.iter().zip(&insert.values) {
+                ensure_table_column(table, column)?;
+                infer_mutation_literal_kind(column, value, &columns, &mut inferred)?;
+            }
+        }
+        MutationKind::Update(update) => {
+            for assignment in &update.assignments {
+                if assignment.column == "id" {
+                    return Err(user_error("428C9", "row id cannot be updated"));
+                }
+                ensure_table_column(table, &assignment.column)?;
+                infer_mutation_literal_kind(
+                    &assignment.column,
+                    &assignment.value,
+                    &columns,
+                    &mut inferred,
+                )?;
+            }
+            infer_mutation_literal_kind("id", &update.row_id, &columns, &mut inferred)?;
+        }
+        MutationKind::Delete(delete) => {
+            infer_mutation_literal_kind("id", &delete.row_id, &columns, &mut inferred)?;
+        }
+    }
+    finish_inferred_parameter_kinds(inferred)
+}
+
+fn infer_mutation_literal_kind(
+    column: &str,
+    literal: &SqlLiteral,
+    columns: &BTreeMap<String, ColumnKind>,
+    inferred: &mut BTreeMap<usize, ColumnKind>,
+) -> PgWireResult<()> {
+    let SqlLiteral::Placeholder(position) = literal else {
+        return Ok(());
+    };
+    let kind = columns
+        .get(column)
+        .copied()
+        .ok_or_else(|| user_error("42703", format!("column {column} does not exist")))?;
+    insert_inferred_kind(inferred, *position, kind)
+}
+
+fn finish_inferred_parameter_kinds(
+    inferred: BTreeMap<usize, ColumnKind>,
+) -> PgWireResult<Vec<ColumnKind>> {
     let Some(max) = inferred.keys().next_back().copied() else {
         return Ok(Vec::new());
     };
@@ -3029,6 +3407,7 @@ impl VirtualRelation {
             columns,
             rows,
             response_permit: None,
+            command_tag: None,
         })
     }
 
@@ -3430,6 +3809,27 @@ fn postgres_database_query_error(error: String) -> PgWireError {
     if error.starts_with("PostgreSQL response exceeds configured") {
         user_error("54000", error)
     } else if error.starts_with("PostgreSQL schema changed while planning") {
+        user_error("40001", error)
+    } else {
+        internal_database_error(error)
+    }
+}
+
+fn postgres_database_mutation_error(error: String) -> PgWireError {
+    if error.starts_with("PostgreSQL schema changed while planning") {
+        user_error("40001", error)
+    } else if (error.contains("MalformedCommit") && error.contains("exceeds max"))
+        || error.contains("server write cell payload exceeds max")
+    {
+        user_error("54000", error)
+    } else if error.contains("object already exists") || error.contains("row already deleted") {
+        user_error("23505", error)
+    } else if error.contains("policy denied")
+        || error.contains("authorization denied")
+        || error.contains("AuthorizationDenied")
+    {
+        user_error("42501", error)
+    } else if error.contains("did not reach global durability") {
         user_error("40001", error)
     } else {
         internal_database_error(error)

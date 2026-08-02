@@ -82,7 +82,7 @@ pub async fn run(
     let postgres_server = match postgres_port {
         Some(port) => {
             let postgres_secret = postgres_secret
-                .ok_or("PostgreSQL interface requires a read-only PostgreSQL secret")?;
+                .ok_or("PostgreSQL interface requires a dedicated PostgreSQL secret")?;
             let postgres = crate::tools::server::postgres::PostgresServerHandle::start(
                 state.clone(),
                 SocketAddr::from(([127, 0, 0, 1], port)),

@@ -141,11 +141,11 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Enable the read-only PostgreSQL interface on this loopback port.
+        /// Enable the administrative PostgreSQL interface on this loopback port.
         #[arg(long, env = "JAZZ_POSTGRES_PORT")]
         postgres_port: Option<u16>,
 
-        /// Password for the read-only PostgreSQL interface.
+        /// Password for the administrative PostgreSQL interface.
         #[arg(long, env = "JAZZ_POSTGRES_SECRET")]
         postgres_secret: Option<String>,
 
@@ -584,7 +584,7 @@ mod tests {
         .expect("server command should parse");
 
         let error = validate_server_cli_options(&cli.command)
-            .expect_err("PostgreSQL without its read-only secret should fail validation");
+            .expect_err("PostgreSQL without its dedicated secret should fail validation");
         assert!(error.contains("--postgres-secret"));
         assert!(error.contains("--postgres-port"));
     }

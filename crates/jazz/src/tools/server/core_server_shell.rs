@@ -4,7 +4,7 @@ use std::thread;
 
 use crate::db::{CommitUnitTrust, DbIdentity, Transport};
 use crate::groove::records::Value;
-use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::MigrationLens;
 use crate::query::Query;
@@ -42,6 +42,25 @@ pub(crate) struct PostgresQueryResult {
     pub(crate) table: TableSchema,
     pub(crate) rows: Vec<PostgresRow>,
     pub(crate) response_permit: OwnedSemaphorePermit,
+}
+
+pub(crate) enum PostgresMutation {
+    Insert {
+        row: RowUuid,
+        cells: BTreeMap<String, Value>,
+    },
+    Update {
+        row: RowUuid,
+        patch: BTreeMap<String, Value>,
+    },
+    Delete {
+        row: RowUuid,
+    },
+}
+
+pub(crate) struct PostgresMutationResult {
+    pub(crate) affected_rows: usize,
+    pub(crate) row: Option<RowUuid>,
 }
 
 impl ServerShellHandle {
@@ -300,6 +319,67 @@ impl ServerShellHandle {
             })
         })
         .await
+    }
+
+    pub(crate) async fn postgres_mutate(
+        &self,
+        table_name: String,
+        expected_schema_version: SchemaVersionId,
+        mutation: PostgresMutation,
+        database_job_permit: OwnedSemaphorePermit,
+        query_guard: ActivePostgresQueryGuard,
+    ) -> Result<PostgresMutationResult, String> {
+        let activity_tx = self.activity_tx.clone();
+        let result = self
+            .run_cancelable(move |shell| {
+                let _database_job_permit = database_job_permit;
+                let _query_guard = query_guard;
+                let schema = shell
+                    .current_runtime_schema()
+                    .map_err(|error| error.to_string())?;
+                if schema.version_id() != expected_schema_version {
+                    return Err(
+                        "PostgreSQL schema changed while planning the mutation; retry".to_owned(),
+                    );
+                }
+                if !schema.tables.iter().any(|table| table.name == table_name) {
+                    return Err(format!("unknown table {table_name}"));
+                }
+                match mutation {
+                    PostgresMutation::Insert { row, cells } => {
+                        let row = shell
+                            .insert_settled_as_system(&table_name, row, cells)
+                            .map_err(|error| error.to_string())?;
+                        Ok(PostgresMutationResult {
+                            affected_rows: 1,
+                            row: Some(row),
+                        })
+                    }
+                    PostgresMutation::Update { row, patch } => {
+                        let updated = shell
+                            .update_settled_as_system(&table_name, row, patch)
+                            .map_err(|error| error.to_string())?;
+                        Ok(PostgresMutationResult {
+                            affected_rows: usize::from(updated),
+                            row: updated.then_some(row),
+                        })
+                    }
+                    PostgresMutation::Delete { row } => {
+                        let deleted = shell
+                            .delete_settled_as_system(&table_name, row)
+                            .map_err(|error| error.to_string())?;
+                        Ok(PostgresMutationResult {
+                            affected_rows: usize::from(deleted),
+                            row: deleted.then_some(row),
+                        })
+                    }
+                }
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
     }
 
     pub(crate) async fn receive_tick_take(

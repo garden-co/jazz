@@ -7,8 +7,10 @@ use std::{path::Path, process::Stdio};
 
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
-use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
-use support::TestingClient;
+use jazz::tools::{
+    ColumnType, DurabilityTier, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+};
+use support::{TestingClient, has_added, has_removed, has_updated, wait_for_subscription_update};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_postgres::{NoTls, types::Type};
@@ -48,7 +50,6 @@ async fn postgres_driver_lists_catalogue_and_paginates_jazz_rows() {
                 .ready_on("documents", READY_TIMEOUT)
                 .connect()
                 .await;
-
             for created_at in 0_i64..5 {
                 let (_, _, batch) = writer
                     .insert(
@@ -364,11 +365,14 @@ async fn postgres_driver_lists_catalogue_and_paginates_jazz_rows() {
                 .expect("catalogue filters preserve SQL NULL semantics");
             assert!(null_comparison_rows.is_empty());
 
-            let write_error = client
+            let unsafe_delete_error = client
                 .execute("DELETE FROM documents", &[])
                 .await
-                .expect_err("the PostgreSQL interface is read-only");
-            assert_eq!(write_error.code().map(|code| code.code()), Some("0A000"));
+                .expect_err("DELETE must identify exactly one row by id");
+            assert_eq!(
+                unsafe_delete_error.code().map(|code| code.code()),
+                Some("0A000")
+            );
 
             let unbounded_error = client
                 .query("SELECT * FROM documents", &[])
@@ -463,7 +467,7 @@ async fn postgres_driver_lists_catalogue_and_paginates_jazz_rows() {
             let transaction = client
                 .transaction()
                 .await
-                .expect("start read-only PostgreSQL transaction");
+                .expect("start PostgreSQL read transaction");
             let portal_statement = transaction
                 .prepare("SELECT id FROM documents LIMIT 2")
                 .await
@@ -567,6 +571,421 @@ async fn postgres_driver_lists_catalogue_and_paginates_jazz_rows() {
             .await;
 
             server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_driver_mutates_globally_settled_rows_in_autocommit_mode() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = documents_schema();
+            let server = JazzServer::builder()
+                .with_schema(schema.clone())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let observer = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000077")
+                .as_admin()
+                .ready_on("documents", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut subscription = observer
+                .subscribe(QueryBuilder::new("documents").build())
+                .await
+                .expect("open an active Jazz subscription before PostgreSQL mutations");
+            let mut subscription_log = Vec::new();
+
+            let url = server.postgres_url().expect("PostgreSQL URL");
+            let (mut client, connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect PostgreSQL mutation client");
+            let connection_task = tokio::spawn(async move {
+                connection
+                    .await
+                    .expect("PostgreSQL mutation connection remains healthy")
+            });
+
+            let read_only = client
+                .query_one("SHOW default_transaction_read_only", &[])
+                .await
+                .expect("inspect advertised transaction mode")
+                .get::<_, String>(0);
+            assert_eq!(read_only, "off");
+
+            let no_note: Option<&str> = None;
+            let inserted = client
+                .query_one(
+                    "INSERT INTO documents \
+                     (team_id, title, optional_note, created_at) \
+                     VALUES ($1, $2, $3, $4) RETURNING id AS document_id",
+                    &[&"team-pg", &"created-through-postgres", &no_note, &7_i64],
+                )
+                .await
+                .expect("insert through PostgreSQL with a generated Jazz id");
+            let document_id = inserted.get::<_, uuid::Uuid>(0);
+            let document_object_id = ObjectId::from_uuid(document_id);
+
+            let visible = client
+                .query_one(
+                    "SELECT title, optional_note, created_at FROM documents \
+                     WHERE id = $1 LIMIT 1",
+                    &[&document_id],
+                )
+                .await
+                .expect("the committed insert is immediately globally readable");
+            assert_eq!(visible.get::<_, String>(0), "created-through-postgres");
+            assert_eq!(visible.get::<_, Option<String>>(1), None);
+            assert_eq!(visible.get::<_, i64>(2), 7);
+
+            wait_for_subscription_update(
+                &mut subscription,
+                &mut subscription_log,
+                Duration::from_secs(5),
+                "PostgreSQL insert to reach an active Jazz observer",
+                |log| has_added(log, document_object_id),
+            )
+            .await;
+
+            let updated = client
+                .execute(
+                    "UPDATE documents SET title = $1, optional_note = $2 WHERE id = $3",
+                    &[
+                        &"updated-through-postgres",
+                        &Some("now-present"),
+                        &document_id,
+                    ],
+                )
+                .await
+                .expect("update through PostgreSQL");
+            assert_eq!(updated, 1);
+            let updated_row = client
+                .query_one(
+                    "SELECT team_id, title, optional_note, created_at FROM documents \
+                     WHERE id = $1 LIMIT 1",
+                    &[&document_id],
+                )
+                .await
+                .expect("read updated row");
+            assert_eq!(updated_row.get::<_, String>(0), "team-pg");
+            assert_eq!(updated_row.get::<_, String>(1), "updated-through-postgres");
+            assert_eq!(
+                updated_row.get::<_, Option<String>>(2).as_deref(),
+                Some("now-present")
+            );
+            assert_eq!(updated_row.get::<_, i64>(3), 7);
+
+            wait_for_subscription_update(
+                &mut subscription,
+                &mut subscription_log,
+                Duration::from_secs(5),
+                "PostgreSQL update to reach an active Jazz observer",
+                |log| has_updated(log, document_object_id),
+            )
+            .await;
+
+            let missing_id = uuid::Uuid::now_v7();
+            assert_eq!(
+                client
+                    .execute(
+                        "UPDATE documents SET title = $1 WHERE id = $2",
+                        &[&"missing", &missing_id],
+                    )
+                    .await
+                    .expect("updating a missing row is a successful no-op"),
+                0
+            );
+            assert_eq!(
+                client
+                    .execute("DELETE FROM documents WHERE id = $1", &[&missing_id])
+                    .await
+                    .expect("deleting a missing row is a successful no-op"),
+                0
+            );
+
+            let missing_required = client
+                .execute("INSERT INTO documents (team_id) VALUES ($1)", &[&"team-pg"])
+                .await
+                .expect_err("missing required columns must be rejected before commit");
+            assert_eq!(
+                missing_required.code().map(|code| code.code()),
+                Some("23502")
+            );
+
+            let duplicate = client
+                .execute(
+                    "INSERT INTO documents \
+                     (id, team_id, title, optional_note, created_at) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[&document_id, &"team-pg", &"duplicate", &no_note, &8_i64],
+                )
+                .await
+                .expect_err("an explicit duplicate Jazz id must not become an update");
+            assert_eq!(duplicate.code().map(|code| code.code()), Some("23505"));
+
+            let oversized_note = "x".repeat(3 * 1024 * 1024);
+            let oversized = client
+                .execute(
+                    "UPDATE documents SET optional_note = $1 WHERE id = $2",
+                    &[&oversized_note, &document_id],
+                )
+                .await
+                .expect_err("an oversized commit must be rejected as a PostgreSQL limit error");
+            assert_eq!(oversized.code().map(|code| code.code()), Some("54000"));
+            let unchanged = client
+                .query_one(
+                    "SELECT optional_note FROM documents WHERE id = $1 LIMIT 1",
+                    &[&document_id],
+                )
+                .await
+                .expect("oversized rejected update leaves the row unchanged");
+            assert_eq!(
+                unchanged.get::<_, Option<String>>(0).as_deref(),
+                Some("now-present")
+            );
+
+            let transaction = client
+                .transaction()
+                .await
+                .expect("begin explicit PostgreSQL transaction");
+            let transaction_id = uuid::Uuid::now_v7();
+            let transaction_error = transaction
+                .execute(
+                    "INSERT INTO documents \
+                     (id, team_id, title, optional_note, created_at) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &transaction_id,
+                        &"team-pg",
+                        &"must-not-commit",
+                        &no_note,
+                        &9_i64,
+                    ],
+                )
+                .await
+                .expect_err("DML inside BEGIN is explicitly unsupported");
+            assert_eq!(
+                transaction_error.code().map(|code| code.code()),
+                Some("0A000")
+            );
+            let aborted = transaction
+                .query_one("SELECT 1", &[])
+                .await
+                .expect_err("the failed explicit transaction remains aborted");
+            assert_eq!(aborted.code().map(|code| code.code()), Some("25P02"));
+            transaction
+                .rollback()
+                .await
+                .expect("rollback unsupported DML transaction");
+
+            let mixed_id = uuid::Uuid::now_v7();
+            let mixed_batch = client
+                .simple_query(&format!(
+                    "INSERT INTO documents (id, team_id, title, created_at) \
+                     VALUES ('{mixed_id}', 'team-pg', 'must-not-partially-commit', 10); \
+                     SELECT 1"
+                ))
+                .await
+                .expect_err("mixed DML simple-query batches are rejected before execution");
+            assert_eq!(mixed_batch.code().map(|code| code.code()), Some("0A000"));
+            assert!(
+                client
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&mixed_id],
+                    )
+                    .await
+                    .expect("verify rejected batch did not commit")
+                    .is_empty()
+            );
+
+            assert_eq!(
+                client
+                    .execute("DELETE FROM documents WHERE id = $1", &[&document_id])
+                    .await
+                    .expect("delete through PostgreSQL"),
+                1
+            );
+            assert!(
+                client
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&document_id],
+                    )
+                    .await
+                    .expect("deleted row is no longer visible")
+                    .is_empty()
+            );
+
+            wait_for_subscription_update(
+                &mut subscription,
+                &mut subscription_log,
+                Duration::from_secs(5),
+                "PostgreSQL delete to reach an active Jazz observer",
+                |log| has_removed(log, document_object_id),
+            )
+            .await;
+
+            drop(client);
+            connection_task.await.expect("join mutation connection");
+            observer.shutdown().await.expect("shutdown Jazz observer");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_mutations_survive_persistent_server_restart() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let data_dir = tempfile::tempdir().expect("temporary PostgreSQL server data dir");
+            let app_id = jazz::tools::AppId::random();
+            let schema = documents_schema();
+            let survivor_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000a1")
+                .expect("survivor UUID");
+            let deleted_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000a2")
+                .expect("deleted UUID");
+
+            {
+                let server = JazzServer::builder()
+                    .with_app_id(app_id)
+                    .with_schema(schema.clone())
+                    .with_data_dir(data_dir.path())
+                    .with_postgres_port(0)
+                    .with_persistent_storage()
+                    .start()
+                    .await;
+                let url = server
+                    .postgres_url()
+                    .expect("PostgreSQL URL before restart");
+                let (client, connection) = tokio_postgres::connect(&url, NoTls)
+                    .await
+                    .expect("connect PostgreSQL client before restart");
+                let connection_task = tokio::spawn(async move {
+                    connection
+                        .await
+                        .expect("pre-restart PostgreSQL connection remains healthy")
+                });
+
+                let survivor_note = Some("must-survive-untouched");
+                assert_eq!(
+                    client
+                        .execute(
+                            "INSERT INTO documents \
+                             (id, team_id, title, optional_note, created_at) \
+                             VALUES ($1, $2, $3, $4, $5)",
+                            &[
+                                &survivor_id,
+                                &"team-stable",
+                                &"before-update",
+                                &survivor_note,
+                                &101_i64,
+                            ],
+                        )
+                        .await
+                        .expect("insert survivor before restart"),
+                    1
+                );
+                assert_eq!(
+                    client
+                        .execute(
+                            "INSERT INTO documents \
+                             (id, team_id, title, optional_note, created_at) \
+                             VALUES ($1, $2, $3, $4, $5)",
+                            &[
+                                &deleted_id,
+                                &"team-delete",
+                                &"delete-before-restart",
+                                &Option::<&str>::None,
+                                &202_i64,
+                            ],
+                        )
+                        .await
+                        .expect("insert row to delete before restart"),
+                    1
+                );
+                assert_eq!(
+                    client
+                        .execute(
+                            "UPDATE documents SET title = $1 WHERE id = $2",
+                            &[&"after-update", &survivor_id],
+                        )
+                        .await
+                        .expect("update survivor before restart"),
+                    1
+                );
+                assert_eq!(
+                    client
+                        .execute("DELETE FROM documents WHERE id = $1", &[&deleted_id])
+                        .await
+                        .expect("delete row before restart"),
+                    1
+                );
+
+                drop(client);
+                connection_task
+                    .await
+                    .expect("join pre-restart PostgreSQL connection");
+                server.shutdown().await;
+            }
+
+            let restarted = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema)
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let url = restarted
+                .postgres_url()
+                .expect("PostgreSQL URL after restart");
+            let (client, connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect PostgreSQL client after restart");
+            let connection_task = tokio::spawn(async move {
+                connection
+                    .await
+                    .expect("post-restart PostgreSQL connection remains healthy")
+            });
+
+            let survivor = client
+                .query_one(
+                    "SELECT team_id, title, optional_note, created_at FROM documents \
+                     WHERE id = $1 LIMIT 1",
+                    &[&survivor_id],
+                )
+                .await
+                .expect("survivor remains readable after restart");
+            assert_eq!(survivor.get::<_, String>(0), "team-stable");
+            assert_eq!(survivor.get::<_, String>(1), "after-update");
+            assert_eq!(
+                survivor.get::<_, Option<String>>(2).as_deref(),
+                Some("must-survive-untouched")
+            );
+            assert_eq!(survivor.get::<_, i64>(3), 101);
+
+            assert!(
+                client
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&deleted_id],
+                    )
+                    .await
+                    .expect("query deleted row after restart")
+                    .is_empty(),
+                "deleted row must not reappear after persistent restart"
+            );
+
+            drop(client);
+            connection_task
+                .await
+                .expect("join post-restart PostgreSQL connection");
+            restarted.shutdown().await;
         })
         .await;
 }
@@ -746,6 +1165,48 @@ async fn raw_extended_protocol_lifecycle(port: u16, database: &str, password: &s
         }
     }
 
+    let returning_sql = "INSERT INTO documents (id, team_id, title, created_at) \
+                         VALUES ('00000000-0000-4000-8000-0000000000b1', \
+                         'team-wire', 'returning-wire', 301) RETURNING id";
+    let mut returning_query = Vec::new();
+    push_c_string(&mut returning_query, returning_sql);
+    write_frontend_frame(&mut socket, b'Q', &returning_query).await;
+    let returning_messages = read_until_ready(&mut socket).await;
+    assert_eq!(
+        command_tags(&returning_messages),
+        ["INSERT 0 1"],
+        "INSERT RETURNING must emit a valid PostgreSQL command tag"
+    );
+
+    let mutation_sql = "INSERT INTO documents (id, team_id, title, created_at) \
+                        VALUES ('00000000-0000-4000-8000-0000000000b2', \
+                        'team-wire', 'execute-once-wire', 302)";
+    let mut mutation_parse = Vec::new();
+    push_c_string(&mut mutation_parse, "mutation_once");
+    push_c_string(&mut mutation_parse, mutation_sql);
+    mutation_parse.extend_from_slice(&0_u16.to_be_bytes());
+    write_frontend_frame(&mut socket, b'P', &mutation_parse).await;
+    let mut mutation_bind = Vec::new();
+    push_c_string(&mut mutation_bind, "mutation_once_portal");
+    push_c_string(&mut mutation_bind, "mutation_once");
+    mutation_bind.extend_from_slice(&0_u16.to_be_bytes());
+    mutation_bind.extend_from_slice(&0_u16.to_be_bytes());
+    mutation_bind.extend_from_slice(&0_u16.to_be_bytes());
+    write_frontend_frame(&mut socket, b'B', &mutation_bind).await;
+    let mut mutation_execute = Vec::new();
+    push_c_string(&mut mutation_execute, "mutation_once_portal");
+    mutation_execute.extend_from_slice(&0_u32.to_be_bytes());
+    write_frontend_frame(&mut socket, b'E', &mutation_execute).await;
+    write_frontend_frame(&mut socket, b'E', &mutation_execute).await;
+    write_frontend_frame(&mut socket, b'S', &[]).await;
+    let mutation_messages = read_until_ready(&mut socket).await;
+    assert_eq!(command_tags(&mutation_messages), ["INSERT 0 1"]);
+    assert_eq!(
+        first_error_sqlstate(&mutation_messages).as_deref(),
+        Some("26000"),
+        "a completed mutation portal must not execute its DML twice"
+    );
+
     let mut parse = Vec::new();
     push_c_string(&mut parse, "");
     push_c_string(&mut parse, "SELECT 1");
@@ -922,6 +1383,20 @@ fn first_data_row_text(messages: &[(u8, Vec<u8>)]) -> Option<&str> {
     let length = i32::from_be_bytes(payload.get(2..6)?.try_into().ok()?);
     let length = usize::try_from(length).ok()?;
     std::str::from_utf8(payload.get(6..6 + length)?).ok()
+}
+
+fn command_tags(messages: &[(u8, Vec<u8>)]) -> Vec<&str> {
+    messages
+        .iter()
+        .filter(|(tag, _)| *tag == b'C')
+        .map(|(_, payload)| {
+            let end = payload
+                .iter()
+                .position(|byte| *byte == 0)
+                .expect("PostgreSQL command tag is NUL terminated");
+            std::str::from_utf8(&payload[..end]).expect("PostgreSQL command tag is UTF-8")
+        })
+        .collect()
 }
 
 fn first_error_sqlstate(messages: &[(u8, Vec<u8>)]) -> Option<String> {

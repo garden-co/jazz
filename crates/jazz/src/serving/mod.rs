@@ -338,6 +338,51 @@ impl ShellDb {
         }
     }
 
+    #[cfg(feature = "server")]
+    fn insert_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> ShellResult<RowUuid> {
+        match self {
+            Self::Memory(db) => db
+                .insert_settled_as_system(table, row, cells)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .insert_settled_as_system(table, row, cells)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn update_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> ShellResult<bool> {
+        match self {
+            Self::Memory(db) => db
+                .update_settled_as_system(table, row, patch)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .update_settled_as_system(table, row, patch)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn delete_settled_as_system(&self, table: &str, row: RowUuid) -> ShellResult<bool> {
+        match self {
+            Self::Memory(db) => db.delete_settled_as_system(table, row).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.delete_settled_as_system(table, row).map_err(Into::into),
+        }
+    }
+
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
@@ -594,8 +639,7 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
-    /// Resolve the runtime catalogue schema used by the server's read-only
-    /// administrative interfaces.
+    /// Resolve the runtime catalogue schema used by the server's administrative interfaces.
     #[cfg(feature = "server")]
     pub(crate) fn current_runtime_schema(&self) -> ShellResult<JazzSchema> {
         let current = self.db.current_write_schema();
@@ -623,6 +667,34 @@ impl InMemoryServerShell {
     #[cfg(feature = "server")]
     pub(crate) fn hydrate_large_value_handle(&self, handle: &[u8]) -> ShellResult<Vec<u8>> {
         self.db.hydrate_large_value_handle(handle)
+    }
+
+    /// Insert one administrative row and settle it at Global durability.
+    #[cfg(feature = "server")]
+    pub(crate) fn insert_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> ShellResult<RowUuid> {
+        self.db.insert_settled_as_system(table, row, cells)
+    }
+
+    /// Update one administrative row and settle it at Global durability.
+    #[cfg(feature = "server")]
+    pub(crate) fn update_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> ShellResult<bool> {
+        self.db.update_settled_as_system(table, row, patch)
+    }
+
+    /// Delete one administrative row and settle it at Global durability.
+    #[cfg(feature = "server")]
+    pub(crate) fn delete_settled_as_system(&self, table: &str, row: RowUuid) -> ShellResult<bool> {
+        self.db.delete_settled_as_system(table, row)
     }
 
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {

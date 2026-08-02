@@ -33,6 +33,11 @@ use web_time::Instant;
 /// plain history runs to compact incrementally.
 const POST_TICK_HISTORY_WINDOW_BUDGET: usize = 4;
 
+/// Leave half the commit-unit budget for transaction metadata and encoding
+/// overhead on direct server-adapter writes.
+#[cfg(feature = "server")]
+const MAX_SETTLED_SERVER_WRITE_CELL_BYTES: usize = MAX_COMMIT_UNIT_BYTES / 2;
+
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 use crate::node::{
@@ -49,6 +54,8 @@ use crate::protocol::{
     Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
     build_version_carriers_from_singletons, expand_version_carriers,
 };
+#[cfg(feature = "server")]
+use crate::protocol_limits::MAX_COMMIT_UNIT_BYTES;
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
     validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
@@ -72,6 +79,26 @@ use crate::wire::{
     WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
     decode_sync_message_for_receive, encode_frame, encode_sync_message,
 };
+
+#[cfg(feature = "server")]
+fn server_write_value_size(value: &Value) -> Option<usize> {
+    match value {
+        Value::U8(_) | Value::Bool(_) | Value::Enum(_) => Some(1),
+        Value::U16(_) => Some(2),
+        Value::U32(_) | Value::I32(_) => Some(4),
+        Value::U64(_) | Value::I64(_) | Value::F64(_) => Some(8),
+        Value::Uuid(_) => Some(16),
+        Value::String(value) => Some(value.len()),
+        Value::Bytes(value) => Some(value.len()),
+        Value::Tuple(values) | Value::Array(values) => {
+            values.iter().try_fold(0_usize, |sum, value| {
+                sum.checked_add(server_write_value_size(value)?)
+            })
+        }
+        Value::Nullable(None) => Some(1),
+        Value::Nullable(Some(value)) => server_write_value_size(value)?.checked_add(1),
+    }
+}
 
 /// How urgently a runtime should service pending peer-connection work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,6 +476,207 @@ where
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
+    }
+
+    /// Insert one administrative row directly into history-complete server state.
+    ///
+    /// Unlike ordinary facade writes, this path self-finalizes the mergeable
+    /// transaction at Global durability before returning. It is restricted to
+    /// the system identity and is used by server-side administrative adapters.
+    #[cfg(feature = "server")]
+    pub(crate) fn insert_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<RowUuid, Error> {
+        self.check_catalogue_admin()?;
+        self.current_table_schema_for_server_write(table)?;
+        let (content_parent, deletion_parent) = {
+            let mut node = self.node.node.borrow_mut();
+            (
+                node.local_content_winner_tx_id(table, row)?,
+                node.local_deletion_winner_tx_id(table, row)?,
+            )
+        };
+        if deletion_parent.is_some() {
+            return Err(row_already_deleted(row));
+        }
+        if content_parent.is_some() {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("encoding error: object already exists: {}", row.0),
+            ));
+        }
+        self.write_settled_as_system(table, row, cells, Vec::new(), None)?;
+        Ok(row)
+    }
+
+    /// Update one administrative row directly in history-complete server state.
+    ///
+    /// Returns `false` when the row does not currently exist.
+    #[cfg(feature = "server")]
+    pub(crate) fn update_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<bool, Error> {
+        self.check_catalogue_admin()?;
+        let table_schema = self.current_table_schema_for_server_write(table)?;
+        let existing = self.node.node.borrow_mut().local_current_row(table, row)?;
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        let mut cells = BTreeMap::new();
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(&table_schema, &column.name) {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+        cells.extend(patch);
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        self.write_settled_as_system(table, row, cells, parent.into_iter().collect(), None)?;
+        Ok(true)
+    }
+
+    /// Soft-delete one administrative row directly in history-complete server state.
+    ///
+    /// Returns `false` when the row does not currently exist.
+    #[cfg(feature = "server")]
+    pub(crate) fn delete_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<bool, Error> {
+        self.check_catalogue_admin()?;
+        self.current_table_schema_for_server_write(table)?;
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .local_current_row(table, row)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let parent = self
+            .node
+            .node
+            .borrow_mut()
+            .local_content_winner_tx_id(table, row)?;
+        self.write_settled_as_system(
+            table,
+            row,
+            BTreeMap::new(),
+            parent.into_iter().collect(),
+            Some(DeletionEvent::Deleted),
+        )?;
+        Ok(true)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_settled_as_system(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+    ) -> Result<TxId, Error> {
+        self.check_catalogue_admin()?;
+        let operation = if deletion == Some(DeletionEvent::Deleted) {
+            "DELETE"
+        } else if parents.is_empty() {
+            "INSERT"
+        } else {
+            "UPDATE"
+        };
+        let cells = if operation == "INSERT" {
+            let table_schema = self.current_table_schema_for_server_write(table)?;
+            let mut cells = cells;
+            for column in &table_schema.columns {
+                if !cells.contains_key(&column.name)
+                    && let Some(default) = &column.default
+                {
+                    cells.insert(
+                        column.name.clone(),
+                        default_cell_for_column_type(&column.column_type, default),
+                    );
+                }
+            }
+            cells
+        } else {
+            cells
+        };
+        let cell_bytes = cells.values().try_fold(0_usize, |total, value| {
+            total.checked_add(server_write_value_size(value)?)
+        });
+        if cell_bytes.is_none_or(|bytes| bytes > MAX_SETTLED_SERVER_WRITE_CELL_BYTES) {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!(
+                    "server write cell payload exceeds max {MAX_SETTLED_SERVER_WRITE_CELL_BYTES} bytes"
+                ),
+            ));
+        }
+        let mut commit = MergeableCommit::new(table, row, self.next_now_ms())
+            .made_by(AuthorId::SYSTEM)
+            .parents(parents)
+            .cells(cells);
+        if let Some(deletion) = deletion {
+            commit = commit.deletion(deletion);
+        }
+        let allowed = self
+            .node
+            .node
+            .borrow_mut()
+            .dry_run_mergeable_write_allows(commit.clone())
+            .map_err(Error::from)?;
+        if !allowed {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("policy denied {operation} on table {table}"),
+            ));
+        }
+
+        let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
+        self.node
+            .node
+            .borrow_mut()
+            .finalize_local_mergeable_commit(tx_id)?;
+        let state = self.write_state(tx_id)?;
+        let refresh_result = self.refresh_subscriptions();
+        self.node.mark_subscriber_connections_dirty();
+        if let Err(error) = refresh_result {
+            tracing::warn!(
+                operation,
+                table,
+                error = %error,
+                "globally committed server write could not refresh subscriptions immediately"
+            );
+        }
+        match state.fate {
+            Fate::Accepted if state.durability >= DurabilityTier::Global => Ok(tx_id),
+            Fate::Rejected(reason) => Err(write_rejected(reason)),
+            Fate::Pending | Fate::Accepted => Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("{operation} did not reach global durability"),
+            )),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn current_table_schema_for_server_write(&self, table: &str) -> Result<TableSchema, Error> {
+        self.current_write_schema_for_query()?
+            .0
+            .tables
+            .into_iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
     }
 
     /// Return the locally observed fate and durability for a write transaction.

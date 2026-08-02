@@ -10439,9 +10439,11 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 
 fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
     let user_name = user_column_field(column);
-    let idx = row.record.descriptor().fields().iter().position(|field| {
-        field.name.as_deref() == Some(user_name.as_str()) || field.name.as_deref() == Some(column)
-    })?;
+    let idx = row
+        .record
+        .descriptor()
+        .field_index(&user_name)
+        .or_else(|| row.record.descriptor().field_index(column))?;
     nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
 }
 

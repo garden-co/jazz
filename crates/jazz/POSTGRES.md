@@ -1,8 +1,8 @@
-# Read-only PostgreSQL interface
+# PostgreSQL interface
 
-Jazz can expose one app through a PostgreSQL-compatible, read-only endpoint.
+Jazz can expose one app through a PostgreSQL-compatible administrative endpoint.
 The endpoint is disabled by default, binds only to `127.0.0.1`, and uses a
-dedicated read-only database secret. It is available on core servers only
+dedicated database secret. It is available on core servers only
 because an edge may hold a partial, query-scoped cache.
 
 Start it with an app ID, PostgreSQL secret, and PostgreSQL port:
@@ -53,7 +53,7 @@ is sent unencrypted on that loopback connection; it is not SCRAM. Do not proxy
 it onto a public interface. Use an authenticated encrypted tunnel for remote
 administration.
 
-## Supported reads
+## Supported SQL
 
 The interface supports both PostgreSQL simple and extended/prepared query
 protocols. The SQL subset is deliberately strict:
@@ -64,12 +64,27 @@ protocols. The SQL subset is deliberately strict:
   `IS NULL`, and `IN`;
 - column `ORDER BY`, `LIMIT`, and `OFFSET` (maximum 10,000 each); nullable,
   large-value, and surrogate-text columns are not orderable yet;
-- up to 1,024 `$n` parameters in filters, `LIMIT`, and `OFFSET`; decoded
+- up to 1,024 `$n` parameters in filters, mutations, `LIMIT`, and `OFFSET`; decoded
   parameter data is capped at 4 MiB and expanded Jazz bindings at 8 MiB;
 - `version()`, `current_database()`, `current_schema()`, `current_user`, common
   `SHOW` probes, and transaction framing commands;
 - explicit virtual catalogue reads from `pg_catalog.pg_database`,
   `information_schema.tables`, and `information_schema.columns`.
+
+Basic single-row mutations are also supported:
+
+- `INSERT` with an explicit column list and exactly one `VALUES` row;
+- optional `INSERT ... RETURNING id [AS alias]` for the generated Jazz row UUID;
+- `UPDATE ... SET ... WHERE id = <UUID or $n>`;
+- `DELETE ... WHERE id = <UUID or $n>`.
+
+Mutations must be sent as individual autocommit statements. Multi-row inserts,
+broader update/delete predicates, mutation batches, mutation transactions,
+`UPDATE ... RETURNING`, `DELETE ... RETURNING`, tuple columns, and array columns
+are rejected. A successful response is returned only after the write reaches
+global durability in the core server. Materialized cell data for one mutation
+is capped at 1 MiB so the resulting Jazz commit remains safely below its wire
+budget.
 
 A simple-protocol batch may contain at most one application-table `SELECT`;
 send additional table reads as separate queries. Catalogue and session-probe
@@ -105,11 +120,22 @@ WHERE team_id = $1
   AND (created_at < $2 OR (created_at = $2 AND id < $3))
 ORDER BY created_at DESC, id DESC
 LIMIT 100;
+
+INSERT INTO documents (team_id, title, created_at)
+VALUES ('team-a', 'Quarterly report', 1710000000)
+RETURNING id;
+
+UPDATE documents
+SET title = 'Final quarterly report'
+WHERE id = '018f1234-5678-7abc-8def-0123456789ab';
+
+DELETE FROM documents
+WHERE id = '018f1234-5678-7abc-8def-0123456789ab';
 ```
 
-All application-table reads execute as the Jazz system/admin identity through
-the server's existing database-owner thread and storage engine. SQL writes,
-joins, aggregates, subqueries, and unsupported syntax return an error.
+All application-table reads and mutations execute as the Jazz system/admin
+identity through the server's existing database-owner thread and storage
+engine. Joins, aggregates, subqueries, and unsupported syntax return an error.
 The public `id` column is the Jazz row UUID; treat `id` as reserved in app
 schemas. Unsigned 64-bit integers are exposed as lossless decimal text, while
 tuple and array values are exposed as stable JSON text.
@@ -125,7 +151,8 @@ workflows are also unsupported.
 Filter parameters must be non-`NULL`; use literal `IS NULL` or `IS NOT NULL`
 syntax so SQL three-valued logic remains explicit. Transaction framing accepts
 plain `BEGIN`/`START TRANSACTION`, `COMMIT`, and `ROLLBACK`; isolation/access
-modes, savepoints, modifiers, and chaining are rejected.
+modes, savepoints, modifiers, and chaining are rejected. Reads may be framed in
+a transaction; mutations are currently autocommit-only.
 
 ## Pagination performance
 

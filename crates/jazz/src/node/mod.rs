@@ -4105,10 +4105,11 @@ impl CurrentRow {
             .iter()
             .find(|candidate| candidate.name == column)?;
         let user_name = user_column_field(column);
-        let idx = self.record.descriptor().fields().iter().position(|field| {
-            field.name.as_deref() == Some(user_name.as_str())
-                || field.name.as_deref() == Some(column)
-        })?;
+        let idx = self
+            .record
+            .descriptor()
+            .field_index(&user_name)
+            .or_else(|| self.record.descriptor().field_index(column))?;
         nullable_value(self.record.borrowed().get_idx(idx).ok()?).ok()?
     }
 
