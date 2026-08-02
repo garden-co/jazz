@@ -66,6 +66,35 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let Some(mut cells) = self.tx_read_raw(tx_id, table, row_uuid)? else {
+            return Ok(None);
+        };
+        let table_schema = self.table(table)?.clone();
+        for column in table_schema
+            .columns
+            .iter()
+            .filter(|column| column.large_value.is_some())
+        {
+            match self.tx_large_value_cell(tx_id, table, row_uuid, &column.name)? {
+                Some(OpenTxLargeValueCell::Authored(bytes))
+                | Some(OpenTxLargeValueCell::SnapshotHandle(bytes)) => {
+                    cells.insert(column.name.clone(), Value::Bytes(bytes));
+                }
+                None => {
+                    cells.remove(&column.name);
+                }
+            }
+        }
+        Ok(Some(cells))
+    }
+
+    /// Read a row overlay without resolving large-value cells.
+    pub(crate) fn tx_read_raw(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.table(table)?;
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
@@ -106,6 +135,72 @@ where
         tx_id: OpenTxId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let mut rows = self.tx_current_rows_for_query_source(tx_id, table)?;
+        self.resolve_tx_large_value_rows(tx_id, table, None, &mut rows)?;
+        Ok(rows)
+    }
+
+    /// Replace raw transaction-query large-value cells with authored bytes or
+    /// snapshot handles after filtering, ordering, and pagination.
+    pub(super) fn resolve_tx_large_value_rows(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        selected_columns: Option<&[String]>,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
+        let table_schema = self.table(table)?.clone();
+        let selected_columns = selected_columns
+            .map(|columns| columns.iter().map(String::as_str).collect::<BTreeSet<_>>());
+        let large_columns = table_schema
+            .columns
+            .iter()
+            .filter(|column| {
+                column.large_value.is_some()
+                    && selected_columns
+                        .as_ref()
+                        .is_none_or(|selected| selected.contains(column.name.as_str()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if large_columns.is_empty() {
+            return Ok(());
+        }
+        for row in rows {
+            let row_uuid = row.row_uuid();
+            let mut cells = table_schema
+                .columns
+                .iter()
+                .filter_map(|column| {
+                    row.cell(&table_schema, &column.name)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect::<BTreeMap<_, _>>();
+            for column in &large_columns {
+                match self.tx_large_value_cell(tx_id, table, row_uuid, &column.name)? {
+                    Some(OpenTxLargeValueCell::Authored(bytes))
+                    | Some(OpenTxLargeValueCell::SnapshotHandle(bytes)) => {
+                        cells.insert(column.name.clone(), Value::Bytes(bytes));
+                    }
+                    None => {
+                        cells.remove(&column.name);
+                    }
+                }
+            }
+            let cells = positional_cells_from_map(&table_schema, &cells)?;
+            *row = current_row_from_positional_cells(&table_schema, row_uuid, &cells)?;
+        }
+        Ok(())
+    }
+
+    /// Build raw snapshot-plus-overlay rows for query evaluation. Large-value
+    /// cells stay as stored payloads or authored bytes here; selected output
+    /// cells are resolved lazily after filtering and pagination.
+    pub(super) fn tx_current_rows_for_query_source(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.table(table)?;
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let rows = self
@@ -124,7 +219,17 @@ where
         let mut current = Vec::new();
         let table_schema = self.table(table)?.clone();
         for row_uuid in rows {
-            let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
+            let mut snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
+            if snapshot_row.content_version.is_some()
+                && let Some(cells) = snapshot_row.content_cells.as_mut()
+            {
+                for (index, column) in table_schema.columns.iter().enumerate() {
+                    if column.large_value.is_some() && cells.get(index).is_some_and(Option::is_none)
+                    {
+                        cells[index] = Some(Value::Bytes(Vec::new()));
+                    }
+                }
+            }
             if let Some(cells) =
                 self.overlay_pending_writes(tx_id, table, row_uuid, snapshot_row)?
             {
@@ -149,6 +254,120 @@ where
                 binding_values: binding.values().clone(),
             });
         Ok(current)
+    }
+
+    /// Resolve one large-value cell with explicit transaction provenance.
+    /// Pending authored bytes never pass through handle decoding; snapshot
+    /// values become handles only when a returned cell asks for them.
+    pub(crate) fn tx_large_value_cell(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_uuid: RowUuid,
+        column: &str,
+    ) -> Result<Option<OpenTxLargeValueCell>, Error> {
+        let table_schema = self.table(table)?.clone();
+        let column_schema = table_schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or(Error::InvalidStoredValue(
+                "open transaction large-value column is unknown",
+            ))?;
+        let Some(kind) = column_schema.large_value else {
+            return Err(Error::InvalidStoredValue(
+                "open transaction cell is not a large value",
+            ));
+        };
+
+        enum PendingResolution {
+            NoOverride,
+            Value(Option<Vec<u8>>),
+        }
+        let pending = self
+            .open_tx(tx_id)?
+            .writes
+            .iter()
+            .rev()
+            .filter(|write| {
+                write.table == table && write.row_uuid == row_uuid && write.deletion.is_none()
+            })
+            .find_map(|write| match &write.cells {
+                PendingCells::Replace(cells) => Some(PendingResolution::Value(
+                    cells.get(column).and_then(authored_large_value_bytes),
+                )),
+                PendingCells::Patch(patch) => patch
+                    .get(column)
+                    .map(|value| PendingResolution::Value(authored_large_value_bytes(value))),
+            })
+            .unwrap_or(PendingResolution::NoOverride);
+        match pending {
+            PendingResolution::Value(Some(bytes)) => {
+                return Ok(Some(OpenTxLargeValueCell::Authored(bytes)));
+            }
+            PendingResolution::Value(None) => return Ok(None),
+            PendingResolution::NoOverride => {}
+        }
+
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let Some(version) =
+            self.snapshot_layer_winner(table, row_uuid, VersionLayer::Content, &snapshot)
+        else {
+            return Ok(None);
+        };
+        if matches!(
+            column_schema.column_type,
+            crate::groove::schema::ColumnType::Nullable(_)
+        ) && self.snapshot_large_value_is_null(&table_schema, &version, column)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(OpenTxLargeValueCell::SnapshotHandle(
+            self.large_value_handle_for_version(
+                &table_schema,
+                &version,
+                &column_schema.name,
+                kind,
+            )?,
+        )))
+    }
+
+    fn snapshot_large_value_is_null(
+        &mut self,
+        table: &TableSchema,
+        winner: &VersionRow,
+        column: &str,
+    ) -> Result<bool, Error> {
+        let mut current = self.version_tx_id(winner)?;
+        loop {
+            let version = self
+                .query_versions_for_tx(current)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == table.name
+                        && version.row_uuid() == winner.row_uuid()
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(current))?;
+            match version.cell(table, column)? {
+                Some(Value::Nullable(None)) => return Ok(true),
+                Some(Value::Nullable(Some(value))) if matches!(*value, Value::Bytes(_)) => {
+                    return Ok(false);
+                }
+                Some(Value::Bytes(_)) => return Ok(false),
+                Some(_) => {
+                    return Err(Error::InvalidStoredValue(
+                        "nullable large-value column has an invalid stored value",
+                    ));
+                }
+                None => {}
+            }
+            match version.parents().as_slice() {
+                [] => return Ok(true),
+                [parent] => current = *parent,
+                parents => current = self.large_value_primary_parent(parents)?,
+            }
+        }
     }
 
     /// Stage a row write inside an exclusive transaction.
@@ -212,6 +431,75 @@ where
             open_tx.writes.push(pending);
         }
         Ok(())
+    }
+
+    /// Stage a partial row update inside an exclusive transaction.
+    ///
+    /// Keeping the patch distinct from a replacement matters for large-value
+    /// columns: an untouched column inherits through the content parent instead
+    /// of materializing and re-encoding its stored operation payload.
+    pub(crate) fn tx_patch_exclusive(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+    ) -> Result<bool, Error> {
+        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not exclusive",
+            ));
+        }
+        if self.tx_read_raw(tx_id, table, row_uuid)?.is_none() {
+            return Ok(false);
+        }
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        positional_cells_from_map(&table_schema, &patch)?;
+        let cache_key = (table.to_owned(), row_uuid);
+        let snapshot_row = self
+            .open_tx(tx_id)?
+            .base_snapshot_rows
+            .get(&cache_key)
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "exclusive update did not retain its snapshot row",
+            ))?;
+        let pending = PendingWrite {
+            table: table.to_owned(),
+            row_uuid,
+            schema_version: write_schema_version,
+            cells: PendingCells::Patch(patch),
+            deletion: None,
+            parents: snapshot_row.content_version.into_iter().collect(),
+            now_ms: None,
+            refresh_parents_at_commit: false,
+        };
+        let open_tx = self.open_tx_mut(tx_id)?;
+        open_tx.base_snapshot_rows.remove(&cache_key);
+        if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
+            write.table == pending.table
+                && write.row_uuid == pending.row_uuid
+                && write.deletion.is_none()
+        }) {
+            let cells = match (&existing.cells, &pending.cells) {
+                (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
+                    let mut cells = existing.clone();
+                    cells.extend(patch.clone());
+                    PendingCells::Replace(cells)
+                }
+                (PendingCells::Patch(existing), PendingCells::Patch(patch)) => {
+                    let mut cells = existing.clone();
+                    cells.extend(patch.clone());
+                    PendingCells::Patch(cells)
+                }
+                _ => unreachable!("exclusive update always stages a patch"),
+            };
+            *existing = PendingWrite { cells, ..pending };
+        } else {
+            open_tx.writes.push(pending);
+        }
+        Ok(true)
     }
 
     pub(crate) fn tx_write_mergeable(
@@ -364,31 +652,66 @@ where
         }
         let made_at = self.mint_tx_time(now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
-        let versions = open_tx
-            .writes
-            .into_iter()
-            .map(|write| {
-                let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-                let PendingCells::Replace(cells) = write.cells else {
-                    return Err(Error::InvalidMergeableCommit(
-                        "exclusive transaction cannot contain update patches",
-                    ));
-                };
-                let cells = positional_cells_from_map(&table_schema, &cells)?;
-                Ok(VersionRecord::encode(
-                    &table_schema,
-                    write.schema_version,
-                    write.row_uuid,
-                    write.parents,
-                    made_by,
-                    made_at,
-                    made_by,
-                    made_at,
-                    &cells,
-                    write.deletion,
-                )?)
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let mut versions = Vec::with_capacity(open_tx.writes.len());
+        for write in open_tx.writes {
+            let table_schema = self
+                .table_in_schema(&write.table, write.schema_version)?
+                .clone();
+            let parent = match write.parents.first().copied() {
+                Some(parent) => Some(
+                    self.query_versions_for_tx(parent)?
+                        .into_iter()
+                        .find(|version| {
+                            version.table() == write.table
+                                && version.row_uuid() == write.row_uuid
+                                && version.layer() == VersionLayer::Content
+                        })
+                        .ok_or(Error::MissingTransaction(parent))?,
+                ),
+                None => None,
+            };
+            let mut cells = match write.cells {
+                PendingCells::Replace(cells) => cells,
+                PendingCells::Patch(patch) => {
+                    let parent = parent.as_ref().ok_or(Error::InvalidMergeableCommit(
+                        "exclusive update patch requires a content parent",
+                    ))?;
+                    let mut cells = BTreeMap::new();
+                    for column in table_schema
+                        .columns
+                        .iter()
+                        .filter(|column| column.large_value.is_none())
+                    {
+                        if let Some(value) = parent.cell(&table_schema, &column.name)? {
+                            cells.insert(column.name.clone(), value);
+                        }
+                    }
+                    cells.extend(patch);
+                    cells
+                }
+            };
+            cells = self.encode_large_value_cells(
+                &table_schema,
+                write.schema_version,
+                write.row_uuid,
+                made_by,
+                cells,
+                parent.as_ref(),
+            )?;
+            let cells = positional_cells_from_map(&table_schema, &cells)?;
+            versions.push(VersionRecord::encode(
+                &table_schema,
+                write.schema_version,
+                write.row_uuid,
+                write.parents,
+                made_by,
+                made_at,
+                made_by,
+                made_at,
+                &cells,
+                write.deletion,
+            )?);
+        }
         let tx = Transaction {
             tx_id,
             kind: TxKind::Exclusive,
@@ -665,6 +988,27 @@ pub(super) enum OpenTransactionKind {
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
     },
+}
+
+fn authored_large_value_bytes(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Bytes(bytes) => Some(bytes.clone()),
+        Value::Nullable(Some(value)) => authored_large_value_bytes(value),
+        Value::Nullable(None)
+        | Value::U8(_)
+        | Value::U16(_)
+        | Value::U32(_)
+        | Value::U64(_)
+        | Value::I32(_)
+        | Value::I64(_)
+        | Value::F64(_)
+        | Value::Bool(_)
+        | Value::String(_)
+        | Value::Uuid(_)
+        | Value::Enum(_)
+        | Value::Tuple(_)
+        | Value::Array(_) => None,
+    }
 }
 
 pub(super) struct OpenTransaction {

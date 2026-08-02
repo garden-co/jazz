@@ -868,7 +868,7 @@ where
             }
             let rows = self
                 .node
-                .tx_current_rows(tx_id, &request.source.table)
+                .tx_current_rows_for_query_source(tx_id, &request.source.table)
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
@@ -8456,6 +8456,30 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity_impl(tx_id, shape, binding, identity, true)
+    }
+
+    /// Evaluate an open-transaction query while leaving large-value cells raw
+    /// for a server adapter that resolves only its returned output columns.
+    #[cfg(feature = "server")]
+    pub(crate) fn tx_query_for_identity_raw(
+        &mut self,
+        tx_id: OpenTxId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.tx_query_for_identity_impl(tx_id, shape, binding, identity, false)
+    }
+
+    fn tx_query_for_identity_impl(
+        &mut self,
+        tx_id: OpenTxId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorId,
+        resolve_large_values: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table(&query.table)?.clone();
@@ -8482,6 +8506,15 @@ where
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         self.finish_engine_query_rows(query, &mut rows)?;
+        if resolve_large_values && query.aggregate.is_none() {
+            self.resolve_tx_large_value_rows(
+                tx_id,
+                &query.table,
+                query.select.as_deref(),
+                &mut rows,
+            )?;
+        }
+        self.apply_projection(query, &mut rows)?;
         Ok(rows)
     }
 

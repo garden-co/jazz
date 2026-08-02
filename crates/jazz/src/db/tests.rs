@@ -10750,6 +10750,103 @@ fn db_large_blob_values_round_trip_binary_from_empty_parent() {
     );
 }
 
+/// Contract: public exclusive prepared reads expose handles for inherited
+/// snapshot large values and exact authored bytes for a staged restore.
+///
+/// Actors: alice commits a sparse ordinary-column update, then opens fresh
+/// exclusive transactions to query and restore the Blob.
+///
+/// ```text
+/// alice --sparse UPDATE/COMMIT--> inherited Blob
+/// alice --fresh all_prepared----> hydrateable snapshot handle
+/// alice --restore/all_prepared--> exact staged authored bytes
+/// ```
+#[test]
+fn exclusive_prepared_reads_resolve_inherited_and_restored_large_values() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "assets",
+        [
+            crate::schema::ColumnSchema::new("name", ColumnType::String),
+            crate::schema::ColumnSchema::blob("data"),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x71; 16]),
+            author: AuthorId::from_bytes([0x72; 16]),
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x71))),
+        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
+    }))
+    .unwrap();
+    let table = &schema.tables[0];
+    let original = b"inherited snapshot blob".to_vec();
+    let restored = b"restored authored blob".to_vec();
+    let asset = db
+        .insert(
+            "assets",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("original".to_owned())),
+                ("data".to_owned(), Value::Bytes(original.clone())),
+            ]),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let update = db.exclusive_tx().unwrap();
+    update
+        .update(
+            "assets",
+            asset,
+            BTreeMap::from([("name".to_owned(), Value::String("renamed".to_owned()))]),
+        )
+        .unwrap();
+    update.commit().unwrap();
+
+    let prepared = db
+        .prepare_query(&Query::from("assets").select(["data"]))
+        .unwrap();
+    let fresh = db.exclusive_tx().unwrap();
+    let rows = fresh.all_prepared(&prepared).unwrap();
+    assert_eq!(rows[0].cell(table, "name"), None);
+    let handle = match rows[0].cell(table, "data") {
+        Some(Value::Bytes(handle)) => handle,
+        other => panic!("expected inherited Blob handle, got {other:?}"),
+    };
+    assert_eq!(db.hydrate_large_value_handle(&handle).unwrap(), original);
+    drop(fresh);
+
+    db.delete("assets", asset).unwrap();
+    let restore = db.exclusive_tx().unwrap();
+    restore
+        .restore(
+            "assets",
+            asset,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("restored".to_owned())),
+                ("data".to_owned(), Value::Bytes(restored.clone())),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        restore.read("assets", asset).unwrap().unwrap().get("data"),
+        Some(&Value::Bytes(restored.clone()))
+    );
+    assert_eq!(
+        restore.all_prepared(&prepared).unwrap()[0].cell(table, "data"),
+        Some(Value::Bytes(restored))
+    );
+    drop(restore);
+}
+
 #[test]
 fn db_text_edit_ops_materialize_expected_value() {
     let schema =

@@ -27,9 +27,9 @@ use crate::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage;
 use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
-#[cfg(feature = "server")]
-use crate::node::CurrentRow;
 use crate::node::EdgeCacheBudget;
+#[cfg(feature = "server")]
+use crate::node::{CurrentRow, OpenTxId, OpenTxLargeValueCell};
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaVersion, SyncMessage,
 };
@@ -339,47 +339,131 @@ impl ShellDb {
     }
 
     #[cfg(feature = "server")]
-    fn insert_settled_as_system(
+    fn begin_exclusive_as_system(&self) -> ShellResult<OpenTxId> {
+        match self {
+            Self::Memory(db) => db.begin_exclusive_as_system().map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.begin_exclusive_as_system().map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn read_exclusive_as_system(
         &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> ShellResult<RowUuid> {
+        open_tx_id: OpenTxId,
+        query: &Query,
+        bindings: BTreeMap<String, Value>,
+    ) -> ShellResult<Vec<CurrentRow>> {
         match self {
             Self::Memory(db) => db
-                .insert_settled_as_system(table, row, cells)
+                .read_exclusive_as_system(open_tx_id, query, bindings)
                 .map_err(Into::into),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db
-                .insert_settled_as_system(table, row, cells)
+                .read_exclusive_as_system(open_tx_id, query, bindings)
                 .map_err(Into::into),
         }
     }
 
     #[cfg(feature = "server")]
-    fn update_settled_as_system(
+    fn resolve_exclusive_large_value_as_system(
         &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+    ) -> ShellResult<Option<OpenTxLargeValueCell>> {
+        match self {
+            Self::Memory(db) => db
+                .resolve_exclusive_large_value_as_system(open_tx_id, table, row, column)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .resolve_exclusive_large_value_as_system(open_tx_id, table, row, column)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn insert_many_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        rows: Vec<(RowUuid, RowCells)>,
+    ) -> ShellResult<Vec<RowUuid>> {
+        match self {
+            Self::Memory(db) => db
+                .insert_many_exclusive_as_system(open_tx_id, table, rows)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .insert_many_exclusive_as_system(open_tx_id, table, rows)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn update_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
         table: &str,
         row: RowUuid,
         patch: RowCells,
     ) -> ShellResult<bool> {
         match self {
             Self::Memory(db) => db
-                .update_settled_as_system(table, row, patch)
+                .update_exclusive_as_system(open_tx_id, table, row, patch)
                 .map_err(Into::into),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(db) => db
-                .update_settled_as_system(table, row, patch)
+                .update_exclusive_as_system(open_tx_id, table, row, patch)
                 .map_err(Into::into),
         }
     }
 
     #[cfg(feature = "server")]
-    fn delete_settled_as_system(&self, table: &str, row: RowUuid) -> ShellResult<bool> {
+    fn delete_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+    ) -> ShellResult<bool> {
         match self {
-            Self::Memory(db) => db.delete_settled_as_system(table, row).map_err(Into::into),
+            Self::Memory(db) => db
+                .delete_exclusive_as_system(open_tx_id, table, row)
+                .map_err(Into::into),
             #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.delete_settled_as_system(table, row).map_err(Into::into),
+            Self::Rocks(db) => db
+                .delete_exclusive_as_system(open_tx_id, table, row)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn commit_exclusive_settled_as_system(&self, open_tx_id: OpenTxId) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .commit_exclusive_settled_as_system(open_tx_id)
+                .map(drop)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .commit_exclusive_settled_as_system(open_tx_id)
+                .map(drop)
+                .map_err(Into::into),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn rollback_exclusive_as_system(&self, open_tx_id: OpenTxId) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .rollback_exclusive_as_system(open_tx_id)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .rollback_exclusive_as_system(open_tx_id)
+                .map_err(Into::into),
         }
     }
 
@@ -669,32 +753,86 @@ impl InMemoryServerShell {
         self.db.hydrate_large_value_handle(handle)
     }
 
-    /// Insert one administrative row and settle it at Global durability.
+    /// Open an exclusive transaction owned by a trusted administrative adapter.
     #[cfg(feature = "server")]
-    pub(crate) fn insert_settled_as_system(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> ShellResult<RowUuid> {
-        self.db.insert_settled_as_system(table, row, cells)
+    pub(crate) fn begin_exclusive_as_system(&self) -> ShellResult<OpenTxId> {
+        self.db.begin_exclusive_as_system()
     }
 
-    /// Update one administrative row and settle it at Global durability.
+    /// Read through the fixed snapshot and write overlay of an open transaction.
     #[cfg(feature = "server")]
-    pub(crate) fn update_settled_as_system(
+    pub(crate) fn read_exclusive_as_system(
         &self,
+        open_tx_id: OpenTxId,
+        query: &Query,
+        bindings: BTreeMap<String, Value>,
+    ) -> ShellResult<Vec<CurrentRow>> {
+        self.db
+            .read_exclusive_as_system(open_tx_id, query, bindings)
+    }
+
+    /// Resolve one returned large-value cell using transaction provenance.
+    #[cfg(feature = "server")]
+    pub(crate) fn resolve_exclusive_large_value_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+    ) -> ShellResult<Option<OpenTxLargeValueCell>> {
+        self.db
+            .resolve_exclusive_large_value_as_system(open_tx_id, table, row, column)
+    }
+
+    /// Stage a batch of inserts in an open trusted transaction.
+    #[cfg(feature = "server")]
+    pub(crate) fn insert_many_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        rows: Vec<(RowUuid, RowCells)>,
+    ) -> ShellResult<Vec<RowUuid>> {
+        self.db
+            .insert_many_exclusive_as_system(open_tx_id, table, rows)
+    }
+
+    /// Stage an update in an open trusted transaction.
+    #[cfg(feature = "server")]
+    pub(crate) fn update_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
         table: &str,
         row: RowUuid,
         patch: RowCells,
     ) -> ShellResult<bool> {
-        self.db.update_settled_as_system(table, row, patch)
+        self.db
+            .update_exclusive_as_system(open_tx_id, table, row, patch)
     }
 
-    /// Delete one administrative row and settle it at Global durability.
+    /// Stage a delete in an open trusted transaction.
     #[cfg(feature = "server")]
-    pub(crate) fn delete_settled_as_system(&self, table: &str, row: RowUuid) -> ShellResult<bool> {
-        self.db.delete_settled_as_system(table, row)
+    pub(crate) fn delete_exclusive_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+    ) -> ShellResult<bool> {
+        self.db.delete_exclusive_as_system(open_tx_id, table, row)
+    }
+
+    /// Settle an open trusted transaction and refresh observers once.
+    #[cfg(feature = "server")]
+    pub(crate) fn commit_exclusive_settled_as_system(
+        &self,
+        open_tx_id: OpenTxId,
+    ) -> ShellResult<()> {
+        self.db.commit_exclusive_settled_as_system(open_tx_id)
+    }
+
+    /// Abandon an open trusted transaction.
+    #[cfg(feature = "server")]
+    pub(crate) fn rollback_exclusive_as_system(&self, open_tx_id: OpenTxId) -> ShellResult<()> {
+        self.db.rollback_exclusive_as_system(open_tx_id)
     }
 
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {

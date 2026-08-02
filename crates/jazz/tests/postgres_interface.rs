@@ -8,9 +8,13 @@ use std::{path::Path, process::Stdio};
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    ColumnDescriptor, ColumnType, DurabilityTier, LargeValueKind, ObjectId, QueryBuilder,
+    RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema, Value,
 };
-use support::{TestingClient, has_added, has_removed, has_updated, wait_for_subscription_update};
+use support::{
+    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
+    wait_for_subscription_update,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_postgres::{NoTls, types::Type};
@@ -29,6 +33,54 @@ fn documents_schema() -> Schema {
                 .index_only(["team_id", "title", "optional_note", "created_at"]),
         )
         .build()
+}
+
+fn postgres_large_values_schema() -> Schema {
+    [(
+        TableName::new("assets"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("body", ColumnType::Bytea).large_value(LargeValueKind::Text),
+            ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
+        ])),
+    )]
+    .into_iter()
+    .collect()
+}
+
+fn postgres_nullable_large_values_schema() -> Schema {
+    [(
+        TableName::new("nullable_assets"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("data", ColumnType::Bytea)
+                .nullable()
+                .large_value(LargeValueKind::Blob),
+        ])),
+    )]
+    .into_iter()
+    .collect()
+}
+
+fn handle_shaped_blob_payload(row: uuid::Uuid) -> Vec<u8> {
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    let mut bytes = b"JLVH1".to_vec();
+    push_string(&mut bytes, "assets");
+    bytes.extend_from_slice(row.as_bytes());
+    push_string(&mut bytes, "data");
+    bytes.extend_from_slice(&77_u64.to_be_bytes());
+    bytes.extend_from_slice(
+        uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000ff")
+            .expect("handle-shaped payload node UUID")
+            .as_bytes(),
+    );
+    bytes.push(2); // LargeValueKind::Blob
+    bytes.extend_from_slice(&123_u64.to_be_bytes());
+    bytes.extend_from_slice(&0_u64.to_be_bytes());
+    bytes
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -753,34 +805,49 @@ async fn postgres_driver_mutates_globally_settled_rows_in_autocommit_mode() {
                 .await
                 .expect("begin explicit PostgreSQL transaction");
             let transaction_id = uuid::Uuid::now_v7();
-            let transaction_error = transaction
-                .execute(
-                    "INSERT INTO documents \
-                     (id, team_id, title, optional_note, created_at) \
-                     VALUES ($1, $2, $3, $4, $5)",
-                    &[
-                        &transaction_id,
-                        &"team-pg",
-                        &"must-not-commit",
-                        &no_note,
-                        &9_i64,
-                    ],
-                )
-                .await
-                .expect_err("DML inside BEGIN is explicitly unsupported");
             assert_eq!(
-                transaction_error.code().map(|code| code.code()),
-                Some("0A000")
+                transaction
+                    .execute(
+                        "INSERT INTO documents \
+                         (id, team_id, title, optional_note, created_at) \
+                         VALUES ($1, $2, $3, $4, $5)",
+                        &[
+                            &transaction_id,
+                            &"team-pg",
+                            &"must-not-commit",
+                            &no_note,
+                            &9_i64,
+                        ],
+                    )
+                    .await
+                    .expect("stage DML inside BEGIN"),
+                1
             );
-            let aborted = transaction
-                .query_one("SELECT 1", &[])
-                .await
-                .expect_err("the failed explicit transaction remains aborted");
-            assert_eq!(aborted.code().map(|code| code.code()), Some("25P02"));
+            assert_eq!(
+                transaction
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&transaction_id],
+                    )
+                    .await
+                    .expect("the transaction reads its staged insert")
+                    .len(),
+                1
+            );
             transaction
                 .rollback()
                 .await
-                .expect("rollback unsupported DML transaction");
+                .expect("rollback explicit DML transaction");
+            assert!(
+                client
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&transaction_id],
+                    )
+                    .await
+                    .expect("rolled-back staged insert remains absent")
+                    .is_empty()
+            );
 
             let mixed_id = uuid::Uuid::now_v7();
             let mixed_batch = client
@@ -833,6 +900,1143 @@ async fn postgres_driver_mutates_globally_settled_rows_in_autocommit_mode() {
             drop(client);
             connection_task.await.expect("join mutation connection");
             observer.shutdown().await.expect("shutdown Jazz observer");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+/// Contract: PostgreSQL transactions stage multi-row inserts, predicate updates,
+/// and exact-id deletes in one Jazz transaction with snapshot isolation,
+/// read-your-writes, atomic subscription delivery, rollback, and durable commit.
+///
+/// Actors: alice is the PostgreSQL writer, bob is an independent PostgreSQL
+/// reader, carol is an active Jazz subscriber, and dave is a raw PostgreSQL
+/// client that disconnects with an open transaction.
+///
+/// ```text
+/// alice --BEGIN/stage--> server tx overlay --read-own-writes--> alice
+/// bob   ------read-----> committed snapshot (staged rows absent)
+/// alice ----COMMIT-----> RocksDB --one add/update/remove delta--> carol
+/// alice --ROLLBACK/error--> discard --no rows or delta---------> bob/carol
+/// dave  --BEGIN/stage/disconnect--> abandon --no row or delta--> bob/carol
+///                              |
+///                              `--restart--> only committed state survives
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_transactions_are_atomic_and_read_their_own_writes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let data_dir = tempfile::tempdir().expect("temporary transaction data dir");
+            let app_id = jazz::tools::AppId::random();
+            let schema = documents_schema();
+            let server = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let carol = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("00000000-0000-4000-8000-000000000076")
+                .as_admin()
+                .ready_on("documents", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut carol_subscription = carol
+                .subscribe(QueryBuilder::new("documents").build())
+                .await
+                .expect("open a Jazz subscription before transactional mutations");
+            let mut carol_subscription_log = Vec::new();
+
+            let url = server.postgres_url().expect("PostgreSQL URL");
+            let (mut alice, alice_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect alice as the transactional PostgreSQL writer");
+            let alice_connection_task = tokio::spawn(async move {
+                alice_connection
+                    .await
+                    .expect("alice's PostgreSQL connection remains healthy")
+            });
+            let (bob, bob_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect bob as the independent PostgreSQL reader");
+            let bob_connection_task = tokio::spawn(async move {
+                bob_connection
+                    .await
+                    .expect("bob's PostgreSQL connection remains healthy")
+            });
+
+            let seeded = alice
+                .query(
+                    "INSERT INTO documents (team_id, title, optional_note, created_at) VALUES \
+                     ($1, $2, $3, $4), ($1, $5, $6, $7), ($8, $9, $10, $11) \
+                     RETURNING id",
+                    &[
+                        &"team-seed",
+                        &"seed-one",
+                        &Option::<&str>::None,
+                        &11_i64,
+                        &"seed-two",
+                        &Option::<&str>::None,
+                        &12_i64,
+                        &"team-other",
+                        &"other-team",
+                        &Option::<&str>::None,
+                        &13_i64,
+                    ],
+                )
+                .await
+                .expect("autocommit a multi-row INSERT with generated ids");
+            assert_eq!(seeded.len(), 3);
+            let seeded_ids = seeded
+                .iter()
+                .map(|row| row.get::<_, uuid::Uuid>(0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                seeded_ids
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                3,
+                "every VALUES row receives a distinct Jazz id"
+            );
+            wait_for_subscription_update(
+                &mut carol_subscription,
+                &mut carol_subscription_log,
+                Duration::from_secs(5),
+                "alice's seed insert to reach carol's Jazz subscription",
+                |log| {
+                    seeded_ids
+                        .iter()
+                        .all(|id| has_added(log, ObjectId::from_uuid(*id)))
+                },
+            )
+            .await;
+            carol_subscription_log.clear();
+
+            let inserted_ids = [
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000d1")
+                    .expect("first transaction UUID"),
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000d2")
+                    .expect("second transaction UUID"),
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000d3")
+                    .expect("third transaction UUID"),
+            ];
+            let alice_tx = alice
+                .transaction()
+                .await
+                .expect("alice begins a write transaction");
+            let returned = alice_tx
+                .query(
+                    "INSERT INTO documents \
+                     (id, team_id, title, optional_note, created_at) VALUES \
+                     ($1, $2, $3, $4, $5), \
+                     ($6, $2, $7, $8, $9), \
+                     ($10, $2, $11, $12, $13) \
+                     RETURNING id AS document_id",
+                    &[
+                        &inserted_ids[0],
+                        &"team-transaction",
+                        &"transaction-one",
+                        &Option::<&str>::None,
+                        &21_i64,
+                        &inserted_ids[1],
+                        &"transaction-two",
+                        &Some("has-note"),
+                        &22_i64,
+                        &inserted_ids[2],
+                        &"transaction-three",
+                        &Option::<&str>::None,
+                        &23_i64,
+                    ],
+                )
+                .await
+                .expect("stage a multi-row INSERT in the transaction");
+            assert_eq!(
+                returned
+                    .iter()
+                    .map(|row| row.get::<_, uuid::Uuid>(0))
+                    .collect::<Vec<_>>(),
+                inserted_ids,
+                "INSERT RETURNING preserves VALUES order"
+            );
+            assert_eq!(
+                alice_tx
+                    .execute(
+                        "UPDATE documents SET title = $1, optional_note = $2 \
+                         WHERE team_id = $3 AND created_at IN ($4, $5)",
+                        &[
+                            &"predicate-updated",
+                            &Some("updated-note"),
+                            &"team-seed",
+                            &11_i64,
+                            &12_i64,
+                        ],
+                    )
+                    .await
+                    .expect("stage a predicate UPDATE in the transaction"),
+                2
+            );
+            assert_eq!(
+                alice_tx
+                    .execute("DELETE FROM documents WHERE id = $1", &[&seeded_ids[2]],)
+                    .await
+                    .expect("stage an exact-id DELETE in the transaction"),
+                1
+            );
+
+            let own_inserted_rows = alice_tx
+                .query(
+                    "SELECT id FROM documents WHERE team_id = $1 \
+                     ORDER BY created_at LIMIT 10",
+                    &[&"team-transaction"],
+                )
+                .await
+                .expect("transaction reads its staged inserts");
+            assert_eq!(own_inserted_rows.len(), 3);
+            let own_updated_rows = alice_tx
+                .query(
+                    "SELECT title, optional_note FROM documents \
+                     WHERE team_id = $1 ORDER BY created_at LIMIT 10",
+                    &[&"team-seed"],
+                )
+                .await
+                .expect("transaction reads its staged predicate update");
+            assert_eq!(own_updated_rows.len(), 2);
+            assert!(own_updated_rows.iter().all(|row| {
+                row.get::<_, String>(0) == "predicate-updated"
+                    && row.get::<_, Option<String>>(1).as_deref() == Some("updated-note")
+            }));
+            assert!(
+                alice_tx
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&seeded_ids[2]],
+                    )
+                    .await
+                    .expect("transaction reads its staged delete")
+                    .is_empty()
+            );
+
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE team_id = $1 LIMIT 10",
+                    &[&"team-transaction"],
+                )
+                .await
+                .expect("another session reads the committed snapshot")
+                .is_empty(),
+                "another PostgreSQL session must not see uncommitted inserts"
+            );
+            let external_seed_rows = bob
+                .query(
+                    "SELECT title FROM documents WHERE team_id = $1 \
+                     ORDER BY created_at LIMIT 10",
+                    &[&"team-seed"],
+                )
+                .await
+                .expect("another session does not see the staged update");
+            assert_eq!(
+                external_seed_rows
+                    .iter()
+                    .map(|row| row.get::<_, String>(0))
+                    .collect::<Vec<_>>(),
+                ["seed-one".to_owned(), "seed-two".to_owned()]
+            );
+            assert_eq!(
+                bob.query(
+                    "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                    &[&seeded_ids[2]],
+                )
+                .await
+                .expect("another session does not see the staged delete")
+                .len(),
+                1
+            );
+            collect_stream_deltas(
+                &mut carol_subscription,
+                &mut carol_subscription_log,
+                Duration::from_millis(150),
+            )
+            .await;
+            assert!(
+                inserted_ids.iter().all(|id| {
+                    !has_any_change(&carol_subscription_log, ObjectId::from_uuid(*id))
+                })
+            );
+            assert!(
+                seeded_ids.iter().all(|id| {
+                    !has_any_change(&carol_subscription_log, ObjectId::from_uuid(*id))
+                })
+            );
+
+            alice_tx
+                .commit()
+                .await
+                .expect("atomically commit staged PostgreSQL mutations");
+
+            let committed_rows = bob
+                .query(
+                    "SELECT id FROM documents WHERE team_id = $1 \
+                     ORDER BY created_at LIMIT 10",
+                    &[&"team-transaction"],
+                )
+                .await
+                .expect("another session sees inserts after COMMIT");
+            assert_eq!(committed_rows.len(), 3);
+            let committed_updates = bob
+                .query(
+                    "SELECT title, optional_note FROM documents WHERE team_id = $1 \
+                     ORDER BY created_at LIMIT 10",
+                    &[&"team-seed"],
+                )
+                .await
+                .expect("another session sees predicate updates after COMMIT");
+            assert_eq!(committed_updates.len(), 2);
+            assert!(committed_updates.iter().all(|row| {
+                row.get::<_, String>(0) == "predicate-updated"
+                    && row.get::<_, Option<String>>(1).as_deref() == Some("updated-note")
+            }));
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                    &[&seeded_ids[2]],
+                )
+                .await
+                .expect("committed exact-id DELETE becomes visible")
+                .is_empty()
+            );
+
+            wait_for_subscription_update(
+                &mut carol_subscription,
+                &mut carol_subscription_log,
+                Duration::from_secs(5),
+                "alice's commit to reach carol atomically",
+                |log| {
+                    log.iter().any(|delta| {
+                        inserted_ids.iter().all(|id| {
+                            delta
+                                .added
+                                .iter()
+                                .any(|change| change.id == ObjectId::from_uuid(*id))
+                        }) && seeded_ids[..2].iter().all(|id| {
+                            delta
+                                .updated
+                                .iter()
+                                .any(|change| change.id == ObjectId::from_uuid(*id))
+                        }) && delta
+                            .removed
+                            .iter()
+                            .any(|change| change.id == ObjectId::from_uuid(seeded_ids[2]))
+                    })
+                },
+            )
+            .await;
+
+            let rollback_ids = [
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000e1")
+                    .expect("first rollback UUID"),
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000e2")
+                    .expect("second rollback UUID"),
+            ];
+            carol_subscription_log.clear();
+            let alice_rollback_tx = alice
+                .transaction()
+                .await
+                .expect("alice begins a transaction to roll back");
+            assert_eq!(
+                alice_rollback_tx
+                    .execute(
+                        "INSERT INTO documents \
+                         (id, team_id, title, optional_note, created_at) VALUES \
+                         ($1, $2, $3, $4, $5), ($6, $2, $7, $4, $8)",
+                        &[
+                            &rollback_ids[0],
+                            &"team-rollback",
+                            &"rollback-one",
+                            &Option::<&str>::None,
+                            &31_i64,
+                            &rollback_ids[1],
+                            &"rollback-two",
+                            &32_i64,
+                        ],
+                    )
+                    .await
+                    .expect("stage rows that will be rolled back"),
+                2
+            );
+            assert_eq!(
+                alice_rollback_tx
+                    .execute(
+                        "UPDATE documents SET title = $1 WHERE team_id = $2",
+                        &[&"must-roll-back", &"team-seed"],
+                    )
+                    .await
+                    .expect("stage predicate update that will be rolled back"),
+                2
+            );
+            assert_eq!(
+                alice_rollback_tx
+                    .query(
+                        "SELECT id FROM documents WHERE team_id = $1 LIMIT 10",
+                        &[&"team-rollback"],
+                    )
+                    .await
+                    .expect("transaction reads rows before rollback")
+                    .len(),
+                2
+            );
+            alice_rollback_tx
+                .rollback()
+                .await
+                .expect("discard all staged mutations");
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE team_id = $1 LIMIT 10",
+                    &[&"team-rollback"],
+                )
+                .await
+                .expect("rolled-back rows stay invisible")
+                .is_empty()
+            );
+            let after_rollback = bob
+                .query(
+                    "SELECT title FROM documents WHERE team_id = $1 LIMIT 10",
+                    &[&"team-seed"],
+                )
+                .await
+                .expect("rolled-back predicate update stays invisible");
+            assert_eq!(after_rollback.len(), 2);
+            assert!(
+                after_rollback
+                    .iter()
+                    .all(|row| { row.get::<_, String>(0) == "predicate-updated" })
+            );
+
+            let failed_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000f1")
+                .expect("failed transaction UUID");
+            let alice_failed_tx = alice
+                .transaction()
+                .await
+                .expect("alice begins a transaction that will fail");
+            assert_eq!(
+                alice_failed_tx
+                    .execute(
+                        "INSERT INTO documents \
+                         (id, team_id, title, optional_note, created_at) \
+                         VALUES ($1, $2, $3, $4, $5)",
+                        &[
+                            &failed_id,
+                            &"team-failed",
+                            &"must-not-commit",
+                            &Option::<&str>::None,
+                            &41_i64,
+                        ],
+                    )
+                    .await
+                    .expect("stage a row before a later statement fails"),
+                1
+            );
+            let duplicate_error = alice_failed_tx
+                .execute(
+                    "INSERT INTO documents \
+                     (id, team_id, title, optional_note, created_at) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &seeded_ids[0],
+                        &"team-failed",
+                        &"duplicate-id",
+                        &Option::<&str>::None,
+                        &42_i64,
+                    ],
+                )
+                .await
+                .expect_err("duplicate id aborts the explicit transaction");
+            assert_eq!(
+                duplicate_error.code().map(|code| code.code()),
+                Some("23505")
+            );
+            let aborted_error = alice_failed_tx
+                .query_one("SELECT 1", &[])
+                .await
+                .expect_err("an aborted transaction rejects later statements");
+            assert_eq!(aborted_error.code().map(|code| code.code()), Some("25P02"));
+            alice_failed_tx
+                .commit()
+                .await
+                .expect("COMMIT on a failed transaction performs PostgreSQL rollback");
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                    &[&failed_id],
+                )
+                .await
+                .expect("failed transaction has no partial effects")
+                .is_empty()
+            );
+
+            let atomic_ids = [
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000101")
+                    .expect("first atomic-statement UUID"),
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000102")
+                    .expect("second atomic-statement UUID"),
+            ];
+            let null_title: Option<&str> = None;
+            let atomic_error = alice
+                .execute(
+                    "INSERT INTO documents \
+                     (id, team_id, title, optional_note, created_at) VALUES \
+                     ($1, $2, $3, $4, $5), ($6, $2, $7, $4, $8)",
+                    &[
+                        &atomic_ids[0],
+                        &"team-atomic-error",
+                        &Some("valid-row"),
+                        &Option::<&str>::None,
+                        &51_i64,
+                        &atomic_ids[1],
+                        &null_title,
+                        &52_i64,
+                    ],
+                )
+                .await
+                .expect_err("one invalid VALUES row rejects the whole INSERT statement");
+            assert_eq!(atomic_error.code().map(|code| code.code()), Some("23502"));
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE id IN ($1, $2) LIMIT 10",
+                    &[&atomic_ids[0], &atomic_ids[1]],
+                )
+                .await
+                .expect("failed multi-row INSERT leaves no partial rows")
+                .is_empty()
+            );
+
+            collect_stream_deltas(
+                &mut carol_subscription,
+                &mut carol_subscription_log,
+                Duration::from_millis(150),
+            )
+            .await;
+            for id in rollback_ids
+                .iter()
+                .chain(std::iter::once(&failed_id))
+                .chain(atomic_ids.iter())
+            {
+                assert!(
+                    !has_any_change(&carol_subscription_log, ObjectId::from_uuid(*id)),
+                    "discarded row {id} must not reach an active Jazz subscription"
+                );
+            }
+            assert!(
+                seeded_ids[..2].iter().all(|id| {
+                    !has_any_change(&carol_subscription_log, ObjectId::from_uuid(*id))
+                }),
+                "a rolled-back predicate update must not reach an active Jazz subscription"
+            );
+
+            let disconnected_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000110")
+                .expect("dave's disconnected transaction UUID");
+            carol_subscription_log.clear();
+            let database = server.app_id().to_string();
+            let mut dave = raw_authenticated_postgres_socket(
+                server.postgres_port().expect("PostgreSQL port for dave"),
+                &database,
+                JazzServer::POSTGRES_SECRET,
+            )
+            .await;
+            let dave_begin = raw_simple_query(&mut dave, "BEGIN").await;
+            assert_eq!(command_tags(&dave_begin), ["BEGIN"]);
+            assert_eq!(ready_status(&dave_begin), Some(b'T'));
+            let dave_insert = raw_simple_query(
+                &mut dave,
+                &format!(
+                    "INSERT INTO documents (id, team_id, title, created_at) VALUES \
+                     ('{disconnected_id}', 'team-disconnect', 'dave-staged', 61)"
+                ),
+            )
+            .await;
+            assert_eq!(command_tags(&dave_insert), ["INSERT 0 1"]);
+            assert_eq!(ready_status(&dave_insert), Some(b'T'));
+
+            // Close the transport without a PostgreSQL Terminate, COMMIT, or
+            // ROLLBACK message. EOF confirms the server observed the disconnect.
+            dave.shutdown()
+                .await
+                .expect("dave disconnects with an open transaction");
+            let mut eof = [0_u8; 1];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), dave.read(&mut eof))
+                    .await
+                    .expect("server closes dave's disconnected session")
+                    .expect("read dave's disconnected session EOF"),
+                0
+            );
+            assert!(
+                bob.query(
+                    "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                    &[&disconnected_id],
+                )
+                .await
+                .expect("bob cannot observe dave's abandoned insert")
+                .is_empty()
+            );
+            collect_stream_deltas(
+                &mut carol_subscription,
+                &mut carol_subscription_log,
+                Duration::from_millis(150),
+            )
+            .await;
+            assert!(
+                !has_any_change(
+                    &carol_subscription_log,
+                    ObjectId::from_uuid(disconnected_id)
+                ),
+                "carol must not receive dave's abandoned insert"
+            );
+
+            drop(bob);
+            bob_connection_task
+                .await
+                .expect("join bob's PostgreSQL connection");
+            drop(alice);
+            alice_connection_task
+                .await
+                .expect("join alice's PostgreSQL connection");
+            carol
+                .shutdown()
+                .await
+                .expect("shutdown carol's Jazz client");
+            server.shutdown().await;
+
+            let restarted = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema)
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let restarted_url = restarted
+                .postgres_url()
+                .expect("PostgreSQL URL after transaction restart");
+            let (restarted_client, restarted_connection) =
+                tokio_postgres::connect(&restarted_url, NoTls)
+                    .await
+                    .expect("connect after transaction restart");
+            let restarted_connection_task = tokio::spawn(async move {
+                restarted_connection
+                    .await
+                    .expect("post-restart transaction connection remains healthy")
+            });
+            assert_eq!(
+                restarted_client
+                    .query(
+                        "SELECT id FROM documents WHERE team_id = $1 LIMIT 10",
+                        &[&"team-transaction"],
+                    )
+                    .await
+                    .expect("committed transaction rows survive restart")
+                    .len(),
+                3
+            );
+            let restarted_updates = restarted_client
+                .query(
+                    "SELECT title, optional_note FROM documents WHERE team_id = $1 LIMIT 10",
+                    &[&"team-seed"],
+                )
+                .await
+                .expect("committed predicate update survives restart");
+            assert_eq!(restarted_updates.len(), 2);
+            assert!(restarted_updates.iter().all(|row| {
+                row.get::<_, String>(0) == "predicate-updated"
+                    && row.get::<_, Option<String>>(1).as_deref() == Some("updated-note")
+            }));
+            assert!(
+                restarted_client
+                    .query(
+                        "SELECT id FROM documents WHERE id = $1 LIMIT 1",
+                        &[&seeded_ids[2]],
+                    )
+                    .await
+                    .expect("committed transaction delete survives restart")
+                    .is_empty()
+            );
+            for team in [
+                "team-rollback",
+                "team-failed",
+                "team-atomic-error",
+                "team-disconnect",
+            ] {
+                assert!(
+                    restarted_client
+                        .query(
+                            "SELECT id FROM documents WHERE team_id = $1 LIMIT 10",
+                            &[&team],
+                        )
+                        .await
+                        .expect("discarded transaction rows remain absent after restart")
+                        .is_empty(),
+                    "discarded rows for {team} must not reappear after restart"
+                );
+            }
+            drop(restarted_client);
+            restarted_connection_task
+                .await
+                .expect("join post-restart transaction connection");
+            restarted.shutdown().await;
+        })
+        .await;
+}
+
+/// Contract: PostgreSQL exclusive transactions encode large Text and Blob
+/// inserts as ordinary extent-backed values, expose exact logical bytes to
+/// read-your-writes, let a partial update inherit untouched large columns, and
+/// never mistake authored handle-shaped Blob bytes for a stored handle.
+///
+/// Actor: alice writes and reads the asset through PostgreSQL.
+///
+/// ```text
+/// alice --BEGIN/INSERT--> tx overlay --SELECT exact bytes--> alice
+/// alice ------COMMIT----> RocksDB
+/// alice --BEGIN/UPDATE name only--> parent large values --SELECT--> alice
+/// alice ------COMMIT/new BEGIN/restart----------------------> same bytes
+/// alice --UPDATE handle-shaped Blob/SELECT/ROLLBACK--------> exact authored bytes
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_transactions_preserve_large_values_across_partial_updates_and_restart() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let data_dir = tempfile::tempdir().expect("temporary large-value data dir");
+            let app_id = jazz::tools::AppId::random();
+            let schema = postgres_large_values_schema();
+            let asset_id =
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000b1").expect("asset UUID");
+            let body = "transactional-large-text-".repeat(4_096);
+            let data = (0..128 * 1024)
+                .map(|index| ((index * 31 + 7) % 251) as u8)
+                .collect::<Vec<_>>();
+
+            let server = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let url = server.postgres_url().expect("PostgreSQL URL");
+            let (mut alice, alice_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect alice for large-value writes");
+            let alice_connection_task = tokio::spawn(async move {
+                alice_connection
+                    .await
+                    .expect("alice's large-value connection remains healthy")
+            });
+
+            let insert = alice
+                .transaction()
+                .await
+                .expect("begin large-value insert transaction");
+            assert_eq!(
+                insert
+                    .execute(
+                        "INSERT INTO assets (id, name, body, data) VALUES ($1, $2, $3, $4)",
+                        &[&asset_id, &"original", &body, &data],
+                    )
+                    .await
+                    .expect("stage large Text and Blob values"),
+                1
+            );
+            let staged_insert = insert
+                .query_one(
+                    "SELECT name, body, data FROM assets WHERE id = $1 LIMIT 1",
+                    &[&asset_id],
+                )
+                .await
+                .expect("read staged large values before commit");
+            assert_eq!(staged_insert.get::<_, String>(0), "original");
+            assert_eq!(staged_insert.get::<_, String>(1), body);
+            assert_eq!(staged_insert.get::<_, Vec<u8>>(2), data);
+            insert
+                .commit()
+                .await
+                .expect("commit extent-backed large-value insert");
+
+            let update = alice
+                .transaction()
+                .await
+                .expect("begin partial large-value row update");
+            assert_eq!(
+                update
+                    .execute(
+                        "UPDATE assets SET name = $1 WHERE id = $2",
+                        &[&"renamed", &asset_id],
+                    )
+                    .await
+                    .expect("stage ordinary-column-only update"),
+                1
+            );
+            let staged_update = update
+                .query_one(
+                    "SELECT name, body, data FROM assets WHERE id = $1 LIMIT 1",
+                    &[&asset_id],
+                )
+                .await
+                .expect("read inherited large values before update commit");
+            assert_eq!(staged_update.get::<_, String>(0), "renamed");
+            assert_eq!(staged_update.get::<_, String>(1), body);
+            assert_eq!(staged_update.get::<_, Vec<u8>>(2), data);
+            update
+                .commit()
+                .await
+                .expect("commit partial update without rewriting large values");
+
+            // A fresh transaction sees the large values inherited through the
+            // sparse name-only winner. Read the id first so this also exercises
+            // the projection that must not resolve any large-value history.
+            let inherited = alice
+                .transaction()
+                .await
+                .expect("begin fresh transaction after sparse update");
+            assert_eq!(
+                inherited
+                    .query("SELECT id FROM assets WHERE id = $1 LIMIT 1", &[&asset_id],)
+                    .await
+                    .expect("read only id without resolving large values")
+                    .len(),
+                1
+            );
+            let inherited_row = inherited
+                .query_one(
+                    "SELECT name, body, data FROM assets WHERE id = $1 LIMIT 1",
+                    &[&asset_id],
+                )
+                .await
+                .expect("read large values inherited through sparse winner");
+            assert_eq!(inherited_row.get::<_, String>(0), "renamed");
+            assert_eq!(inherited_row.get::<_, String>(1), body);
+            assert_eq!(inherited_row.get::<_, Vec<u8>>(2), data);
+            inherited
+                .rollback()
+                .await
+                .expect("close inherited-value read transaction");
+
+            let handle_shaped_data = handle_shaped_blob_payload(asset_id);
+            let handle_shaped = alice
+                .transaction()
+                .await
+                .expect("begin handle-shaped Blob transaction");
+            assert_eq!(
+                handle_shaped
+                    .execute(
+                        "UPDATE assets SET data = $1 WHERE id = $2",
+                        &[&handle_shaped_data, &asset_id],
+                    )
+                    .await
+                    .expect("stage a Blob whose bytes encode as a valid Jazz handle"),
+                1
+            );
+            assert_eq!(
+                handle_shaped
+                    .query_one(
+                        "SELECT data FROM assets WHERE id = $1 LIMIT 1",
+                        &[&asset_id],
+                    )
+                    .await
+                    .expect("read handle-shaped authored bytes without hydrating them")
+                    .get::<_, Vec<u8>>(0),
+                handle_shaped_data
+            );
+            handle_shaped
+                .rollback()
+                .await
+                .expect("discard handle-shaped Blob update");
+
+            let committed = alice
+                .query_one(
+                    "SELECT name, body, data FROM assets WHERE id = $1 LIMIT 1",
+                    &[&asset_id],
+                )
+                .await
+                .expect("read committed inherited large values");
+            assert_eq!(committed.get::<_, String>(0), "renamed");
+            assert_eq!(committed.get::<_, String>(1), body);
+            assert_eq!(committed.get::<_, Vec<u8>>(2), data);
+
+            drop(alice);
+            alice_connection_task
+                .await
+                .expect("join alice's large-value connection");
+            server.shutdown().await;
+
+            let restarted = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema)
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let restarted_url = restarted
+                .postgres_url()
+                .expect("PostgreSQL URL after large-value restart");
+            let (alice, restarted_connection) = tokio_postgres::connect(&restarted_url, NoTls)
+                .await
+                .expect("reconnect alice after large-value restart");
+            let restarted_connection_task = tokio::spawn(async move {
+                restarted_connection
+                    .await
+                    .expect("restarted large-value connection remains healthy")
+            });
+            let durable = alice
+                .query_one(
+                    "SELECT name, body, data FROM assets WHERE id = $1 LIMIT 1",
+                    &[&asset_id],
+                )
+                .await
+                .expect("read durable large values after restart");
+            assert_eq!(durable.get::<_, String>(0), "renamed");
+            assert_eq!(durable.get::<_, String>(1), body);
+            assert_eq!(durable.get::<_, Vec<u8>>(2), data);
+
+            drop(alice);
+            restarted_connection_task
+                .await
+                .expect("join restarted large-value connection");
+            restarted.shutdown().await;
+        })
+        .await;
+}
+
+/// Contract: PostgreSQL rejects a table containing nullable large-value
+/// columns before any read or write can reach Jazz's non-null large-value
+/// storage path.
+///
+/// Actor: alice probes the unsupported table, receives `0A000`, then reuses the
+/// same connection successfully.
+///
+/// ```text
+/// alice --SELECT/INSERT nullable large value--> 0A000
+/// alice ----------------SELECT 1-----------> healthy connection
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_rejects_nullable_large_value_tables_without_writing() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = JazzServer::builder()
+                .with_schema(postgres_nullable_large_values_schema())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let url = server.postgres_url().expect("PostgreSQL URL");
+            let (alice, connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect nullable large-value probe");
+            let connection_task = tokio::spawn(async move {
+                connection
+                    .await
+                    .expect("nullable large-value probe connection remains healthy")
+            });
+
+            let read_error = alice
+                .query("SELECT id FROM nullable_assets LIMIT 1", &[])
+                .await
+                .expect_err("nullable large-value table reads are rejected explicitly");
+            assert_eq!(read_error.code().map(|code| code.code()), Some("0A000"));
+            let insert_error = alice
+                .execute(
+                    "INSERT INTO nullable_assets (data) VALUES ($1)",
+                    &[&Some(vec![1_u8, 2, 3])],
+                )
+                .await
+                .expect_err("nullable large-value table writes are rejected explicitly");
+            assert_eq!(insert_error.code().map(|code| code.code()), Some("0A000"));
+            assert_eq!(
+                alice
+                    .query_one("SELECT 1", &[])
+                    .await
+                    .expect("connection remains usable after explicit rejection")
+                    .get::<_, i32>(0),
+                1
+            );
+
+            drop(alice);
+            connection_task
+                .await
+                .expect("join nullable large-value probe connection");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+/// Contract: a serialization failure while committing an exclusive PostgreSQL
+/// transaction closes that transaction and returns ReadyForQuery(I), for both
+/// the simple and extended protocols, so the same connection is immediately
+/// reusable.
+///
+/// Actors: alice and bob conflict through raw simple-query connections; carol
+/// and dave repeat the conflict through prepared/extended execution.
+///
+/// ```text
+/// alice/carol --BEGIN/update----> same snapshot
+/// bob/dave   --BEGIN/update----> same snapshot
+/// alice/carol --COMMIT---------> accepted
+/// bob/dave   --COMMIT---------> 40001 + ReadyForQuery(I) --SELECT 1--> healthy
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn postgres_commit_conflicts_return_connections_to_idle() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let data_dir = tempfile::tempdir().expect("temporary conflict data dir");
+            let app_id = jazz::tools::AppId::random();
+            let server = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(documents_schema())
+                .with_data_dir(data_dir.path())
+                .with_postgres_port(0)
+                .with_persistent_storage()
+                .start()
+                .await;
+            let url = server.postgres_url().expect("PostgreSQL URL");
+            let row_id = uuid::Uuid::parse_str("00000000-0000-4000-8000-0000000000c1")
+                .expect("conflict row UUID");
+            let (seed, seed_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect conflict seed writer");
+            let seed_connection_task = tokio::spawn(async move {
+                seed_connection
+                    .await
+                    .expect("conflict seed connection remains healthy")
+            });
+            seed.execute(
+                "INSERT INTO documents (id, team_id, title, created_at) \
+                 VALUES ($1, $2, $3, $4)",
+                &[&row_id, &"team-conflict", &"base", &1_i64],
+            )
+            .await
+            .expect("seed the row used by both conflict canaries");
+
+            let database = server.app_id().to_string();
+            let port = server.postgres_port().expect("PostgreSQL conflict port");
+            let mut alice =
+                raw_authenticated_postgres_socket(port, &database, JazzServer::POSTGRES_SECRET)
+                    .await;
+            let mut bob =
+                raw_authenticated_postgres_socket(port, &database, JazzServer::POSTGRES_SECRET)
+                    .await;
+            assert_eq!(
+                ready_status(&raw_simple_query(&mut alice, "BEGIN").await),
+                Some(b'T')
+            );
+            assert_eq!(
+                ready_status(&raw_simple_query(&mut bob, "BEGIN").await),
+                Some(b'T')
+            );
+            assert_eq!(
+                command_tags(
+                    &raw_simple_query(
+                        &mut alice,
+                        &format!("UPDATE documents SET title = 'alice' WHERE id = '{row_id}'"),
+                    )
+                    .await,
+                ),
+                ["UPDATE 1"]
+            );
+            assert_eq!(
+                command_tags(
+                    &raw_simple_query(
+                        &mut bob,
+                        &format!("UPDATE documents SET title = 'bob' WHERE id = '{row_id}'"),
+                    )
+                    .await,
+                ),
+                ["UPDATE 1"]
+            );
+            let alice_commit = raw_simple_query(&mut alice, "COMMIT").await;
+            assert_eq!(command_tags(&alice_commit), ["COMMIT"]);
+            assert_eq!(ready_status(&alice_commit), Some(b'I'));
+            let bob_conflict = raw_simple_query(&mut bob, "COMMIT").await;
+            assert_eq!(
+                first_error_sqlstate(&bob_conflict).as_deref(),
+                Some("40001")
+            );
+            assert_eq!(ready_status(&bob_conflict), Some(b'I'));
+            let bob_health = raw_simple_query(&mut bob, "SELECT 1").await;
+            assert_eq!(first_data_row_text(&bob_health), Some("1"));
+            assert_eq!(ready_status(&bob_health), Some(b'I'));
+            drop(alice);
+            drop(bob);
+
+            let (carol, carol_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect extended-protocol winner");
+            let carol_connection_task = tokio::spawn(async move {
+                carol_connection
+                    .await
+                    .expect("extended-protocol winner remains healthy")
+            });
+            let (dave, dave_connection) = tokio_postgres::connect(&url, NoTls)
+                .await
+                .expect("connect extended-protocol loser");
+            let dave_connection_task = tokio::spawn(async move {
+                dave_connection
+                    .await
+                    .expect("extended-protocol loser remains healthy")
+            });
+            carol
+                .execute("BEGIN", &[])
+                .await
+                .expect("begin extended winner transaction");
+            dave.execute("BEGIN", &[])
+                .await
+                .expect("begin extended loser transaction");
+            carol
+                .execute(
+                    "UPDATE documents SET title = $1 WHERE id = $2",
+                    &[&"carol", &row_id],
+                )
+                .await
+                .expect("stage extended winner update");
+            dave.execute(
+                "UPDATE documents SET title = $1 WHERE id = $2",
+                &[&"dave", &row_id],
+            )
+            .await
+            .expect("stage extended loser update");
+            carol
+                .execute("COMMIT", &[])
+                .await
+                .expect("commit extended winner");
+            let dave_conflict = dave
+                .execute("COMMIT", &[])
+                .await
+                .expect_err("second extended commit conflicts");
+            assert_eq!(dave_conflict.code().map(|code| code.code()), Some("40001"));
+            assert_eq!(
+                dave.query_one("SELECT 1", &[])
+                    .await
+                    .expect("extended loser connection immediately returns to idle")
+                    .get::<_, i32>(0),
+                1
+            );
+
+            drop(dave);
+            dave_connection_task
+                .await
+                .expect("join extended loser connection");
+            drop(carol);
+            carol_connection_task
+                .await
+                .expect("join extended winner connection");
+            drop(seed);
+            seed_connection_task
+                .await
+                .expect("join conflict seed connection");
             server.shutdown().await;
         })
         .await;
@@ -1132,6 +2336,11 @@ impl Drop for ChildGuard {
 }
 
 async fn raw_extended_protocol_lifecycle(port: u16, database: &str, password: &str) {
+    let mut socket = raw_authenticated_postgres_socket(port, database, password).await;
+    raw_extended_protocol_lifecycle_body(&mut socket).await;
+}
+
+async fn raw_authenticated_postgres_socket(port: u16, database: &str, password: &str) -> TcpStream {
     let mut socket = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect raw PostgreSQL client");
@@ -1165,22 +2374,38 @@ async fn raw_extended_protocol_lifecycle(port: u16, database: &str, password: &s
         }
     }
 
+    socket
+}
+
+async fn raw_extended_protocol_lifecycle_body(mut socket: &mut TcpStream) {
     let returning_sql = "INSERT INTO documents (id, team_id, title, created_at) \
                          VALUES ('00000000-0000-4000-8000-0000000000b1', \
-                         'team-wire', 'returning-wire', 301) RETURNING id";
+                         'team-wire', 'returning-wire-one', 301), \
+                         ('00000000-0000-4000-8000-0000000000b2', \
+                         'team-wire', 'returning-wire-two', 302) RETURNING id";
     let mut returning_query = Vec::new();
     push_c_string(&mut returning_query, returning_sql);
     write_frontend_frame(&mut socket, b'Q', &returning_query).await;
     let returning_messages = read_until_ready(&mut socket).await;
     assert_eq!(
         command_tags(&returning_messages),
-        ["INSERT 0 1"],
+        ["INSERT 0 2"],
         "INSERT RETURNING must emit a valid PostgreSQL command tag"
+    );
+    assert_eq!(
+        returning_messages
+            .iter()
+            .filter(|(tag, _)| *tag == b'D')
+            .count(),
+        2,
+        "multi-row INSERT RETURNING emits one DataRow per VALUES row"
     );
 
     let mutation_sql = "INSERT INTO documents (id, team_id, title, created_at) \
-                        VALUES ('00000000-0000-4000-8000-0000000000b2', \
-                        'team-wire', 'execute-once-wire', 302)";
+                        VALUES ('00000000-0000-4000-8000-0000000000b3', \
+                        'team-wire', 'execute-once-wire-one', 303), \
+                        ('00000000-0000-4000-8000-0000000000b4', \
+                        'team-wire', 'execute-once-wire-two', 304)";
     let mut mutation_parse = Vec::new();
     push_c_string(&mut mutation_parse, "mutation_once");
     push_c_string(&mut mutation_parse, mutation_sql);
@@ -1200,11 +2425,49 @@ async fn raw_extended_protocol_lifecycle(port: u16, database: &str, password: &s
     write_frontend_frame(&mut socket, b'E', &mutation_execute).await;
     write_frontend_frame(&mut socket, b'S', &[]).await;
     let mutation_messages = read_until_ready(&mut socket).await;
-    assert_eq!(command_tags(&mutation_messages), ["INSERT 0 1"]);
+    assert_eq!(command_tags(&mutation_messages), ["INSERT 0 2"]);
     assert_eq!(
         first_error_sqlstate(&mutation_messages).as_deref(),
         Some("26000"),
         "a completed mutation portal must not execute its DML twice"
+    );
+
+    let begun = raw_simple_query(&mut socket, "BEGIN").await;
+    assert_eq!(command_tags(&begun), ["BEGIN"]);
+    assert_eq!(ready_status(&begun), Some(b'T'));
+    let staged = raw_simple_query(
+        &mut socket,
+        "INSERT INTO documents (id, team_id, title, created_at) VALUES \
+         ('00000000-0000-4000-8000-0000000000c1', 'team-wire-failed', 'one', 401), \
+         ('00000000-0000-4000-8000-0000000000c2', 'team-wire-failed', 'two', 402)",
+    )
+    .await;
+    assert_eq!(command_tags(&staged), ["INSERT 0 2"]);
+    assert_eq!(ready_status(&staged), Some(b'T'));
+    let failed = raw_simple_query(
+        &mut socket,
+        "INSERT INTO documents (id, team_id, title, created_at) VALUES \
+         ('00000000-0000-4000-8000-0000000000c1', 'team-wire-failed', 'duplicate', 403)",
+    )
+    .await;
+    assert_eq!(first_error_sqlstate(&failed).as_deref(), Some("23505"));
+    assert_eq!(ready_status(&failed), Some(b'E'));
+    let rolled_back = raw_simple_query(&mut socket, "COMMIT").await;
+    assert_eq!(
+        command_tags(&rolled_back),
+        ["ROLLBACK"],
+        "COMMIT in an aborted transaction reports PostgreSQL rollback"
+    );
+    assert_eq!(ready_status(&rolled_back), Some(b'I'));
+    let discarded = raw_simple_query(
+        &mut socket,
+        "SELECT id FROM documents WHERE team_id = 'team-wire-failed' LIMIT 10",
+    )
+    .await;
+    assert_eq!(
+        discarded.iter().filter(|(tag, _)| *tag == b'D').count(),
+        0,
+        "a failed transaction does not partially publish staged rows"
     );
 
     let mut parse = Vec::new();
@@ -1328,6 +2591,13 @@ async fn raw_extended_protocol_lifecycle(port: u16, database: &str, password: &s
     );
 }
 
+async fn raw_simple_query(socket: &mut TcpStream, sql: &str) -> Vec<(u8, Vec<u8>)> {
+    let mut query = Vec::new();
+    push_c_string(&mut query, sql);
+    write_frontend_frame(socket, b'Q', &query).await;
+    read_until_ready(socket).await
+}
+
 fn push_c_string(target: &mut Vec<u8>, value: &str) {
     target.extend_from_slice(value.as_bytes());
     target.push(0);
@@ -1397,6 +2667,13 @@ fn command_tags(messages: &[(u8, Vec<u8>)]) -> Vec<&str> {
             std::str::from_utf8(&payload[..end]).expect("PostgreSQL command tag is UTF-8")
         })
         .collect()
+}
+
+fn ready_status(messages: &[(u8, Vec<u8>)]) -> Option<u8> {
+    messages
+        .iter()
+        .find(|(tag, _)| *tag == b'Z')
+        .and_then(|(_, payload)| payload.first().copied())
 }
 
 fn first_error_sqlstate(messages: &[(u8, Vec<u8>)]) -> Option<String> {

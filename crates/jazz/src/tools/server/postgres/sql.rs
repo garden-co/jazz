@@ -17,6 +17,7 @@ const MAX_SQL_TOKENS: usize = 2_048;
 const MAX_EXPRESSION_DEPTH: usize = 64;
 const MAX_PREFIX_OPERATOR_DEPTH: usize = 64;
 const MAX_FILTER_NODES: usize = 512;
+pub(crate) const MAX_INSERT_ROWS: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ParsedStatement {
@@ -41,7 +42,7 @@ pub(crate) enum MutationKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InsertPlan {
     pub(crate) columns: Vec<String>,
-    pub(crate) values: Vec<SqlLiteral>,
+    pub(crate) rows: Vec<Vec<SqlLiteral>>,
     pub(crate) returning: Option<ReturningId>,
 }
 
@@ -53,7 +54,7 @@ pub(crate) struct ReturningId {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UpdatePlan {
     pub(crate) assignments: Vec<MutationAssignment>,
-    pub(crate) row_id: SqlLiteral,
+    pub(crate) filter: FilterExpr,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -340,7 +341,7 @@ fn parse_insert(insert: sqlparser::ast::Insert) -> Result<MutationPlan, SqlError
 
     let source = insert
         .source
-        .ok_or_else(|| SqlError("INSERT requires exactly one explicit VALUES row".to_owned()))?;
+        .ok_or_else(|| SqlError("INSERT requires at least one explicit VALUES row".to_owned()))?;
     if source.with.is_some()
         || source.order_by.is_some()
         || source.limit_clause.is_some()
@@ -359,23 +360,32 @@ fn parse_insert(insert: sqlparser::ast::Insert) -> Result<MutationPlan, SqlError
     if values.explicit_row || values.value_keyword {
         return Err(unsupported("INSERT VALUE and explicit ROW syntax"));
     }
-    if values.rows.len() != 1 {
+    if values.rows.is_empty() {
         return Err(SqlError(
-            "INSERT requires exactly one VALUES row".to_owned(),
+            "INSERT requires at least one VALUES row".to_owned(),
         ));
     }
-    let row = values
-        .rows
-        .first()
-        .expect("exactly one INSERT row was checked");
-    if row.len() != columns.len() {
+    if values.rows.len() > MAX_INSERT_ROWS {
         return Err(SqlError(format!(
-            "INSERT has {} target columns but {} values",
-            columns.len(),
-            row.len()
+            "INSERT cannot contain more than {MAX_INSERT_ROWS} VALUES rows"
         )));
     }
-    let values = row.iter().map(parse_literal).collect::<Result<_, _>>()?;
+    let rows = values
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            if row.len() != columns.len() {
+                return Err(SqlError(format!(
+                    "INSERT row {} has {} target columns but {} values",
+                    row_index + 1,
+                    columns.len(),
+                    row.len()
+                )));
+            }
+            row.iter().map(parse_literal).collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let returning = insert
         .returning
         .as_deref()
@@ -386,7 +396,7 @@ fn parse_insert(insert: sqlparser::ast::Insert) -> Result<MutationPlan, SqlError
         table,
         kind: MutationKind::Insert(InsertPlan {
             columns,
-            values,
+            rows,
             returning,
         }),
     })
@@ -433,13 +443,19 @@ fn parse_update(update: sqlparser::ast::Update) -> Result<MutationPlan, SqlError
             .collect::<Vec<_>>(),
         "UPDATE assignment",
     )?;
-    let row_id = parse_required_row_id_filter(update.selection.as_ref(), "UPDATE", &table)?;
+    let selection = update
+        .selection
+        .as_ref()
+        .ok_or_else(|| SqlError("UPDATE requires a WHERE expression".to_owned()))?;
+    validate_filter_complexity(selection)?;
+    validate_mutation_filter_qualifiers(selection, &table)?;
+    let filter = parse_filter(selection)?;
 
     Ok(MutationPlan {
         table,
         kind: MutationKind::Update(UpdatePlan {
             assignments,
-            row_id,
+            filter,
         }),
     })
 }
@@ -711,6 +727,59 @@ fn validate_filter_complexity(root: &Expr) -> Result<(), SqlError> {
         }
     }
     Ok(())
+}
+
+fn validate_mutation_filter_qualifiers(expr: &Expr, table: &str) -> Result<(), SqlError> {
+    match expr {
+        Expr::BinaryOp { left, right, .. } => {
+            validate_mutation_column_qualifier(left, table)?;
+            validate_mutation_column_qualifier(right, table)?;
+            if matches!(
+                expr,
+                Expr::BinaryOp {
+                    op: BinaryOperator::And | BinaryOperator::Or,
+                    ..
+                }
+            ) {
+                validate_mutation_filter_qualifiers(left, table)?;
+                validate_mutation_filter_qualifiers(right, table)?;
+            }
+        }
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        }
+        | Expr::Nested(expr) => validate_mutation_filter_qualifiers(expr, table)?,
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
+            validate_mutation_column_qualifier(expr, table)?;
+        }
+        Expr::InList { expr, .. } => validate_mutation_column_qualifier(expr, table)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_mutation_column_qualifier(expr: &Expr, table: &str) -> Result<(), SqlError> {
+    let parts = match strip_nested_expr(expr) {
+        Expr::Identifier(identifier) => vec![normalize_ident(identifier)],
+        Expr::CompoundIdentifier(identifiers) => {
+            identifiers.iter().map(normalize_ident).collect::<Vec<_>>()
+        }
+        _ => return Ok(()),
+    };
+    let valid = match parts.as_slice() {
+        [_column] => true,
+        [qualifier, _column] => qualifier == table,
+        [schema, qualifier, _column] => schema == "public" && qualifier == table,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SqlError(format!(
+            "UPDATE filter column must reference target table public.{table}"
+        )))
+    }
 }
 
 fn parse_source(from: &[sqlparser::ast::TableWithJoins]) -> Result<SelectSource, SqlError> {
@@ -1112,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_basic_single_row_mutations() {
+    fn parses_basic_mutations() {
         let ParsedStatement::Mutation(insert) = parse_sql(
             "INSERT INTO public.documents (team_id, title, created_at) \
              VALUES ($1, 'new document', -1) RETURNING id AS document_id",
@@ -1126,12 +1195,12 @@ mod tests {
         };
         assert_eq!(insert.columns, ["team_id", "title", "created_at"]);
         assert_eq!(
-            insert.values,
-            [
+            insert.rows,
+            [vec![
                 SqlLiteral::Placeholder(1),
                 SqlLiteral::String("new document".to_owned()),
                 SqlLiteral::Number("-1".to_owned()),
-            ]
+            ]]
         );
         assert_eq!(
             insert.returning,
@@ -1165,8 +1234,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            update.row_id,
-            SqlLiteral::String("00000000-0000-4000-8000-000000000001".to_owned())
+            update.filter,
+            FilterExpr::Compare {
+                column: "id".to_owned(),
+                op: CompareOp::Eq,
+                literal: SqlLiteral::String("00000000-0000-4000-8000-000000000001".to_owned()),
+            }
         );
 
         let ParsedStatement::Mutation(delete) =
@@ -1182,19 +1255,87 @@ mod tests {
     }
 
     #[test]
+    fn parses_multi_row_insert_and_predicate_update() {
+        let ParsedStatement::Mutation(insert) = parse_sql(
+            "INSERT INTO documents (team_id, title) VALUES \
+             ($1, 'first'), ($1, $2), ('another-team', 'third') RETURNING id",
+        )
+        .expect("parse insert") else {
+            panic!("expected insert mutation");
+        };
+        let MutationKind::Insert(insert) = insert.kind else {
+            panic!("expected insert plan");
+        };
+        assert_eq!(insert.rows.len(), 3);
+        assert_eq!(
+            insert.rows[1],
+            [SqlLiteral::Placeholder(1), SqlLiteral::Placeholder(2)]
+        );
+
+        let ParsedStatement::Mutation(update) = parse_sql(
+            "UPDATE documents SET title = $1 \
+             WHERE team_id = $2 AND (archived = false OR title IN ('draft', $3))",
+        )
+        .expect("parse update") else {
+            panic!("expected update mutation");
+        };
+        let MutationKind::Update(update) = update.kind else {
+            panic!("expected update plan");
+        };
+        assert_eq!(
+            update.filter,
+            FilterExpr::And(
+                Box::new(FilterExpr::Compare {
+                    column: "team_id".to_owned(),
+                    op: CompareOp::Eq,
+                    literal: SqlLiteral::Placeholder(2),
+                }),
+                Box::new(FilterExpr::Or(
+                    Box::new(FilterExpr::Compare {
+                        column: "archived".to_owned(),
+                        op: CompareOp::Eq,
+                        literal: SqlLiteral::Boolean(false),
+                    }),
+                    Box::new(FilterExpr::In {
+                        column: "title".to_owned(),
+                        values: vec![
+                            SqlLiteral::String("draft".to_owned()),
+                            SqlLiteral::Placeholder(3),
+                        ],
+                        negated: false,
+                    }),
+                )),
+            )
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_mutation_shapes_and_joins() {
         assert!(parse_sql("DELETE FROM documents").is_err());
         assert!(parse_sql("DELETE FROM documents WHERE team_id = 'team'").is_err());
         assert!(parse_sql("DELETE FROM documents WHERE users.id = $1").is_err());
         assert!(parse_sql("DELETE FROM documents WHERE private.documents.id = $1").is_err());
         assert!(parse_sql("UPDATE documents SET title = 'x' WHERE users.id = $1").is_err());
+        assert!(parse_sql("UPDATE documents SET title = 'x' WHERE users.team_id = $1").is_err());
+        assert!(
+            parse_sql("UPDATE documents SET title = 'x' WHERE private.documents.team_id = $1")
+                .is_err()
+        );
+        assert!(parse_sql("UPDATE documents SET title = 'x' WHERE documents.team_id = $1").is_ok());
+        assert!(
+            parse_sql("UPDATE documents SET title = 'x' WHERE public.documents.team_id = $1")
+                .is_ok()
+        );
         assert!(parse_sql("DELETE FROM documents WHERE documents.id = $1").is_ok());
         assert!(parse_sql("DELETE FROM documents WHERE public.documents.id = $1").is_ok());
         assert!(parse_sql("DELETE FROM documents WHERE id = $1 RETURNING id").is_err());
         assert!(parse_sql("UPDATE documents SET title = 'x'").is_err());
         assert!(parse_sql("UPDATE documents SET id = $1 WHERE id = $2").is_err());
         assert!(parse_sql("UPDATE documents SET title = 'x' WHERE id = $1 RETURNING id").is_err());
-        assert!(parse_sql("INSERT INTO documents (title) VALUES ('one'), ('two')").is_err());
+        assert!(parse_sql("INSERT INTO documents (title) VALUES ('one'), ('two')").is_ok());
+        assert!(
+            parse_sql("INSERT INTO documents (title) VALUES ('one'), ('two', 'extra')").is_err()
+        );
         assert!(parse_sql("INSERT INTO documents (title) VALUES ('x') RETURNING title").is_err());
         assert!(parse_sql("INSERT INTO private.documents (title) VALUES ('x')").is_err());
         assert!(parse_sql("SELECT * FROM a JOIN b ON a.id = b.id").is_err());

@@ -34,6 +34,7 @@ use pgwire::messages::extendedquery::{
     TARGET_TYPE_BYTE_PORTAL, TARGET_TYPE_BYTE_STATEMENT,
 };
 use pgwire::messages::response::{ReadyForQuery, TransactionStatus};
+use pgwire::messages::simplequery::Query as SimpleQuery;
 use pgwire::messages::{
     DecodeContext, PgWireBackendMessage, PgWireFrontendMessage, ProtocolVersion,
 };
@@ -53,13 +54,14 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, LargeValueKind, TableSchema};
 use crate::tools::server::core_server_shell::{
-    PostgresMutation, PostgresQueryResult, ServerShellHandle,
+    PostgresMutation, PostgresOpenTransaction, PostgresQueryResult, ServerShellHandle,
 };
 use crate::tools::server::{ServerState, ServerTopology};
 
 use self::sql::{
-    Command, CompareOp, FilterExpr, InsertPlan, MutationKind, MutationPlan, PageValue,
-    ParsedStatement, ProjectedExpr, SelectPlan, SelectSource, SessionFunction, SqlLiteral,
+    Command, CompareOp, FilterExpr, InsertPlan, MAX_INSERT_ROWS, MutationKind, MutationPlan,
+    PageValue, ParsedStatement, ProjectedExpr, SelectPlan, SelectSource, SessionFunction,
+    SqlLiteral,
 };
 
 const POSTGRES_USER: &str = "jazz";
@@ -620,6 +622,7 @@ struct ConnectionResourceUsage {
     portals: HashMap<String, PortalResourceUsage>,
     portal_bytes: usize,
     response_permits: HashMap<String, Arc<tokio::sync::OwnedSemaphorePermit>>,
+    transaction: Option<Arc<PostgresOpenTransaction>>,
 }
 
 struct PortalResourceUsage {
@@ -628,6 +631,38 @@ struct PortalResourceUsage {
 }
 
 impl ConnectionResources {
+    fn transaction(&self) -> Option<Arc<PostgresOpenTransaction>> {
+        self.usage
+            .lock()
+            .expect("PostgreSQL resource lock")
+            .transaction
+            .clone()
+    }
+
+    fn begin_transaction(&self, transaction: PostgresOpenTransaction) -> bool {
+        let mut usage = self.usage.lock().expect("PostgreSQL resource lock");
+        if usage.transaction.is_some() {
+            return false;
+        }
+        usage.transaction = Some(Arc::new(transaction));
+        true
+    }
+
+    fn take_transaction(&self) -> Option<Arc<PostgresOpenTransaction>> {
+        self.usage
+            .lock()
+            .expect("PostgreSQL resource lock")
+            .transaction
+            .take()
+    }
+
+    fn restore_transaction(&self, transaction: Arc<PostgresOpenTransaction>) {
+        let mut usage = self.usage.lock().expect("PostgreSQL resource lock");
+        if usage.transaction.is_none() {
+            usage.transaction = Some(transaction);
+        }
+    }
+
     fn reserve_statement(&self, name: &str, bytes: usize) -> PgWireResult<()> {
         let mut usage = self.usage.lock().expect("PostgreSQL resource lock");
         let existing = usage.statements.get(name).copied();
@@ -848,6 +883,28 @@ impl QueryParser for ParsedQueryParser {
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresBackend {
+    async fn on_query<C>(&self, client: &mut C, query: SimpleQuery) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let result = self._on_query(client, query).await;
+        if result.is_err()
+            && client.transaction_status() != TransactionStatus::Idle
+            && connection_resources(client).transaction().is_none()
+        {
+            // COMMIT/ROLLBACK consume the Jazz transaction before their final
+            // validation result is known. If that final step fails, the SQL
+            // transaction is still over: make pgwire's outer error handler
+            // preserve Idle instead of turning the now-closed block into E.
+            client.set_transaction_status(TransactionStatus::Idle);
+            clear_connection_portals(client);
+        }
+        result
+    }
+
     async fn do_query<C>(&self, client: &mut C, sql: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
@@ -856,6 +913,7 @@ impl SimpleQueryHandler for PostgresBackend {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         ensure_sql_size(sql)?;
+        let resources = connection_resources(client);
         // PostgreSQL's simple Query message replaces the unnamed statement and
         // every portal derived from it, even when named extended-protocol
         // objects remain on the connection.
@@ -872,7 +930,7 @@ impl SimpleQueryHandler for PostgresBackend {
         if statements.len() > 1 && statements.iter().any(is_mutation) {
             return Err(user_error(
                 "0A000",
-                "PostgreSQL mutations must be sent as individual autocommit statements",
+                "PostgreSQL mutations must be sent as individual statements",
             ));
         }
         if statements.len() > 1
@@ -897,18 +955,11 @@ impl SimpleQueryHandler for PostgresBackend {
                     ))
                 )
             {
+                self.rollback_connection_transaction(&resources).await?;
                 clear_connection_portals(client);
                 return Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))]);
             }
             return Err(failed_transaction_error());
-        }
-        if client.transaction_status() != TransactionStatus::Idle
-            && statements.iter().any(is_mutation)
-        {
-            return Err(user_error(
-                "0A000",
-                "PostgreSQL mutations are currently supported in autocommit mode only",
-            ));
         }
         let application_table_reads = statements
             .iter()
@@ -949,7 +1000,7 @@ impl SimpleQueryHandler for PostgresBackend {
         });
         for statement in statements {
             responses.push(
-                self.execute(statement, &[], &Format::UnifiedText, None)
+                self.execute(&resources, statement, &[], &Format::UnifiedText, None)
                     .await?
                     .response,
             );
@@ -1185,6 +1236,15 @@ impl ExtendedQueryHandler for PostgresBackend {
             .unwrap_or((false, false));
         let result = self._on_execute(client, message).await;
         connection_resources(client).release_response(&portal_name);
+        if result.is_err()
+            && client.transaction_status() != TransactionStatus::Idle
+            && connection_resources(client).transaction().is_none()
+        {
+            // See the simple-query equivalent above. `process_error` maps
+            // Idle to Idle, so the following Sync reports ReadyForQuery(I).
+            client.set_transaction_status(TransactionStatus::Idle);
+            clear_connection_portals(client);
+        }
         if result.is_ok() && completes_mutation {
             connection_resources(client).release_portal(&portal_name);
             client.portal_store().rm_portal(&portal_name);
@@ -1236,20 +1296,15 @@ impl ExtendedQueryHandler for PostgresBackend {
             ));
         }
         let statement = &portal.statement.statement;
+        let resources = connection_resources(client);
         if client.transaction_status() == TransactionStatus::Error {
             return match statement.parsed {
                 ParsedStatement::Command(Command::Rollback | Command::Commit) => {
+                    self.rollback_connection_transaction(&resources).await?;
                     Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
                 }
                 _ => Err(failed_transaction_error()),
             };
-        }
-        if client.transaction_status() != TransactionStatus::Idle && is_mutation(&statement.parsed)
-        {
-            return Err(user_error(
-                "0A000",
-                "PostgreSQL mutations are currently supported in autocommit mode only",
-            ));
         }
         let current_parameter_kinds = self.parameter_kinds(&statement.parsed).await?;
         let current_result_columns = self
@@ -1266,6 +1321,7 @@ impl ExtendedQueryHandler for PostgresBackend {
         let parameters = decode_parameters(portal, &statement.parameter_kinds)?;
         let executed = self
             .execute(
+                &resources,
                 statement.parsed.clone(),
                 &parameters,
                 &portal.result_column_format,
@@ -1379,6 +1435,7 @@ impl PostgresBackend {
 
     async fn execute(
         &self,
+        resources: &ConnectionResources,
         statement: ParsedStatement,
         parameters: &[ParameterValue],
         format: &Format,
@@ -1387,19 +1444,26 @@ impl PostgresBackend {
         match statement {
             ParsedStatement::Select(plan) => {
                 let output = self
-                    .execute_select(plan, parameters, expected_schema_version)
+                    .execute_select(resources, plan, parameters, expected_schema_version)
                     .await?;
                 output.into_response(format)
             }
             ParsedStatement::Mutation(plan) => {
-                self.execute_mutation(plan, parameters, format, expected_schema_version)
+                self.execute_mutation(resources, plan, parameters, format, expected_schema_version)
                     .await
             }
-            ParsedStatement::Command(command) => self.execute_command(command, format),
+            ParsedStatement::Command(command) => {
+                self.execute_command(resources, command, format).await
+            }
         }
     }
 
-    fn execute_command(&self, command: Command, format: &Format) -> PgWireResult<ExecutedResponse> {
+    async fn execute_command(
+        &self,
+        resources: &ConnectionResources,
+        command: Command,
+        format: &Format,
+    ) -> PgWireResult<ExecutedResponse> {
         match command {
             Command::Show(setting) => {
                 let value = match setting.to_ascii_lowercase().as_str() {
@@ -1424,20 +1488,120 @@ impl PostgresBackend {
                 }
                 .into_response(format)
             }
-            Command::Begin => Ok(ExecutedResponse::without_permit(
-                Response::TransactionStart(Tag::new("BEGIN")),
-            )),
-            Command::Commit => Ok(ExecutedResponse::without_permit(Response::TransactionEnd(
-                Tag::new("COMMIT"),
-            ))),
-            Command::Rollback => Ok(ExecutedResponse::without_permit(Response::TransactionEnd(
-                Tag::new("ROLLBACK"),
-            ))),
+            Command::Begin => {
+                if resources.transaction().is_none() {
+                    let _database_job_permit = self
+                        .database_job
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| {
+                            internal_error("PostgreSQL database transaction gate is closed")
+                        })?;
+                    let _query_guard = self
+                        .state
+                        .shutdown
+                        .try_enter_postgres_query()
+                        .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
+                    let transaction = self
+                        .shell()?
+                        .postgres_begin_transaction()
+                        .await
+                        .map_err(postgres_database_transaction_error)?;
+                    if !resources.begin_transaction(transaction) {
+                        return Err(internal_error(
+                            "PostgreSQL connection transaction state changed during BEGIN",
+                        ));
+                    }
+                }
+                Ok(ExecutedResponse::without_permit(
+                    Response::TransactionStart(Tag::new("BEGIN")),
+                ))
+            }
+            Command::Commit => {
+                self.commit_connection_transaction(resources).await?;
+                Ok(ExecutedResponse::without_permit(Response::TransactionEnd(
+                    Tag::new("COMMIT"),
+                )))
+            }
+            Command::Rollback => {
+                self.rollback_connection_transaction(resources).await?;
+                Ok(ExecutedResponse::without_permit(Response::TransactionEnd(
+                    Tag::new("ROLLBACK"),
+                )))
+            }
         }
+    }
+
+    async fn commit_connection_transaction(
+        &self,
+        resources: &ConnectionResources,
+    ) -> PgWireResult<()> {
+        let Some(transaction) = resources.take_transaction() else {
+            return Ok(());
+        };
+        let transaction = match Arc::try_unwrap(transaction) {
+            Ok(transaction) => transaction,
+            Err(transaction) => {
+                resources.restore_transaction(transaction);
+                return Err(internal_error(
+                    "PostgreSQL transaction is still executing another statement",
+                ));
+            }
+        };
+        let _database_job_permit = self
+            .database_job
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| internal_error("PostgreSQL database transaction gate is closed"))?;
+        let _query_guard = self
+            .state
+            .shutdown
+            .try_enter_postgres_query()
+            .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(postgres_database_transaction_error)
+    }
+
+    async fn rollback_connection_transaction(
+        &self,
+        resources: &ConnectionResources,
+    ) -> PgWireResult<()> {
+        let Some(transaction) = resources.take_transaction() else {
+            return Ok(());
+        };
+        let transaction = match Arc::try_unwrap(transaction) {
+            Ok(transaction) => transaction,
+            Err(transaction) => {
+                resources.restore_transaction(transaction);
+                return Err(internal_error(
+                    "PostgreSQL transaction is still executing another statement",
+                ));
+            }
+        };
+        let _database_job_permit = self
+            .database_job
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| internal_error("PostgreSQL database transaction gate is closed"))?;
+        let _query_guard = self
+            .state
+            .shutdown
+            .try_enter_postgres_query()
+            .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
+        transaction
+            .rollback()
+            .await
+            .map_err(postgres_database_transaction_error)
     }
 
     async fn execute_mutation(
         &self,
+        resources: &ConnectionResources,
         plan: MutationPlan,
         parameters: &[ParameterValue],
         format: &Format,
@@ -1456,55 +1620,68 @@ impl PostgresBackend {
             .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
         let schema = self.schema().await?;
         let schema_version = schema.version_id();
+        if resources
+            .transaction()
+            .is_some_and(|transaction| transaction.schema_version() != schema_version)
+        {
+            return Err(user_error(
+                "40001",
+                "PostgreSQL schema changed during the transaction; retry",
+            ));
+        }
         if expected_schema_version.is_some_and(|expected| expected != schema_version) {
             return Err(user_error(
                 "0A000",
                 "cached PostgreSQL plan changed after a Jazz schema update; prepare it again",
             ));
         }
-        let table = table_by_name(&schema, &plan.table)?;
+        let table_name = plan.table;
+        let table = table_by_name(&schema, &table_name)?;
+        ensure_postgres_table_supported(table)?;
         let (mutation, command, returning_alias) = match plan.kind {
             MutationKind::Insert(insert) => {
-                let mut cells = BTreeMap::new();
-                let mut row = None;
-                for (column_name, value) in insert.columns.iter().zip(&insert.values) {
-                    if column_name == "id" {
-                        row = Some(resolve_mutation_row_id(value, parameters)?);
-                        continue;
+                let mut rows = Vec::with_capacity(insert.rows.len());
+                for values in &insert.rows {
+                    let mut cells = BTreeMap::new();
+                    let mut row = None;
+                    for (column_name, value) in insert.columns.iter().zip(values) {
+                        if column_name == "id" {
+                            row = Some(resolve_mutation_row_id(value, parameters)?);
+                            continue;
+                        }
+                        let column = ensure_table_column(table, column_name)?
+                            .expect("non-id column has a schema entry");
+                        ensure_mutation_column_supported(column)?;
+                        cells.insert(
+                            column_name.clone(),
+                            resolve_mutation_value(value, column, parameters)?,
+                        );
                     }
-                    let column = ensure_table_column(table, column_name)?
-                        .expect("non-id column has a schema entry");
-                    ensure_mutation_column_supported(column)?;
-                    cells.insert(
-                        column_name.clone(),
-                        resolve_mutation_value(value, column, parameters)?,
-                    );
+                    for column in &table.columns {
+                        if cells.contains_key(&column.name) || column.default.is_some() {
+                            continue;
+                        }
+                        if matches!(column.column_type, ColumnType::Nullable(_)) {
+                            cells.insert(column.name.clone(), Value::Nullable(None));
+                        } else {
+                            return Err(user_error(
+                                "23502",
+                                format!(
+                                    "null value in column {} violates not-null constraint",
+                                    column.name
+                                ),
+                            ));
+                        }
+                    }
+                    rows.push((row.unwrap_or_else(|| RowUuid(uuid::Uuid::now_v7())), cells));
                 }
-                for column in &table.columns {
-                    if cells.contains_key(&column.name) || column.default.is_some() {
-                        continue;
-                    }
-                    if matches!(column.column_type, ColumnType::Nullable(_)) {
-                        cells.insert(column.name.clone(), Value::Nullable(None));
-                    } else {
-                        return Err(user_error(
-                            "23502",
-                            format!(
-                                "null value in column {} violates not-null constraint",
-                                column.name
-                            ),
-                        ));
-                    }
-                }
-                let row = row.unwrap_or_else(|| RowUuid(uuid::Uuid::now_v7()));
                 (
-                    PostgresMutation::Insert { row, cells },
+                    PostgresMutation::Insert { rows },
                     "INSERT",
                     insert.returning.map(|returning| returning.alias),
                 )
             }
             MutationKind::Update(update) => {
-                let row = resolve_mutation_row_id(&update.row_id, parameters)?;
                 let mut patch = BTreeMap::new();
                 for assignment in update.assignments {
                     if assignment.column == "id" {
@@ -1518,7 +1695,20 @@ impl PostgresBackend {
                         resolve_mutation_value(&assignment.value, column, parameters)?,
                     );
                 }
-                (PostgresMutation::Update { row, patch }, "UPDATE", None)
+                let (predicate, bindings) = lower_table_filter(&update.filter, table, parameters)?;
+                let query = Query::from(table_name.clone())
+                    .filter(predicate)
+                    .select(["id"])
+                    .limit(MAX_INSERT_ROWS + 1);
+                (
+                    PostgresMutation::Update {
+                        query,
+                        bindings,
+                        patch,
+                    },
+                    "UPDATE",
+                    None,
+                )
             }
             MutationKind::Delete(delete) => (
                 PostgresMutation::Delete {
@@ -1543,27 +1733,46 @@ impl PostgresBackend {
         } else {
             None
         };
-        let result = self
-            .shell()?
-            .postgres_mutate(
-                plan.table,
-                schema_version,
-                mutation,
-                database_job_permit,
-                query_guard,
-            )
-            .await
-            .map_err(postgres_database_mutation_error)?;
+        let shell = self.shell()?;
+        let result = if let Some(transaction) = resources.transaction() {
+            shell
+                .postgres_mutate_in_transaction(
+                    &transaction,
+                    table_name,
+                    schema_version,
+                    mutation,
+                    database_job_permit,
+                    query_guard,
+                )
+                .await
+        } else {
+            shell
+                .postgres_mutate(
+                    table_name,
+                    schema_version,
+                    mutation,
+                    database_job_permit,
+                    query_guard,
+                )
+                .await
+        }
+        .map_err(postgres_database_mutation_error)?;
         if let Some(alias) = returning_alias {
-            let row = result
-                .row
-                .ok_or_else(|| internal_error("INSERT RETURNING did not produce a row id"))?;
+            if result.rows.len() != result.affected_rows {
+                return Err(internal_error(
+                    "INSERT RETURNING did not produce every affected row id",
+                ));
+            }
             return QueryOutput {
                 columns: vec![OutputColumn::new(
                     alias.unwrap_or_else(|| "id".to_owned()),
                     ColumnKind::Uuid,
                 )],
-                rows: vec![vec![Cell::Uuid(row.0)]],
+                rows: result
+                    .rows
+                    .into_iter()
+                    .map(|row| vec![Cell::Uuid(row.0)])
+                    .collect(),
                 response_permit: returning_permit.map(Arc::new),
                 command_tag: Some("INSERT 0".to_owned()),
             }
@@ -1580,6 +1789,7 @@ impl PostgresBackend {
 
     async fn execute_select(
         &self,
+        resources: &ConnectionResources,
         plan: SelectPlan,
         parameters: &[ParameterValue],
         expected_schema_version: Option<SchemaVersionId>,
@@ -1622,6 +1832,7 @@ impl PostgresBackend {
                     ));
                 }
                 self.execute_table(
+                    resources,
                     plan,
                     table,
                     parameters,
@@ -1649,6 +1860,7 @@ impl PostgresBackend {
 
     async fn execute_table(
         &self,
+        resources: &ConnectionResources,
         plan: SelectPlan,
         table_name: String,
         parameters: &[ParameterValue],
@@ -1670,6 +1882,15 @@ impl PostgresBackend {
             .ok_or_else(|| user_error("57P01", "Jazz server is shutting down"))?;
         let schema = self.schema().await?;
         let schema_version = schema.version_id();
+        if resources
+            .transaction()
+            .is_some_and(|transaction| transaction.schema_version() != schema_version)
+        {
+            return Err(user_error(
+                "40001",
+                "PostgreSQL schema changed during the transaction; retry",
+            ));
+        }
         if expected_schema_version.is_some_and(|expected| expected != schema_version) {
             return Err(user_error(
                 "0A000",
@@ -1677,46 +1898,15 @@ impl PostgresBackend {
             ));
         }
         let table = table_by_name(&schema, &table_name)?;
+        ensure_postgres_table_supported(table)?;
         let columns = projected_table_columns(&plan, table)?;
         let mut query = Query::from(table_name);
+        let mut bindings = BTreeMap::new();
         if let Some(filter) = &plan.filter {
-            let (predicate, bindings) = lower_table_filter(filter, table, parameters)?;
+            let (predicate, lowered_bindings) = lower_table_filter(filter, table, parameters)?;
             query = query.filter(predicate);
-            query = query.select(columns.iter().map(|column| column.source_name.clone()));
-            for order in &plan.order_by {
-                let column = ensure_table_column(table, &order.column)?;
-                ensure_orderable_column(column, &order.column)?;
-                query = query.order_by(
-                    order.column.clone(),
-                    if order.ascending {
-                        OrderDirection::Asc
-                    } else {
-                        OrderDirection::Desc
-                    },
-                );
-            }
-            query = query.limit(limit);
-            query = query.offset(offset);
-            let result = self
-                .shell()?
-                .postgres_query(
-                    query,
-                    schema_version,
-                    columns
-                        .iter()
-                        .map(|column| column.source_name.clone())
-                        .collect(),
-                    bindings,
-                    query_permit,
-                    response_permit,
-                    query_guard,
-                    MAX_RESPONSE_BYTES,
-                )
-                .await
-                .map_err(postgres_database_query_error)?;
-            return table_query_output(result, columns);
+            bindings = lowered_bindings;
         }
-
         query = query.select(columns.iter().map(|column| column.source_name.clone()));
         for order in &plan.order_by {
             let column = ensure_table_column(table, &order.column)?;
@@ -1732,23 +1922,40 @@ impl PostgresBackend {
         }
         query = query.limit(limit);
         query = query.offset(offset);
-        let result = self
-            .shell()?
-            .postgres_query(
-                query,
-                schema_version,
-                columns
-                    .iter()
-                    .map(|column| column.source_name.clone())
-                    .collect(),
-                BTreeMap::new(),
-                query_permit,
-                response_permit,
-                query_guard,
-                MAX_RESPONSE_BYTES,
-            )
-            .await
-            .map_err(postgres_database_query_error)?;
+        let selected_columns = columns
+            .iter()
+            .map(|column| column.source_name.clone())
+            .collect();
+        let shell = self.shell()?;
+        let result = if let Some(transaction) = resources.transaction() {
+            shell
+                .postgres_query_in_transaction(
+                    &transaction,
+                    query,
+                    schema_version,
+                    selected_columns,
+                    bindings,
+                    query_permit,
+                    response_permit,
+                    query_guard,
+                    MAX_RESPONSE_BYTES,
+                )
+                .await
+        } else {
+            shell
+                .postgres_query(
+                    query,
+                    schema_version,
+                    selected_columns,
+                    bindings,
+                    query_permit,
+                    response_permit,
+                    query_guard,
+                    MAX_RESPONSE_BYTES,
+                )
+                .await
+        }
+        .map_err(postgres_database_query_error)?;
         table_query_output(result, columns)
     }
 
@@ -2656,6 +2863,21 @@ fn ensure_mutation_column_supported(column: &crate::schema::ColumnSchema) -> PgW
     Ok(())
 }
 
+fn ensure_postgres_table_supported(table: &crate::schema::TableSchema) -> PgWireResult<()> {
+    if let Some(column) = table.columns.iter().find(|column| {
+        column.large_value.is_some() && matches!(column.column_type, ColumnType::Nullable(_))
+    }) {
+        return Err(user_error(
+            "0A000",
+            format!(
+                "PostgreSQL access does not yet support nullable large-value column {}.{}",
+                table.name, column.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn lower_table_filter<'a>(
     filter: &FilterExpr,
     table: &'a TableSchema,
@@ -3126,9 +3348,11 @@ fn infer_mutation_parameter_kinds(
     let mut inferred = BTreeMap::<usize, ColumnKind>::new();
     match &plan.kind {
         MutationKind::Insert(insert) => {
-            for (column, value) in insert.columns.iter().zip(&insert.values) {
-                ensure_table_column(table, column)?;
-                infer_mutation_literal_kind(column, value, &columns, &mut inferred)?;
+            for row in &insert.rows {
+                for (column, value) in insert.columns.iter().zip(row) {
+                    ensure_table_column(table, column)?;
+                    infer_mutation_literal_kind(column, value, &columns, &mut inferred)?;
+                }
             }
         }
         MutationKind::Update(update) => {
@@ -3144,7 +3368,7 @@ fn infer_mutation_parameter_kinds(
                     &mut inferred,
                 )?;
             }
-            infer_mutation_literal_kind("id", &update.row_id, &columns, &mut inferred)?;
+            infer_parameter_kinds_node(&update.filter, &columns, &mut inferred)?;
         }
         MutationKind::Delete(delete) => {
             infer_mutation_literal_kind("id", &delete.row_id, &columns, &mut inferred)?;
@@ -3808,7 +4032,7 @@ fn internal_database_error(error: String) -> PgWireError {
 fn postgres_database_query_error(error: String) -> PgWireError {
     if error.starts_with("PostgreSQL response exceeds configured") {
         user_error("54000", error)
-    } else if error.starts_with("PostgreSQL schema changed while planning") {
+    } else if error.starts_with("PostgreSQL schema changed") {
         user_error("40001", error)
     } else {
         internal_database_error(error)
@@ -3816,13 +4040,18 @@ fn postgres_database_query_error(error: String) -> PgWireError {
 }
 
 fn postgres_database_mutation_error(error: String) -> PgWireError {
-    if error.starts_with("PostgreSQL schema changed while planning") {
+    if error.starts_with("PostgreSQL schema changed") || error.contains("ExclusiveConflict") {
         user_error("40001", error)
     } else if (error.contains("MalformedCommit") && error.contains("exceeds max"))
         || error.contains("server write cell payload exceeds max")
+        || error.starts_with("PostgreSQL transaction cannot affect more than")
+        || error.starts_with("PostgreSQL transaction cell payload exceeds")
     {
         user_error("54000", error)
-    } else if error.contains("object already exists") || error.contains("row already deleted") {
+    } else if error.contains("object already exists")
+        || error.contains("duplicate object id")
+        || error.contains("row already deleted")
+    {
         user_error("23505", error)
     } else if error.contains("policy denied")
         || error.contains("authorization denied")
@@ -3834,6 +4063,10 @@ fn postgres_database_mutation_error(error: String) -> PgWireError {
     } else {
         internal_database_error(error)
     }
+}
+
+fn postgres_database_transaction_error(error: String) -> PgWireError {
+    postgres_database_mutation_error(error)
 }
 
 fn user_error(code: &str, message: impl Into<String>) -> PgWireError {

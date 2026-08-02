@@ -4345,6 +4345,16 @@ pub struct LargeValueMetrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpenTxId(u64);
 
+/// Large-value bytes resolved from an open transaction without guessing from
+/// their shape. Authored bytes may deliberately be identical to a Jazz handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OpenTxLargeValueCell {
+    /// Logical bytes staged by the open transaction.
+    Authored(Vec<u8>),
+    /// Handle for the value inherited from the pinned snapshot.
+    SnapshotHandle(Vec<u8>),
+}
+
 /// Explicit edit operation for one text/blob column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LargeValueEditOp {
