@@ -36,7 +36,7 @@ allows compatible schema versions to reuse the same physical indexes. It also
 reduces table proliferation and avoids rebuilding equivalent storage structures
 for migrations that do not materially change a table.
 
-The importance of reusing indexes must not be understated: currently we keep a separate
+The importance of reusing indexes must not be understated: currently we keep separate
 indexes for each table version, and they are not combined into a useful logical cross-version index.
 Once a table has schema partitions, Jazz disables the ordinary prepared-query fast path.
 
@@ -116,7 +116,7 @@ Jazz currently selects a winning content version across all writes. If that vers
 the schema's default value is returned to the user. That leads to frequent data loss for columns dropped across
 schema versions.
 
-The key idea in this proposal is to **distinguish unset fields from default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Default values are only applied when returning rows with unset fields to users. When decoding an older layout, physical columns introduced only by later layouts are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
+The key idea in this proposal is to **distinguish unset fields from lens default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Lens default values are only applied when reading rows with unset fields from storage. When decoding an older layout, physical columns introduced only by later layouts are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
 
 For every content write, we need to:
 
@@ -246,6 +246,12 @@ Branch identity remains a separate key/prefix dimension. We just need to make su
 
 ## Open Questions
 
+### What happens with a server's active subscriptions when the current schema changes?
+
+Active subscriptions continue to use the schema they were created with for query semantics and output projection. Authorization is evaluated independently against the server’s current permission-evaluation schema, with row data projected into that schema before evaluating policies. If the permission-evaluation schema changes, all active maintained subscriptions should probably be invalidated and recompiled under the new policy before further results are served.
+
+This is what Jazz currently does for policy-only changes on the existing authorization schema. Moving the permission head to a different schema is not currently handled. We need to ensure this scenario works properly and add test coverage for it.
+
 ### Conflicting lens paths may assign different physical identities
 
 A schema may be reachable through multiple lens paths. Those paths could disagree
@@ -289,3 +295,39 @@ Safe physical cleanup requires proving that:
 - old-schema reads are no longer promised.
 
 Jazz currently deliberately forbids automatic schema-partition GC for these reasons ([lens spec (line 218)](./10_lenses_migrations.md#L218)).
+
+## Implementation Plan
+
+Overall approach: start preserving today’s copy-forward/default behavior, including its known data-loss limitation.
+
+1. Add physical identity metadata without changing storage behavior.
+   - Introduce `PhysicalTableId`, `PhysicalColumnId`, and `PhysicalLayoutId`.
+   - Persist each schema version’s logical-to-physical mapping.
+   - Add a durable layout registry recovered during the catalogue-open stage.
+   - Include column identity now because layouts and reusable indexes cannot safely be defined using logical names.
+
+2. Add versioned record envelopes.
+   - Teach Groove/Jazz storage tables to hold rows encoded under multiple registered layouts.
+   - Decode the stable envelope first, then decode the payload using its layout descriptor.
+   - Initially use existing lens projection/default behavior when normalizing layouts.
+   - Test mixed-layout scans, point reads, indexes, and restart recovery before changing table placement.
+
+3. Share immutable history first.
+   - Key content-history and deletion-register structures by `PhysicalTableId`.
+   - Replace `version_storage_sources()` fanout with one physical source per lineage.
+   - Keep global/ahead-current tables partitioned temporarily, giving us a contained vertical slice.
+
+4. Share current state and indexes.
+   - Move global-current, ahead-current, and durable index prefixes to physical identities.
+   - Replace the current union-and-`arg_max` path in [query_eval.rs](/Users/nicolasr/Desktop/Jazz/jazz2/crates/jazz/src/node/query_eval.rs:1256) with one source plus logical projection.
+   - Re-enable the ordinary prepared-query path.
+   - Add a storage-read receipt proving read cost stays constant as schema-version count increases.
+
+5. Convert the remaining schema-keyed storage.
+   - Branch overlays: retain branch identity, remove schema identity.
+   - Audit global-change keys, rejected-version storage, large-value checkpoints, and any table/column-name-derived keys.
+   - Remove `jazz_partitions` only after recovery no longer depends on it.
+
+6. Implement unset/data-preservation semantics later.
+
+   This becomes a semantic change on top of a storage model already capable of selecting layouts and physical columns, rather than being entangled with eliminating partition fanout.
