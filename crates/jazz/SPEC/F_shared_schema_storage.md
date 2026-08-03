@@ -216,18 +216,26 @@ Identity follows these rules:
 - Independently introduced same-named entities receive different physical ids.
   Name and shape equality alone never merges identities.
 
-This identity model is inspired by PostgreSQL's stable relation and attribute
-catalogue identities:
+#### Publishing lenses
 
-- https://www.postgresql.org/docs/current/catalog-pg-class.html
-- https://www.postgresql.org/docs/current/catalog-pg-attribute.html
+A new schema may be published and written to before the lens mapping it to an existing schema is published,
+so data will end up in a new physical table. If that happens, identity resolution is not a metadata-only relabel.
 
-A new schema may be (and usually is) published before the lens mapping it to an existing schema,
-so it will receive fresh physical ids. If a lens is published after both sides have already acquired independent physical lineages containing data, identity resolution is not a metadata-only relabel. It
-requires either:
+This is mostly a dev-only concern: it's expected that devs experiment with schema shapes before writing migrations, but in prod new schemas will usually be published alongside their migrations. This means data preservation is not an essential requirement.
 
-- discarding data from the physical table corresponding to the "new" schema
-- migrating data from one physical table to another (we'd need to determine how that migration happens)
+We can handle this scenario in the following way:
+
+- `PublishSchema` creates a deterministic but provisional mapping.
+- Publishing lenses may reconcile provisional mappings, preserving identities across renames and unchanged entities.
+- When reconciliation replaces a provisional table identity, Jazz discards all
+  storage scoped to the target/new physical table before installing the
+  reconciled mapping.
+- This discard includes history, derived current state, indexes, branches, and
+  other table-scoped side storage.
+
+This deliberately accepts data loss in the uncommon dev workflow where a schema
+receives writes before its lens is published. In the future we may replace the
+discard with migration from one physical table to another.
 
 ### Indexing
 
