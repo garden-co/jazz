@@ -579,6 +579,15 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        if let Some((sink, output)) = outputs.first_key_value().filter(|_| outputs.len() == 1) {
+            let records = self.hydration_snapshot(output.node, storage)?;
+            if records.descriptor != output.output {
+                return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            return Ok(MultisinkDeltas {
+                sinks: BTreeMap::from([(sink.clone(), records)]),
+            });
+        }
         let mut sinks = BTreeMap::new();
         let mut table_snapshot_cache = Vec::new();
         for (sink, output) in outputs {
@@ -650,6 +659,18 @@ impl IvmRuntime {
         records
     }
 
+    fn subscription_hydration_snapshot<S>(
+        &mut self,
+        output_node: NodeId,
+        storage: &S,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
+        self.subscription_hydration_snapshot_from_table_deltas(output_node, storage, &table_deltas)
+    }
+
     fn subscription_hydration_snapshots<S>(
         &mut self,
         outputs: &BTreeMap<String, CompiledNode>,
@@ -658,6 +679,15 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        if let Some((sink, output)) = outputs.first_key_value().filter(|_| outputs.len() == 1) {
+            let records = self.subscription_hydration_snapshot(output.node, storage)?;
+            if records.descriptor != output.output {
+                return Err(IvmRuntimeError::GraphOutputMismatch);
+            }
+            return Ok(MultisinkDeltas {
+                sinks: BTreeMap::from([(sink.clone(), records)]),
+            });
+        }
         let mut sinks = BTreeMap::new();
         let mut table_snapshot_cache = Vec::new();
         for (sink, output) in outputs {
