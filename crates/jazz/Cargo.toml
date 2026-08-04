@@ -184,6 +184,10 @@ name = "authorization_scope_benchmark"
 harness = false
 
 [[bench]]
+name = "policy_cost_receipt"
+harness = false
+
+[[bench]]
 name = "realistic_phase1"
 harness = false
 
