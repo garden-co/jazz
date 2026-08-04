@@ -66,6 +66,20 @@ are the retained baseline. Reopen separately reads every Global-current row;
 reporting that phase prevents a future query optimization from hiding
 equivalent work in startup.
 
+## Indexed one-shot result
+
+Inlining the concrete one-shot binding before lowering prevents execution from
+replacing the index-selected program with the generic cached parameterized
+shape. On the same default ladder, query-path reads are fixed at 100 index rows
+plus 100 selected current rows for every table size. The 100,000-row query fell
+from 174.877 ms in the baseline run to 0.744 ms in the optimized run, while the
+ordered-ID digest remained unchanged. Reopen work is unaffected and remains
+reported separately.
+
+The benchmark now enforces the structural result: query current-row reads must
+not exceed the fixed candidate count, and the candidate count must be supplied
+by the declared index. Wall time remains informational rather than gated.
+
 ## Acceptance rule for an optimization
 
 An optimization is admissible only if:
