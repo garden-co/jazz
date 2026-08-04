@@ -33,6 +33,12 @@ fn run_rung(source_rows: usize) {
     let seed_started = Instant::now();
     let mut fixture = Fixture::new();
     let changed_row = fixture.seed(source_rows);
+    let maintained_core = &fixture.core;
+    let rehydrated_core = &fixture.core;
+    assert!(
+        !std::ptr::eq(maintained_core, rehydrated_core),
+        "maintained and rehydrated lanes must use independent core state"
+    );
     let seed_us = seed_started.elapsed().as_micros();
     let shape = Query::from(TABLE)
         .filter(eq(col("status"), lit(Value::String(ACTIVE.to_owned()))))
