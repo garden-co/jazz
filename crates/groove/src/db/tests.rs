@@ -4489,14 +4489,17 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
             let snapshots = database.query_graphs(sinks).unwrap();
             elapsed_us.push(started.elapsed().as_micros() as u64);
 
-            let mut canonical = snapshots
+            let canonical = snapshots
                 .sinks
                 .values()
                 .map(|rows| format!("{:?}", rows.to_values().unwrap()))
                 .collect::<Vec<_>>();
-            canonical.sort_unstable();
+            assert!(
+                canonical.windows(2).all(|pair| pair[0] == pair[1]),
+                "equivalent terminals must materialize byte-identical logical rows"
+            );
             let mut hasher = DefaultHasher::new();
-            canonical.hash(&mut hasher);
+            canonical[0].hash(&mut hasher);
             let digest = hasher.finish();
             let memo_after = database.runtime_stats();
             receipt = Some((
@@ -4516,7 +4519,8 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
         let (snapshot_queries, child_visits, memo_computes, memo_hits, result_rows, digest) =
             receipt.unwrap();
         println!(
-            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{ROWS},\"samples\":{SAMPLES},\"snapshot_query_executions\":{snapshot_queries},\"storage_snapshots_constructed\":{snapshot_queries},\"child_visits\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"result_rows\":{result_rows},\"result_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
+            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{ROWS},\"samples\":{SAMPLES},\"storage_prefix_scans\":{snapshot_queries},\"storage_records_visited\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"total_result_rows\":{result_rows},\"per_terminal_rows\":{},\"per_terminal_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
+            result_rows / terminal_count,
             elapsed_us[SAMPLES / 2]
         );
     }
