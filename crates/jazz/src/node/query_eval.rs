@@ -8289,6 +8289,7 @@ where
                 ))
         });
         let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
+        let mut target_tables = BTreeMap::<String, TableSchema>::new();
         for candidate in candidates {
             let group = (
                 candidate.edge.source_table.clone(),
@@ -8307,12 +8308,18 @@ where
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
             )) {
-                let target_table = self
-                    .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
-                    .clone();
+                if !target_tables.contains_key(&candidate.edge.target_table) {
+                    let target_table = self
+                        .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
+                        .clone();
+                    target_tables.insert(candidate.edge.target_table.clone(), target_table);
+                }
+                let target_table = target_tables
+                    .get(&candidate.edge.target_table)
+                    .expect("target table was inserted");
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
-                    &target_table,
+                    target_table,
                     &candidate.edge.target_table,
                     candidate.edge.target_row,
                     candidate.target_tx_time,
