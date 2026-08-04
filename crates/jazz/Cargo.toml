@@ -106,6 +106,7 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }
+libc = "0.2"
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -285,10 +286,6 @@ required-features = ["test"]
 
 [[test]]
 name = "parameterized_subscription_routing"
-required-features = ["test"]
-
-[[test]]
-name = "flush_once_per_refresh"
 required-features = ["test"]
 
 [[example]]
