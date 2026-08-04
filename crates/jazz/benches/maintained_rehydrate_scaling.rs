@@ -31,14 +31,15 @@ fn main() {
 
 fn run_rung(source_rows: usize) {
     let seed_started = Instant::now();
-    let mut fixture = Fixture::new();
-    let changed_row = fixture.seed(source_rows);
-    let maintained_core = &fixture.core;
-    let rehydrated_core = &fixture.core;
+    let mut maintained_fixture = Fixture::new();
+    let maintained_changed_row = maintained_fixture.seed(source_rows);
+    let mut rehydrated_fixture = Fixture::new();
+    let rehydrated_changed_row = rehydrated_fixture.seed(source_rows);
     assert!(
-        !std::ptr::eq(maintained_core, rehydrated_core),
+        !std::ptr::eq(&maintained_fixture.core, &rehydrated_fixture.core),
         "maintained and rehydrated lanes must use independent core state"
     );
+    assert_eq!(maintained_changed_row, rehydrated_changed_row);
     let seed_us = seed_started.elapsed().as_micros();
     let shape = Query::from(TABLE)
         .filter(eq(col("status"), lit(Value::String(ACTIVE.to_owned()))))
@@ -53,19 +54,20 @@ fn run_rung(source_rows: usize) {
 
     let mut maintained = PeerState::new();
     maintained
-        .rehydrate_query(&mut fixture.core, &shape, &binding)
+        .rehydrate_query(&mut maintained_fixture.core, &shape, &binding)
         .expect("prime maintained subscription");
     maintained.metrics = Default::default();
 
-    fixture.update_to_active(changed_row);
+    maintained_fixture.update_to_active(maintained_changed_row);
+    rehydrated_fixture.update_to_active(rehydrated_changed_row);
 
-    fixture.core.reset_storage_read_metrics();
+    maintained_fixture.core.reset_storage_read_metrics();
     let maintained_started = Instant::now();
     let maintained_update = maintained
-        .query_update(&mut fixture.core, &shape, &binding)
+        .query_update(&mut maintained_fixture.core, &shape, &binding)
         .expect("serve maintained delta");
     let maintained_us = maintained_started.elapsed().as_micros();
-    let maintained_reads = fixture.core.storage_read_metrics();
+    let maintained_reads = maintained_fixture.core.storage_read_metrics();
     let maintained_bytes = encode_sync_message(&maintained_update)
         .expect("encode maintained delta")
         .len();
@@ -74,14 +76,14 @@ fn run_rung(source_rows: usize) {
         .expect("maintained result set");
     let maintained_footprint = maintained.maintained_subscription_view_metrics().footprint;
 
-    fixture.core.reset_storage_read_metrics();
+    rehydrated_fixture.core.reset_storage_read_metrics();
     let mut rehydrated = PeerState::new();
     let rehydrate_started = Instant::now();
     let rehydrate_update = rehydrated
-        .rehydrate_query(&mut fixture.core, &shape, &binding)
+        .rehydrate_query(&mut rehydrated_fixture.core, &shape, &binding)
         .expect("serve full rehydrate");
     let rehydrate_us = rehydrate_started.elapsed().as_micros();
-    let rehydrate_reads = fixture.core.storage_read_metrics();
+    let rehydrate_reads = rehydrated_fixture.core.storage_read_metrics();
     let rehydrate_bytes = encode_sync_message(&rehydrate_update)
         .expect("encode full rehydrate")
         .len();
