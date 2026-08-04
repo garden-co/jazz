@@ -19,15 +19,15 @@
 
 ## Gates
 
-| Gate | Exit Code |
-| --- | --- |
-| `cargo test -p jazz-tools --features test -j 2` | 0 |
-| `cargo test -p jazz -j 2` | 0 |
-| `cargo test -p jazz-server -j 2` | 0 |
-| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | 0 |
-| `cargo test -p jazz --test incremental_delivery_canary -j 2` | 0 |
-| `cargo fmt -p jazz-tools --check` | 0 |
-| `cargo check -p jazz-sim --benches -j 2` | 0 |
-| `cargo build --release -p jazz-tools --bin jazz-tools --features cli -j 2` | 0 |
+| Gate                                                                                     | Exit Code |
+| ---------------------------------------------------------------------------------------- | --------- |
+| `cargo test -p jazz-tools --features test -j 2`                                          | 0         |
+| `cargo test -p jazz -j 2`                                                                | 0         |
+| `cargo test -p jazz-server -j 2`                                                         | 0         |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | 0         |
+| `cargo test -p jazz --test incremental_delivery_canary -j 2`                             | 0         |
+| `cargo fmt -p jazz-tools --check`                                                        | 0         |
+| `cargo check -p jazz-sim --benches -j 2`                                                 | 0         |
+| `cargo build --release -p jazz-tools --bin jazz-tools --features cli -j 2`               | 0         |
 
 Release binary: `target/release/jazz-tools`.

@@ -131,10 +131,11 @@ export class WebSocketCarrier {
     });
     this.socket.addEventListener("close", (event) => {
       if (this.closing) return;
+      const close = websocketCloseDetails(event);
       this.onError?.({
         code: "websocket_closed",
         retry: "later",
-        message: `websocket closed (code=${event.code}, reason=${event.reason || "none"})`,
+        message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
       });
     });
   }
@@ -174,6 +175,15 @@ export class WebSocketCarrier {
       this.onFrame(frame);
     }
   }
+}
+
+function websocketCloseDetails(event: unknown): { code?: number; reason?: string } {
+  if (!event || typeof event !== "object") return {};
+  const close = event as { code?: unknown; reason?: unknown };
+  return {
+    code: typeof close.code === "number" ? close.code : undefined,
+    reason: typeof close.reason === "string" ? close.reason : undefined,
+  };
 }
 
 export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {

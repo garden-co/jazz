@@ -29,7 +29,7 @@ snapshot to decide whether each added row was new or updated:
 - related-row additions scanned roots and then related rows
 
 For an append-only unbounded subscription with 500 new rows per commit, that
-made the facade snapshot application O(current result size * delta size) in the
+made the facade snapshot application O(current result size \* delta size) in the
 common add path. This is the INV-INC-1 violation: the maintained terminal delta
 was bounded, but delivery re-materialized membership against the full delivered
 snapshot.
@@ -75,13 +75,13 @@ Both exited 0.
 
 Selected 10k curve:
 
-| rows | unsub commit ms | sub commit ms | sub event adds |
-|---:|---:|---:|---:|
-| 500 | 11.896 | 58.090 | 500 |
-| 2500 | 11.185 | 65.620 | 500 |
-| 5000 | 10.902 | 68.829 | 500 |
-| 7500 | 11.218 | 70.405 | 500 |
-| 10000 | 11.622 | 71.370 | 500 |
+|  rows | unsub commit ms | sub commit ms | sub event adds |
+| ----: | --------------: | ------------: | -------------: |
+|   500 |          11.896 |        58.090 |            500 |
+|  2500 |          11.185 |        65.620 |            500 |
+|  5000 |          10.902 |        68.829 |            500 |
+|  7500 |          11.218 |        70.405 |            500 |
+| 10000 |          11.622 |        71.370 |            500 |
 
 5k subscribed selected points: 500 rows 56.858 ms, 2500 rows 65.672 ms,
 5000 rows 69.844 ms. Unsubscribed stayed about 10.7-11.4 ms.

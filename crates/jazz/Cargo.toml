@@ -7,11 +7,20 @@ autobenches = false
 autotests = false
 
 [features]
-default = ["rocksdb", "transport-compression-zstd"]
+default = ["rocksdb", "server", "transport-compression-zstd"]
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 client = ["server"]
-server = ["dep:axum", "dep:tracing-subscriber", "dep:tower-http", "dep:async-stream", "dep:reqwest"]
+server = [
+  "dep:axum",
+  "dep:tracing-subscriber",
+  "dep:tower-http",
+  "dep:async-stream",
+  "dep:reqwest",
+  "dep:tokio",
+  "dep:tokio-tungstenite",
+  "dep:tungstenite",
+]
 cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
@@ -58,7 +67,7 @@ jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"], optional = true }
 rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
   "lz4",
   "zstd",
@@ -69,8 +78,10 @@ tokio-tungstenite = { version = "0.29", features = [
   "rustls-tls-native-roots",
   "rustls-tls-webpki-roots",
   "handshake",
-] }
-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+], optional = true }
+tungstenite = { version = "0.29", default-features = false, features = [
+  "handshake",
+], optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -285,10 +296,6 @@ required-features = ["test"]
 
 [[test]]
 name = "parameterized_subscription_routing"
-required-features = ["test"]
-
-[[test]]
-name = "flush_once_per_refresh"
 required-features = ["test"]
 
 [[example]]
