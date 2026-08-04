@@ -51,7 +51,25 @@ lane_reset() {
     (cd "$path" && cargo clean -q -p jazz -p groove -p opfs-btree \
         -p jazz-sim -p jazz-napi -p jazz-wasm 2>/dev/null || true)
   fi
+  lane_install_node_modules "$path"
   echo "$path"
+}
+
+# A lane created by `git worktree add` has no node_modules, so `pnpm exec
+# oxfmt` exits 254 and the format gate silently does nothing — a lane reported
+# "oxfmt is not installed" rather than a formatting result, which is the worst
+# kind of gate failure because it looks like a tooling note instead of a skipped
+# check. With a warm pnpm store this costs ~3s, so it runs on every reset rather
+# than only when node_modules is missing: a branch can change the lockfile.
+lane_install_node_modules() {
+  local path="$1"
+  (cd "$path" && pnpm install --frozen-lockfile --prefer-offline) >/dev/null 2>&1 || {
+    echo "lane.sh: WARNING: pnpm install failed in $path; oxfmt/vitest gates will not run" >&2
+    return 0
+  }
+  if [ ! -x "$path/node_modules/.bin/oxfmt" ]; then
+    echo "lane.sh: WARNING: oxfmt still missing in $path after install" >&2
+  fi
 }
 
 cmd_ensure() {
