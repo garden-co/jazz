@@ -1952,11 +1952,21 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
             tier,
             ..
         } => {
-            let delta = encode_core_subscription_delta(added, updated, removed)
+            // Keep the current native wire source-row addressed until a later
+            // revision carries occurrence identity explicitly.
+            let added = added
+                .iter()
+                .map(|output| output.row.clone())
+                .collect::<Vec<_>>();
+            let updated = updated
+                .iter()
+                .map(|output| output.row.clone())
+                .collect::<Vec<_>>();
+            let delta = encode_core_subscription_delta(&added, &updated, removed)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             let relation_delta = encode_core_relation_subscription_delta(
-                added,
-                updated,
+                &added,
+                &updated,
                 removed,
                 added_related,
                 added_edges,
