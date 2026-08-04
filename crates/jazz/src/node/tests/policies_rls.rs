@@ -5320,11 +5320,23 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>()
     };
-    assert_eq!(query_rows(&mut core).len(), 100);
+    let expected_initial = (0..100_u8).rev().map(row).collect::<Vec<_>>();
+    let initial_one_shot = query_rows(&mut core);
+    assert_eq!(initial_one_shot, expected_initial);
+    assert_eq!(initial_one_shot.iter().copied().collect::<BTreeSet<_>>().len(), 100);
 
     let mut peer = PeerState::for_author(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    assert_eq!(canonical_view_update_rows_for_table(&initial, "documents").0.len(), 100);
+    let (initial_adds, initial_removes) =
+        canonical_view_update_rows_for_table(&initial, "documents");
+    assert!(initial_removes.is_empty());
+    assert_eq!(
+        initial_adds
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<BTreeSet<_>>(),
+        expected_initial.iter().copied().collect()
+    );
 
     let duplicate_grant = row(0xfe);
     let duplicate_grant_tx = accept_global(
@@ -5378,12 +5390,14 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     );
     let final_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
-        canonical_view_update_rows_for_table(&final_revoke, "documents")
-            .1
-            .iter()
-            .map(|(_, row, _)| *row)
-            .collect::<Vec<_>>(),
-        vec![row(99)]
+        canonical_view_update_rows_for_table(&final_revoke, "documents"),
+        (
+            Vec::new(),
+            vec![("documents".to_owned().into(), row(99), document_txs[99])]
+        )
     );
-    assert_eq!(query_rows(&mut core).len(), 99);
+    assert_eq!(
+        query_rows(&mut core),
+        (0..99_u8).rev().map(row).collect::<Vec<_>>()
+    );
 }
