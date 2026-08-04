@@ -6,18 +6,22 @@ view with unrelated customer rows. The transaction changes four current rows:
 one warehouse, district, customer, and newly inserted payment.
 
 The gate primes all eight S4 table subscriptions across both core-to-edge and
-edge-to-client hops before the change. Every rung must then preserve:
+edge-to-client hops before the change. One client writes the transaction and a
+separate client observes it, so the second hop cannot pass by relying on the
+writer's local state. Every rung must then preserve:
 
 - the SQLite-reference final state;
-- exactly four result additions, three replaced-result removals, and fixed
-  version bundle and record counts on each hop;
+- exactly the four expected result additions (warehouse, district, customer,
+  and payment), the three expected replacement removals, and fixed version
+  bundle and record counts on each hop;
 - identical program-fact additions and removals; and
-- identical storage reads and ranges on each node.
+- identical storage reads and ranges on each node; and
+- the expected post-Payment values in the observer's local database.
 
-Encoded wire bytes may differ from the first rung by at most 72 bytes per hop:
-the maximum nine-byte growth of a postcard-encoded `u64` `settled_through`
-cursor across eight view-update envelopes. This is a fixed framing allowance,
-not a view-size ratio.
+Encoded wire bytes may differ from the first rung by at most 72 bytes per hop,
+covering the maximum nine-byte growth of sequence/cursor framing across eight
+view-update envelopes. This is a fixed framing allowance, not a view-size
+ratio.
 
 Run the default ladder with:
 
@@ -35,13 +39,14 @@ One 10/1,000/10,000-customer run on the local development box produced:
 
 | View rows | Changed rows | Core → edge bytes | Edge → client bytes | Adds/removes per hop | Bundles/records per hop | Core reads/ranges | Edge reads/ranges | Wall time |
 | --------: | -----------: | ----------------: | ------------------: | -------------------: | ----------------------: | ----------------: | ----------------: | --------: |
-|        15 |            4 |           4,570 B |             4,570 B |                  4/3 |                    4/10 |               4/4 |           184/192 |  5,949 us |
-|     1,005 |            4 |           4,594 B |             4,594 B |                  4/3 |                    4/10 |               4/4 |           184/192 |  7,469 us |
-|    10,005 |            4 |           4,602 B |             4,602 B |                  4/3 |                    4/10 |               4/4 |           184/192 | 27,542 us |
+|        15 |            4 |           4,570 B |             4,570 B |                  4/3 |                    4/10 |               4/4 |           104/119 |  5,926 us |
+|     1,005 |            4 |           4,594 B |             4,594 B |                  4/3 |                    4/10 |               4/4 |           104/119 |  8,707 us |
+|    10,005 |            4 |           4,602 B |             4,602 B |                  4/3 |                    4/10 |               4/4 |           104/119 | 28,857 us |
 
-Propagation I/O, result deltas, facts, and version payload work remain fixed as
-the unrelated retained view grows. The 32-byte wire difference is cursor
-framing across eight messages on each hop.
+Propagation I/O, exact result identities, facts, version payload work, and the
+observer's final values remain fixed as the unrelated retained view grows. The
+32-byte wire difference is sequence/cursor framing across eight messages on
+each hop.
 
 Wall time is directional and is not the acceptance claim. It still grows with
 the retained view despite flat I/O and output, consistent with retained-view

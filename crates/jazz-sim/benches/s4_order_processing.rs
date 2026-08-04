@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState};
+use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, expand_version_carriers};
 use jazz::schema::{JazzSchema, TableSchema};
@@ -1173,6 +1173,8 @@ struct PropagationWork {
     program_fact_removes: usize,
     version_bundles: usize,
     version_records: usize,
+    result_add_rows: BTreeSet<(String, RowUuid)>,
+    result_remove_rows: BTreeSet<(String, RowUuid)>,
 }
 
 impl PropagationWork {
@@ -1194,6 +1196,16 @@ impl PropagationWork {
         };
         self.result_adds += result_member_adds.len();
         self.result_removes += result_member_removes.len();
+        self.result_add_rows
+            .extend(result_member_adds.iter().map(|member| {
+                let (table, row, _) = member.as_row().expect("S4 result add is a real row");
+                (table.as_str().to_owned(), row)
+            }));
+        self.result_remove_rows
+            .extend(result_member_removes.iter().map(|member| {
+                let (table, row, _) = member.as_row().expect("S4 result removal is a real row");
+                (table.as_str().to_owned(), row)
+            }));
         self.program_fact_adds += program_fact_adds.len();
         self.program_fact_removes += program_fact_removes.len();
         let expanded_carriers =
@@ -1228,12 +1240,41 @@ impl PropagationWork {
             self.version_records, expected.version_records,
             "{hop} version records"
         );
+        assert_eq!(
+            self.result_add_rows, expected.result_add_rows,
+            "{hop} added row identities"
+        );
+        assert_eq!(
+            self.result_remove_rows, expected.result_remove_rows,
+            "{hop} removed row identities"
+        );
         assert!(
             self.wire_bytes.abs_diff(expected.wire_bytes)
                 <= MAX_SETTLED_THROUGH_FRAMING_DELTA_PER_HOP,
             "{hop} wire bytes exceeded the fixed settled-through framing allowance: actual={}, expected={}",
             self.wire_bytes,
             expected.wire_bytes
+        );
+    }
+
+    fn assert_payment_delta(&self, hop: &str) {
+        let replaced_rows = BTreeSet::from([
+            (WAREHOUSES.to_owned(), warehouse_row(0)),
+            (DISTRICTS.to_owned(), district_row(0, 0)),
+            (CUSTOMERS.to_owned(), customer_row(0, 0, 0)),
+        ]);
+        let mut added_rows = replaced_rows.clone();
+        added_rows.insert((PAYMENTS.to_owned(), payment_row(0, 0, 0, 10_000)));
+        assert_eq!(self.result_adds, 4, "{hop} Payment result adds");
+        assert_eq!(self.result_removes, 3, "{hop} Payment result removes");
+        assert_eq!(self.program_fact_adds, 0, "{hop} Payment fact adds");
+        assert_eq!(self.program_fact_removes, 0, "{hop} Payment fact removes");
+        assert_eq!(self.version_bundles, 4, "{hop} Payment version bundles");
+        assert_eq!(self.version_records, 10, "{hop} Payment version records");
+        assert_eq!(self.result_add_rows, added_rows, "{hop} Payment added rows");
+        assert_eq!(
+            self.result_remove_rows, replaced_rows,
+            "{hop} Payment removed rows"
         );
     }
 }
@@ -1249,6 +1290,11 @@ struct PropagationSignature {
 }
 
 impl PropagationSignature {
+    fn assert_payment_delta(&self) {
+        self.core_to_edge.assert_payment_delta("core-to-edge");
+        self.edge_to_client.assert_payment_delta("edge-to-client");
+    }
+
     fn assert_delta_bounded(&self, expected: &Self) {
         self.core_to_edge
             .assert_delta_bounded(&expected.core_to_edge, "core-to-edge");
@@ -1325,7 +1371,7 @@ fn run_fixed_delta_scaling(customer_rungs: &[usize]) {
         let schema = schema();
         let (_core_dir, mut core) = open_node(node(250), schema.clone());
         seed_jazz_fixture(&config, &mut core);
-        let mut clients = open_clients(1, 20, &schema, &mut core);
+        let mut clients = open_clients(2, 20, &schema, &mut core);
         let mut edge_acceptance = Histogram::new(3).unwrap();
         let op = Op::Payment {
             warehouse: 0,
@@ -1345,8 +1391,10 @@ fn run_fixed_delta_scaling(customer_rungs: &[usize]) {
         );
 
         let started = Instant::now();
-        let signature = propagate_client(&mut core, &mut clients[0]);
+        let signature = propagate_client(&mut core, &mut clients[1]);
         let wall_us = started.elapsed().as_micros();
+        assert_observer_payment(&clients[1].db, &schema);
+        signature.assert_payment_delta();
         let view_rows = customers + 5;
         assert_eq!(
             TABLES
@@ -1405,6 +1453,44 @@ fn run_fixed_delta_scaling(customer_rungs: &[usize]) {
             &JsonValue::Object(fields).to_string(),
         );
     }
+}
+
+fn assert_observer_payment(db: &Db<RocksDbStorage>, schema: &JazzSchema) {
+    let warehouse = observer_row(db, WAREHOUSES, warehouse_row(0));
+    assert_eq!(
+        warehouse.cell(table_schema(schema, WAREHOUSES), "ytd"),
+        Some(Value::F64(1.0))
+    );
+    let district = observer_row(db, DISTRICTS, district_row(0, 0));
+    assert_eq!(
+        district.cell(table_schema(schema, DISTRICTS), "ytd"),
+        Some(Value::F64(1.0))
+    );
+    let customer = observer_row(db, CUSTOMERS, customer_row(0, 0, 0));
+    assert_eq!(
+        customer.cell(table_schema(schema, CUSTOMERS), "balance"),
+        Some(Value::F64(-1.0))
+    );
+    assert_eq!(
+        customer.cell(table_schema(schema, CUSTOMERS), "paymentCount"),
+        Some(Value::U64(1))
+    );
+    let payment = observer_row(db, PAYMENTS, payment_row(0, 0, 0, 10_000));
+    assert_eq!(
+        payment.cell(table_schema(schema, PAYMENTS), "amount"),
+        Some(Value::F64(1.0))
+    );
+}
+
+fn observer_row(db: &Db<RocksDbStorage>, table: &str, row: RowUuid) -> CurrentRow {
+    let prepared = db
+        .prepare_query(&db.table(table))
+        .unwrap_or_else(|error| panic!("prepare observer {table} query failed: {error}"));
+    db.read(&prepared)
+        .unwrap_or_else(|error| panic!("read observer {table} query failed: {error}"))
+        .into_iter()
+        .find(|candidate| candidate.row_uuid() == row)
+        .unwrap_or_else(|| panic!("observer is missing {table} row {row:?}"))
 }
 
 fn insert_propagation_work(
