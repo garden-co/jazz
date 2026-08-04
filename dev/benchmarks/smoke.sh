@@ -47,6 +47,7 @@ prebuild_benches() {
   (
     cd "$ROOT"
     cargo bench -p jazz --no-run -j "$SMOKE_JOBS"
+    cargo bench --profile perf -p jazz --bench policy_cost_receipt --no-run -j "$SMOKE_JOBS"
     cargo bench -p jazz-sim --no-run -j "$SMOKE_JOBS"
   ) >"$log" 2>&1
   status=$?
@@ -429,8 +430,8 @@ run_scenario \
 
 run_scenario \
   "jazz/policy_cost_receipt" \
-  "cargo bench -p jazz --bench policy_cost_receipt --quiet" \
-  cargo bench -p jazz --bench policy_cost_receipt --quiet
+  "cargo bench --profile perf -p jazz --bench policy_cost_receipt --quiet" \
+  cargo bench --profile perf -p jazz --bench policy_cost_receipt --quiet
 
 run_scenario \
   "jazz-sim/micro" \

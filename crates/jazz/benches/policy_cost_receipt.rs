@@ -15,6 +15,7 @@ use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, PolicyBranch, Query, claim, col, eq, in_list, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -205,10 +206,7 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
     let mut stream = block_on(db.subscribe_for_identity(&prepared, local_opts(), LIFECYCLE_READER))
         .expect("subscribe lifecycle reader");
     let mut observed = take_reset(&mut stream);
-    let mut exact = observed
-        == expected_page(fixture, 5, LIFECYCLE_READER)
-            .into_iter()
-            .collect();
+    let mut exact = observed_page(&observed) == expected_page(fixture, 5, LIFECYCLE_READER);
 
     let membership = tagged_row(0x74, 9_000);
     let grant_started = Instant::now();
@@ -220,7 +218,7 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
     .expect("grant membership");
     let grant_us = micros(grant_started.elapsed());
     apply_events(&mut stream, &mut observed);
-    let grant_exact = observed == expected_member_page(fixture, fixture.teams[0]);
+    let grant_exact = observed_page(&observed) == expected_member_page(fixture, fixture.teams[0]);
     exact &= grant_exact;
 
     let revoke_started = Instant::now();
@@ -228,10 +226,7 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
         .expect("revoke membership");
     let revoke_us = micros(revoke_started.elapsed());
     apply_events(&mut stream, &mut observed);
-    let revoke_exact = observed
-        == expected_page(fixture, 5, LIFECYCLE_READER)
-            .into_iter()
-            .collect();
+    let revoke_exact = observed_page(&observed) == expected_page(fixture, 5, LIFECYCLE_READER);
     exact &= revoke_exact;
 
     let restore_started = Instant::now();
@@ -243,7 +238,7 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
     .expect("restore membership");
     let restore_us = micros(restore_started.elapsed());
     apply_events(&mut stream, &mut observed);
-    let restore_exact = observed == expected_member_page(fixture, fixture.teams[0]);
+    let restore_exact = observed_page(&observed) == expected_member_page(fixture, fixture.teams[0]);
     exact &= restore_exact;
 
     let moved = fixture
@@ -275,7 +270,8 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
         .expect("moved oracle document");
     changed.team = fixture.teams[1];
     changed.organization = fixture.organizations[1];
-    let move_out_exact = observed == expected_member_page_from(&moved_fixture, fixture.teams[0]);
+    let move_out_exact =
+        observed_page(&observed) == expected_member_page_from(&moved_fixture, fixture.teams[0]);
     exact &= move_out_exact;
 
     let move_back_started = Instant::now();
@@ -293,7 +289,8 @@ fn run_lifecycle(db: &BenchDb, fixture: &Fixture) -> LifecycleReceipt {
     .expect("move document back into scope");
     let move_back_us = micros(move_back_started.elapsed());
     apply_events(&mut stream, &mut observed);
-    let move_back_exact = observed == expected_member_page(fixture, fixture.teams[0]);
+    let move_back_exact =
+        observed_page(&observed) == expected_member_page(fixture, fixture.teams[0]);
     exact &= move_back_exact;
 
     LifecycleReceipt {
@@ -600,11 +597,11 @@ fn expected_page(fixture: &Fixture, branches: usize, identity: AuthorId) -> Vec<
         .collect()
 }
 
-fn expected_member_page(fixture: &Fixture, team: RowUuid) -> BTreeSet<RowUuid> {
+fn expected_member_page(fixture: &Fixture, team: RowUuid) -> Vec<RowUuid> {
     expected_member_page_from(&fixture.documents, team)
 }
 
-fn expected_member_page_from(documents: &[Document], team: RowUuid) -> BTreeSet<RowUuid> {
+fn expected_member_page_from(documents: &[Document], team: RowUuid) -> Vec<RowUuid> {
     documents
         .iter()
         .rev()
@@ -614,23 +611,19 @@ fn expected_member_page_from(documents: &[Document], team: RowUuid) -> BTreeSet<
         .collect()
 }
 
-fn take_reset(stream: &mut SubscriptionStream) -> BTreeSet<RowUuid> {
+fn take_reset(stream: &mut SubscriptionStream) -> BTreeMap<RowUuid, u64> {
     match stream.try_next_event().expect("initial subscription reset") {
         SubscriptionEvent::Delta {
             reset: true,
             added,
             updated,
             ..
-        } => added
-            .into_iter()
-            .chain(updated)
-            .map(|row| row.row_uuid())
-            .collect(),
+        } => added.into_iter().chain(updated).map(observed_row).collect(),
         other => panic!("expected initial reset, got {other:?}"),
     }
 }
 
-fn apply_events(stream: &mut SubscriptionStream, observed: &mut BTreeSet<RowUuid>) {
+fn apply_events(stream: &mut SubscriptionStream, observed: &mut BTreeMap<RowUuid, u64>) {
     while let Some(event) = stream.try_next_event() {
         match event {
             SubscriptionEvent::Delta {
@@ -647,13 +640,31 @@ fn apply_events(stream: &mut SubscriptionStream, observed: &mut BTreeSet<RowUuid
                     observed.remove(&row.row_uuid);
                 }
                 for row in added.into_iter().chain(updated) {
-                    observed.insert(row.row_uuid());
+                    let (row, updated_at) = observed_row(row);
+                    observed.insert(row, updated_at);
                 }
             }
             SubscriptionEvent::Rejected { reason } => panic!("subscription rejected: {reason:?}"),
             SubscriptionEvent::Closed => panic!("subscription closed"),
         }
     }
+}
+
+fn observed_row(row: CurrentRow) -> (RowUuid, u64) {
+    let updated_at = match row.cell_at(2) {
+        Some(Value::U64(updated_at)) => updated_at,
+        other => panic!("expected projected updated_at, got {other:?}"),
+    };
+    (row.row_uuid(), updated_at)
+}
+
+fn observed_page(observed: &BTreeMap<RowUuid, u64>) -> Vec<RowUuid> {
+    let mut rows = observed
+        .iter()
+        .map(|(row, updated_at)| (*row, *updated_at))
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|(row, updated_at)| (std::cmp::Reverse(*updated_at), *row));
+    rows.into_iter().map(|(row, _)| row).collect()
 }
 
 fn local_opts() -> ReadOpts {

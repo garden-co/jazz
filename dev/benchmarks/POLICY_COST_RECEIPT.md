@@ -33,9 +33,9 @@ existential authorization before the finite window. The trusted administrator
 overlaps every other branch.
 
 An independent fixture oracle checks every ordered one-shot result and digest.
-A retained subscription then checks exact membership after membership grant,
-revoke, restore, moving a winning document out of scope, and moving it back.
-The benchmark exits unsuccessfully on any mismatch.
+A retained subscription then reconstructs and checks the exact ordered page
+after membership grant, revoke, restore, moving a winning document out of
+scope, and moving it back. The benchmark exits unsuccessfully on any mismatch.
 
 Run it with:
 
