@@ -5,10 +5,14 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
-use jazz::protocol::{SyncMessage, VersionRecord};
+use jazz::protocol::{
+    PeerPayloadInventory, RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage,
+    VersionBundle, VersionRecord,
+};
+use jazz::query::Query;
 use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
-use jazz::time::TxTime;
-use jazz::tx::{Fate, Transaction, TxId, TxKind};
+use jazz::time::{GlobalSeq, TxTime};
+use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use serde_json::{Value as JsonValue, json};
 
 fn documents_schema(payload_schema: Option<JsonValue>) -> JazzSchema {
@@ -76,12 +80,11 @@ fn payload(raw: &str) -> BTreeMap<String, Value> {
 
 /// Emits a wire commit unit carrying `raw` in `documents.payload`, as an
 /// untrusted peer would, and hands it to the receiving node's ingest boundary.
-fn ingest_remote_payload(
-    node: &mut NodeState<MemoryStorage>,
+fn remote_payload_unit(
     schema: &JazzSchema,
     document_id: RowUuid,
     raw: &str,
-) -> Vec<SyncMessage> {
+) -> (Transaction, VersionRecord) {
     let table = schema
         .tables
         .iter()
@@ -121,6 +124,18 @@ fn ingest_remote_payload(
         merge_strategy: None,
     };
 
+    (tx, version)
+}
+
+/// Emits a wire commit unit carrying `raw` in `documents.payload`, as an
+/// untrusted peer would, and hands it to the receiving node's ingest boundary.
+fn ingest_remote_payload(
+    node: &mut NodeState<MemoryStorage>,
+    schema: &JazzSchema,
+    document_id: RowUuid,
+    raw: &str,
+) -> Vec<SyncMessage> {
+    let (tx, version) = remote_payload_unit(schema, document_id, raw);
     node.ingest_commit_unit(tx, vec![version], 500)
         .expect("ingest reports rejection through fate, not a transport error")
 }
@@ -343,4 +358,122 @@ fn remote_ingest_rejects_json_schema_violation() {
     let messages = ingest_remote_payload(&mut node, &schema, document_id, "{\"name\":123}");
 
     assert_row_absent(&mut node, document_id, &messages);
+}
+
+/// Relay admission is a storage boundary rather than a fate authority, so an
+/// invalid wire value is observable as an ingest error. Constructing the wire
+/// record directly is necessary because every local write API rejects it first.
+#[test]
+fn relay_ingest_rejects_invalid_json_before_storage() {
+    let schema = schema_requiring_string_name();
+    let mut node = open_node(schema.clone());
+    let document_id = row(5);
+    let (tx, version) = remote_payload_unit(&schema, document_id, "{\"name\":123}");
+
+    let error = node
+        .ingest_relay_commit_unit(tx, vec![version])
+        .expect_err("relay must reject schema-invalid JSON");
+
+    assert!(
+        error
+            .to_string()
+            .contains("JSON schema validation failed for column `payload`"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        node.visible_current_cells("documents", document_id)
+            .expect("query local row"),
+        None,
+        "invalid relayed JSON must not reach storage"
+    );
+}
+
+/// View updates require direct wire construction because a conforming serving
+/// node cannot produce an invalid JSON cell. This exercises both live message
+/// variants through `apply_sync_message`, including reset/bulk ingestion.
+#[test]
+fn view_update_wire_variants_reject_invalid_json_before_storage() {
+    let schema = schema_requiring_string_name();
+
+    for chunked in [false, true] {
+        let mut node = open_node(schema.clone());
+        let document_id = if chunked { row(7) } else { row(6) };
+        let query = Query::from("documents");
+        let shape = query.validate(&schema).expect("validate documents query");
+        let binding = shape.bind(BTreeMap::new()).expect("bind documents query");
+        let opts = RegisterShapeOptions::default();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        node.apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .expect("register documents shape");
+        node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .expect("subscribe to documents");
+
+        let (tx, version) = remote_payload_unit(&schema, document_id, "{\"name\":123}");
+        let tx_id = tx.tx_id;
+        let bundle = VersionBundle {
+            tx,
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: DurabilityTier::Global,
+        };
+        let result_member_adds = vec![("documents".to_owned().into(), document_id, tx_id).into()];
+        let message = if chunked {
+            SyncMessage::ViewUpdateChunk {
+                subscription,
+                settled_through: GlobalSeq(1),
+                reset_result_set: true,
+                final_chunk: true,
+                version_carriers: Vec::new(),
+                version_bundles: vec![bundle],
+                peer_payload_inventory: PeerPayloadInventory::default(),
+                result_member_adds,
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            }
+        } else {
+            SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(1),
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                version_bundles: vec![bundle],
+                peer_payload_inventory: PeerPayloadInventory::default(),
+                result_member_adds,
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            }
+        };
+
+        let error = node
+            .apply_sync_message(message)
+            .expect_err("view update must reject schema-invalid JSON");
+        assert!(
+            error
+                .to_string()
+                .contains("JSON schema validation failed for column `payload`"),
+            "unexpected error for chunked={chunked}: {error:?}"
+        );
+        assert_eq!(
+            node.visible_current_cells("documents", document_id)
+                .expect("query local row"),
+            None,
+            "invalid view-update JSON must not reach storage"
+        );
+    }
 }
