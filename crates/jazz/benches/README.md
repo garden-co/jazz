@@ -7,7 +7,8 @@ source material here.
 ## Active benches
 
 The active bench harness is the explicit `[[bench]]` list in
-`crates/jazz-tools/Cargo.toml`:
+`crates/jazz/Cargo.toml`. It includes the retained core/simulation receipts and
+the facade-level Criterion and realistic lanes, including:
 
 - `observer_write_path`
 - `db_benchmark`
@@ -16,6 +17,13 @@ The active bench harness is the explicit `[[bench]]` list in
 - `insert_benchmark`
 - `update_benchmark`
 - `subscription_benchmark`
+- `validation`
+- `sync`
+- `cold_subscription`
+- `large_value_checkpointing`
+- `merge_back_cost`
+- `relation_include_delivery`
+- `selective_global_hydration`
 
 All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy
@@ -49,6 +57,13 @@ than old helper behavior:
   revoked doc visible. Recursive write-policy settlement is covered in the
   `jazz` policy tests with global/settled support rows; local-only support rows
   correctly do not authorize writes.
+
+`selective_global_hydration` is a custom JSONL receipt over the persisted
+Global query path. It holds one selected team and its result page fixed while
+total table rows increase, then records exact result digests and logical
+Global-current row/index reads. It is intentionally not a timing gate: the
+deterministic read counts establish whether hydration is selective before an
+engine optimization is attempted.
 
 ## Intended next ports
 
