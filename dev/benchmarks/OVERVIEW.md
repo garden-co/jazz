@@ -1,121 +1,174 @@
-# Benchmarks: what we have, what they measure, what's missing
+# Benchmarks: current map and performance roadmap
 
-An orientation for anyone picking up performance work. Compiled 2026-07-28 from a
-read of the bench sources — not from their names, several of which mislead.
-
-Full detail, with `file:line` for every claim, is in the working notes
-(`benchmark-inventory.md`). This is the map.
+An orientation for anyone picking up performance work. Originally compiled
+2026-07-28 by reading the benchmark sources rather than trusting their names;
+updated 2026-07-31 after the incremental-delivery, persisted-read, cold-settle,
+policy/fan-out, and relation-hydration investigations.
 
 ## The short version
 
-We have plenty of benchmarks. What we don't have is **an answer to "where do we
-stand"** — because results land in three unrelated places, and only one of them
-keeps history.
+We have enough benchmarks to identify and verify important engine wins. The
+remaining problem is not a total absence of receipts: it is that retention and
+comparison are still split across several workflows, and the highest-value
+remaining specification properties do not yet have controlled scale sweeps.
 
-| harness                   | output                                                 | survives?                                 |
-| ------------------------- | ------------------------------------------------------ | ----------------------------------------- |
-| `dev/benchmarks/smoke.sh` | JSONL receipts + `SMOKE_LEDGER.md` with previous/delta | **yes, committed**                        |
-| Criterion (`cargo bench`) | `target/criterion`                                     | no — machine-local, dies on `cargo clean` |
-| realistic native/browser  | per-scenario JSON, CI artifacts                        | no — artifacts expire                     |
+Do not block useful performance work on a repository-wide receipt rewrite.
+Every new high-value lane should emit an attributable, correctness-checked
+receipt and state where that receipt is retained.
 
-So Groove, Criterion, browser, storage/OPFS and WASM-ingest numbers exist only as
-whatever the last person happened to run.
+| harness                        | output and retention                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dev/benchmarks/smoke.sh`      | JSONL receipts plus committed previous/delta history in `SMOKE_LEDGER.md`                                                                                           |
+| realistic native/browser       | per-scenario JSON; selected CI results are retained in `realistic/history/bench_history.json`, while local exploratory runs remain local unless explicitly imported |
+| Groove scenario/micro          | JSON on stdout; `receipt-adapters.sh` can retain results and append smoke-shaped summaries                                                                          |
+| Criterion                      | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local                      |
+| storage, OPFS, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                              |
 
-## What each thing actually measures
+Timing medians are directional unless the harness controls the relevant cache,
+fixture, and host conditions. Prefer deterministic structural counters for hard
+gates. A fast result that fails its oracle or result digest is not a benchmark
+result.
 
-### Core `jazz` benches — the ones in the smoke gate
+## What each benchmark family measures
 
-| bench                       | measures                                                                                                                     | sensitive to                                                   |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `cold_subscription`         | seeds one row at history depths (1k/5k/10k), times global `current_rows_update` and local `current_rows`                     | historical depth, pending local state, current-row hydration   |
-| `validation`                | multi-client exclusive transactions, 1–3 reads + 1–2 writes each; compares core ingest acceptance against a simplified model | client/row/commit counts, hot-row rate, OCC and predicate sets |
-| `sync`                      | mixed mergeable/exclusive/skew/delete commits UI→worker→edge→core, with periodic current-row updates back                    | commit mix, view cadence, topology, bundle/reference reuse     |
-| `large_value_checkpointing` | one-byte text edits to depth ~300, then materialization with interval checkpoints vs full replay                             | text history depth, checkpoint interval, body size             |
-| `merge_back_cost`           | branch creation, ~1k mergeable writes, merge-back, current-row count                                                         | branch write count. **Not** complete offline sync              |
+### Core `jazz` benches and smoke receipts
 
-Run: `cargo bench -p jazz --bench <name>`. All five are in `smoke.sh`, so they
-have committed history and delta tracking.
+| bench                       | measures                                                                          | sensitive to                                              |
+| --------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `cold_subscription`         | global update and local current-row materialization over increasing history depth | history depth, pending local state, current-row hydration |
+| `validation`                | multi-client exclusive ingest against an independent simplified model             | clients, rows, contention, OCC, and predicate sets        |
+| `sync`                      | mixed commits over UI → worker → edge → core with periodic view updates           | commit mix, topology, view cadence, known-state reuse     |
+| `large_value_checkpointing` | small text edits followed by checkpointed versus full replay                      | text history, checkpoint interval, body size              |
+| `merge_back_cost`           | branch creation, mergeable writes, merge-back, and current-row count              | branch write count; not a complete offline-sync scenario  |
+| `relation_include_delivery` | one-row relation/include delivery over a 1k–20k accumulated-view ladder           | incremental delivery work versus retained view size       |
 
-### `jazz-sim` scenarios — S1–S7, S9
+The smoke gate retains these receipts and their deltas. The
+`relation_include_delivery` ladder is the quantitative `INV-INC-1` gate added by
+#1166; it holds the change fixed and enforces a `1.025x` allocation/byte ratio.
+#1192 corrects its reporting to use independent per-metric medians without
+retuning that threshold.
 
-Named workload simulations (`s1_saas`, `s2_canvas`, `s3_permissions`,
-`s4_order_processing`, `s5_durable_stream`, `s6_text_traces`, `s7_migrations`,
-`s9_durable_execution`) plus `micro`. In the smoke gate, so also committed.
+### `jazz-sim` scenarios
 
-**S8 does not exist.** The spec reserves it for branch/merge/offline edits;
-there's no Cargo target. `merge_back_cost` is a smaller piece of that, and R8 is
-a declarative JSON scenario with no runner.
+S1–S7 and S9 cover SaaS, canvas, permissions, order processing, durable
+streams, text traces, migrations, and durable execution. They are retained by
+the smoke workflow.
 
-### Groove benches — not in any gate
+**S8 still does not exist.** The specification reserves it for
+branch/merge/offline edits. `merge_back_cost` and the declarative R8 fixture
+cover pieces of that story, not the complete lifecycle.
 
-`scenario` (social feed, ACL, one-shot) and `micro`. Driven by env vars:
+### Groove
 
-```
-GROOVE_SCENARIO=social_feed GROOVE_ENGINE=groove cargo bench -p groove --bench scenario --quiet
-```
+`scenario` covers social-feed joins, recursive ACLs, and one-shot reads;
+`micro` isolates record encoding, planning, and subscribe/unsubscribe costs.
+Groove emits correctness-checked JSON, and `dev/benchmarks/receipt-adapters.sh`
+provides the retained-baseline path described in `crates/groove/SPEC/B_benchmarks.md`.
 
-Emit JSON on stdout. Nothing captures it. The Groove spec references a
-`scripts/bench_run.py` retention tree that **doesn't exist in this checkout** —
-treat that documentation as stale.
+### Realistic `jazz-tools` and browser lanes
 
-### Legacy `jazz-tools` Criterion suite — manual only
+The older Criterion cases are predominantly `MemoryStorage`; their “batch”
+insert/update cases are serial insert-and-wait calls, not atomic transactions.
+Do not use them as evidence about persisted reads or transaction batching.
 
-`observer_write_path`, `db_benchmark`, `authorization_scope_benchmark`,
-`insert`/`update`, `subscription`, and `realistic_phase1` (R1–R13).
+`realistic_phase1` includes the persisted RocksDB R3 lane. The stack beginning
+at #1174 adds reproducible phase receipts, controlled warm/best-effort-evicted
+cache modes, startup attribution, and exact result validation. #1175, #1176,
+#1178, #1199, and #1203 then use those receipts to remove redundant or
+unbounded startup work. #1202 is a separate design arm: representative-row
+layout validation is faster, but its durable-format contract still needs team
+alignment.
 
-Two things to know before trusting these:
+Browser realistic scenarios cover writes, reads, fan-out, permissions, and
+history. CI-scale runs are shape/correctness checks rather than representative
+latency numbers. #1224 adds B7 for public relation-result hydration coverage.
 
-- **They're all `MemoryStorage`** unless noted, so they don't measure the
-  persisted read path at all.
-- The "batch" cases in `insert`/`update` are _serial insert-and-wait calls_, not
-  atomic transactions. Only `subscription` has a genuinely staged 100-insert
-  mergeable transaction.
+### Storage, OPFS, and WASM
 
-`realistic_phase1` needs `--features rocksdb`. CI runs R1/R2/R3/R4/R9–R12, not R13.
+- Native storage benchmarks compare raw SQLite, RocksDB, and redb KV behavior.
+- `opfs-btree/hot_paths` uses an in-memory file; the WASM worker harness is the
+  actual OPFS path.
+- Jazz WASM probes primarily measure runtime characteristics such as
+  arithmetic, indirect calls, `RefCell`, and allocation—not full Jazz data
+  paths.
 
-### Browser, storage, WASM
+## What has changed since the original inventory
 
-- **Browser realistic** (W1/W4, B1–B6): `pnpm --dir packages/jazz-tools run bench:realistic:browser`. CI scales the workload to **3%**, so these are shape checks, not scale numbers.
-- **Native realistic** (W1/W3/W4): `cargo run -p jazz-tools --example realistic_bench -- <scenario>`.
-- **Native storage engines** (SQLite/RocksDB/redb raw KV): `cargo bench -p jazz-storage-native-bench`.
-- **OPFS B-tree hot paths**: `cargo bench -p opfs-btree --bench hot_paths` — note this uses an **in-memory file, not actual OPFS**. The real one is the WASM worker bench (`run-opfs-bench.cjs`).
-- **Jazz WASM probes**: arithmetic, trait dispatch, RefCell, allocation. Runtime characteristics, _not_ Jazz data paths.
+### Closed or substantially addressed
 
-## The gaps that matter
+1. **`INV-INC-1` receipt and gate:** #1166 added the scale curve and retained
+   smoke receipt. #1192 is the reporting correction still to land.
+2. **Persisted realistic read attribution:** #1174–#1203 establish and pull the
+   R3 startup thread. The ordinary arm reduces clean startup from the original
+   roughly 3.2-second baseline to roughly 0.75 seconds on the benchmark fixture;
+   the separate #1202 design arm can reduce it further if its format contract is
+   accepted.
+3. **Cold-settle attribution:** #1167 and #1187 identify receiver-side bulk view
+   ingest as the dominant phase and separate it from transport and maintained
+   settle.
+4. **First-read attribution and hydration:** #1207 attributes first read inside
+   Groove execution. #1219 and #1221–#1225 add measured join/hydration
+   optimizations and a public browser relation benchmark.
+5. **Policy/fan-out exploration:** draft #1170 supplies realistic permission,
+   route, persisted-hydration, and subscription-count evidence plus
+   implementation plans. Its stable findings still need extraction into
+   focused retained lanes.
 
-Ranked by how much they'd change a decision:
+### Important negative results retained
 
-1. **`INV-INC-1` has no performance receipt.** The mechanism law — maintained delivery work bounded by the change, never by view size — is enforced by an exact functional canary (one parent, 20k children, insert one, allocations within 3×). That proves the property at _one point_. No slope, no curve, no number to set a target against. Given how much recent work is justified against this invariant, it's the first gap to close.
-2. **No end-to-end persisted realistic-scale read receipt.** Legacy suites are in-memory, browser CI runs at 3%, and native R3 reopens its own temp RocksDB without controlling OS cache. We have no honest cold-read number.
-3. **S8 missing** (branch/merge/offline).
-4. **Policy _cost_ coverage lags policy _correctness_ coverage.** Nothing measures ordinary writes becoming visible to authorized readers at scale, or reconnect during policy churn.
-5. **S5–S7 missing promised dimensions**: remote resume / evicted prefix (S5), full-history memory (S6), native-vs-lens tax and migration waves (S7).
-6. **No peer-known-state / payload-dedup scale sweep** for normal sync.
+- #1190 removes one Groove flush per subscription refresh and is a major
+  high-route write win, but does not improve the adopter-shaped cold-settle
+  workload; that workload performs few refresh cycles and is dominated by bulk
+  ingest volume.
+- One-shot reads intentionally reuse subscription machinery. Do not treat
+  subscribe/wait/unsubscribe setup as an accidental one-shot-only defect.
+- R3 startup gains vary with fixture state. Quote the complete clean/unclean and
+  warm/evicted receipt, not a single best-case number.
 
-## Where targets should come from
+## Remaining gaps, ranked
 
-The spec states performance properties that nothing currently enforces. These
-are the natural source of acceptance targets:
+Ranked by their ability to change an engineering decision:
 
-| property                                   | what exists                                      | what's missing                                                         |
-| ------------------------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------- |
-| `INV-INC-1` bounded incremental delivery   | landing canary, S1 fanout counters               | no scale curve, numerical bound, or gate                               |
-| PERF-4 known-state payload dedup           | S1/sync emit bundle and reference counters       | no controlled known-state cardinality sweep                            |
-| PERF-5 maintained converges to rehydrate   | correctness/oracle work                          | no maintained-vs-rehydrate cost/bytes comparison over view scale       |
-| PERF-7/8 current reads are O(current rows) | `cold_subscription`, `large_value_checkpointing` | no retained baseline or slope threshold; filtered/indexed reads absent |
-| S4 post-acceptance propagation is O(delta) | S4 emits settlement/propagation phases           | no fixed-delta / varying-view regression rule                          |
+1. **Policy and selective-hydration cost receipts.** Extract the stable lanes
+   from #1170: authorized write-to-reader visibility, route/subscription scale,
+   policy churn/reconnect, and selective Global hydration.
+2. **PERF-4 known-state payload dedup.** Hold the changed payload fixed while
+   sweeping peer-known-state cardinality; retain bundle/reference counts,
+   encoded bytes, and correctness digests.
+3. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
+   state over increasing view sizes while asserting identical results.
+4. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
+   propagation; add a deterministic structural bound proving propagation stays
+   proportional to the affected delta.
+5. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
+   reconnect, merge-back, conflicts, and payload reuse end to end.
+6. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
+   for S5, full-history memory for S6, and native-versus-lens plus migration-wave
+   costs for S7.
 
-## Known documentation rot
+## Source of acceptance targets
 
-- The bench README says R13 is unregistered; the source registers it.
-- `C_performance.md` says S4's phase split is incomplete; the source emits both phases.
-- Groove's spec references a retention script tree that isn't in this checkout.
-- `opfs-btree/BENCHMARK_OVERVIEW.md` maps historical figures to paths that have moved.
+| property                                   | current evidence                                          | next enforcement                                                                               |
+| ------------------------------------------ | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `INV-INC-1` bounded incremental delivery   | retained 1k–20k ladder and `1.025x` gate                  | land #1192 and extend only when a new maintained mechanism needs its own shape-specific canary |
+| PERF-4 known-state payload dedup           | sync/S1 bundle and reference counters                     | controlled known-state-cardinality sweep                                                       |
+| PERF-5 maintained converges to rehydrate   | correctness and differential oracles                      | cost/bytes/state comparison over view scale                                                    |
+| PERF-7/8 current reads are O(current rows) | R3 persisted receipts, current-row and checkpoint benches | retained filtered/indexed-read slope where selection is held fixed                             |
+| S4 post-acceptance propagation is O(delta) | separate settlement/propagation phases                    | fixed-delta/varying-view structural gate                                                       |
 
-## Suggested order of work
+Targets should come from specification properties and measured deterministic
+spread, not from an arbitrary percentage around today’s laptop timing.
 
-1. **Unify receipts before running anything.** Have Criterion, browser, storage and Groove targets emit a smoke-shaped receipt alongside their native output — name, metric, value, unit, workload params, commit, dirty flag, timestamp. The `SMOKE_LEDGER.md` schema already does previous/delta; reuse it rather than inventing one. Small adapter per harness, not a rewrite.
-2. **Then run everything once** to establish a baseline that's actually comparable run-to-run.
-3. **Then set targets**, taking them from the stated-properties table above rather than from whatever the current numbers happen to be.
+## Recommended order of work
 
-Doing 2 before 1 produces three incomparable snapshots and no baseline.
+1. Land the benchmark-foundation corrections and the existing R3 and
+   first-read/hydration stacks in dependency order. Keep #1202 separate until
+   its durable-format decision has team agreement.
+2. Extract focused policy/selective-hydration receipts from #1170 rather than
+   merging one omnibus benchmark investigation.
+3. Add the PERF-4 known-state sweep.
+4. Add PERF-5 and the S4 structural gate.
+5. Build S8, then fill the remaining S5–S7 dimensions.
+
+Add retention alongside each lane. A broad receipt-unification project is no
+longer a prerequisite for useful performance work.
