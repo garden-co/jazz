@@ -4380,6 +4380,7 @@ fn equivalent_query_graph_terminals_share_snapshot_materialization() {
 
     let scans_before = counter.scan_prefix_count();
     let visits_before = counter.visited_records();
+    let memo_before = database.runtime_stats();
     let snapshots = database
         .query_graphs([
             ("first", GraphBuilder::table("albums").project(["id"])),
@@ -4402,10 +4403,16 @@ fn equivalent_query_graph_terminals_share_snapshot_materialization() {
         "equivalent output terminals should construct their shared table snapshot once"
     );
     assert_eq!(counter.visited_records() - visits_before, 2);
+    let memo_after = database.runtime_stats();
+    assert!(
+        memo_after.hydration_memo_hits > memo_before.hydration_memo_hits,
+        "the second equivalent terminal must reuse evaluated relation nodes"
+    );
 }
 
 #[test]
 fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
+    let mut computed_nodes = Vec::new();
     for terminal_count in [1_usize, 2, 4, 8] {
         let storage = ScanCountingStorage::new(&["albums"]);
         let counter = storage.clone();
@@ -4433,7 +4440,59 @@ fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
         assert!(snapshots.sinks.values().all(|rows| rows.deltas.len() == 32));
         assert_eq!(counter.scan_prefix_count() - scans_before, 1);
         assert_eq!(counter.visited_records() - visits_before, 32);
+        computed_nodes.push(database.runtime_stats().hydration_memo_computes);
     }
+    assert!(
+        computed_nodes.windows(2).all(|pair| pair[0] == pair[1]),
+        "evaluated relation work must remain constant as equivalent terminals are added: {computed_nodes:?}"
+    );
+}
+
+#[test]
+fn different_downstream_shapes_share_only_raw_snapshot_materialization() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let scans_before = counter.scan_prefix_count();
+    let snapshots = database
+        .query_graphs([
+            (
+                "ids",
+                GraphBuilder::table("albums")
+                    .filter(PredicateExpr::eq("id", Value::U64(1)))
+                    .project(["id"]),
+            ),
+            ("titles", GraphBuilder::table("albums").project(["title"])),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        snapshots.get("ids").unwrap().to_values().unwrap(),
+        [(vec![Value::U64(1)], 1)]
+    );
+    assert_eq!(
+        snapshots.get("titles").unwrap().to_values().unwrap(),
+        [
+            (vec![Value::String("Blue Train".to_owned())], 1),
+            (vec![Value::String("Giant Steps".to_owned())], 1),
+        ]
+    );
+    assert_eq!(
+        counter.scan_prefix_count() - scans_before,
+        1,
+        "different evaluated query shapes may share raw rows but not evaluated outputs"
+    );
 }
 
 #[test]
