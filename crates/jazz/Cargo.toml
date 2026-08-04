@@ -325,6 +325,10 @@ required-features = ["test"]
 name = "sync_telemetry_otel"
 required-features = ["test", "otel-core"]
 
+[[test]]
+name = "prepared_claim_routing"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
