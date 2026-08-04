@@ -1130,6 +1130,20 @@ fn schema_versions_table() -> GrooveTableSchema {
             // node-local-derived: allocated by schema-version alias interning.
             column("id", GrooveColumnType::U64),
             column("uuid", GrooveColumnType::Uuid),
+            // node-local: mapping from a schema version's logical table & column names to stable
+            // physical storage identities. Stored as serialized JSON bytes containing `SchemaPhysicalMapping`:
+            // {
+            //   tables: {
+            //     "todos": {
+            //       table_id: 7,
+            //       columns: {
+            //         "title": 12,
+            //         "body": 19
+            //       }
+            //     }
+            //   }
+            // }
+            column("physical_mapping", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))

@@ -58,17 +58,6 @@ where
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_schema_versions", &[])?
-        {
-            let record = raw.record();
-            let alias =
-                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
-            let uuid =
-                SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
-            self.catalogue.schema_version_aliases.insert(uuid, alias);
-        }
         let branch_records = self
             .database
             .primary_key_scan_raw("jazz_branches", &[])?

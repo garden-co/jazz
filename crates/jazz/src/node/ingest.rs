@@ -295,6 +295,7 @@ where
             self.query.current_row_graphs = current_row_graphs(&self.catalogue.schema);
         }
         self.persist_catalogue_schema(&schema)?;
+        self.ensure_provisional_physical_mapping(schema.id)?;
         self.ensure_schema_version_alias(schema.id)?;
         if active_schema_changed {
             // Policy declarations are intentionally outside the schema version
@@ -351,17 +352,25 @@ where
             return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
         }
         self.validate_migration_lens(&lens)?;
-        let installed = if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.catalogue.catalogue_lenses.entry(lens.id)
-        {
-            entry.insert(lens.clone());
-            true
+        let installed = !self.catalogue.catalogue_lenses.contains_key(&lens.id);
+        let reconciled = if installed {
+            Some(self.reconcile_physical_mapping_for_lens(&lens)?)
         } else {
-            false
+            None
         };
+        self.persist_catalogue_lens_with_physical_metadata(&lens, reconciled.as_ref())?;
+        if installed {
+            self.catalogue
+                .catalogue_lenses
+                .insert(lens.id, lens.clone());
+        }
+        if let Some(mapping) = reconciled {
+            self.catalogue
+                .physical_mappings
+                .insert(lens.target, mapping);
+        }
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
-        self.persist_catalogue_lens(&lens)?;
         if installed {
             self.rebuild_database_slot()?;
         }

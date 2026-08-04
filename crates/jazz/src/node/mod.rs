@@ -26,8 +26,8 @@ use thiserror::Error;
 
 use self::query_engine::user_column_field;
 use crate::ids::{
-    AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, RowUuid, SchemaVersionAlias,
-    SchemaVersionId,
+    AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
+    RowUuid, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
@@ -67,6 +67,7 @@ mod global_state;
 mod ingest;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
+mod physical;
 mod policy;
 mod query_engine;
 mod query_eval;
@@ -87,6 +88,7 @@ use branches::BranchRecord;
 use codec::*;
 use content_store::ContentStore;
 use open_tx::*;
+use physical::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
@@ -255,6 +257,12 @@ struct SchemaCatalogue {
     catalogue_schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
     /// Catalogue entries for migration lenses known to this node.
     catalogue_lenses: BTreeMap<MigrationLensId, MigrationLens>,
+    /// Resolved logical-to-physical identity mapping for every known schema.
+    physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    /// Next database-local physical table id.
+    next_physical_table_id: u64,
+    /// Next database-local physical column id.
+    next_physical_column_id: u64,
     /// Shortest migration-lens paths by schema pair and traversal direction.
     lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
@@ -555,6 +563,10 @@ where
             storage,
             mut schemas,
             lenses,
+            schema_version_aliases,
+            physical_mappings,
+            next_physical_table_id,
+            next_physical_column_id,
             current_write_schema,
             partitions,
             branch_partitions,
@@ -569,16 +581,22 @@ where
         let database =
             Self::open_full_database(&schema, &schemas, &partitions, &branch_partitions, storage)?;
         let current_row_graphs = current_row_graphs(&schema);
+        let current_schema_version_alias = schema_version_aliases
+            .get(&current_schema_version_id)
+            .copied();
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
             catalogue: SchemaCatalogue {
                 current_schema_version_id,
-                current_schema_version_alias: None,
+                current_schema_version_alias,
                 schema: schema.clone(),
-                schema_version_aliases: BTreeMap::new(),
+                schema_version_aliases,
                 catalogue_schemas: schemas,
                 catalogue_lenses: lenses,
+                physical_mappings,
+                next_physical_table_id,
+                next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
                 current_write_schema,
@@ -644,6 +662,15 @@ where
             initial_sync_flush_active: false,
             initial_sync_flush_completed: false,
         };
+        let known_schema_versions = node
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for schema_version in known_schema_versions {
+            node.ensure_provisional_physical_mapping(schema_version)?;
+        }
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
         node.rebuild_ahead_current_keys()?;
@@ -935,6 +962,39 @@ where
                 _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
             }
         }
+        let mut schema_version_aliases = BTreeMap::new();
+        let mut physical_mappings = BTreeMap::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_schema_versions", &[])? {
+            let record = raw.record();
+            let mapping: SchemaPhysicalMapping = serde_json::from_slice(
+                record.get_bytes(SchemaVersionAliasRowRecord::FIELD_PHYSICAL_MAPPING_IDX)?,
+            )?;
+            let schema_version =
+                SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
+            let alias =
+                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
+            schema_version_aliases.insert(schema_version, alias);
+            physical_mappings.insert(schema_version, mapping);
+        }
+        let mut next_physical_table_id = 1;
+        let mut next_physical_column_id = 1;
+        for mapping in physical_mappings.values() {
+            for table in mapping.tables.values() {
+                let table_successor = table
+                    .table_id
+                    .0
+                    .checked_add(1)
+                    .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
+                next_physical_table_id = next_physical_table_id.max(table_successor);
+                for column_id in table.columns.values() {
+                    let column_successor = column_id
+                        .0
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
+                    next_physical_column_id = next_physical_column_id.max(column_successor);
+                }
+            }
+        }
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
             schema: current_schema_version_id,
@@ -981,6 +1041,10 @@ where
             storage: meta_database.into_storage(),
             schemas: catalogue_schemas,
             lenses: catalogue_lenses,
+            schema_version_aliases,
+            physical_mappings,
+            next_physical_table_id,
+            next_physical_column_id,
             current_write_schema,
             partitions,
             branch_partitions,
@@ -3359,7 +3423,238 @@ where
         Ok(())
     }
 
-    fn persist_catalogue_lens(&mut self, lens: &MigrationLens) -> Result<(), Error> {
+    fn ensure_provisional_physical_mapping(
+        &mut self,
+        schema_version: SchemaVersionId,
+    ) -> Result<(), Error> {
+        if self
+            .catalogue
+            .physical_mappings
+            .contains_key(&schema_version)
+            && self
+                .catalogue
+                .schema_version_aliases
+                .contains_key(&schema_version)
+        {
+            return Ok(());
+        }
+        let mapping = match self.catalogue.physical_mappings.get(&schema_version) {
+            Some(mapping) => mapping.clone(),
+            None => {
+                let schema = self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&schema_version)
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical mapping schema payload missing",
+                    ))?
+                    .schema
+                    .clone();
+                let mut tables = BTreeMap::new();
+                for table in &schema.tables {
+                    let table_id = self.allocate_physical_table_id()?;
+                    let mut columns = BTreeMap::new();
+                    for column in &table.columns {
+                        columns.insert(column.name.clone(), self.allocate_physical_column_id()?);
+                    }
+                    tables.insert(
+                        table.name.clone(),
+                        TablePhysicalMapping { table_id, columns },
+                    );
+                }
+                SchemaPhysicalMapping { tables }
+            }
+        };
+        let alias = match self.catalogue.schema_version_aliases.get(&schema_version) {
+            Some(alias) => *alias,
+            None => SchemaVersionAlias(
+                self.catalogue
+                    .schema_version_aliases
+                    .values()
+                    .map(|alias| alias.0)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
+            ),
+        };
+        let mut batch = self.database.open_batch();
+        Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
+        self.database.commit_batch(batch)?;
+        self.catalogue
+            .schema_version_aliases
+            .insert(schema_version, alias);
+        if schema_version == self.catalogue.current_schema_version_id {
+            self.catalogue.current_schema_version_alias = Some(alias);
+        }
+        self.catalogue
+            .physical_mappings
+            .insert(schema_version, mapping);
+        Ok(())
+    }
+
+    fn allocate_physical_table_id(&mut self) -> Result<PhysicalTableId, Error> {
+        let id = PhysicalTableId(self.catalogue.next_physical_table_id);
+        self.catalogue.next_physical_table_id = self
+            .catalogue
+            .next_physical_table_id
+            .checked_add(1)
+            .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
+        Ok(id)
+    }
+
+    fn allocate_physical_column_id(&mut self) -> Result<PhysicalColumnId, Error> {
+        let id = PhysicalColumnId(self.catalogue.next_physical_column_id);
+        self.catalogue.next_physical_column_id = self
+            .catalogue
+            .next_physical_column_id
+            .checked_add(1)
+            .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
+        Ok(id)
+    }
+
+    fn reconcile_physical_mapping_for_lens(
+        &mut self,
+        lens: &MigrationLens,
+    ) -> Result<SchemaPhysicalMapping, Error> {
+        let source_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&lens.source)
+            .ok_or(Error::InvalidStoredValue("source physical mapping missing"))?
+            .clone();
+        let mut target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&lens.target)
+            .ok_or(Error::InvalidStoredValue("target physical mapping missing"))?
+            .clone();
+        let source_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.source)
+            .ok_or(Error::InvalidStoredValue(
+                "source physical mapping schema missing",
+            ))?
+            .schema
+            .clone();
+        let target_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.target)
+            .ok_or(Error::InvalidStoredValue(
+                "target physical mapping schema missing",
+            ))?
+            .schema
+            .clone();
+        for table_lens in &lens.table_lenses {
+            let source_table = source_mapping.tables.get(&table_lens.source_table).ok_or(
+                Error::InvalidStoredValue("source physical table mapping missing"),
+            )?;
+            let provisional_target_table = target_mapping
+                .tables
+                .get(&table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "target physical table mapping missing",
+                ))?
+                .clone();
+            let source_table_schema = source_schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "source physical table schema missing",
+                ))?;
+            let target_table_schema = target_schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "target physical table schema missing",
+                ))?;
+            let mut columns = source_table
+                .columns
+                .iter()
+                .map(|(name, id)| (name.clone(), (*id, Some(name.clone()))))
+                .collect::<BTreeMap<_, _>>();
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameTable { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                    LensOp::RenameColumn { from, to } => {
+                        if let Some(column_id) = columns.remove(from) {
+                            columns.insert(to.clone(), column_id);
+                        }
+                    }
+                    LensOp::CopyColumn { to, .. } | LensOp::AddColumn { column: to, .. } => {
+                        let column_id = *provisional_target_table.columns.get(to).ok_or(
+                            Error::InvalidStoredValue(
+                                "target provisional physical column mapping missing",
+                            ),
+                        )?;
+                        columns.insert(to.clone(), (column_id, None));
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        columns.remove(column);
+                    }
+                }
+            }
+            let target_column_names = target_table_schema
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<BTreeSet<_>>();
+            columns.retain(|column, _| target_column_names.contains(column));
+            for column in &target_table_schema.columns {
+                if !columns.contains_key(&column.name) {
+                    let column_id = *provisional_target_table.columns.get(&column.name).ok_or(
+                        Error::InvalidStoredValue(
+                            "target provisional physical column mapping missing",
+                        ),
+                    )?;
+                    columns.insert(column.name.clone(), (column_id, None));
+                }
+            }
+            let columns = columns
+                .into_iter()
+                .map(|(target_name, (inherited_id, source_name))| {
+                    let column_id = match source_name {
+                        Some(source_name)
+                            if physical_column_epoch_is_compatible(
+                                source_table_schema,
+                                &source_name,
+                                target_table_schema,
+                                &target_name,
+                            ) =>
+                        {
+                            inherited_id
+                        }
+                        _ => *provisional_target_table.columns.get(&target_name).ok_or(
+                            Error::InvalidStoredValue(
+                                "target provisional physical column mapping missing",
+                            ),
+                        )?,
+                    };
+                    Ok((target_name, column_id))
+                })
+                .collect::<Result<BTreeMap<_, _>, Error>>()?;
+            target_mapping.tables.insert(
+                table_lens.target_table.clone(),
+                TablePhysicalMapping {
+                    table_id: source_table.table_id,
+                    columns,
+                },
+            );
+        }
+        Ok(target_mapping)
+    }
+
+    fn persist_catalogue_lens_with_physical_metadata(
+        &mut self,
+        lens: &MigrationLens,
+        mapping: Option<&SchemaPhysicalMapping>,
+    ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
@@ -3369,7 +3664,34 @@ where
                 Value::Bytes(serde_json::to_vec(lens)?),
             ],
         );
+        if let Some(mapping) = mapping {
+            let alias = *self
+                .catalogue
+                .schema_version_aliases
+                .get(&lens.target)
+                .ok_or(Error::InvalidStoredValue(
+                    "physical mapping schema alias missing",
+                ))?;
+            Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
+        }
         self.database.commit_batch(batch)?;
+        Ok(())
+    }
+
+    fn write_schema_version_mapping_to_batch(
+        batch: &mut DatabaseBatch,
+        alias: SchemaVersionAlias,
+        schema_version: SchemaVersionId,
+        mapping: &SchemaPhysicalMapping,
+    ) -> Result<(), Error> {
+        batch.update(
+            "jazz_schema_versions",
+            vec![
+                Value::U64(alias.0),
+                Value::Uuid(schema_version.0),
+                Value::Bytes(serde_json::to_vec(mapping)?),
+            ],
+        );
         Ok(())
     }
 
@@ -3472,46 +3794,14 @@ where
             }
             return Ok(*alias);
         }
-        let mut max_alias = self
-            .catalogue
-            .schema_version_aliases
-            .values()
-            .map(|alias| alias.0)
-            .max()
-            .unwrap_or(0);
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_schema_versions", &[])?
-        {
-            let record = raw.record();
-            let alias =
-                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
-            max_alias = max_alias.max(alias.0);
-            if record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)? == schema_version_id.0
-            {
-                self.catalogue
-                    .schema_version_aliases
-                    .insert(schema_version_id, alias);
-                if schema_version_id == self.catalogue.current_schema_version_id {
-                    self.catalogue.current_schema_version_alias = Some(alias);
-                }
-                return Ok(alias);
-            }
-        }
-        let alias = SchemaVersionAlias(max_alias + 1);
+        self.ensure_provisional_physical_mapping(schema_version_id)?;
         self.catalogue
             .schema_version_aliases
-            .insert(schema_version_id, alias);
-        if schema_version_id == self.catalogue.current_schema_version_id {
-            self.catalogue.current_schema_version_alias = Some(alias);
-        }
-        let mut batch = self.database.open_batch();
-        batch.insert(
-            "jazz_schema_versions",
-            vec![Value::U64(alias.0), Value::Uuid(schema_version_id.0)],
-        );
-        self.database.commit_batch(batch)?;
-        Ok(alias)
+            .get(&schema_version_id)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "schema version alias allocation failed",
+            ))
     }
 
     pub(super) fn schema_version_for_alias(
@@ -4766,6 +5056,10 @@ struct CatalogueOpenState<S> {
     storage: S,
     schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
     lenses: BTreeMap<MigrationLensId, MigrationLens>,
+    schema_version_aliases: BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    physical_mappings: BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    next_physical_table_id: u64,
+    next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     partitions: BTreeSet<(String, SchemaVersionId)>,
     branch_partitions: BTreeSet<(String, SchemaVersionId, BranchId)>,

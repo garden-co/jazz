@@ -84,39 +84,36 @@ After a v2 title update, a v1 reader should see the old legacy value, not the ba
 
 Groove records are schema-driven typed tuples whose physical layout can reorder fixed- and variable-width fields ([storage model (line 86)](../../groove/SPEC/2_storage_model.md#L86)). Existing history tables encode user fields according to that version’s `TableSchema` ([schema.rs (line 905)](../src/schema.rs#L905)).
 
-Shared storage will use **versioned physical layouts**. Every encoded history and
-current row begins with a stable envelope that can be decoded without knowing the
-row's application schema or payload layout. At minimum, the envelope identifies
-the envelope format version and the `PhysicalLayoutId`. Jazz first decodes this
-envelope, resolves the layout id, and only then decodes the typed tuple payload
-using that layout's Groove descriptor.
+Shared storage will use **schema-versioned tuple decoding**. Every encoded history
+and current row begins with a stable envelope that can be decoded without knowing
+the payload shape. At minimum, the envelope contains its format version and the
+node-local `SchemaVersionAlias`. The `PhysicalTableId` comes from the
+storage key/table context. Together they identify the logical table mapping and
+the Groove tuple descriptor needed to decode the payload:
 
-A physical layout describes the tuple representation and maps its slots to stable
-physical column ids. When a migration changes that representation, Jazz publishes
-a new layout; existing rows remain encoded in their previous layouts and coexist
-in the same physical table. A rename does not require a new layout when the
-underlying physical ids and types are unchanged.
+1. resolve `SchemaVersionAlias` to `SchemaVersionId`;
+2. load that schema version's mapping for the surrounding `PhysicalTableId`;
+3. walk the schema's ordered columns, resolving each to its `PhysicalColumnId`,
+   and construct the typed payload descriptor.
 
-The physical layout id is distinct from schema identity:
+Rows written under different schema-version aliases can therefore coexist in one
+physical table even when their typed tuple representations differ. A rename can produce
+an equivalent descriptor when the physical ids and types remain unchanged, but
+it is still safe for rows to retain their own schema-version aliases.
 
-- the authored `SchemaVersionId` (or `SchemaVersionAlias`) records the application schema against which the
-  write was produced;
-- the `PhysicalLayoutId` selects the decoder for the stored payload;
-- the requested `SchemaVersionId` selects the logical projection returned by a
-  read and is not stored in the row.
-
-The layout registry must be durable and recovered before rows that reference it
-can be decoded. Publishing or activating a schema that introduces a layout must
-install that layout before any writer can use it. A layout registry entry cannot
-be removed while any retained history, current row, branch, or snapshot may still
-reference it. The exact binary encoding and allocation scheme for
-`PhysicalLayoutId` remain to be specified.
+The authored `SchemaVersionId` remains the write's wire-level provenance, its
+local `SchemaVersionAlias` selects the stored payload descriptor, and the
+requested `SchemaVersionId` selects the logical projection returned by a read.
+The schema catalogue and the local `jazz_schema_versions` rows containing each
+alias and its physical mapping must be durable and recovered before payload
+decoding. A schema version or mapping cannot be removed while any retained
+history, current row, branch, or snapshot uses its alias.
 
 Jazz currently selects a winning content version across all writes. If that version omits a retired column,
 the schema's default value is returned to the user. That leads to frequent data loss for columns dropped across
 schema versions.
 
-The key idea in this proposal is to **distinguish unset fields from lens default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Lens default values are only applied when reading rows with unset fields from storage. When decoding an older layout, physical columns introduced only by later layouts are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
+The key idea in this proposal is to **distinguish unset fields from lens default values**: a row's field is unset in storage unless it's explicitly set by an insert or update operation. Lens default values are only applied when reading rows with unset fields from storage. When decoding a row written under an older schema, physical columns introduced only by later schemas are considered unset. Unset fields are also semantically different from fields explicitly set to `null` by the application.
 
 For every content write, we need to:
 
@@ -191,9 +188,16 @@ schema version:
 - each logical table and column name in a `SchemaVersionId` maps to one of those
   physical ids.
 
-These are opaque, globally stable catalogue ids. Physical layouts refer to
-`PhysicalColumnId`s, while query planning, projection, and index lookup resolve
-application names through the requested schema's identity mapping.
+These are opaque, database-local `u64` ids, analogous to `SchemaVersionAlias`.
+They are durable and stable for the lifetime of a persisted mapping, but do not
+need to match across nodes. During one process lifetime each database allocates
+them monotonically.
+On restart it derives the next ids as one greater than the maximum ids in live
+persisted mappings. An id removed from all mappings may therefore be reused after
+a restart; this is safe because publishing a lens first discards all storage and
+metadata belonging to the replaced provisional identity. Tuple decoding, query
+planning, projection, and index lookup resolve application names through the
+relevant schema's identity mapping.
 
 Identity follows these rules:
 
@@ -225,7 +229,7 @@ This is mostly a dev-only concern: it's expected that devs experiment with schem
 
 We can handle this scenario in the following way:
 
-- `PublishSchema` creates a deterministic but provisional mapping.
+- `PublishSchema` allocates a database-local provisional mapping.
 - Publishing lenses may reconcile provisional mappings, preserving identities across renames and unchanged entities.
 - When reconciliation replaces a provisional table identity, Jazz discards all
   storage scoped to the target/new physical table before installing the
@@ -309,16 +313,28 @@ Jazz currently deliberately forbids automatic schema-partition GC for these reas
 Overall approach: start preserving today’s copy-forward/default behavior, including its known data-loss limitation.
 
 1. Add physical identity metadata without changing storage behavior.
-   - Introduce `PhysicalTableId`, `PhysicalColumnId`, and `PhysicalLayoutId`.
-   - Persist each schema version’s logical-to-physical mapping.
-   - Add a durable layout registry recovered during the catalogue-open stage.
-   - Include column identity now because layouts and reusable indexes cannot safely be defined using logical names.
+   **Status: complete (2026-08-03).** The mappings are durable shadow metadata;
+   application data still uses the existing schema-partitioned storage path.
+   - Introduce database-local `u64` `PhysicalTableId` and `PhysicalColumnId`
+     values.
+   - Persist each schema version’s logical-to-physical mapping alongside its
+     database-local alias in `jazz_schema_versions`.
+   - Recover the next table/column ids from live persisted mappings during the
+     catalogue-open stage. Fully discarded provisional ids may be reused after
+     restart.
+   - Include column identity now because reusable storage and indexes cannot
+     safely be defined using logical names.
 
-2. Add versioned record envelopes.
-   - Teach Groove/Jazz storage tables to hold rows encoded under multiple registered layouts.
-   - Decode the stable envelope first, then decode the payload using its layout descriptor.
-   - Initially use existing lens projection/default behavior when normalizing layouts.
-   - Test mixed-layout scans, point reads, indexes, and restart recovery before changing table placement.
+2. Add schema-versioned record envelopes.
+   - Teach Groove/Jazz storage tables to hold rows encoded under multiple schema
+     versions.
+   - Decode the stable envelope first, then use its `SchemaVersionAlias` plus the
+     surrounding `PhysicalTableId` to derive the payload descriptor from durable
+     schema and mapping metadata.
+   - Initially use existing lens projection/default behavior when normalizing
+     schema versions.
+   - Test mixed-schema-version scans, point reads, indexes, and restart recovery
+     before changing table placement.
 
 3. Share immutable history first.
    - Key content-history and deletion-register structures by `PhysicalTableId`.

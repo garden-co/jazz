@@ -31,6 +31,205 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
     let wire = reopened.version_record_from_row(&versions[0]).unwrap();
     assert_eq!(wire.schema_version(), expected_schema_version);
 }
+
+#[test]
+fn physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata() {
+    // Physical topology is intentionally not public API, so this internal test
+    // verifies the catalogue/recovery and local-allocation invariants directly.
+    let schema = schema();
+    let schema_version = schema.version_id();
+    let (left_dir, left) = open_node_with_schema(node(0x2d), schema.clone());
+
+    let left_mapping = left.catalogue.physical_mappings[&schema_version].clone();
+    let todos = &left_mapping.tables["todos"];
+    assert_ne!(todos.table_id.0, 0);
+    assert_ne!(todos.columns["title"].0, 0);
+    drop(left);
+
+    let mut reopened = reopen_node_at(&left_dir, node(0x2d), schema);
+    assert_eq!(
+        reopened.catalogue.physical_mappings[&schema_version],
+        left_mapping
+    );
+
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    reopened
+        .apply_sync_message(SyncMessage::PublishSchema {
+            author: AuthorId::SYSTEM,
+            schema: Box::new(evolved.clone()),
+        })
+        .unwrap();
+    let next = &reopened.catalogue.physical_mappings[&evolved.id].tables["todos"];
+    assert!(next.table_id.0 > todos.table_id.0);
+    assert!(next.columns["title"].0 > todos.columns["title"].0);
+}
+
+#[test]
+fn publishing_lens_reconciles_target_table_and_column_identities_durably() {
+    // Physical topology is intentionally not public API, so this internal test
+    // verifies identity reconciliation and live-mapping recovery directly.
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let source_id = base.version_id();
+    let target = SchemaVersion::new(evolved);
+    let (dir, mut core) = open_node_with_schema(node(0x2f), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(target.clone()),
+    })
+    .unwrap();
+
+    let source_table = core.catalogue.physical_mappings[&source_id].tables["todos"].clone();
+    let provisional_target =
+        core.catalogue.physical_mappings[&target.id].tables["todos"].clone();
+    assert_ne!(source_table.table_id, provisional_target.table_id);
+    assert_ne!(source_table.columns["title"], provisional_target.columns["title"]);
+
+    let lens = MigrationLens::new(
+        source_id,
+        target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens,
+    })
+    .unwrap();
+
+    let reconciled = core.catalogue.physical_mappings[&target.id].tables["todos"].clone();
+    assert_eq!(reconciled.table_id, source_table.table_id);
+    assert_eq!(reconciled.columns["title"], source_table.columns["title"]);
+    assert_eq!(
+        reconciled.columns["body"],
+        provisional_target.columns["body"],
+        "AddColumn must retain its fresh target physical identity"
+    );
+    let mapping = core.catalogue.physical_mappings[&target.id].clone();
+    let discarded_table_id = provisional_target.table_id;
+    let max_live_column_id = mapping
+        .tables
+        .values()
+        .flat_map(|table| table.columns.values())
+        .map(|column| column.0)
+        .max()
+        .unwrap();
+    drop(core);
+
+    let mut reopened = reopen_node_at(&dir, node(0x2f), base);
+    assert_eq!(reopened.catalogue.physical_mappings[&target.id], mapping);
+    let later = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "notes",
+        [ColumnSchema::new("text", ColumnType::String)],
+    )]));
+    reopened
+        .apply_sync_message(SyncMessage::PublishSchema {
+            author: AuthorId::SYSTEM,
+            schema: Box::new(later.clone()),
+    })
+    .unwrap();
+    let later_table = &reopened.catalogue.physical_mappings[&later.id].tables["notes"];
+    assert_eq!(
+        later_table.table_id, discarded_table_id,
+        "an unreferenced provisional table id may be reused after restart"
+    );
+    assert!(later_table.columns["text"].0 > max_live_column_id);
+}
+
+#[test]
+fn table_and_column_rename_reuses_the_existing_physical_identities() {
+    let base = schema();
+    let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]));
+    let (_dir, mut core) = open_node_with_schema(node(0x30), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(renamed.clone()),
+    })
+    .unwrap();
+    let source = core.catalogue.physical_mappings[&base.version_id()].tables["todos"].clone();
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+    })
+    .unwrap();
+
+    let target = &core.catalogue.physical_mappings[&renamed.id].tables["tasks"];
+    assert_eq!(target.table_id, source.table_id);
+    assert_eq!(target.columns["name"], source.columns["title"]);
+}
+
+#[test]
+fn changed_merge_semantics_start_a_new_physical_column_epoch() {
+    // The stored scalar representation remains U64, but counter and LWW cells
+    // cannot share one physical column identity or its derived indexes.
+    let base = JazzSchema::new([TableSchema::new(
+        "counts",
+        [ColumnSchema::new("value", ColumnType::U64)],
+    )]);
+    let evolved = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "counts",
+            [ColumnSchema::new("value", ColumnType::U64)],
+        )
+        .with_column_merge_strategy("value", MergeStrategy::Counter),
+    ]));
+    let (_dir, mut core) = open_node_with_schema(node(0x2c), base.clone());
+    core.apply_sync_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(evolved.clone()),
+    })
+    .unwrap();
+    let source = core.catalogue.physical_mappings[&base.version_id()].tables["counts"].clone();
+    let provisional_target =
+        core.catalogue.physical_mappings[&evolved.id].tables["counts"].clone();
+
+    core.apply_sync_message(SyncMessage::PublishLens {
+        author: AuthorId::SYSTEM,
+        lens: MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "counts".to_owned(),
+                target_table: "counts".to_owned(),
+                ops: vec![],
+            }],
+        ),
+    })
+    .unwrap();
+
+    let target = &core.catalogue.physical_mappings[&evolved.id].tables["counts"];
+    assert_eq!(target.table_id, source.table_id);
+    assert_ne!(target.columns["value"], source.columns["value"]);
+    assert_eq!(target.columns["value"], provisional_target.columns["value"]);
+}
+
 #[test]
 fn catalogue_schema_publish_replicates_and_is_idempotent() {
     let base = schema();

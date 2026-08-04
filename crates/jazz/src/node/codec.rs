@@ -234,6 +234,7 @@ groove::define_record! {
     pub(super) struct SchemaVersionAliasRowRecord {
         0 => id: SchemaVersionAlias,
         1 => uuid: SchemaVersionId,
+        2 => physical_mapping: Vec<u8>,
     }
 }
 
