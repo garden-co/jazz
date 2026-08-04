@@ -142,6 +142,7 @@ test = false
 [[bin]]
 name = "jazz-server"
 path = "src/bin/jazz-server.rs"
+required-features = ["server"]
 
 [[bench]]
 name = "validation"
