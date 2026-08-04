@@ -96,6 +96,9 @@
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
+/// Disabled-by-default counters used by the native cold-settle attribution bench.
+#[cfg(feature = "cold-settle-attribution")]
+pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
 /// Poll ready-immediate database futures without an async runtime.

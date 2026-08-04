@@ -5819,11 +5819,27 @@ fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {
 }
 
 fn serialized_sync_message_len(message: &SyncMessage) -> usize {
-    encode_sync_message(message).map_or(0, |bytes| bytes.len())
+    #[cfg(feature = "cold-settle-attribution")]
+    let started = Instant::now();
+    let encoded = encode_sync_message(message);
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_payload(
+        started.elapsed().as_nanos() as u64,
+        encoded.as_ref().map_or(0, Vec::len),
+    );
+    encoded.map_or(0, |bytes| bytes.len())
 }
 
 fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
-    let Ok(payload) = encode_sync_message(message) else {
+    #[cfg(feature = "cold-settle-attribution")]
+    let payload_started = Instant::now();
+    let payload = encode_sync_message(message);
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_payload(
+        payload_started.elapsed().as_nanos() as u64,
+        payload.as_ref().map_or(0, Vec::len),
+    );
+    let Ok(payload) = payload else {
         return usize::MAX;
     };
     let envelope = WireEnvelope::new(
@@ -5831,7 +5847,15 @@ fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
         payload,
     );
-    encode_frame(&WireFrame::Message(envelope)).map_or(usize::MAX, |bytes| bytes.len())
+    #[cfg(feature = "cold-settle-attribution")]
+    let frame_started = Instant::now();
+    let frame = encode_frame(&WireFrame::Message(envelope));
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_frame(
+        frame_started.elapsed().as_nanos() as u64,
+        frame.as_ref().map_or(0, Vec::len),
+    );
+    frame.map_or(usize::MAX, |bytes| bytes.len())
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -6194,7 +6218,12 @@ struct ViewUpdateChunkUnit {
 }
 
 fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
-    if validate_wire_frame_len(serialized_uncompressed_wire_message_len(&message)).is_ok() {
+    let initial_encoded_bytes = serialized_uncompressed_wire_message_len(&message);
+    if validate_wire_frame_len(initial_encoded_bytes).is_ok() {
+        #[cfg(feature = "cold-settle-attribution")]
+        if matches!(&message, SyncMessage::ViewUpdate { .. }) {
+            crate::cold_settle_attribution::record_view_update_fit(initial_encoded_bytes);
+        }
         return Ok(vec![message]);
     }
     let SyncMessage::ViewUpdate {
@@ -6212,6 +6241,8 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
     else {
         return Ok(vec![message]);
     };
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_view_update_split();
     version_bundles.extend(
         expand_version_carriers(&version_carriers)
             .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
@@ -6234,16 +6265,30 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         let mut low = 1;
         let mut high = remaining;
         let mut best = 0;
+        #[cfg(feature = "cold-settle-attribution")]
+        let mut best_encoded_bytes = 0;
         while low <= high {
             let mid = low + (high - low) / 2;
+            #[cfg(feature = "cold-settle-attribution")]
+            let candidate_started = Instant::now();
             let candidate = view_update_chunk_from_units(
                 subscription,
                 settled_through,
                 reset_chunk,
                 &units[start..start + mid],
             );
-            if serialized_uncompressed_wire_message_len(&candidate) <= MAX_WIRE_FRAME_BYTES {
+            let encoded_bytes = serialized_uncompressed_wire_message_len(&candidate);
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::record_candidate(
+                encoded_bytes,
+                candidate_started.elapsed().as_nanos() as u64,
+            );
+            if encoded_bytes <= MAX_WIRE_FRAME_BYTES {
                 best = mid;
+                #[cfg(feature = "cold-settle-attribution")]
+                {
+                    best_encoded_bytes = encoded_bytes;
+                }
                 low = mid + 1;
             } else {
                 high = mid.saturating_sub(1);
@@ -6261,6 +6306,8 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
             reset_chunk,
             &units[start..start + best],
         ));
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_selected_payload(best_encoded_bytes);
         start += best;
     }
     if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {

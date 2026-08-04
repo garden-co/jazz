@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["rocksdb"]
 rocksdb = ["dep:rocksdb"]
+cold-settle-attribution = []
 
 [dependencies]
 internment = { version = "0.8.6", features = ["serde"] }
