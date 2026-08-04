@@ -1989,6 +1989,12 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                         "type": "ShapeRegistrationPendingCatalogueAdmission",
                     })
                 }
+                jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                    serde_json::json!({
+                        "type": "ServerFailure",
+                        "code": format!("{code:?}"),
+                    })
+                }
             };
             Ok(serde_json::json!({
                 "type": "rejected",

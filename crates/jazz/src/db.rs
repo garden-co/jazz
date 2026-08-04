@@ -38,16 +38,16 @@ pub use crate::node::CommitUnitTrust;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, RelationEdge, RelationSnapshot, RowProvenance,
-    ViewUpdateParts,
+    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 use crate::protocol::{
     BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
     MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
     ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
-    Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
-    build_version_carriers_from_singletons, expand_version_carriers,
+    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
+    VersionBundle, build_version_carriers_from_singletons, expand_version_carriers,
 };
 use crate::protocol_limits::{
     MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
@@ -588,6 +588,26 @@ where
             .node
             .borrow_mut()
             .query_rows_local_preview(
+                &prepared.shape,
+                &prepared.binding,
+                prepared.plan_for_tier(DurabilityTier::Local),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Synchronously read rows and attribute work inside the node query path.
+    ///
+    /// The returned rows are identical to [`Self::read`]. This diagnostic
+    /// variant exists so persisted-read benchmarks can locate first-read cost
+    /// without adding clocks to the ordinary read path.
+    pub fn read_profiled(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .query_rows_local_preview_profiled(
                 &prepared.shape,
                 &prepared.binding,
                 prepared.plan_for_tier(DurabilityTier::Local),
@@ -5313,8 +5333,20 @@ where
                             let shape = match shape_validation {
                                 Ok(Some(shape)) => Some(shape),
                                 Ok(None) => None,
-                                Err(_) => {
-                                    drop_peer_request(&self.node);
+                                Err(error) => {
+                                    if is_server_shape_validation_failure(&error) {
+                                        reject_server_subscription_failure(
+                                            &mut *self.transport,
+                                            register_shape_rejection_subscription(
+                                                shape_id,
+                                                opts.read_view_key(),
+                                            ),
+                                            &error,
+                                        )
+                                        .map_err(transport_error)?;
+                                    } else {
+                                        drop_peer_request(&self.node);
+                                    }
                                     continue;
                                 }
                             };
@@ -5359,8 +5391,17 @@ where
                                         )
                                         .map_err(transport_error)?;
                                         continue;
-                                    } else if supported.is_err() {
-                                        drop_peer_request(&self.node);
+                                    } else if let Err(error) = supported {
+                                        reject_server_subscription_failure(
+                                            &mut *self.transport,
+                                            SubscriptionKey {
+                                                shape_id,
+                                                binding_id: binding.binding_id(),
+                                                read_view: opts.read_view_key(),
+                                            },
+                                            &error,
+                                        )
+                                        .map_err(transport_error)?;
                                         continue;
                                     }
                                 }
@@ -5392,6 +5433,8 @@ where
                                     _ => {}
                                 }
                             }
+                            let rejection_subscription =
+                                register_shape_rejection_subscription(shape_id, registration_key.1);
                             let register_result = {
                                 self.node.borrow_mut().apply_sync_message(
                                     SyncMessage::RegisterShape {
@@ -5402,13 +5445,12 @@ where
                                 )
                             };
                             if let Err(error) = register_result {
-                                if matches!(
-                                    error,
-                                    crate::node::Error::Storage(_) | crate::node::Error::Groove(_)
-                                ) {
-                                    return Err(error.into());
-                                }
-                                drop_peer_request(&self.node);
+                                reject_server_subscription_failure(
+                                    &mut *self.transport,
+                                    rejection_subscription,
+                                    &error,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
                             let registration = if awaiting_catalogue_admission {
@@ -5510,8 +5552,13 @@ where
                                 )
                                 .map_err(transport_error)?;
                                 continue;
-                            } else if supported.is_err() {
-                                drop_peer_request(&self.node);
+                            } else if let Err(error) = supported {
+                                reject_server_subscription_failure(
+                                    &mut *self.transport,
+                                    subscription,
+                                    &error,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
@@ -5548,7 +5595,15 @@ where
                                         .map_err(transport_error)?;
                                         continue;
                                     }
-                                    Err(error) => return Err(error.into()),
+                                    Err(error) => {
+                                        reject_server_subscription_failure(
+                                            &mut *self.transport,
+                                            subscription,
+                                            &error,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    }
                                 };
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
@@ -5561,13 +5616,25 @@ where
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
-                                let update = peer
+                                let update_result = peer
                                     .rehydrate_query_for_subscription_from_maintained_subscription(
                                         &mut node,
                                         group_subscription,
                                         subscription,
                                         &shape,
-                                    )?;
+                                    );
+                                let update = match update_result {
+                                    Ok(update) => update,
+                                    Err(error) => {
+                                        reject_server_subscription_failure(
+                                            &mut *self.transport,
+                                            subscription,
+                                            &error,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    }
+                                };
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "subscriber rehydrate duplicate usage={} group={} update={}",
@@ -5780,7 +5847,7 @@ where
                             binding_id: coverage.binding_id,
                             read_view: coverage.opts.read_view_key(),
                         };
-                        let update = {
+                        let update_result = {
                             let mut node = self.node.borrow_mut();
                             peer.query_update_for_subscription_with_opts_after_runtime_flush(
                                 &mut node,
@@ -5788,7 +5855,21 @@ where
                                 &group.shape,
                                 &group.binding,
                                 coverage.opts.clone(),
-                            )?
+                            )
+                        };
+                        let update = match update_result {
+                            Ok(update) => update,
+                            Err(error) => {
+                                for subscription in group.subscribers.iter().copied() {
+                                    reject_server_subscription_failure(
+                                        &mut *self.transport,
+                                        subscription,
+                                        &error,
+                                    )
+                                    .map_err(transport_error)?;
+                                }
+                                continue;
+                            }
                         };
                         if !view_update_is_empty(&update) {
                             #[cfg(feature = "sync-autopsy")]
@@ -7060,10 +7141,67 @@ fn send_unsupported_shape_capability_rejection(
     subscription: SubscriptionKey,
     detail: String,
 ) -> Result<(), TransportError> {
+    send_subscription_rejection(
+        transport,
+        subscription,
+        SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    )
+}
+
+fn reject_server_subscription_failure(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    error: &crate::node::Error,
+) -> Result<(), TransportError> {
+    // Keep the complete error on the serving process only. Subscription keys
+    // provide a correlation handle without disclosing schema, policy, or
+    // storage details to the peer.
+    eprintln!(
+        "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
+        subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
+    );
+    send_subscription_rejection(
+        transport,
+        subscription,
+        SubscribeRejectReason::ServerFailure {
+            code: server_failure_code(error),
+        },
+    )
+}
+
+fn send_subscription_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    reason: SubscribeRejectReason,
+) -> Result<(), TransportError> {
     transport.send(SyncMessage::SubscribeRejected {
         subscription,
-        reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        reason,
     })
+}
+
+fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
+    match error {
+        crate::node::Error::TableNotFound(_)
+        | crate::node::Error::Query(QueryError::UnknownTable(_)) => {
+            SubscribeServerFailureCode::TableNotFound
+        }
+        crate::node::Error::Query(_) => SubscribeServerFailureCode::QueryValidation,
+        crate::node::Error::QueryLowering(_) => SubscribeServerFailureCode::QueryLowering,
+        crate::node::Error::AuthorizationDenied => SubscribeServerFailureCode::PolicyEvaluation,
+        crate::node::Error::InvalidStoredValue(_)
+        | crate::node::Error::InvalidCatalogueUpdate(_) => {
+            SubscribeServerFailureCode::SchemaResolution
+        }
+        _ => SubscribeServerFailureCode::Internal,
+    }
+}
+
+fn is_server_shape_validation_failure(error: &crate::node::Error) -> bool {
+    matches!(
+        error,
+        crate::node::Error::TableNotFound(_) | crate::node::Error::Query(_)
+    )
 }
 
 fn register_shape_rejection_subscription(
