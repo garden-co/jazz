@@ -464,8 +464,8 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     ) {
       throw new Error("Integer value must be a signed 32-bit integer");
     }
-    writer.u64(2); // groove::records::Value::U32
-    writer.u64((value.value ^ 0x80000000) >>> 0);
+    writer.u64(14); // groove::records::Value::I32
+    writer.i64(value.value);
     return;
   }
   if (value.type === "BigInt") {
