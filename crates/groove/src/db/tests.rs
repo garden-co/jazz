@@ -4540,6 +4540,112 @@ fn shared_snapshot_materialization_preserves_multiset_weights() {
 }
 
 #[test]
+fn equivalent_subscription_terminals_share_join_hydration_and_advance() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let graph = || {
+        let joined = GraphBuilder::join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("albums"),
+            ["id"],
+            ["id"],
+        )
+        .project(["left.id", "right.title"]);
+        GraphBuilder::union([joined.clone(), joined])
+    };
+    let scans_before = counter.scan_prefix_count();
+    let subscription = database
+        .subscribe([("first", graph()), ("second", graph())])
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    let expected_initial = [
+        (
+            vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+            1,
+        ),
+        (
+            vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+            1,
+        ),
+    ];
+    assert_eq!(
+        initial.get("first").unwrap().to_values().unwrap(),
+        expected_initial
+    );
+    assert_eq!(
+        initial.get("second").unwrap().to_values().unwrap(),
+        expected_initial
+    );
+    assert_eq!(counter.scan_prefix_count() - scans_before, 1);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    let incremental = subscription.recv().unwrap();
+    let expected_incremental = [
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            1,
+        ),
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            1,
+        ),
+    ];
+    assert_eq!(
+        incremental.get("first").unwrap().to_values().unwrap(),
+        expected_incremental
+    );
+    assert_eq!(
+        incremental.get("second").unwrap().to_values().unwrap(),
+        expected_incremental
+    );
+
+    let mut fresh = Database::new(albums_schema(), counter.clone()).unwrap();
+    let full = fresh
+        .subscribe([("first", graph()), ("second", graph())])
+        .unwrap();
+    let full = full.recv().unwrap();
+    let expected_full = [
+        (
+            vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+            1,
+        ),
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            1,
+        ),
+        (
+            vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+            1,
+        ),
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            1,
+        ),
+    ];
+    assert_eq!(
+        full.get("first").unwrap().to_values().unwrap(),
+        expected_full
+    );
+    assert_eq!(
+        full.get("second").unwrap().to_values().unwrap(),
+        expected_full
+    );
+}
+
+#[test]
 fn unwrap_nullable_retractions_flow_symmetrically() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();
