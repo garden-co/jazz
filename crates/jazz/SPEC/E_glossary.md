@@ -87,12 +87,15 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 - **`SyncMessage`** — the one wire vocabulary (`CommitUnit`, `FateUpdate`,
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
-- **`PeerState` / `PeerRole::{Relay, EdgeClient}`** — link-local sync state and
+- **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
   role; **relay** (uses `AuthorId::SYSTEM`, no fate), **edge** (terminates a
   client identity; mergeable fate authority), **core** (exclusive authority,
   history-complete), **client**. The sync participant type is `Node`: a local
   `NodeState` engine plus connections and serving. Relay, edge, and core are
   node-level roles, **not** `Db` roles.
+  **Implementation status (verified).**
+  `edge_defers_mergeable_fate_until_permission_scope_settles` verifies that the
+  edge assigns mergeable fate after its permission scope settles.
 - **payload coverage / peer payload inventory** — the sync vocabulary for what
   payload bytes a peer can safely reference instead of resending. Inventory facts
   are deliberately narrow today: **complete-tx payload dedup / complete tx
@@ -122,7 +125,6 @@ Restored}`) · **global-current overwrite table** — node-local derived current
 - 🔶 **Flat index.** Keep this dependency-ordered grouping, or add a flat
   alphabetical index for lookup as well?
 - 🔶 **Facade spelling.** The high-level facade spells mergeable transactions as
-  _batch_ and exclusive transactions as _transaction_; the implementation has not
-  yet landed those facade spellings.
-- 🔶 **Edge fate authority.** An edge is the mergeable fate authority; the
-  implementation path currently uses the core for mergeable fate authority.
+  _batch_ and exclusive transactions as _transaction_. `Db::transaction` is
+  present; decide whether mergeable writes should expose the corresponding
+  `batch` spelling.

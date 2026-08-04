@@ -1702,6 +1702,10 @@ fn encode_key_part(key: &mut Vec<u8>, value: &RecordValue) -> Result<(), Error> 
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        RecordValue::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
+        }
         RecordValue::I64(value) => {
             key.push(13);
             key.extend(order_preserving_i64_bits(*value).to_be_bytes());
@@ -1768,6 +1772,16 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
                     .expect("slice has u64 length"),
             )))
         }
+        ValueType::I32 => {
+            expect_key_tag(bytes, 14)?;
+            Ok(RecordValue::I32(
+                (u32::from_be_bytes(
+                    take_key_bytes(bytes, 4)?
+                        .try_into()
+                        .expect("slice has i32 length"),
+                ) ^ (1_u32 << 31)) as i32,
+            ))
+        }
         ValueType::I64 => {
             expect_key_tag(bytes, 13)?;
             Ok(RecordValue::I64(
@@ -1819,6 +1833,10 @@ fn decode_key_part(bytes: &mut &[u8], value_type: &ValueType) -> Result<RecordVa
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {

@@ -17,24 +17,25 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A PeerRole::Relay link MUST use AuthorId::SYSTEM as its link identity and MUST NOT terminate a client identity.
-- `INV-EDGE-2`: A relay MUST store/forward TxKind::Mergeable and TxKind::Exclusive commit units as Fate::Pending with DurabilityTier::Local and MUST NOT assign an authority fate.
-- `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as PeerRole::EdgeClient { identity }, and downstream reads on that link MUST use that identity fo...
-- `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST rema...
-- `INV-EDGE-5`: Edge-local fate assignment MUST support only TxKind::Mergeable; an edge MUST NOT use the edge mergeable path to assign fate for TxKind::Exclusive.
-- `INV-EDGE-6`: TxKind::Exclusive acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
-- `INV-EDGE-7`: Once a transaction reaches Fate::Accepted, later stale Fate::Pending updates MUST NOT regress its fate.
-- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
-- `INV-EDGE-9`: A cancelled or missing permission scope MUST NOT satisfy the edge permission gate; after restart, deferred edge-fate gates and retained scope refs are absent until cli...
-- `INV-EDGE-10`: After a permission scope has first settled, an edge MAY continue accepting mergeables against stale scope state unless a configured staleness horizon says otherwise; t...
-- `INV-EDGE-11`: Fate and durability MUST remain separate axes: edge-accepted does not imply DurabilityTier::Global; receivers MUST raise observed durability only from explicit durabil...
-- `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
-- `INV-EDGE-13`: Resubmitting the same commit unit through another edge MUST be idempotent by TxId when the payload matches, and conflicting payloads with the same TxId MUST be rejecte...
-- `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, large-value op metadata, or edge-a...
-- `INV-EDGE-15`: Edge refetch after eviction MUST use payload-inventory resubscribe rather than assuming the edge has complete history.
-- `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them...
-- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by (policyshape, writerclaim) — the write policy's query shape bound to the writer's claim("sub") — and MUST NOT hy...
-- `INV-EDGE-18`: Overlapping (policyshape, writerclaim) scopes MUST resolve to a single upstream subscription whose settled result satisfies every acceptance gate that depends on it; t...
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorId::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
+- `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::ClientLink { identity }`, and downstream reads on that link MUST use that identity for policy composition.
+- `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain pending and deferred.
+- `INV-EDGE-5`: Edge-local fate assignment MUST support only `TxKind::Mergeable`; an edge MUST NOT use the edge mergeable path to assign fate for `TxKind::Exclusive`.
+- `INV-EDGE-6`: `TxKind::Exclusive` acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
+- `INV-EDGE-7`: Once a transaction reaches `Fate::Accepted`, later stale `Fate::Pending` updates MUST NOT regress its fate.
+- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently after the edge's settled permission basis.
+- `INV-EDGE-9`: A cancelled or missing permission scope MUST NOT satisfy the edge permission gate; after restart, deferred edge-fate gates and retained scope refs are absent until client outbox redelivery reopens the gate, while already edge-accepted units MUST survive from edge storage without redelivery.
+- `INV-EDGE-10`: An edge MAY use a previously settled permission scope to accept a mergeable transaction only as permitted by its configured freshness policy; the default policy MUST permit unbounded freshness.
+- `INV-EDGE-11`: Fate and durability MUST remain separate axes: edge-accepted does not imply `DurabilityTier::Global`; receivers MUST raise observed durability only from explicit durability claims.
+- `INV-EDGE-12`: Edge authority and merge coordination MUST route upstream through core rather than directly between edges.
+- `INV-EDGE-13`: Resubmitting the same commit unit through another edge MUST be idempotent by `TxId` when the payload matches, and conflicting payloads with the same `TxId` MUST be rejected as `ConflictingCommitUnit`.
+- `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, large-value op metadata, or edge-accepted versions not yet globally durable.
+- `INV-EDGE-15`: After eviction, an edge MUST recover required payloads through resubscription without assuming complete local history.
+- `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them by folding over the de-duplicated raw head set (not by re-merging merged values), so `Counter` never double-counts a shared ancestor.
+- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("sub")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
+- `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
+- `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
@@ -74,13 +75,18 @@ Each capability belongs to the tier that can safely exercise it:
 | exclusive fate authority      | core                                                                                |
 | read narrowing / write-policy | edge enforces for the identities it terminates                                      |
 | durability tiers offered      | `Local`, `Edge`, `Global`                                                           |
-| eviction                      | edge cache eviction (`INV-EDGE-14`, target)                                         |
-| topology                      | star: clients/edges ↔ core (`INV-EDGE-12`, target)                                  |
+| eviction                      | edge cache eviction (`INV-EDGE-14`)                                                 |
+| topology                      | authority and merge coordination route through core (`INV-EDGE-12`)                 |
 
-The four-tier tests exercise the role shapes: relay store-and-forward, edge
-identity termination, and edge fate deferral. Normal committed units outside the
-partial edge-mergeable path still rely on core as the authority until the
-remaining edge capabilities are complete.
+**Implementation status (verified 2026-07-27).** The four-tier tests exercise
+edge identity termination and edge fate deferral
+(`edge_peer_terminates_client_identity_and_relays_upstream` and
+`edge_defers_mergeable_fate_until_permission_scope_settles` in
+`crates/jazz/tests/four_tier.rs`). The ordinary committed-unit path remains
+core-authoritative outside the partial edge-mergeable path; general edge
+read/write enforcement likewise still relies on core. Edge-client links do
+narrow reads under the terminated identity. These are rollout status, not
+topology semantics.
 
 The canonical alpha-replacement conformance and benchmark topology is:
 
@@ -116,7 +122,7 @@ the browser. Server-deployed relays are the exception.
 
 The edge-client boundary is where the system binds a link to a user identity and
 applies the last-hop policy view. An edge-client link terminates exactly one
-client `AuthorId` as `PeerRole::EdgeClient { identity }`, and downstream reads on
+client `AuthorId` as `PeerRole::ClientLink { identity }`, and downstream reads on
 that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 
 Upstream commit-unit uploads on a normal session link are authorized under the
@@ -135,10 +141,15 @@ edge must not assign a mergeable fate until a **settled permission-scope
 subscription** covers the writer and affected policy data — otherwise it
 registers/hydrates the scope and defers (`INV-EDGE-4`, ch. 8).
 
-After the first settled result, stale scope data may be used for acceptance,
-bounded only by an optional staleness-horizon knob (default off/unbounded). A
-cancelled scope, or a scope missing after restart, no longer satisfies the gate;
-validation defers until the scope rehydrates.
+After the first settled result, an edge may use scope data only under its
+configured freshness policy; the default permits unbounded freshness
+(`INV-EDGE-10`). A cancelled scope, or a scope missing after restart, no longer
+satisfies the gate; validation defers until the scope rehydrates.
+
+**Implementation status (2026-07-27).** The freshness policy has no configuration
+type or enforcement point yet. The existing gate behavior is covered by
+`edge_defers_mergeable_fate_until_permission_scope_settles`
+(`crates/jazz/tests/four_tier.rs`).
 
 Deferred edge-fate gate state is in-memory by design. Restart drops deferred
 fate entries and their retained permission-scope subscription refs; recovery is
@@ -160,13 +171,16 @@ to the writer's `claim("sub")` narrows hydration to exactly the rows the policy
 would read for that writer. An edge therefore holds only the policy data for the
 identities it terminates, rather than every tenant's data.
 
-The acceptance gate, the defer/rehydrate bookkeeping, and the eviction pin set
-(§9.8) all index on this key. Overlapping scopes — many writers whose policies
-read the same row — share **one** upstream subscription through sync-level
-work-dedup (ch. 8): the edge registers a covering scope once and fans its settled
-result to every gate entry that needs it (`INV-EDGE-18`). A whole-table scope is
-deliberately _not_ offered; it would force an edge to hydrate unbounded unrelated
-data and is exactly the pathological cost this tier exists to avoid.
+The acceptance gate, defer/rehydrate bookkeeping, and eviction pin set (§9.8)
+index on this key. A settled scope is shared among every acceptance gate it can
+satisfy (`INV-EDGE-18`).
+
+**Implementation status (verified 2026-07-27).** The implementation shares
+exact-key scopes; covering-scope subsumption is not implemented. Exact-key
+sharing and last-dependent release are covered by
+`edge_deduplicates_scope_subscription_for_repeated_deferred_units` and
+`edge_releases_scope_subscription_after_last_deferred_unit_resolves`
+(`crates/jazz/tests/four_tier.rs`).
 
 > **Edge-final mergeable fate.** An edge mergeable fate is _final_: when core
 > receives an edge-accepted mergeable, it performs structural admission checks
@@ -184,11 +198,16 @@ write reached core/global durability (`INV-EDGE-11`, ch. 3).
 Fate finality and storage durability are independent. An edge-final write can
 still be lost if edge storage is destroyed before it syncs upstream.
 
+A disconnected edge continues to serve edge-tier state, including mergeable
+transactions for scopes where it is the fate authority. Requests that require
+global settlement defer or carry an explicit unsettled/staleness marker; upstream
+connectivity is not a precondition for edge-tier service.
+
 ### 9.7 Star topology
 
-Edges form a star around core. They connect to core and do not sync with each
-other (`INV-EDGE-12`, target). Client mobility across edges needs nothing
-special: resubmitting a transaction to another edge is idempotent by `TxId`
+Edge authority and merge coordination route upstream through core rather than
+directly between edges (`INV-EDGE-12`). Client mobility across edges needs
+nothing special: resubmitting a transaction to another edge is idempotent by `TxId`
 (`INV-EDGE-13`, ch. 8), and two edges accepting concurrent mergeables is ordinary
 merging (ch. 4).
 
@@ -210,14 +229,15 @@ fate-pending units, edge-accepted versions not yet globally durable (not
 refetchable from core until they reach `Global`, §9.6), the scope results backing
 an acceptance gate (§9.5), and parked families (`INV-EDGE-14`, `INV-EDGE-15`).
 
-Refetch of evicted state is a **payload-inventory resubscribe**. The edge
-re-registers the scope and receives only what its payload inventory no longer
-holds (ch. 8). The v1 trigger is an optional edge byte budget: absent budget
-means eviction is disabled. When metered cache bytes exceed the budget, the edge
-evicts to a fixed low-water mark using write/settle recency as the LRU
-approximation: least-recently-written unpinned row versions first. Direct
-large-value content/checkpoint bytes remain regenerable cold content under the
-same budget, while metadata and all pin roots survive.
+After eviction, an edge recovers required payloads through resubscription rather
+than assuming complete local history (`INV-EDGE-15`).
+
+**Implementation status (verified 2026-07-27).** The current recovery path
+forgets evicted payload coverage and rehydrates; it is covered by
+`evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate`
+(`crates/jazz/src/node/tests/content_store.rs`). The optional byte budget and
+write/settle-recency eviction policy are implementation details, not topology
+invariants.
 
 ### 9.9 Subsumed topology and server notes
 
@@ -227,6 +247,16 @@ authorized links to `Node`/peer state; it does not own a parallel query,
 transaction, or sync engine. CORS, WebSocket paths, health endpoints, quota
 limits, and dashboard or deployment configuration are shell/product concerns
 around this role ladder.
+
+**Dynamic-catalogue bootstrap.** Publishing a schema alone does not make a
+dynamically catalogued serving authority ready to serve session writes. Before
+it accepts an uploaded commit unit, an authority MUST publish a permissions head
+that selects the write schema and its table policies (`INV-EDGE-19`). Until that
+head exists, the authority MUST reject the unit as
+`Fate::Rejected(RejectionReason::MalformedCommit("permissions_head_missing: no
+published permissions head"))`; it MUST neither silently accept the write nor
+defer it as though a policy basis existed. Publishing the first permissions head
+rehydrates live session views under the selected policy.
 
 Client and edge cache limits are topology policy. Storage may evict cold
 coverage only when doing so preserves fate-pending units, authority evidence,
@@ -243,43 +273,10 @@ refetch accurately.
   It must not introduce a second transaction/query/sync engine. Decide which
   pieces live in a `jazz-server` crate/package versus examples while topology is
   still stabilizing.
-- 🔶 **Topology conformance matrix.** Run the same black-box scenarios across
-  client-only, browser shared-worker relay, Node client, edge, relay, and core
-  deployments. The matrix should cover mergeable/exclusive writes, RLS,
-  subscription deltas, large values, branches/lenses, reconnect/resume, and
-  protocol mismatch. Differences should be role configuration, not alternate
-  semantics.
-- 🔶 **Staleness horizon** (`INV-EDGE-10`, target) — a config knob (default
-  off/unbounded): once a scope has delivered its first settled result, how stale
-  its data may be before acceptance must re-gate. Decided in prose; no config type
-  or enforcement point yet.
-- ✅ **Restart/rehydration** (`INV-EDGE-9`) — deferred edge-fate gates are
-  in-memory by design; restart recovery is client outbox redelivery for unfated
-  units, while edge-accepted units survive in edge storage.
 - 🔶 **True read-recency LRU** — v1 eviction uses write/settle recency because it
   is already present in history. True least-recently-read eviction would require
   per-read metadata writes; that is a product-data decision, not a correctness
   requirement for the v1 byte-budget trigger.
-- 🔶 **Serving while disconnected** — decided (2026-07-02): a disconnected edge
-  **keeps serving edge-tier state**, including accepting mergeable
-  transactions where it is the fate authority for the scope — edge-tier
-  durability and mergeable semantics are eventually-consistent by design, so
-  upstream connectivity is not a serving precondition for them. Claims at
-  `Global` tier (reads or durability waits requiring global settlement) are
-  what a disconnected edge cannot satisfy: those defer or carry an explicit
-  staleness/unsettled marker rather than being served as fresh. This narrows
-  the staleness-horizon knob above to global-tier claims.
-- 🔶 **Topology and edge role completion** — the design is a star of clients and
-  edges around core (`INV-EDGE-12`, target), with the first upstream trusted edge
-  as mergeable fate authority and `Edge` as a durability tier. The implementation
-  still collapses the ordinary path to client ↔ core for many committed units:
-  core plays every upstream role, remains the sole fate authority outside the
-  partial edge-mergeable path, and the offered durability tiers are `Local`
-  (client) and `Global` (core).
-- 🔶 **Edge read/write enforcement** — the design is that an edge enforces
-  read/write policy for the identities it terminates. The implementation still
-  relies on core for general read narrowing and write-policy enforcement, while
-  edge-client links narrow under the terminated identity.
 - 🔶 **Client TTL configuration.** The old hardcoded client-state TTL should
   become an explicit cache/staleness option with clear interaction between
   local, edge, and global durability tiers.

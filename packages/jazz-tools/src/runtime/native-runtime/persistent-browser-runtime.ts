@@ -23,7 +23,7 @@ type PendingCall = {
 
 type WorkerResponse =
   | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: { name?: string; message?: string } }
+  | { id: number; ok: false; error: { name?: string; message?: string; stack?: string } }
   | PersistentBrowserSubscriptionMessage
   | { event: "authFailure"; reason: string };
 
@@ -77,7 +77,16 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
         this.resolveAll();
         return;
       }
-      this.rejectAll(new Error(event.message));
+      this.rejectAll(
+        new Error(
+          `Persistent browser worker error: ${JSON.stringify({
+            message: event.message,
+            filename: event.filename,
+            lineno: event.lineno,
+            colno: event.colno,
+          })}`,
+        ),
+      );
     };
     this.opened = this.send("open", [runtimeSources, dbName, schema, node, author]).then(
       () => undefined,
@@ -546,10 +555,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if ("subscription" in message) {
       const callback = this.subscriptions.get(message.subscription);
       if ("error" in message) {
-        callback?.(
-          new Error(message.error.message ?? "Persistent browser subscription failed"),
-          null,
-        );
+        const error = new Error(message.error.message ?? "Persistent browser subscription failed");
+        if (message.error.stack) error.stack = message.error.stack;
+        callback?.(error, null);
       } else {
         callback?.(nativeDeltaFromFrame(message));
       }
@@ -561,7 +569,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (message.ok) {
       pending.resolve(message.result);
     } else {
-      pending.reject(new Error(message.error.message ?? "Persistent browser worker call failed"));
+      const error = new Error(message.error.message ?? "Persistent browser worker call failed");
+      if (message.error.stack) error.stack = message.error.stack;
+      pending.reject(error);
     }
   }
 

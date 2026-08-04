@@ -13,17 +13,22 @@ in the `jazz-private` repo.
 
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
-Before writing any test in Rust crates, always read `crates/jazz-tools/TESTING_GUIDELINES.md` in full and follow it.
+Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
 
 **Builds:** `pnpm build:core` (all the packages), `pnpm test` (everything), via turbo.
 
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 
-- `cargo test -p jazz -j 2`
-- `cargo test -p groove -j 2`
-- `cargo test -p jazz-tools --features test -j 2` (matches `crates/jazz-tools/TESTING_GUIDELINES.md`)
-- `cargo test -p jazz-server -j 2`
+- `cargo test -p jazz`
+- `cargo test -p groove`
+- `cargo test -p jazz --no-default-features --features test` (matches `crates/jazz/TESTING_GUIDELINES.md`).
+  This replaces the former `cargo test -p jazz-tools --features test`: `jazz-tools`
+  and `jazz-server` are now part of `jazz`, so their suites run here. Note it also
+  runs `jazz-tools`' library unit and doc tests, which its old `[lib] test = false`
+  had suppressed.
+- `cargo test -p jazz-server`
+
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
@@ -34,6 +39,15 @@ For ordinary Rust/core work, the full gate set is:
 - the sensitive-data guard (lives in `jazz-private/dev/gates/`, runs via the
   optional lefthook hook) to keep customer-specific fixture names, domains,
   and IDs out of the public repository.
+
+Use a `-j` appropriate for the box. These gates previously specified `-j 2`,
+which was a workaround for spurious `linking with cc failed` under parallel
+builds on a memory-constrained laptop — a property of that machine, not of the
+build. Cap it only if you actually observe linker OOM. For reference, a cold
+`cargo test -p jazz -j 16` measured 2m23s wall / 18m18s CPU at ~2GB peak of
+187GB, so memory was never the binding constraint there; on a small machine
+`-j 2` is still the right answer. `dev/benchmarks/smoke.sh` derives this from
+`nproc` and honours `JAZZ_SMOKE_JOBS`.
 
 Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
 or benchmark harnesses. Any change to a public `jazz` type additionally gates the

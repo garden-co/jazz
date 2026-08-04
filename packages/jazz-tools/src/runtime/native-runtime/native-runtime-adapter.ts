@@ -850,7 +850,10 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.subscribe!(query, opts);
       }
     } catch (error) {
-      throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
+      const nativeStack = error instanceof Error ? error.stack : undefined;
+      throw new Error(
+        `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
+      );
     }
     const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {

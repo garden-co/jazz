@@ -163,6 +163,7 @@ pub enum GraphBuilder {
     Filter {
         input: Box<GraphBuilder>,
         predicate: PredicateExpr,
+        comparison: ValueComparison,
     },
     UnwrapNullable {
         input: Box<GraphBuilder>,
@@ -185,18 +186,21 @@ pub enum GraphBuilder {
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
+        comparison: ValueComparison,
     },
     SemiJoin {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
+        comparison: ValueComparison,
     },
     AntiJoin {
         left: Box<GraphBuilder>,
         right: Box<GraphBuilder>,
         left_on: Vec<FieldRef>,
         right_on: Vec<FieldRef>,
+        comparison: ValueComparison,
     },
     ArgMaxBy {
         input: Box<GraphBuilder>,
@@ -351,6 +355,23 @@ impl GraphBuilder {
             right: Box::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
+            comparison: ValueComparison::Exact,
+        }
+    }
+
+    /// Join using policy value comparison semantics.
+    pub fn policy_join(
+        left: GraphBuilder,
+        right: GraphBuilder,
+        left_on: impl IntoIterator<Item = impl Into<String>>,
+        right_on: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_on: left_on.into_iter().map(FieldRef::name).collect(),
+            right_on: right_on.into_iter().map(FieldRef::name).collect(),
+            comparison: ValueComparison::Policy,
         }
     }
 
@@ -365,6 +386,7 @@ impl GraphBuilder {
             right: Box::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
+            comparison: ValueComparison::Exact,
         }
     }
 
@@ -379,6 +401,7 @@ impl GraphBuilder {
             right: Box::new(right),
             left_on: left_on.into_iter().map(FieldRef::name).collect(),
             right_on: right_on.into_iter().map(FieldRef::name).collect(),
+            comparison: ValueComparison::Exact,
         }
     }
 
@@ -440,6 +463,16 @@ impl GraphBuilder {
         Self::Filter {
             input: Box::new(self),
             predicate,
+            comparison: ValueComparison::Exact,
+        }
+    }
+
+    /// Filter using policy value comparison semantics.
+    pub fn policy_filter(self, predicate: PredicateExpr) -> Self {
+        Self::Filter {
+            input: Box::new(self),
+            predicate,
+            comparison: ValueComparison::Policy,
         }
     }
 
@@ -510,6 +543,20 @@ impl ProjectField {
         }
     }
 
+    pub fn literal_typed(
+        output_name: impl Into<String>,
+        value: impl Into<LiteralValue>,
+        value_type: ValueType,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::TypedLiteral {
+                value: value.into(),
+                value_type,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     /// Create a null projection with the legacy default type `Nullable(Bytes)`.
     /// Use [`Self::null_typed`] when the output schema matters.
     pub fn null(output_name: impl Into<String>) -> Self {
@@ -549,7 +596,9 @@ impl ProjectField {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source) => Some(source),
-            ProjectExpr::Literal(_) | ProjectExpr::Null(_) => None,
+            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
+                None
+            }
         }
     }
 }
@@ -558,6 +607,10 @@ impl ProjectField {
 pub enum ProjectExpr {
     Field(FieldRef),
     Literal(LiteralValue),
+    TypedLiteral {
+        value: LiteralValue,
+        value_type: ValueType,
+    },
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),
@@ -1133,6 +1186,7 @@ mod tests {
             NodeDescriptor::new(
                 OpType::Filter(FilterOp {
                     predicate: PredicateExpr::gt("id", crate::records::Value::U64(10)),
+                    comparison: ValueComparison::Exact,
                 }),
                 [input],
                 output(),
@@ -1166,6 +1220,7 @@ mod tests {
             NodeDescriptor::new(
                 OpType::Filter(FilterOp {
                     predicate: PredicateExpr::gt("id", crate::records::Value::U64(10)),
+                    comparison: ValueComparison::Exact,
                 }),
                 [input],
                 output(),
@@ -1184,6 +1239,7 @@ mod tests {
         let descriptor = NodeDescriptor::new(
             OpType::Filter(FilterOp {
                 predicate: PredicateExpr::gt("id", crate::records::Value::U64(10)),
+                comparison: ValueComparison::Exact,
             }),
             [],
             output(),
@@ -1239,6 +1295,7 @@ mod tests {
                 left_descriptor: output(),
                 right_descriptor: output(),
                 residual_predicate: None,
+                comparison: ValueComparison::Exact,
             }),
             [NodeId(1), NodeId(2)],
             RecordDescriptor::new([("left.f0", ValueType::U64), ("right.f0", ValueType::U64)]),

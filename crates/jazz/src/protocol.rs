@@ -1494,6 +1494,8 @@ pub enum SubscribeRejectReason {
         /// Human-readable diagnostic. Not part of semantic compatibility.
         detail: String,
     },
+    /// The shape is valid, but its schema has not yet reached this runtime.
+    ShapeRegistrationPendingCatalogueAdmission,
     /// The serving peer failed while resolving or maintaining the subscription.
     ///
     /// This deliberately carries no server error detail: schema names, policy
@@ -2294,6 +2296,10 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::U64(value) => {
             bytes.push(3);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(14);
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         Value::I64(value) => {

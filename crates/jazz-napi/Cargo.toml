@@ -5,18 +5,13 @@ edition = "2024"
 
 [features]
 default = ["rocksdb"]
-rocksdb = ["jazz/rocksdb", "jazz_tools/rocksdb", "jazz-server/rocksdb"]
+rocksdb = ["jazz/rocksdb"]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
-  "test-utils",
-  "otel-core",
-] }
-jazz = { path = "../jazz", default-features = false }
-jazz-server = { path = "../jazz-server", default-features = false }
+jazz = { path = "../jazz", default-features = false, features = ["test-utils", "otel-core"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi5", "serde-json", "async"] }

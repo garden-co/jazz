@@ -30,6 +30,15 @@ const taggedTodoSchema = {
 type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
 const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema);
 
+const defaultsTodoSchema = {
+  defaults_todos: s.table({
+    title: s.string().default("default title"),
+    done: s.boolean().default(false),
+  }),
+};
+type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
+const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema);
+
 let db: Db;
 
 beforeEach(async () => {
@@ -140,6 +149,48 @@ describe("Db transactions", () => {
     await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
       { id: existing.id, title: "committed", done: true },
     ]);
+  });
+
+  it("reads a restored row inside a mergeable callback transaction", async () => {
+    const deleted = await db
+      .insert(app.todos, { title: "deleted", done: false })
+      .wait({ tier: "local" });
+    await db.delete(app.todos, deleted.id).wait({ tier: "local" });
+
+    const result = await db.transaction(async (tx) => {
+      const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
+
+      await expect(tx.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+        restored,
+      );
+
+      return restored;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
+      result.value,
+    );
+  });
+
+  it("applies defaults to empty inserts and restores inside a mergeable callback transaction", async () => {
+    const inserted = await db.insert(defaultsApp.defaults_todos, {}).wait({ tier: "local" });
+    await db.delete(defaultsApp.defaults_todos, inserted.id).wait({ tier: "local" });
+
+    const result = await db.transaction(async (tx) => {
+      const restored = tx.restore(defaultsApp.defaults_todos, inserted.id, {});
+
+      await expect(
+        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+      ).resolves.toEqual(restored);
+
+      return restored;
+    });
+
+    await result.wait({ tier: "local" });
+    await expect(
+      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+    ).resolves.toEqual(inserted);
   });
 
   it("orders in-transaction reads by explicit orderBy and by implicit row id when omitted", async () => {

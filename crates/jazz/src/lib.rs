@@ -96,6 +96,9 @@
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
+/// Disabled-by-default counters used by the native cold-settle attribution bench.
+#[cfg(feature = "cold-settle-attribution")]
+pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
 /// Poll ready-immediate database futures without an async runtime.
@@ -123,10 +126,17 @@ pub mod protocol_limits;
 pub mod query;
 /// Jazz schema and storage lowering.
 pub mod schema;
+/// Operational server-shell APIs formerly provided by jazz-server.
+pub mod serving;
 /// Pure plaintext operation substrate and deterministic text-merge walk.
 pub mod text_merge;
 /// Logical time and sequence counters.
 pub mod time;
+/// Public client, server, and CLI support APIs formerly provided by jazz-tools.
+// The tools API was a separate crate before consolidation and intentionally
+// retains its existing documentation policy.
+#[allow(missing_docs)]
+pub mod tools;
 /// Transaction, fate, and history vocabulary.
 pub mod tx;
 /// Versioned transport frames around the semantic sync protocol.
