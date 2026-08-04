@@ -231,6 +231,45 @@ harness = false
 required-features = ["testing"]
 
 [[test]]
+name = "column_defaults"
+
+[[test]]
+name = "fate_regressions"
+
+[[test]]
+name = "four_tier"
+
+[[test]]
+name = "incremental_delivery_canary"
+
+[[test]]
+name = "json_storage"
+
+[[test]]
+name = "row_provenance"
+
+[[test]]
+name = "shared_coverage_differential"
+
+[[test]]
+name = "threaded_four_tier"
+
+[[test]]
+name = "warm_reopen_differential"
+
+[[test]]
+name = "wire_fixtures"
+
+[[test]]
+name = "admin_schema_api"
+
+[[test]]
+name = "auth_admission"
+
+[[test]]
+name = "cli_dry_run"
+
+[[test]]
 name = "large_blob_permissions"
 required-features = ["test"]
 
