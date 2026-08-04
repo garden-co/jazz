@@ -8,6 +8,7 @@
 
 use super::*;
 use std::cell::Cell;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
@@ -4446,6 +4447,79 @@ fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
         computed_nodes.windows(2).all(|pair| pair[0] == pair[1]),
         "evaluated relation work must remain constant as equivalent terminals are added: {computed_nodes:?}"
     );
+}
+
+#[test]
+#[ignore = "receipt-only timing for equivalent-terminal snapshot hydration"]
+fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
+    const ROWS: usize = 4_096;
+    const SAMPLES: usize = 7;
+
+    for terminal_count in [1_usize, 2, 4, 8] {
+        let mut elapsed_us = Vec::with_capacity(SAMPLES);
+        let mut receipt = None;
+        for _ in 0..SAMPLES {
+            let storage = ScanCountingStorage::new(&["albums"]);
+            let counter = storage.clone();
+            let mut database = Database::new(albums_schema(), storage).unwrap();
+            let mut batch = database.open_batch();
+            for id in 0..ROWS as u64 {
+                batch.insert(
+                    "albums",
+                    vec![Value::U64(id), Value::String(format!("album-{id}"))],
+                );
+            }
+            database.commit_batch(batch).unwrap();
+
+            let graph = || {
+                GraphBuilder::join(
+                    GraphBuilder::table("albums"),
+                    GraphBuilder::table("albums"),
+                    ["id"],
+                    ["id"],
+                )
+                .project(["left.id", "right.title"])
+            };
+            let sinks =
+                (0..terminal_count).map(|terminal| (format!("terminal-{terminal}"), graph()));
+            let scans_before = counter.scan_prefix_count();
+            let visits_before = counter.visited_records();
+            let memo_before = database.runtime_stats();
+            let started = Instant::now();
+            let snapshots = database.query_graphs(sinks).unwrap();
+            elapsed_us.push(started.elapsed().as_micros() as u64);
+
+            let mut canonical = snapshots
+                .sinks
+                .values()
+                .map(|rows| format!("{:?}", rows.to_values().unwrap()))
+                .collect::<Vec<_>>();
+            canonical.sort_unstable();
+            let mut hasher = DefaultHasher::new();
+            canonical.hash(&mut hasher);
+            let digest = hasher.finish();
+            let memo_after = database.runtime_stats();
+            receipt = Some((
+                counter.scan_prefix_count() - scans_before,
+                counter.visited_records() - visits_before,
+                memo_after.hydration_memo_computes - memo_before.hydration_memo_computes,
+                memo_after.hydration_memo_hits - memo_before.hydration_memo_hits,
+                snapshots
+                    .sinks
+                    .values()
+                    .map(|rows| rows.deltas.len())
+                    .sum::<usize>(),
+                digest,
+            ));
+        }
+        elapsed_us.sort_unstable();
+        let (snapshot_queries, child_visits, memo_computes, memo_hits, result_rows, digest) =
+            receipt.unwrap();
+        println!(
+            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{ROWS},\"samples\":{SAMPLES},\"snapshot_query_executions\":{snapshot_queries},\"storage_snapshots_constructed\":{snapshot_queries},\"child_visits\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"result_rows\":{result_rows},\"result_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
+            elapsed_us[SAMPLES / 2]
+        );
+    }
 }
 
 #[test]
