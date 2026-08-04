@@ -21,14 +21,7 @@ server = [
   "dep:tokio-tungstenite",
   "dep:tungstenite",
 ]
-cli = [
-  "server",
-  "rocksdb",
-  "dep:clap",
-  "dep:mimalloc",
-  "tokio/rt-multi-thread",
-  "tokio/signal",
-]
+cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc", "tokio/rt-multi-thread", "tokio/signal"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
@@ -74,13 +67,7 @@ jsonschema = { version = "0.42", default-features = false }
 internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 sha2 = "0.10"
-tokio = { version = "1", features = [
-  "macros",
-  "net",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"], optional = true }
 rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
   "lz4",
   "zstd",
@@ -112,10 +99,7 @@ tower-http = { version = "0.6.8", default-features = false, features = [
   "trace",
 ], optional = true }
 async-stream = { version = "0.3", optional = true }
-jsonwebtoken = { version = "10.4", default-features = false, features = [
-  "rust_crypto",
-  "use_pem",
-] }
+jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }
@@ -147,15 +131,9 @@ opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 criterion = "0.5"
 insta = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls",
-] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 bytes = "1"
-jsonwebtoken = { version = "10.4", default-features = false, features = [
-  "rust_crypto",
-  "use_pem",
-] }
+jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 futures = "0.3"
 tokio = { version = "1", features = [
   "macros",
