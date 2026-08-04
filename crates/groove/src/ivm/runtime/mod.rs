@@ -49,8 +49,9 @@ mod recursion;
 use join::{AntiJoinState, ArrangementState, JoinState};
 use persist::apply_persist_delta;
 use recursion::{
-    RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, snapshot_table_deltas,
+    RecursiveState, hydrate_recursive_arrangements, materialize_snapshot_table_deltas,
+    recompute_recursive, recursive_delta, recursive_read_tables, snapshot_table_deltas,
+    snapshot_table_sources,
 };
 
 const DEFAULT_SINK: &str = "__default";
@@ -523,12 +524,24 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
+        self.hydration_snapshot_from_table_deltas(output_node, storage, &table_deltas)
+    }
+
+    fn hydration_snapshot_from_table_deltas<S>(
+        &mut self,
+        output_node: NodeId,
+        storage: &S,
+        table_deltas: &[TableDelta],
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         let binding_snapshots = self.binding_snapshot_deltas();
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
-            table_deltas: &table_deltas,
+            table_deltas,
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
             current_tick: self.current_tick,
@@ -567,8 +580,25 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         let mut sinks = BTreeMap::new();
+        let mut table_snapshot_cache = Vec::new();
         for (sink, output) in outputs {
-            let records = self.hydration_snapshot(output.node, storage)?;
+            let sources = snapshot_table_sources(&self.graph, output.node)?;
+            let cache_index = if let Some(index) = table_snapshot_cache
+                .iter()
+                .position(|(cached_sources, _)| cached_sources == &sources)
+            {
+                index
+            } else {
+                let table_deltas =
+                    materialize_snapshot_table_deltas(&self.schema, storage, sources.clone())?;
+                table_snapshot_cache.push((sources, table_deltas));
+                table_snapshot_cache.len() - 1
+            };
+            let records = self.hydration_snapshot_from_table_deltas(
+                output.node,
+                storage,
+                &table_snapshot_cache[cache_index].1,
+            )?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
@@ -577,22 +607,22 @@ impl IvmRuntime {
         Ok(MultisinkDeltas { sinks })
     }
 
-    fn subscription_hydration_snapshot<S>(
+    fn subscription_hydration_snapshot_from_table_deltas<S>(
         &mut self,
         output_node: NodeId,
         storage: &S,
+        table_deltas: &[TableDelta],
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
-        let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
         let hydrate_arrangements = self.output_depends_on_aggregate(output_node)?;
         let mut metrics = TickMetrics::default();
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
-            table_deltas: &table_deltas,
+            table_deltas,
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
             current_tick: self.current_tick,
@@ -629,8 +659,25 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         let mut sinks = BTreeMap::new();
+        let mut table_snapshot_cache = Vec::new();
         for (sink, output) in outputs {
-            let records = self.subscription_hydration_snapshot(output.node, storage)?;
+            let sources = snapshot_table_sources(&self.graph, output.node)?;
+            let cache_index = if let Some(index) = table_snapshot_cache
+                .iter()
+                .position(|(cached_sources, _)| cached_sources == &sources)
+            {
+                index
+            } else {
+                let table_deltas =
+                    materialize_snapshot_table_deltas(&self.schema, storage, sources.clone())?;
+                table_snapshot_cache.push((sources, table_deltas));
+                table_snapshot_cache.len() - 1
+            };
+            let records = self.subscription_hydration_snapshot_from_table_deltas(
+                output.node,
+                storage,
+                &table_snapshot_cache[cache_index].1,
+            )?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }

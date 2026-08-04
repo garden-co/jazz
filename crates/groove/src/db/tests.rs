@@ -2174,6 +2174,7 @@ struct ScanCountingStorage {
     inner: MemoryStorage,
     scan_range_count: Rc<Cell<usize>>,
     scan_prefix_count: Rc<Cell<usize>>,
+    visited_records: Rc<Cell<usize>>,
 }
 
 impl ScanCountingStorage {
@@ -2182,6 +2183,7 @@ impl ScanCountingStorage {
             inner: MemoryStorage::new(column_families),
             scan_range_count: Rc::new(Cell::new(0)),
             scan_prefix_count: Rc::new(Cell::new(0)),
+            visited_records: Rc::new(Cell::new(0)),
         }
     }
 
@@ -2191,6 +2193,10 @@ impl ScanCountingStorage {
 
     fn scan_prefix_count(&self) -> usize {
         self.scan_prefix_count.get()
+    }
+
+    fn visited_records(&self) -> usize {
+        self.visited_records.get()
     }
 }
 
@@ -2235,7 +2241,12 @@ impl OrderedKvStorage for ScanCountingStorage {
     ) -> Result<(), StorageError> {
         self.scan_prefix_count
             .set(self.scan_prefix_count.get().saturating_add(1));
-        self.inner.scan_prefix(cf, prefix, visit)
+        let mut counting_visit = |key: &[u8], value: &[u8]| {
+            self.visited_records
+                .set(self.visited_records.get().saturating_add(1));
+            visit(key, value)
+        };
+        self.inner.scan_prefix(cf, prefix, &mut counting_visit)
     }
 
     fn scan_prefix_reverse(
@@ -4368,6 +4379,7 @@ fn equivalent_query_graph_terminals_share_snapshot_materialization() {
     database.commit_batch(batch).unwrap();
 
     let scans_before = counter.scan_prefix_count();
+    let visits_before = counter.visited_records();
     let snapshots = database
         .query_graphs([
             ("first", GraphBuilder::table("albums").project(["id"])),
@@ -4389,6 +4401,142 @@ fn equivalent_query_graph_terminals_share_snapshot_materialization() {
         1,
         "equivalent output terminals should construct their shared table snapshot once"
     );
+    assert_eq!(counter.visited_records() - visits_before, 2);
+}
+
+#[test]
+fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
+    for terminal_count in [1_usize, 2, 4, 8] {
+        let storage = ScanCountingStorage::new(&["albums"]);
+        let counter = storage.clone();
+        let mut database = Database::new(albums_schema(), storage).unwrap();
+        let mut batch = database.open_batch();
+        for id in 0..32 {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String(format!("album-{id}"))],
+            );
+        }
+        database.commit_batch(batch).unwrap();
+
+        let sinks = (0..terminal_count).map(|terminal| {
+            (
+                format!("terminal-{terminal}"),
+                GraphBuilder::table("albums").project(["id"]),
+            )
+        });
+        let scans_before = counter.scan_prefix_count();
+        let visits_before = counter.visited_records();
+        let snapshots = database.query_graphs(sinks).unwrap();
+
+        assert_eq!(snapshots.sinks.len(), terminal_count);
+        assert!(snapshots.sinks.values().all(|rows| rows.deltas.len() == 32));
+        assert_eq!(counter.scan_prefix_count() - scans_before, 1);
+        assert_eq!(counter.visited_records() - visits_before, 32);
+    }
+}
+
+#[test]
+fn distinct_snapshot_scan_shapes_do_not_share_materialization() {
+    let storage = ScanCountingStorage::new(&["docs", "indices"]);
+    let counter = storage.clone();
+    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "a", 1, "/one", b"one");
+    insert_scan_doc(&mut batch, "b", 2, "/two", b"two");
+    database.commit_batch(batch).unwrap();
+
+    let scans_before = counter.scan_prefix_count();
+    let snapshots = database
+        .query_graphs([
+            (
+                "a",
+                GraphBuilder::table_scan(
+                    "docs",
+                    StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
+                ),
+            ),
+            (
+                "b",
+                GraphBuilder::table_scan(
+                    "docs",
+                    StaticScanSpec::Prefix(vec![LiteralValue::String("b".to_owned())]),
+                ),
+            ),
+        ])
+        .unwrap();
+
+    assert_eq!(snapshots.get("a").unwrap().deltas.len(), 1);
+    assert_eq!(snapshots.get("b").unwrap().deltas.len(), 1);
+    assert_eq!(counter.scan_prefix_count() - scans_before, 2);
+}
+
+#[test]
+fn shared_snapshot_materialization_advances_after_data_change() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+
+    let graph = || GraphBuilder::table("albums").project(["id"]);
+    let initial = database
+        .query_graphs([("first", graph()), ("second", graph())])
+        .unwrap();
+    assert!(initial.get("first").unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let scans_before = counter.scan_prefix_count();
+    let advanced = database
+        .query_graphs([("first", graph()), ("second", graph())])
+        .unwrap();
+    let expected = [(vec![Value::U64(7)], 1)];
+    assert_eq!(
+        advanced.get("first").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(
+        advanced.get("second").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(counter.scan_prefix_count() - scans_before, 1);
+}
+
+#[test]
+fn shared_snapshot_materialization_preserves_multiset_weights() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let graph = || {
+        let rows = GraphBuilder::table("albums").project(["id"]);
+        GraphBuilder::union([rows.clone(), rows])
+    };
+    let scans_before = counter.scan_prefix_count();
+    let snapshots = database
+        .query_graphs([("first", graph()), ("second", graph())])
+        .unwrap();
+    let expected = [(vec![Value::U64(7)], 1), (vec![Value::U64(7)], 1)];
+
+    assert_eq!(
+        snapshots.get("first").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(
+        snapshots.get("second").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(counter.scan_prefix_count() - scans_before, 1);
 }
 
 #[test]

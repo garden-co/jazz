@@ -374,8 +374,24 @@ pub(super) fn snapshot_table_deltas(
     storage: &impl OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
+    let tables = snapshot_table_sources(graph, root)?;
+    materialize_snapshot_table_deltas(schema, storage, tables)
+}
+
+pub(super) fn snapshot_table_sources(
+    graph: &IvmGraph,
+    root: NodeId,
+) -> Result<HashMap<TableSnapshotSource, RecordDescriptor>, IvmRuntimeError> {
     let mut tables = HashMap::<TableSnapshotSource, RecordDescriptor>::default();
     collect_table_sources(graph, root, &mut tables)?;
+    Ok(tables)
+}
+
+pub(super) fn materialize_snapshot_table_deltas(
+    schema: &crate::schema::DatabaseSchema,
+    storage: &impl OrderedKvStorage,
+    tables: HashMap<TableSnapshotSource, RecordDescriptor>,
+) -> Result<Vec<TableDelta>, IvmRuntimeError> {
     tables
         .into_iter()
         .map(|(source, descriptor)| {
@@ -412,7 +428,7 @@ pub(super) fn snapshot_table_deltas(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TableSnapshotSource {
+pub(super) struct TableSnapshotSource {
     table: String,
     scan: Option<StaticScanSpec>,
 }
