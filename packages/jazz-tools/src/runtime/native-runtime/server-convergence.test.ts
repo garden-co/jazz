@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { WasmSchema } from "../../drivers/types.js";
-import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from "../schema-fetch.js";
+import {
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../schema-fetch.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
@@ -430,11 +435,18 @@ describe("NativeRuntimeAdapter server convergence", () => {
 async function publishSchema(
   server: LocalJazzServerHandle,
 ): Promise<{ objectId: string; hash: string }> {
-  return publishStoredSchema(server.url, {
+  const published = await publishStoredSchema(server.url, {
     appId: server.appId,
     adminSecret: server.adminSecret,
     schema,
   });
+  await publishStoredPermissions(server.url, {
+    appId: server.appId,
+    adminSecret: server.adminSecret,
+    schemaHash: published.hash,
+    permissions: {},
+  });
+  return published;
 }
 
 async function createClient({
