@@ -531,6 +531,166 @@ fn unclean_reopen_sweeps_remote_rejected_ahead_row_without_retry_record() {
 }
 
 #[test]
+fn unclean_reopen_sweeps_remote_rejected_ahead_row_from_versioned_schema_partition() {
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let temp_dir = tempfile::tempdir().unwrap();
+    let partition =
+        crate::schema::partition_ahead_current_table_name("todos", evolved.id);
+    {
+        let mut origin = open_node_at(&temp_dir, base.clone());
+        origin
+            .apply_sync_message(SyncMessage::PublishSchema {
+                author: AuthorId::SYSTEM,
+                schema: Box::new(evolved.clone()),
+            })
+            .unwrap();
+        origin
+            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: evolved.id,
+                },
+            })
+            .unwrap();
+        let tx_id = origin
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(222), 10).cells(BTreeMap::from([
+                    ("title".to_owned(), v("remote rejected")),
+                    ("body".to_owned(), v("partition")),
+                ])),
+            )
+            .unwrap();
+        origin
+            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 2,
+                    schema: base.version_id(),
+                },
+            })
+            .unwrap();
+        let mut stored = origin.query_transaction(tx_id).unwrap().unwrap();
+        stored.fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+        let mut batch = origin.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_seq,
+                stored.durability,
+            ),
+        );
+        origin.database.commit_batch(batch).unwrap();
+        assert_eq!(
+            origin
+                .database
+                .primary_key_scan_raw(&partition, &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    let reopened = reopen_node_at(&temp_dir, node(2), base);
+    assert_eq!(
+        reopened
+            .database
+            .primary_key_scan_raw(&partition, &[])
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn unclean_reopen_sweeps_remote_rejected_ahead_row_from_schema_partition() {
+    let old_schema = schema();
+    let current_schema = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let current_schema_payload = SchemaVersion::new(current_schema.clone());
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut origin = open_node_at(&temp_dir, old_schema.clone());
+        let tx_id = origin
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(222), 10)
+                    .cells(title_cells("remote rejected")),
+            )
+            .unwrap();
+        origin
+            .apply_sync_message(SyncMessage::PublishSchema {
+                author: AuthorId::SYSTEM,
+                schema: Box::new(current_schema_payload.clone()),
+            })
+            .unwrap();
+        origin
+            .apply_sync_message(SyncMessage::PublishLens {
+                author: AuthorId::SYSTEM,
+                lens: MigrationLens::new(
+                    old_schema.version_id(),
+                    current_schema_payload.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "tasks".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "todos".to_owned(),
+                            to: "tasks".to_owned(),
+                        }],
+                    }],
+                ),
+            })
+            .unwrap();
+        origin
+            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: current_schema_payload.id,
+                },
+            })
+            .unwrap();
+        let mut stored = origin.query_transaction(tx_id).unwrap().unwrap();
+        stored.fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+        let mut batch = origin.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_seq,
+                stored.durability,
+            ),
+        );
+        origin.database.commit_batch(batch).unwrap();
+        assert_eq!(
+            origin
+                .database
+                .primary_key_scan_raw(&ahead_current_table_name("todos"), &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    let reopened = reopen_node_at(&temp_dir, node(2), current_schema);
+    assert_eq!(
+        reopened
+            .database
+            .primary_key_scan_raw(&ahead_current_table_name("todos"), &[])
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
