@@ -2899,13 +2899,19 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
-        identity: AuthorId,
+        _identity: AuthorId,
     ) -> Result<(RowCells, Option<TxId>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         let mut cells = BTreeMap::new();
         let mut parent = None;
-        if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
+        // A partial update preserves omitted cells from the storage-visible
+        // current row. That merge is implementation bookkeeping, not a read
+        // granted to the writer: using the writer's read policy here would
+        // turn every omitted cell into `NULL` when write permission does not
+        // also imply read permission, and a later authorization re-entry would
+        // surface a corrupted row to maintained queries.
+        if let Some(existing) = self.local_row_for_identity(table, row, AuthorId::SYSTEM)? {
             for column in &table_schema.columns {
                 if column.large_value.is_some() {
                     continue;
