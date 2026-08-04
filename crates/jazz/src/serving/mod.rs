@@ -34,7 +34,9 @@ use crate::wire::{TransportError, WireTransport};
 
 mod admin_schema_convert;
 pub mod auth_admission;
+#[cfg(feature = "server")]
 pub mod loopback_http;
+#[cfg(feature = "server")]
 pub mod loopback_websocket;
 
 /// Result type returned by server shell helpers.
