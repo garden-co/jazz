@@ -7133,7 +7133,6 @@ where
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
     ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
-        self.database.flush().map_err(Error::Groove)?;
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         loop {

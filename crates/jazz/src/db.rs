@@ -3837,6 +3837,7 @@ where
     let pending_authoritative_resets = node
         .borrow_mut()
         .take_pending_authoritative_reset_binding_views();
+    node.borrow_mut().flush_query_runtime()?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;
