@@ -4,6 +4,7 @@
 //! projects old/candidate data into the pinned policy schema, and fail-closes
 //! write ingest. It also retains the transaction memo used by view emission.
 
+use super::query_engine::{NormalizedRowSetShape, RowSetExpr};
 use super::*;
 
 #[derive(Default)]
@@ -281,16 +282,43 @@ where
         }
     }
 
-    pub(super) fn read_policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
+    pub(super) fn read_policy_schema_for_table_name(
+        &self,
+        table: &str,
+        query_schema: SchemaVersionId,
+        shape: &NormalizedRowSetShape,
+    ) -> SchemaVersionId {
         let write_schema = self.catalogue.current_write_schema.schema;
+        let current_schema = self.catalogue.current_schema_version_id;
         if self
             .table_in_schema(table, write_schema)
             .is_ok_and(|table| table.read_policy.is_some() || table.write_policies.any().is_some())
+            && self.policy_schema_resolves_query_sources(write_schema, shape)
         {
             write_schema
+        } else if self.policy_schema_resolves_query_sources(current_schema, shape) {
+            // Preserve the pinned current policy schema unless it predates a
+            // table rename and cannot resolve every queried source.
+            current_schema
         } else {
-            self.catalogue.current_schema_version_id
+            query_schema
         }
+    }
+
+    fn policy_schema_resolves_query_sources(
+        &self,
+        schema: SchemaVersionId,
+        shape: &NormalizedRowSetShape,
+    ) -> bool {
+        shape
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                RowSetExpr::Source { source, .. } => Some(&source.table),
+                _ => None,
+            })
+            .chain(shape.auxiliary_sources.iter().map(|source| &source.table))
+            .all(|table| self.table_in_schema(table, schema).is_ok())
     }
 
     fn policy_target_schema_for_source(

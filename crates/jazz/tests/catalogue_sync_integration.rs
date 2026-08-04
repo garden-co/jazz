@@ -10,10 +10,10 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz::row_input;
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
-use jazz::row_input;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
@@ -113,7 +113,10 @@ fn rename_chain_values_v1(id: jazz::tools::ObjectId, email: &str) -> HashMap<Str
     row_input!("id" => id, "email" => email)
 }
 
-fn rename_chain_values_v3(id: jazz::tools::ObjectId, contact_email: &str) -> HashMap<String, Value> {
+fn rename_chain_values_v3(
+    id: jazz::tools::ObjectId,
+    contact_email: &str,
+) -> HashMap<String, Value> {
     row_input!("id" => id, "contact_email" => contact_email)
 }
 
