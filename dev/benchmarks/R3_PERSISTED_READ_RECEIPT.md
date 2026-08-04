@@ -15,6 +15,21 @@ that operation to:
 3. query preparation;
 4. first query materialization.
 
+The first-materialization figure is also attributed internally to:
+
+1. settled-view/prepared-plan resolution;
+2. one-shot program compilation, when a prepared plan is unavailable;
+3. executable-plan selection and query-context lookup;
+4. Groove plan execution;
+5. output decode and Jazz row materialization;
+6. includes, ordering, offset, and limit processing;
+7. output projection.
+
+The receipt emits the facade/clock residual as `first_read_unattributed_p50_us`
+so the internal phases can be checked against the existing end-to-end
+`first_read_p50_us`. Ordinary reads do not collect these clocks; only the R3
+diagnostic call does.
+
 ## Workload ladder
 
 Profiles match the realistic benchmark definitions:
