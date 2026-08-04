@@ -3382,12 +3382,14 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id").unbounded());
     let prepared_query = prepared(&db, &query);
 
+    db.node.node.borrow().reset_storage_read_metrics();
     let admin = block_on(db.all_relation_snapshot_for_identity(
         &prepared_query,
         ReadOpts::default(),
         AuthorId::SYSTEM,
     ))
     .unwrap();
+    let admin_reads = db.node.node.borrow().take_storage_read_metrics();
     assert_eq!(
         sorted_related_text_values(
             &admin,
@@ -3401,12 +3403,14 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         vec!["member-visible".to_owned(), "other-visible".to_owned()]
     );
 
+    db.node.node.borrow().reset_storage_read_metrics();
     let member_snapshot = block_on(db.all_relation_snapshot_for_identity(
         &prepared_query,
         ReadOpts::default(),
         member,
     ))
     .unwrap();
+    let member_reads = db.node.node.borrow().take_storage_read_metrics();
     assert_eq!(
         sorted_related_text_values(
             &member_snapshot,
@@ -3420,9 +3424,11 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         vec!["member-visible".to_owned()]
     );
 
+    db.node.node.borrow().reset_storage_read_metrics();
     let spy_snapshot =
         block_on(db.all_relation_snapshot_for_identity(&prepared_query, ReadOpts::default(), spy))
             .unwrap();
+    let spy_reads = db.node.node.borrow().take_storage_read_metrics();
     assert_eq!(
         sorted_related_text_values(
             &spy_snapshot,
@@ -3434,6 +3440,10 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
             "body"
         ),
         Vec::<String>::new()
+    );
+    assert!(
+        admin_reads.total.reads > 0 && member_reads.total.reads > 0 && spy_reads.total.reads > 0,
+        "relation snapshot storage inputs must remain request-local across permission identities: admin={admin_reads:?}, member={member_reads:?}, spy={spy_reads:?}"
     );
 }
 
