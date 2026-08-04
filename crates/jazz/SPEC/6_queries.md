@@ -182,6 +182,42 @@ authenticated `AuthorId`; additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 
+#### Prepared claim parameters
+
+When a query program contains policy claims, lowering MUST first walk the
+entire policy graph and declare one ordered, graph-wide parameter set before it
+emits any graph node. The walk includes every binding source at every nesting
+level, including recursive seed/step paths and every union route. Each claim
+reference is declared by its canonical parameter name and type; a repeated
+reference denotes the same declaration. Every binding source in the emitted
+prepared graph MUST use that one shared declaration environment. A claim in a
+prepared graph MUST lower as a parameter reference and MUST NOT lower as a
+policy-context value literal.
+
+The prepared graph descriptor MUST encode that parameter set -- names and
+types, including claim-path identity where names alone do not establish it --
+but MUST NOT encode the values bound for a particular identity. Parameter
+values are bound independently for each execution from the authenticated policy
+context. Thus two identities with the same query/policy shape legitimately
+share one prepared graph while receiving results evaluated with their respective
+claims. This is the query-level application of
+`groove/SPEC/INVARIANTS.md::INV-QUERY-1A`: the descriptor captures every
+output-affecting input's declared identity and type, while a binding supplies
+its execution-time value.
+
+A claim has one of two semantic roles wherever lowering considers an
+arrangement key. In a **filter role**, such as `row.team == claim.team`, it is
+an execution-time parameter and MUST NOT be baked as a constant into an
+arrangement key; one shared arrangement serves every identity and filters using
+the bound value. In a **partition role**, such as a maintained `top_by` window
+partitioned by `claim.team`, the claim value MAY and MUST participate as a
+partition dimension: the one shared arrangement contains all partitions and
+each binding reads its own partition. A partition dimension describes key
+structure, not a subject-specific constant, and therefore preserves graph
+sharing. Lowering MUST use the established policy-comparison path for claim
+comparisons; any policy-only normalization remains scoped to that comparison
+path and MUST NOT change ordinary arrangement-key encodings.
+
 ### 6.4 Result sets, include paths, and relation payloads
 
 A result set is the authoritative membership for a query in a read view.

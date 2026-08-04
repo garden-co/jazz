@@ -158,6 +158,45 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
 }
 
 #[test]
+fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
+    let schema = owner_policy_schema();
+    let backend = user(0xb0);
+    let attributed_user = user(0xa1);
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
+    let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+
+    let tx_id = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0x90), 10)
+                .made_by(attributed_user)
+                .permission_subject(backend)
+                .cells(owner_cells(backend, "checkpoint cleanup")),
+        )
+        .unwrap();
+
+    // The first six transaction reads are part of validation and acceptance;
+    // checkpoint_large_values_for_tx makes the seventh after Accepted persists.
+    storage.fail_after_transaction_reads(6);
+    let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
+    assert!(error.to_string().contains("injected transaction read failure"));
+    let terminal_state = core.transaction_state(tx_id);
+    assert!(matches!(
+        terminal_state,
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ), "checkpoint failure must follow persisted acceptance, got {terminal_state:?}");
+
+    // This internal assertion is necessary because local_permission_subjects is
+    // deliberately local-only and has no user-visible API. A terminal transaction
+    // cannot retry, so its entry otherwise has no public lifecycle event.
+    assert!(!core.open_tx.local_permission_subjects.contains_key(&tx_id));
+}
+
+#[test]
 fn write_policy_rejection_cleans_up_client() {
     let schema = owner_policy_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());

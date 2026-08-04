@@ -11,15 +11,17 @@ the existing canary's endpoints, adds three interior rungs to make a slope
 visible, and uses increasingly wide gaps so a linear dependence on accumulated
 state cannot hide between adjacent points.
 
-Each rung uses three fresh fixtures and emits the median allocation count and
-bytes. It also records the delivered delta's root/related-row/edge counts and
-auxiliary wall time. Allocations and bytes are the primary signals because they
-are stable under shared-host contention; wall time is retained only for
-operational context.
+Each rung uses three fresh fixtures and independently emits the median
+allocation count, allocation bytes, and wall time. Allocations and bytes are
+the primary signals because they are stable under shared-host contention; wall
+time is retained only for operational context. The delivered delta's
+root/related-row/edge counts are emitted only after the receipt verifies that
+they are identical across all samples, so those values describe every sample
+rather than a selected run.
 
 The final JSONL line (`phase: "slope"`) reports least-squares slopes in
-allocation work per accumulated child, max/min allocation and byte ratios, and
-the acceptance rule. The rule requires both max/min ratios to be at or below
+per-metric median allocation work per accumulated child, max/min allocation and
+byte ratios, and the acceptance rule. The rule requires both max/min ratios to be at or below
 the receipt's measured-data-derived `1.025x` threshold. The initial
 three-sample baseline measured `1.001031x` allocations and `1.017327x` bytes;
 the threshold leaves 0.7673 percentage points of headroom above the larger byte
