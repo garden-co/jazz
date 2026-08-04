@@ -5325,7 +5325,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     assert_eq!(initial_one_shot, expected_initial);
     assert_eq!(initial_one_shot.iter().copied().collect::<BTreeSet<_>>().len(), 100);
 
-    let mut peer = PeerState::for_author(reader);
+    let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (initial_adds, initial_removes) =
         canonical_view_update_rows_for_table(&initial, "documents");
