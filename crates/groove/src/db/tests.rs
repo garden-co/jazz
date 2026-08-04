@@ -2173,6 +2173,7 @@ fn jazz_docs_history_database() -> Database<MemoryStorage> {
 struct ScanCountingStorage {
     inner: MemoryStorage,
     scan_range_count: Rc<Cell<usize>>,
+    scan_prefix_count: Rc<Cell<usize>>,
 }
 
 impl ScanCountingStorage {
@@ -2180,11 +2181,16 @@ impl ScanCountingStorage {
         Self {
             inner: MemoryStorage::new(column_families),
             scan_range_count: Rc::new(Cell::new(0)),
+            scan_prefix_count: Rc::new(Cell::new(0)),
         }
     }
 
     fn scan_range_count(&self) -> usize {
         self.scan_range_count.get()
+    }
+
+    fn scan_prefix_count(&self) -> usize {
+        self.scan_prefix_count.get()
     }
 }
 
@@ -2227,6 +2233,8 @@ impl OrderedKvStorage for ScanCountingStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), StorageError> {
+        self.scan_prefix_count
+            .set(self.scan_prefix_count.get().saturating_add(1));
         self.inner.scan_prefix(cf, prefix, visit)
     }
 
@@ -4339,6 +4347,47 @@ fn query_graphs_returns_named_one_shot_snapshots() {
             (vec![Value::String("Blue Train".to_owned())], 1),
             (vec![Value::String("Giant Steps".to_owned())], 1)
         ]
+    );
+}
+
+#[test]
+fn equivalent_query_graph_terminals_share_snapshot_materialization() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let scans_before = counter.scan_prefix_count();
+    let snapshots = database
+        .query_graphs([
+            ("first", GraphBuilder::table("albums").project(["id"])),
+            ("second", GraphBuilder::table("albums").project(["id"])),
+        ])
+        .unwrap();
+
+    let expected = [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], 1)];
+    assert_eq!(
+        snapshots.get("first").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(
+        snapshots.get("second").unwrap().to_values().unwrap(),
+        expected
+    );
+    assert_eq!(
+        counter.scan_prefix_count() - scans_before,
+        1,
+        "equivalent output terminals should construct their shared table snapshot once"
     );
 }
 
