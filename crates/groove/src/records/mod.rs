@@ -1725,6 +1725,8 @@ pub enum Error {
     UnknownEnumVariant { enum_name: String, variant: String },
     #[error("invalid offset")]
     InvalidOffset,
+    #[error("nested record bytes are not canonical")]
+    NonCanonicalRecord,
     #[error("tuple members must be fixed-width, got {member_type:?}")]
     InvalidTupleMember { member_type: ValueType },
     #[error("invalid utf-8 string")]

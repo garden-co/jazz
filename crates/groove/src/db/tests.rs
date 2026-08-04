@@ -1046,7 +1046,7 @@ fn vec_derived_primary_key_scan_raw(
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut key_prefix = Vec::new();
     for value in prefix {
-        encode_primary_key_part(&mut key_prefix, value);
+        encode_primary_key_part(&mut key_prefix, value).unwrap();
     }
     let mut rows = database
         .primary_key_scan_raw(table, prefix)
@@ -1584,6 +1584,28 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
             .collect::<Vec<_>>(),
         vec![Value::String("Blue Train".to_owned())]
     );
+}
+
+#[test]
+fn direct_record_store_rejects_record_valued_durable_keys() {
+    let child = RecordDescriptor::new([("id", ValueType::U64)]);
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "rendered_results",
+        RecordDescriptor::new([("result", ValueType::Record(Box::new(child)))]),
+        RecordDescriptor::new([("payload", ValueType::Bytes)]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).unwrap();
+    let store = database.direct_record_store("rendered_results").unwrap();
+    let child = crate::records::OwnedRecord::new(child.create(&[Value::U64(1)]).unwrap(), child);
+
+    assert!(matches!(
+        store.set(
+            &[Value::Record(child)],
+            &[Value::Bytes(b"not-a-key".to_vec())],
+        ),
+        Err(Error::InvalidDirectRecordStoreKey(_))
+    ));
 }
 
 #[test]

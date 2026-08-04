@@ -926,7 +926,7 @@ where
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut encoded_key, value);
+            encode_primary_key_part(&mut encoded_key, value)?;
         }
         let staged_contains_key = batch
             .txn_operations
@@ -978,7 +978,7 @@ where
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut encoded_key, value);
+            encode_primary_key_part(&mut encoded_key, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
@@ -1015,7 +1015,7 @@ where
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value);
+            encode_primary_key_part(&mut key_prefix, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
@@ -1054,7 +1054,7 @@ where
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value);
+            encode_primary_key_part(&mut key_prefix, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
         let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
@@ -1099,12 +1099,12 @@ where
         let mut start_key = Vec::new();
         for (value, column) in start.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut start_key, value);
+            encode_primary_key_part(&mut start_key, value)?;
         }
         let mut end_key = Vec::new();
         for (value, column) in end.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut end_key, value);
+            encode_primary_key_part(&mut end_key, value)?;
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
@@ -1182,12 +1182,12 @@ where
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut key_prefix, value);
+            encode_primary_key_part(&mut key_prefix, value)?;
         }
         let mut upper_key = Vec::new();
         for (value, column) in upper.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
-            encode_primary_key_part(&mut upper_key, value);
+            encode_primary_key_part(&mut upper_key, value)?;
         }
         if !upper_key.starts_with(&key_prefix) {
             return Ok(None);
@@ -2098,7 +2098,7 @@ where
         let _ = prefix_descriptor.create(values)?;
         let mut bytes = Vec::new();
         for value in values {
-            encode_primary_key_part(&mut bytes, value);
+            encode_primary_key_part(&mut bytes, value)?;
         }
         Ok(bytes)
     }
@@ -3022,14 +3022,22 @@ impl PrimaryKeyValue {
     fn into_bytes(self) -> Vec<u8> {
         let mut bytes = Vec::new();
         match self {
-            Self::U8(value) => encode_primary_key_part(&mut bytes, &Value::U8(value)),
-            Self::U16(value) => encode_primary_key_part(&mut bytes, &Value::U16(value)),
-            Self::U32(value) => encode_primary_key_part(&mut bytes, &Value::U32(value)),
-            Self::U64(value) => encode_primary_key_part(&mut bytes, &Value::U64(value)),
-            Self::Bool(value) => encode_primary_key_part(&mut bytes, &Value::Bool(value)),
-            Self::String(value) => encode_primary_key_part(&mut bytes, &Value::String(value)),
-            Self::Bytes(value) => encode_primary_key_part(&mut bytes, &Value::Bytes(value)),
-            Self::Uuid(value) => encode_primary_key_part(&mut bytes, &Value::Uuid(value)),
+            Self::U8(value) => encode_primary_key_part(&mut bytes, &Value::U8(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::U16(value) => encode_primary_key_part(&mut bytes, &Value::U16(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::U32(value) => encode_primary_key_part(&mut bytes, &Value::U32(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::U64(value) => encode_primary_key_part(&mut bytes, &Value::U64(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::Bool(value) => encode_primary_key_part(&mut bytes, &Value::Bool(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::String(value) => encode_primary_key_part(&mut bytes, &Value::String(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::Bytes(value) => encode_primary_key_part(&mut bytes, &Value::Bytes(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
+            Self::Uuid(value) => encode_primary_key_part(&mut bytes, &Value::Uuid(value))
+                .expect("PrimaryKeyValue only contains encodable primary-key values"),
             Self::Composite(values) => {
                 for value in values {
                     bytes.extend(value.into_bytes());
@@ -3093,7 +3101,7 @@ fn primary_key_bytes(
     for column in &primary_key.columns {
         let value = record_schema.get(record, &column.column)?;
         ensure_primary_key_value_type(table, column, &value)?;
-        encode_primary_key_part(&mut bytes, &value);
+        encode_primary_key_part(&mut bytes, &value)?;
     }
     Ok(bytes)
 }
@@ -3188,7 +3196,7 @@ fn primary_key_from_index_columns(
             .get(index_position)
             .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
         ensure_primary_key_value_type(table, primary_key_column, value)?;
-        encode_primary_key_part(&mut bytes, value);
+        encode_primary_key_part(&mut bytes, value)?;
     }
     Ok(bytes)
 }
@@ -3257,7 +3265,7 @@ fn ensure_primary_key_value_type(
     }
 }
 
-fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) {
+fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Error> {
     match value {
         Value::U8(value) => {
             key.push(0);
@@ -3306,13 +3314,16 @@ fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::Tuple(values) => {
             key.push(11);
             for value in values {
-                encode_primary_key_part(key, value);
+                encode_primary_key_part(key, value)?;
             }
         }
-        Value::F64(_) | Value::Array(_) | Value::Nullable(_) => {
-            unreachable!("unsupported primary-key value type was validated before encoding")
+        Value::F64(_) | Value::Array(_) | Value::Nullable(_) | Value::Record(_) => {
+            return Err(Error::InvalidDirectRecordStoreKey(
+                "unsupported direct record store key type".to_owned(),
+            ));
         }
     }
+    Ok(())
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -3425,7 +3436,8 @@ fn decode_primary_key_part(
         records::ValueType::F64
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
-        | records::ValueType::Tuple(_) => Err(Error::InvalidDirectRecordStoreKey(
+        | records::ValueType::Tuple(_)
+        | records::ValueType::Record(_) => Err(Error::InvalidDirectRecordStoreKey(
             "unsupported direct record store key type".to_owned(),
         )),
     }

@@ -2492,6 +2492,20 @@ mod tests {
             crate::groove::records::ValueType::Nullable(inner) => {
                 GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
             }
+            crate::groove::records::ValueType::Record(descriptor) => {
+                GrooveValue::Record(crate::groove::records::OwnedRecord::new(
+                    descriptor
+                        .create(
+                            &descriptor
+                                .fields()
+                                .iter()
+                                .map(|field| sample_groove_value(&field.value_type))
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap(),
+                    **descriptor,
+                ))
+            }
         }
     }
 
