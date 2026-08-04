@@ -167,6 +167,11 @@ name = "relation_include_delivery"
 harness = false
 
 [[bench]]
+name = "selective_global_hydration"
+harness = false
+required-features = ["rocksdb", "testing"]
+
+[[bench]]
 name = "observer_write_path"
 harness = false
 

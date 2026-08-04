@@ -6591,6 +6591,29 @@ where
             .then(|| self.settled_binding_view_key_for_query(shape, binding))
             .transpose()?
             .flatten();
+        // A concrete one-shot access path is binding-specific. Inline that
+        // binding so execution keeps the selected graph instead of replacing it
+        // with the generic cached parameterized plan.
+        let inline_query = if prepared_plan.is_none()
+            && settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
+        {
+            let schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+            let inline_shape =
+                inline_snapshot_bind_filter_literals(shape, binding, &schema.schema)?;
+            let inline_binding = inline_shape.bind(BTreeMap::new())?;
+            Some((inline_shape, inline_binding))
+        } else {
+            None
+        };
+        let (shape, binding) = inline_query
+            .as_ref()
+            .map(|(shape, binding)| (shape, binding))
+            .unwrap_or((shape, binding));
         let prepared_plan = prepared_plan
             .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
         let program = if prepared_plan.is_some() {
