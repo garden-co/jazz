@@ -8787,13 +8787,27 @@ where
             },
             Err(err) => return Err(err),
         };
+        // Authorization is existential per protected row and binding route:
+        // multiple policy branches or multiple qualifying grant rows are
+        // alternative proofs, not additional copies of the application row.
+        // Collapse those proofs before the protected source reaches ordinary
+        // relational operators (especially finite TopBy windows). Route
+        // fields are part of the key because one prepared authorization graph
+        // can serve several independently routed bindings.
+        let mut authorization_keys = vec!["row_uuid".to_owned()];
+        authorization_keys.extend(authorized.route_fields.iter().cloned());
+        let authorized_graph = GraphBuilder::arg_max_by(
+            authorized.graph,
+            authorization_keys.clone(),
+            authorization_keys,
+        );
         if authorized.route_fields.is_empty() {
             let fields = output_fields
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
                 .collect::<Vec<_>>();
             return Ok(PolicyAuthorizationGraph {
-                graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+                graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                     .project_fields(fields),
                 route_fields: authorized.route_fields,
             });
@@ -8809,7 +8823,7 @@ where
                 .map(|field| ProjectField::renamed(right_field(field), field.clone())),
         );
         Ok(PolicyAuthorizationGraph {
-            graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+            graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                 .project_fields(fields),
             route_fields: authorized.route_fields,
         })
