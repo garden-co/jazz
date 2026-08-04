@@ -40,6 +40,8 @@ Invariant digest:
 - `INV-QUERY-24`: `TopByOp` MUST apply bag semantics to window occupancy: a record with positive multiplicity `m` occupies `m` consecutive ordinals of the partition's ordered stream, the retained window is the ordinal range `[offset, offset + limit)` (all ordinals `>= offset` when unbounded), and records with non-positive multiplicity are absent.
 - `INV-QUERY-25`: A record straddling a window boundary MUST contribute exactly its in-window copies, as one output record whose weight is the in-window copy count.
 - `INV-QUERY-26`: Per touched partition TopBy MUST emit the minimal consolidated weighted diff of retained windows; unchanged in-window copy counts MUST NOT emit, including rank-only moves, unless rank metadata is declared.
+- `INV-QUERY-27`: `CollectBy` MUST be an output-terminal-only operator: validation MUST reject it as an input to every graph node, including another collector.
+- `INV-QUERY-28`: For each touched `CollectBy` group, the terminal MUST emit no delta when the rendered output bytes are unchanged, otherwise exactly one old-record retraction and one new-record addition; its descriptor and scalar key/order inputs MUST make this result deterministic.
 
 ## Details
 
@@ -242,6 +244,56 @@ the ordered index is operator state, not a semantic rescan license. Unbounded
 retained suffixes are supported for consumers such as jazz maintained ordered
 subscriptions, but they can retain and diff a large portion of each partition.
 Use a finite limit when the consumer only needs a bounded window.
+
+### 3.6.1 `CollectBy` (terminal structured-output collection)
+
+**Target design, 2026-08-04.** `CollectBy` is a terminal-only collector that
+renders one output record per group with an `Array<Record>` field. Its input is
+an ordinary flat weighted record stream: child rows stay rows, parent/child
+association stays in scalar group fields, and no graph-internal delta updates an
+inner collection. `CollectBy` may retain per-group state, including a ranked
+window and the flat records needed to maintain it, but its rendered collection
+exists only at the output terminal.
+
+The `CollectBy` descriptor MUST include every output-affecting input:
+
+- the grouping fields and output parent-field sources;
+- the child projection and the output collection slot;
+- the complete scalar order and tie fields, direction, offset, and limit; and
+- the parent/child presence rules needed to render an empty collection.
+
+This is an application of `INV-QUERY-1A`: descriptors, not external planner
+state, define output identity and sharing. Validation MUST require a complete,
+type-compatible parent projection; an `Array<Record(child_descriptor)>` output
+slot; and a deterministic scalar sort key followed by a complete-child-byte
+tie-break. It MUST reject record-valued types, including `Array<Record>`, in
+group, order, tie, or other arrangement-key fields. Arrangement iteration and
+arrival order are never a semantic order.
+
+For every touched group, the collector forms the old and new selected child
+arrays using the same finite/unbounded window semantics as `TopBy`. It encodes
+the old and new complete parent output records and byte-compares them. If they
+are equal, it emits nothing. If they differ, it emits exactly `-old_parent` and
+`+new_parent`; it MUST NOT emit a child-level delta. Thus a front insert or a
+window-boundary change has one whole-parent replacement even when many array
+positions change. A finite limit bounds the rendered collection by the selected
+window; an unbounded collector's rendered work and bytes scale with its whole
+group.
+
+`CollectBy` MUST NOT compose as a graph node. Node validation and terminal
+preparation MUST reject a collector as an input to every other node, including a
+second collector (`INV-QUERY-27`); planner convention is insufficient. A nested
+structured result is rendered by a terminal-owned collector tree that consumes
+flat associations and writes directly into its final output, never by flowing an
+inner collection update through an ordinary graph edge. This restriction keeps
+the graph's deltas flat.
+
+The terminal's output descriptor may contain
+`ValueType::Record(Box<RecordDescriptor>)` only under the canonical-byte and
+key-rejection rules of ch. 2. It is an inline descriptor form, not a registry
+lookup. Groove does not assign semantics to any external query, policy, or
+permission vocabulary; those systems provide descriptor-complete flat inputs to
+this operator.
 
 ### 3.7 `Aggregate` (maintained grouped summaries)
 
