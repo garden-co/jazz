@@ -500,10 +500,10 @@ fn recovery_includes_the_maximum_global_sequence_endpoint() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     #[cfg(feature = "testing")]
-    let (reopened, receipt) =
+    let (mut reopened, receipt) =
         NodeState::new_with_open_receipt_for_test(node(1), schema, storage, false, 1024).unwrap();
     #[cfg(not(feature = "testing"))]
-    let reopened = NodeState::new(node(1), schema, storage).unwrap();
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
 
     #[cfg(feature = "testing")]
     assert_eq!(receipt.global_sequence_records_scanned, 1);
@@ -513,6 +513,16 @@ fn recovery_includes_the_maximum_global_sequence_endpoint() {
         BTreeSet::from([GlobalSeq(u64::MAX)])
     );
     assert_eq!(reopened.clock.next_global_seq, GlobalSeq(u64::MAX));
+
+    let next_tx = reopened
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(25), 25).cells(title_cells("after exhaustion")),
+        )
+        .unwrap();
+    assert!(matches!(
+        reopened.finalize_local_mergeable_commit(next_tx),
+        Err(Error::InvalidStoredValue("global sequence exhausted"))
+    ));
 }
 
 #[test]
