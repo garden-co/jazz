@@ -4643,6 +4643,96 @@ fn equivalent_subscription_terminals_share_join_hydration_and_advance() {
         full.get("second").unwrap().to_values().unwrap(),
         expected_full
     );
+
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(8));
+    database.commit_batch(batch).unwrap();
+    let retraction = subscription.recv().unwrap();
+    let expected_retraction = [
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            -1,
+        ),
+        (
+            vec![Value::U64(8), Value::String("Giant Steps".to_owned())],
+            -1,
+        ),
+    ];
+    assert_eq!(
+        retraction.get("first").unwrap().to_values().unwrap(),
+        expected_retraction
+    );
+    assert_eq!(
+        retraction.get("second").unwrap().to_values().unwrap(),
+        expected_retraction
+    );
+}
+
+#[test]
+fn different_prepared_bindings_do_not_share_hydrated_results() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding = RecordDescriptor::new([("id", ValueType::U64)]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("album_route", binding),
+        GraphBuilder::table("albums"),
+        ["id"],
+        ["id"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.title", "title"),
+        ProjectField::renamed("left.id", "__route_id"),
+    ]);
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "album",
+                graph,
+                ["__route_id"],
+                ["title"],
+            )],
+            "album_route",
+            binding,
+        )
+        .unwrap();
+
+    let scans_before = counter.scan_prefix_count();
+    let first = database
+        .bind_shape(shape.id(), &[Value::U64(1)])
+        .unwrap()
+        .recv()
+        .unwrap();
+    let second = database
+        .bind_shape(shape.id(), &[Value::U64(2)])
+        .unwrap()
+        .recv()
+        .unwrap();
+
+    assert_eq!(
+        first.get("album").unwrap().to_values().unwrap(),
+        [(vec![Value::String("Blue Train".to_owned())], 1)]
+    );
+    assert_eq!(
+        second.get("album").unwrap().to_values().unwrap(),
+        [(vec![Value::String("Giant Steps".to_owned())], 1)]
+    );
+    assert_eq!(
+        counter.scan_prefix_count() - scans_before,
+        2,
+        "request-local hydration snapshots must not cross binding requests"
+    );
 }
 
 #[test]
