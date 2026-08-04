@@ -41,7 +41,8 @@ use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
     CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
     MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, admit_json_schema_validators,
+    registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -550,6 +551,7 @@ where
         history_complete: bool,
         large_value_checkpoint_op_interval: usize,
     ) -> Result<Self, Error> {
+        admit_json_schema_validators(&schema).map_err(Error::InvalidJsonCell)?;
         let current_schema_version_id = schema.version_id();
         let CatalogueOpenState {
             storage,
@@ -559,6 +561,10 @@ where
             partitions,
             branch_partitions,
         } = Self::open_catalogue_stage(schema.clone(), storage)?;
+        for catalogue_schema in schemas.values() {
+            admit_json_schema_validators(&catalogue_schema.schema)
+                .map_err(Error::InvalidJsonCell)?;
+        }
         let had_base_schema = schemas.contains_key(&current_schema_version_id);
         if !had_base_schema {
             schemas.insert(

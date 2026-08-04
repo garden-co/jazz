@@ -10,7 +10,7 @@ use jazz::protocol::{
     VersionBundle, VersionRecord,
 };
 use jazz::query::Query;
-use jazz::schema::{ColumnSchema, JazzSchema, Policy, TableSchema};
+use jazz::schema::{ColumnSchema, ColumnType, JazzSchema, Policy, TableSchema};
 use jazz::time::{GlobalSeq, TxTime};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use serde_json::{Value as JsonValue, json};
@@ -188,6 +188,46 @@ fn query_documents(db: &Db<MemoryStorage>, schema: &JazzSchema) -> Vec<(RowUuid,
             (row_id, vec![payload])
         })
         .collect()
+}
+
+/// Malformed JSON Schemas fail when a schema enters the node rather than when
+/// the first row using that column is written.
+#[test]
+fn node_open_rejects_malformed_json_schema() {
+    let schema = JazzSchema {
+        tables: vec![TableSchema::new(
+            "documents",
+            [ColumnSchema::new(
+                "payload",
+                ColumnType::Json {
+                    schema: Some("{\"type\":7}".to_owned()),
+                },
+            )],
+        )],
+        branch_read_policy: None,
+        branch_write_policy: None,
+    };
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    let error = match NodeState::new(
+        NodeUuid::from_bytes([0x44; 16]),
+        schema,
+        MemoryStorage::new(&column_family_refs),
+    ) {
+        Ok(_) => panic!("malformed JSON Schema must fail node admission"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("invalid JSON schema for column `documents.payload`"),
+        "unexpected error: {error:?}"
+    );
 }
 
 /// Verifies that a JSON column stores the exact text the user inserted rather

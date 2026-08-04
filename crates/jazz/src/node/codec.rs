@@ -8,7 +8,7 @@
 use super::query_engine::{left_field, user_column_field};
 use super::*;
 use crate::schema::{
-    ColumnSchema, ColumnType, branch_partition_history_table_name,
+    ColumnSchema, ColumnType, admitted_json_schema_validator, branch_partition_history_table_name,
     branch_partition_register_table_name, partition_ahead_current_table_name,
     partition_global_current_table_name, partition_history_table_name,
     partition_register_ahead_current_table_name, partition_register_global_current_table_name,
@@ -1854,14 +1854,9 @@ fn validate_json_value(
                 Error::InvalidJsonCell(format!("invalid JSON for column `{column_path}`: {error}"))
             })?;
             if let Some(schema) = schema {
-                let schema = serde_json::from_str(schema).map_err(|error| {
+                let validator = admitted_json_schema_validator(schema).ok_or_else(|| {
                     Error::InvalidJsonCell(format!(
-                        "invalid JSON schema for column `{column_path}`: {error}"
-                    ))
-                })?;
-                let validator = jsonschema::validator_for(&schema).map_err(|error| {
-                    Error::InvalidJsonCell(format!(
-                        "invalid JSON schema for column `{column_path}`: {error}"
+                        "JSON schema for column `{column_path}` was not compiled at schema admission"
                     ))
                 })?;
                 if let Err(error) = validator.validate(&parsed) {
