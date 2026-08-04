@@ -28,7 +28,13 @@ export type BrowserWebSocket = {
   readonly readyState: number;
   send(data: Uint8Array | string): void;
   close(): void;
-  addEventListener(type: string, listener: (event: { data: unknown }) => void): void;
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  addEventListener(type: "error", listener: (event: unknown) => void): void;
+  addEventListener(
+    type: "close",
+    listener: (event: { code: number; reason: string }) => void,
+  ): void;
 };
 
 export const WIRE_PROTOCOL_VERSION = 3;
