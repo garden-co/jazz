@@ -13,7 +13,7 @@ in the `jazz-private` repo.
 
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
-Before writing any test in Rust crates, always read `crates/jazz-tools/TESTING_GUIDELINES.md` in full and follow it.
+Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
 
 **Builds:** `pnpm build:core` (all the packages), `pnpm test` (everything), via turbo.
 
@@ -22,7 +22,11 @@ For ordinary Rust/core work, the full gate set is:
 
 - `cargo test -p jazz`
 - `cargo test -p groove`
-- `cargo test -p jazz-tools --features test` (matches `crates/jazz-tools/TESTING_GUIDELINES.md`)
+- `cargo test -p jazz --no-default-features --features test` (matches `crates/jazz/TESTING_GUIDELINES.md`).
+  This replaces the former `cargo test -p jazz-tools --features test`: `jazz-tools`
+  and `jazz-server` are now part of `jazz`, so their suites run here. Note it also
+  runs `jazz-tools`' library unit and doc tests, which its old `[lib] test = false`
+  had suppressed.
 - `cargo test -p jazz-server`
 
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)

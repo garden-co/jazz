@@ -1521,7 +1521,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     let mut peer = if identity == AuthorId::SYSTEM {
         PeerState::new()
     } else {
-        PeerState::for_author(identity)
+        PeerState::client_link(identity)
     };
 
     let todo_entry = |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);

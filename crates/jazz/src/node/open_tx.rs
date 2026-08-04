@@ -1,9 +1,9 @@
-//! Open exclusive transaction lifecycle and snapshot-overlay reads. This module
-//! owns `tx_read`, `tx_query`, write buffering, and commit-unit construction for
-//! exclusive transactions described in `jazz/SPEC/6_queries.md`; authority-side
-//! validation and fate assignment live in [`super::ingest`], while query
-//! execution helpers live in [`super::query_eval`]. It is the node API layer used
-//! by the `Db` facade before writes become protocol commit units.
+//! Open transaction lifecycle and snapshot-overlay reads. This module owns
+//! `tx_read`, `tx_query`, mergeable/exclusive write staging, and commit-unit
+//! construction for open transactions; authority-side validation and fate
+//! assignment live in [`super::ingest`], while query execution helpers live in
+//! [`super::query_eval`]. It is the node API layer used by the `Db` facade before
+//! writes become protocol commit units.
 
 use super::*;
 
@@ -13,6 +13,22 @@ where
 {
     /// Open an exclusive transaction over the current snapshot.
     pub fn open_exclusive(&mut self) -> Result<OpenTxId, Error> {
+        self.open_transaction(OpenTransactionKind::Exclusive)
+    }
+
+    /// Open a mergeable transaction over the current snapshot.
+    pub(crate) fn open_mergeable(
+        &mut self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+    ) -> Result<OpenTxId, Error> {
+        self.open_transaction(OpenTransactionKind::Mergeable {
+            made_by,
+            permission_subject,
+        })
+    }
+
+    fn open_transaction(&mut self, kind: OpenTransactionKind) -> Result<OpenTxId, Error> {
         let id = OpenTxId(self.open_tx.next_open_tx_id);
         self.open_tx.next_open_tx_id = self
             .open_tx
@@ -27,9 +43,10 @@ where
             Vec::new(),
         )
         .map_err(Error::InvalidStoredValue)?;
-        self.open_tx.open_exclusive.insert(
+        self.open_tx.open_transactions.insert(
             id,
-            OpenExclusive {
+            OpenTransaction {
+                kind,
                 base_snapshot,
                 base_snapshot_rows: BTreeMap::new(),
                 row_reads: Vec::new(),
@@ -49,15 +66,13 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let table_schema = self.table(table)?.clone();
+        self.table(table)?;
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let snapshot_row = self.snapshot_row(table, row_uuid, &snapshot);
         self.open_tx_mut(tx_id)?
             .base_snapshot_rows
             .insert((table.to_owned(), row_uuid), snapshot_row.clone());
-        let result = self
-            .overlay_pending_writes(tx_id, table, row_uuid, snapshot_row.clone())?
-            .map(|cells| cells_from_positional(&table_schema, &cells));
+        let result = self.overlay_pending_writes(tx_id, table, row_uuid, snapshot_row.clone())?;
         if let Some(version) = snapshot_row.read_version {
             let open_tx = self.open_tx_mut(tx_id)?;
             if !open_tx.row_reads.iter().any(|read| {
@@ -113,6 +128,7 @@ where
             if let Some(cells) =
                 self.overlay_pending_writes(tx_id, table, row_uuid, snapshot_row)?
             {
+                let cells = positional_cells_from_map(&table_schema, &cells)?;
                 current.push(current_row_from_positional_cells(
                     &table_schema,
                     row_uuid,
@@ -144,6 +160,11 @@ where
         cells: BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<(), Error> {
+        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not exclusive",
+            ));
+        }
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let table_schema = self.table_in_schema(table, write_schema_version)?;
         let cells = cells
@@ -168,13 +189,16 @@ where
         } else {
             snapshot_row.content_version
         };
+        positional_cells_from_map(&table_schema, &cells)?;
         let pending = PendingWrite {
             table: table.to_owned(),
             row_uuid,
             schema_version: write_schema_version,
-            cells: positional_cells_from_map(&table_schema, &cells)?,
+            cells: PendingCells::Replace(cells),
             deletion,
-            parent,
+            parents: parent.into_iter().collect(),
+            now_ms: None,
+            refresh_parents_at_commit: false,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.base_snapshot_rows.remove(&cache_key);
@@ -190,7 +214,129 @@ where
         Ok(())
     }
 
-    /// Attach application metadata to an exclusive transaction.
+    pub(crate) fn tx_write_mergeable(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        deletion: Option<DeletionEvent>,
+        parents: Vec<TxId>,
+        now_ms: Option<u64>,
+        refresh_parents_at_commit: bool,
+    ) -> Result<(), Error> {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Mergeable { .. }
+        ) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            ));
+        }
+        validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        positional_cells_from_map(&table_schema, &cells)?;
+        self.stage_mergeable_write(
+            tx_id,
+            PendingWrite {
+                table: table.to_owned(),
+                row_uuid,
+                schema_version: write_schema_version,
+                cells: PendingCells::Replace(cells),
+                deletion,
+                parents,
+                now_ms,
+                refresh_parents_at_commit,
+            },
+        )
+    }
+
+    pub(crate) fn tx_patch_mergeable(
+        &mut self,
+        tx_id: OpenTxId,
+        table: &str,
+        row_uuid: RowUuid,
+        patch: BTreeMap<String, Value>,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Mergeable { .. }
+        ) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            ));
+        }
+        let mut staged_cells = self.tx_read(tx_id, table, row_uuid)?.unwrap_or_default();
+        staged_cells.extend(patch.clone());
+        validate_mergeable_write_shape(staged_cells.is_empty(), false)?;
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        positional_cells_from_map(&table_schema, &patch)?;
+        self.stage_mergeable_write(
+            tx_id,
+            PendingWrite {
+                table: table.to_owned(),
+                row_uuid,
+                schema_version: write_schema_version,
+                cells: PendingCells::Patch(patch),
+                deletion: None,
+                parents: Vec::new(),
+                now_ms,
+                refresh_parents_at_commit: false,
+            },
+        )
+    }
+
+    fn stage_mergeable_write(
+        &mut self,
+        tx_id: OpenTxId,
+        pending: PendingWrite,
+    ) -> Result<(), Error> {
+        let cache_key = (pending.table.clone(), pending.row_uuid);
+        let open_tx = self.open_tx_mut(tx_id)?;
+        open_tx.base_snapshot_rows.remove(&cache_key);
+        if pending.deletion.is_none() {
+            if let Some(existing) = open_tx.writes.iter_mut().find(|write| {
+                write.table == pending.table
+                    && write.row_uuid == pending.row_uuid
+                    && write.deletion.is_none()
+            }) {
+                let cells = match (&existing.cells, &pending.cells) {
+                    (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
+                        let mut cells = existing.clone();
+                        cells.extend(patch.clone());
+                        PendingCells::Replace(cells)
+                    }
+                    (PendingCells::Patch(existing), PendingCells::Patch(patch)) => {
+                        let mut cells = existing.clone();
+                        cells.extend(patch.clone());
+                        PendingCells::Patch(cells)
+                    }
+                    (_, PendingCells::Replace(cells)) => PendingCells::Replace(cells.clone()),
+                };
+                *existing = PendingWrite { cells, ..pending };
+            } else {
+                open_tx.writes.push(pending);
+            }
+            return Ok(());
+        }
+
+        open_tx.writes.retain(|existing| {
+            existing.table != pending.table
+                || existing.row_uuid != pending.row_uuid
+                || match pending.deletion {
+                    Some(DeletionEvent::Deleted) => false,
+                    Some(DeletionEvent::Restored) => existing.deletion.is_none(),
+                    None => true,
+                }
+        });
+        open_tx.writes.push(pending);
+        Ok(())
+    }
+
+    /// Attach application metadata to an open transaction.
     pub fn tx_set_metadata(&mut self, tx_id: OpenTxId, json: String) -> Result<(), Error> {
         self.open_tx_mut(tx_id)?.user_metadata_json = Some(json);
         Ok(())
@@ -203,12 +349,17 @@ where
         made_by: AuthorId,
         now_ms: u64,
     ) -> Result<(TxId, SyncMessage), Error> {
+        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not exclusive",
+            ));
+        }
         let open_tx = self
             .open_tx
-            .open_exclusive
+            .open_transactions
             .remove(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))?;
-        for parent in open_tx.writes.iter().filter_map(|write| write.parent) {
+        for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
         let made_at = self.mint_tx_time(now_ms);
@@ -218,16 +369,22 @@ where
             .into_iter()
             .map(|write| {
                 let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
+                let PendingCells::Replace(cells) = write.cells else {
+                    return Err(Error::InvalidMergeableCommit(
+                        "exclusive transaction cannot contain update patches",
+                    ));
+                };
+                let cells = positional_cells_from_map(&table_schema, &cells)?;
                 Ok(VersionRecord::encode(
                     &table_schema,
                     write.schema_version,
                     write.row_uuid,
-                    write.parent.into_iter().collect(),
+                    write.parents,
                     made_by,
                     made_at,
                     made_by,
                     made_at,
-                    &write.cells,
+                    &cells,
                     write.deletion,
                 )?)
             })
@@ -258,10 +415,91 @@ where
         Ok((tx_id, SyncMessage::CommitUnit { tx, versions }))
     }
 
-    /// Abandon an open exclusive transaction.
+    /// Commit a mergeable open transaction through the ordinary mergeable batch path.
+    pub(crate) fn commit_mergeable_open(
+        &mut self,
+        tx_id: OpenTxId,
+        mut next_now_ms: impl FnMut() -> u64,
+    ) -> Result<TxId, Error> {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Mergeable { .. }
+        ) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            ));
+        }
+        let open_tx = self
+            .open_tx
+            .open_transactions
+            .remove(&tx_id)
+            .ok_or(Error::MissingOpenTx(tx_id))?;
+        let OpenTransactionKind::Mergeable {
+            made_by,
+            permission_subject,
+        } = open_tx.kind
+        else {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            ));
+        };
+        let mut commits = Vec::with_capacity(open_tx.writes.len());
+        for (index, write) in open_tx.writes.into_iter().enumerate() {
+            let parents = if write.refresh_parents_at_commit {
+                if write.deletion.is_none() {
+                    self.local_content_winner_tx_id(&write.table, write.row_uuid)?
+                } else {
+                    self.local_deletion_winner_tx_id(&write.table, write.row_uuid)?
+                }
+                .into_iter()
+                .collect()
+            } else {
+                write.parents
+            };
+            let cells = match write.cells {
+                PendingCells::Replace(cells) => cells,
+                PendingCells::Patch(patch) => {
+                    let table_schema = self.table(&write.table)?.clone();
+                    let mut cells = BTreeMap::new();
+                    if let Some(existing) = self.local_current_row(&write.table, write.row_uuid)? {
+                        for column in &table_schema.columns {
+                            if let Some(value) = existing.cell(&table_schema, &column.name) {
+                                cells.insert(column.name.clone(), value);
+                            }
+                        }
+                    }
+                    cells.extend(patch);
+                    cells
+                }
+            };
+            let mut commit = MergeableCommit::new(
+                &write.table,
+                write.row_uuid,
+                write.now_ms.unwrap_or_else(&mut next_now_ms),
+            )
+            .made_by(made_by)
+            .parents(parents)
+            .cells(cells);
+            if let Some(subject) = permission_subject {
+                commit = commit.permission_subject(subject);
+            }
+            if let Some(deletion) = write.deletion {
+                commit = commit.deletion(deletion);
+            }
+            if index == 0
+                && let Some(metadata) = open_tx.user_metadata_json.as_ref()
+            {
+                commit = commit.user_metadata(metadata.clone());
+            }
+            commits.push(commit);
+        }
+        self.commit_mergeable_many(commits)
+    }
+
+    /// Abandon an open transaction.
     pub fn abandon_tx(&mut self, tx_id: OpenTxId) -> Result<(), Error> {
         self.open_tx
-            .open_exclusive
+            .open_transactions
             .remove(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))?;
         Ok(())
@@ -272,16 +510,16 @@ where
         Ok(self.clock.tx_time > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
-    pub(super) fn open_tx(&self, tx_id: OpenTxId) -> Result<&OpenExclusive, Error> {
+    pub(super) fn open_tx(&self, tx_id: OpenTxId) -> Result<&OpenTransaction, Error> {
         self.open_tx
-            .open_exclusive
+            .open_transactions
             .get(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))
     }
 
-    pub(super) fn open_tx_mut(&mut self, tx_id: OpenTxId) -> Result<&mut OpenExclusive, Error> {
+    pub(super) fn open_tx_mut(&mut self, tx_id: OpenTxId) -> Result<&mut OpenTransaction, Error> {
         self.open_tx
-            .open_exclusive
+            .open_transactions
             .get_mut(&tx_id)
             .ok_or(Error::MissingOpenTx(tx_id))
     }
@@ -389,8 +627,11 @@ where
         table: &str,
         row_uuid: RowUuid,
         snapshot_row: SnapshotRow,
-    ) -> Result<Option<Vec<Option<Value>>>, Error> {
-        let mut cells = snapshot_row.content_cells;
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let table_schema = self.table(table)?;
+        let mut cells = snapshot_row
+            .content_cells
+            .map(|cells| cells_from_positional(&table_schema, &cells));
         let mut deleted = snapshot_row.deleted;
         for write in self
             .open_tx(tx_id)?
@@ -398,8 +639,14 @@ where
             .iter()
             .filter(|write| write.table == table && write.row_uuid == row_uuid)
         {
-            if write.cells.iter().any(Option::is_some) {
-                cells = Some(write.cells.clone());
+            match &write.cells {
+                PendingCells::Replace(replacement) if !replacement.is_empty() => {
+                    cells = Some(replacement.clone());
+                }
+                PendingCells::Patch(patch) => {
+                    cells.get_or_insert_default().extend(patch.clone());
+                }
+                PendingCells::Replace(_) => {}
             }
             match write.deletion {
                 Some(DeletionEvent::Deleted) => deleted = true,
@@ -411,38 +658,59 @@ where
     }
 }
 
-pub struct OpenExclusive {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OpenTransactionKind {
+    Exclusive,
+    Mergeable {
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+    },
+}
+
+pub(super) struct OpenTransaction {
+    /// Commit semantics and attribution carried by this open transaction.
+    pub(super) kind: OpenTransactionKind,
     /// Snapshot captured when the transaction opened.
-    pub base_snapshot: Snapshot,
+    pub(super) base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.
     pub(super) base_snapshot_rows: BTreeMap<(String, RowUuid), SnapshotRow>,
     /// Point reads recorded by the transaction.
-    pub row_reads: Vec<RowRead>,
+    pub(super) row_reads: Vec<RowRead>,
     /// Absent-row reads recorded by the transaction.
-    pub absent_reads: Vec<AbsentRead>,
+    pub(super) absent_reads: Vec<AbsentRead>,
     /// Predicate reads recorded by the transaction.
-    pub predicate_reads: Vec<PredicateRead>,
+    pub(super) predicate_reads: Vec<PredicateRead>,
     /// Pending writes staged by the transaction.
-    pub writes: Vec<PendingWrite>,
+    pub(super) writes: Vec<PendingWrite>,
     /// Optional application metadata.
-    pub user_metadata_json: Option<String>,
+    pub(super) user_metadata_json: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-/// Pending row write inside an exclusive transaction.
-pub struct PendingWrite {
+enum PendingCells {
+    Replace(BTreeMap<String, Value>),
+    Patch(BTreeMap<String, Value>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+/// Pending row write inside an open transaction.
+pub(super) struct PendingWrite {
     /// Target table.
-    pub table: String,
+    pub(super) table: String,
     /// Target row.
-    pub row_uuid: RowUuid,
+    pub(super) row_uuid: RowUuid,
     /// Schema version used to encode staged cells.
-    pub schema_version: SchemaVersionId,
-    /// User cells to write.
-    pub cells: Vec<Option<Value>>,
+    pub(super) schema_version: SchemaVersionId,
+    /// Replacement cells or an update patch resolved when the transaction commits.
+    cells: PendingCells,
     /// Deletion-register event, if any.
-    pub deletion: Option<DeletionEvent>,
-    /// Parent content version, if any.
-    pub parent: Option<TxId>,
+    pub(super) deletion: Option<DeletionEvent>,
+    /// Parent vector carried by the staged write.
+    pub(super) parents: Vec<TxId>,
+    /// Per-write provenance time, or `None` for a commit-time clock value.
+    pub(super) now_ms: Option<u64>,
+    /// Whether restore parents must follow the current layer winner at commit time.
+    pub(super) refresh_parents_at_commit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

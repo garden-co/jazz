@@ -1494,6 +1494,33 @@ pub enum SubscribeRejectReason {
         /// Human-readable diagnostic. Not part of semantic compatibility.
         detail: String,
     },
+    /// The shape is valid, but its schema has not yet reached this runtime.
+    ShapeRegistrationPendingCatalogueAdmission,
+    /// The serving peer failed while resolving or maintaining the subscription.
+    ///
+    /// This deliberately carries no server error detail: schema names, policy
+    /// expressions, and storage state are not safe to disclose to every peer.
+    ServerFailure {
+        /// Stable, client-safe classification of the server-side failure.
+        code: SubscribeServerFailureCode,
+    },
+}
+
+/// Client-safe classes for server-side subscription failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SubscribeServerFailureCode {
+    /// The requested table was not present in the server's schema.
+    TableNotFound,
+    /// The server could not resolve the requested schema version or shape.
+    SchemaResolution,
+    /// Query validation failed on the serving peer.
+    QueryValidation,
+    /// Query lowering failed on the serving peer.
+    QueryLowering,
+    /// The serving peer could not evaluate the subscription's policy.
+    PolicyEvaluation,
+    /// A server-side failure did not fit a more specific safe class.
+    Internal,
 }
 
 /// Legacy-compatible table-qualified current content row entry:

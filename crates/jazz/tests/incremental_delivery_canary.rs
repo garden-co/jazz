@@ -1,23 +1,23 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
-use std::rc::Rc;
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+#[path = "support/duplex_transport.rs"]
+mod duplex_transport;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, Transport,
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{MemoryStorage, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::SyncMessage;
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
-use jazz::wire::TransportError;
 
 struct CountingAllocator;
 
@@ -141,36 +141,7 @@ fn global_read_opts() -> ReadOpts {
     }
 }
 
-struct DuplexTransport {
-    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-}
-
-impl Transport for DuplexTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound.borrow_mut().push_back(message);
-        Ok(())
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inbound.borrow_mut().pop_front()
-    }
-}
-
-fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
-    (
-        Box::new(DuplexTransport {
-            outbound: Rc::clone(&left),
-            inbound: Rc::clone(&right),
-        }),
-        Box::new(DuplexTransport {
-            outbound: right,
-            inbound: left,
-        }),
-    )
-}
+use duplex_transport::duplex;
 
 fn open_db(scale: usize) -> Db<MemoryStorage> {
     open_db_with_schema(scale, relation_schema())

@@ -279,6 +279,8 @@ where
                 "schema id does not match schema payload",
             ));
         }
+        let active_schema_changed = schema.id == self.catalogue.current_schema_version_id
+            && self.catalogue.schema != schema.schema;
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
@@ -291,6 +293,13 @@ where
         }
         self.persist_catalogue_schema(&schema)?;
         self.ensure_schema_version_alias(schema.id)?;
+        if active_schema_changed {
+            // Policy declarations are intentionally outside the schema version
+            // identity. Invalidate maintained handles when that same-version
+            // payload changes so live subscriptions rebuild their authorization
+            // graph without reopening storage through the old catalogue row.
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
         if schema.id != self.catalogue.current_schema_version_id
             && self.parking.parked_commit_units.values().any(|parked| {
                 parked
@@ -323,7 +332,10 @@ where
         &mut self,
         author: AuthorId,
         lens: MigrationLens,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
         self.require_catalogue_admin(author)?;
         if lens.id != lens.content_id() {
             return Err(Error::InvalidCatalogueUpdate(
@@ -336,13 +348,20 @@ where
             return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
         }
         self.validate_migration_lens(&lens)?;
-        self.catalogue
-            .catalogue_lenses
-            .entry(lens.id)
-            .or_insert(lens.clone());
+        let installed = if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.catalogue.catalogue_lenses.entry(lens.id)
+        {
+            entry.insert(lens.clone());
+            true
+        } else {
+            false
+        };
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.persist_catalogue_lens(&lens)?;
+        if installed {
+            self.rebuild_database_slot()?;
+        }
         Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
             revision: None,
             schema: None,
@@ -552,6 +571,7 @@ where
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
+            edge_authority: true,
         });
         let mut updates = self.ingest_edge_authority_mergeable_commit_unit_once(
             tx,
@@ -592,10 +612,11 @@ where
         let permission_subject = self
             .open_tx
             .local_permission_subjects
-            .remove(&tx_id)
+            .get(&tx_id)
+            .copied()
             .unwrap_or(stored.tx.made_by);
         for version in &records {
-            if !self.version_satisfies_write_policy(version, permission_subject) {
+            if !self.version_satisfies_write_policy(version, permission_subject)? {
                 let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
                 self.ingest_rejected_transaction(stored.tx, fate)?;
                 return Ok(());
@@ -610,8 +631,7 @@ where
             Some(DurabilityTier::Global),
         )?;
         self.create_merge_versions_for(&records)?;
-        self.checkpoint_large_values_for_tx(tx_id)?;
-        Ok(())
+        self.checkpoint_large_values_for_tx(tx_id)
     }
 
     /// Finalize a locally-authored pending exclusive commit as the global
@@ -1498,6 +1518,7 @@ where
                     && self.has_forward_lens_path(
                         author_schema,
                         self.catalogue.current_write_schema.schema,
+                        version.table(),
                     );
                 let (table_schema, target_schema, stored) = if has_forward_lens {
                     let mut target_table = version.table().to_owned();
@@ -1625,6 +1646,28 @@ where
         global_seq: Option<GlobalSeq>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
+        let mut terminal_fate_persisted = false;
+        let result = self.apply_fate_update_once(
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+            &mut terminal_fate_persisted,
+        );
+        if terminal_fate_persisted {
+            self.open_tx.local_permission_subjects.remove(&tx_id);
+        }
+        result
+    }
+
+    fn apply_fate_update_once(
+        &mut self,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: Option<DurabilityTier>,
+        terminal_fate_persisted: &mut bool,
+    ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -1727,6 +1770,7 @@ where
             None
         };
         self.database.commit_batch(batch)?;
+        *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
             self.persist_storage_consistency_marker_through(tx_id.time)?;
         }
@@ -1938,7 +1982,7 @@ where
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
-            if !self.version_satisfies_write_policy(version, permission_subject) {
+            if !self.version_satisfies_write_policy(version, permission_subject)? {
                 return Ok(false);
             }
         }
@@ -1949,11 +1993,8 @@ where
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
-    ) -> bool {
-        match self.write_policy_allows_version_record(version, author) {
-            Ok(allowed) => allowed,
-            Err(_) => false,
-        }
+    ) -> Result<bool, Error> {
+        self.write_policy_allows_version_record(version, author)
     }
 
     pub(super) fn cascade_root_for_versions(&mut self, versions: &[VersionRecord]) -> Option<TxId> {
@@ -3958,12 +3999,13 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
+                let current_table = global_current_table_name_for_schema(
+                    version.table(),
+                    schema_version,
+                    base_for_current_names,
+                );
                 batch.update_raw(
-                    global_current_table_name_for_schema(
-                        version.table(),
-                        schema_version,
-                        base_for_current_names,
-                    ),
+                    current_table,
                     global_current_primary_key(version.row_uuid()),
                     owned_record_from_storage_values(
                         &table.global_current_storage_tables()[0],
@@ -4322,6 +4364,7 @@ where
                 && self.has_forward_lens_path(
                     author_schema,
                     self.catalogue.current_write_schema.schema,
+                    version.table(),
                 )
             {
                 target_schema = self.catalogue.current_write_schema.schema;
@@ -4559,9 +4602,14 @@ where
         None
     }
 
-    fn has_forward_lens_path(&mut self, source: SchemaVersionId, target: SchemaVersionId) -> bool {
-        self.shortest_lens_path_ids_cached(source, target, LensPathDirection::Forward)
-            .is_some()
+    fn has_forward_lens_path(
+        &mut self,
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        table: &str,
+    ) -> bool {
+        self.compiled_lens_path(source, target, LensPathDirection::Forward, table)
+            .is_ok_and(|path| path.is_some())
     }
 
     pub(super) fn ingest_rejected_transaction(

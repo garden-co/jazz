@@ -851,7 +851,10 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.subscribe!(query, opts);
       }
     } catch (error) {
-      throw new Error(`Core subscribe failed for ${queryJson}: ${errorMessage(error)}`);
+      const nativeStack = error instanceof Error ? error.stack : undefined;
+      throw new Error(
+        `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
+      );
     }
     const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {
@@ -4093,7 +4096,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
     }
   | {
       type: "rejected";
-      reason: { type: "UnsupportedShapeCapability"; detail: string };
+      reason:
+        | { type: "UnsupportedShapeCapability"; detail: string }
+        | { type: "ServerFailure"; code: string };
     }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
@@ -4148,25 +4153,31 @@ function normalizeSubscriptionChunk(chunk: unknown):
   throw new Error("unknown subscription chunk");
 }
 
-function normalizeSubscriptionRejectionReason(reason: unknown): {
-  type: "UnsupportedShapeCapability";
-  detail: string;
-} {
+function normalizeSubscriptionRejectionReason(
+  reason: unknown,
+):
+  | { type: "UnsupportedShapeCapability"; detail: string }
+  | { type: "ServerFailure"; code: string } {
   if (!reason || typeof reason !== "object") {
     throw new Error("expected subscription rejection reason");
   }
-  const record = reason as { type?: unknown; detail?: unknown };
+  const record = reason as { type?: unknown; detail?: unknown; code?: unknown };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
     return { type: "UnsupportedShapeCapability", detail: record.detail };
+  }
+  if (record.type === "ServerFailure" && typeof record.code === "string") {
+    return { type: "ServerFailure", code: record.code };
   }
   throw new Error("unknown subscription rejection reason");
 }
 
-function subscriptionRejectionError(reason: {
-  type: "UnsupportedShapeCapability";
-  detail: string;
-}): Error {
-  return new Error(`Subscription rejected: ${reason.type}: ${reason.detail}`);
+function subscriptionRejectionError(
+  reason:
+    | { type: "UnsupportedShapeCapability"; detail: string }
+    | { type: "ServerFailure"; code: string },
+): Error {
+  const detail = reason.type === "UnsupportedShapeCapability" ? reason.detail : reason.code;
+  return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
 }
 
 function subscriptionSource(

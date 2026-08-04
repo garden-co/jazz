@@ -79,7 +79,7 @@ acceptance target.
 Default historical Criterion benchmark plus a warm CI receipt:
 
 ```sh
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
   realistic_phase1/r3_rocksdb_cold_load
 ```
 
@@ -90,7 +90,7 @@ JAZZ_R3_PROFILES=ci,s,m \
 JAZZ_R3_CACHE_MODES=warm,evicted \
 JAZZ_R3_PHASE_SAMPLES=3 \
 JAZZ_R3_PHASE_ONLY=1 \
-  cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+  cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
   realistic_phase1/r3_rocksdb_cold_load
 ```
 

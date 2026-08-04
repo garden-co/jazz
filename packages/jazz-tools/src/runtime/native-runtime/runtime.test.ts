@@ -4247,6 +4247,39 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("serializes a bounded Inherits depth as a native inherits policy atom", () => {
+    const policy = readSchemaSelectPolicyInherits(
+      encodeSchema({
+        folders: {
+          columns: [
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "folders",
+            },
+          ],
+          policies: {
+            select: {
+              using: {
+                type: "Inherits",
+                operation: "Select",
+                via_column: "parent_id",
+                max_depth: 3,
+              },
+            },
+          },
+        },
+      }),
+      "folders",
+    );
+
+    expect(policy).toEqual({
+      inherits: [{ parentColumn: "parent_id", maxDepth: 3 }],
+      joinCount: 0,
+    });
+  });
+
   it("serializes direct Inherits through parent exists joins with source lookup", () => {
     const policy = readSchemaSelectPolicyInherits(
       encodeSchema({
@@ -5194,7 +5227,8 @@ function readPolicyBranchForTest(reader: PostcardReader): TestPolicyBranch {
 function readPolicyInheritsForTest(reader: PostcardReader): TestPolicyInherits {
   const parentColumn = reader.string();
   reader.u64();
-  return { parentColumn };
+  const maxDepth = reader.option((optionReader) => optionReader.u64());
+  return maxDepth === undefined ? { parentColumn } : { parentColumn, maxDepth };
 }
 
 function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
@@ -5369,6 +5403,7 @@ type TestPolicyBranch = {
 
 type TestPolicyInherits = {
   parentColumn: string;
+  maxDepth?: number;
 };
 
 type TestPolicyJoin = {

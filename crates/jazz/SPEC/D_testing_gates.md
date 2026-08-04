@@ -28,7 +28,7 @@ For ordinary Rust/core work, the full gate set is:
 
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
-3. `cargo test -p jazz-tools --features test`
+3. `cargo test -p jazz --no-default-features --features test`
 4. `cargo test -p jazz-server`
 5. `cargo check -p jazz-sim --benches`
 6. `dev/gates/ts-wire-codec.sh`

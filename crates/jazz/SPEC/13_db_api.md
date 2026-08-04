@@ -135,7 +135,7 @@ history, uploads its writes to an upstream, never self-finalizes, and has no fat
 authority. The server-side tiers — **core**, **edge**, and **relay** — are not
 `Db` roles. They are operated at the `Node` level: a core is a `Node` over a
 history-complete `NodeState` that self-finalizes via `finalize_*`; an edge is a
-`PeerRole::EdgeClient` link; and a relay is a `PeerRole::Relay` link (ch. 9,
+`PeerRole::ClientLink` link; and a relay is a `PeerRole::Relay` link (ch. 9,
 appendix E). Keeping non-client topology at the `Node` layer preserves one
 vocabulary for sync roles while leaving the app facade small.
 
@@ -535,8 +535,8 @@ serialize query IR, cache prepared handles, transport frames, and hydrate typed
 application objects — but they must not independently evaluate predicates,
 ordering, limit/offset/windowing, relation/include membership, permission
 visibility, identity/dedupe rules, or semantic delta coalescing. A client-side
-reducer over delivered deltas is legitimate only as a *specified wire-protocol
-reducer*: its behavior must be fully determined by the delivered stream, never
+reducer over delivered deltas is legitimate only as a _specified wire-protocol
+reducer_: its behavior must be fully determined by the delivered stream, never
 by re-evaluating the query against row sets.
 
 When a client API needs an alternate read view — read-your-writes inside an

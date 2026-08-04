@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
+import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
 import {
   PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
@@ -76,13 +77,14 @@ class FakeWorker {
     });
   }
 
-  emitSubscriptionError(subscription: number, message: string): void {
+  emitSubscriptionError(subscription: number, message: string, stack?: string): void {
+    const data = {
+      subscription,
+      error: { name: "Error", message, stack },
+    } satisfies PersistentBrowserSubscriptionMessage;
     queueMicrotask(() => {
       this.onmessage?.({
-        data: {
-          subscription,
-          error: { name: "Error", message },
-        },
+        data,
       } as MessageEvent);
     });
   }
@@ -438,13 +440,14 @@ describe("PersistentBrowserOpfsRuntime", () => {
     );
     worker.respond(createSubscriptionMessage!.id, 7);
 
-    worker.emitSubscriptionError(subscriptionHandle, "server transport died");
+    worker.emitSubscriptionError(subscriptionHandle, "server transport died", "remote stack");
 
     await vi.waitFor(() => {
       expect(updates).toHaveLength(1);
     });
     expect(updates[0]![0]).toBeInstanceOf(Error);
     expect((updates[0]![0] as Error).message).toBe("server transport died");
+    expect((updates[0]![0] as Error).stack).toBe("remote stack");
     expect(updates[0]![1]).toBeNull();
 
     await runtime.close();

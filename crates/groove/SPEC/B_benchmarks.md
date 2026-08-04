@@ -75,11 +75,11 @@ counts output deltas processed, not storage rows scanned.)
 
 ### B.6 Retained-baseline workflow
 
-`bench_run.py` writes JSONL enriched with git SHA, dirty state, host, rustc, and
-the active `GROOVE_*` knobs, under `benchmarks/results/` (not `target/`).
-`bench_summary.py` medians retained rows; `bench_compare.py` equality-checks
-deterministic counters and ratios timings. SQLite baselines are usually frozen
-and refreshed only when fixtures, SQL/indexes, durability, or knobs change — this
+Use `dev/benchmarks/receipt-adapters.sh` to retain a Groove run under
+`dev/benchmarks/results/` and append its smoke-shaped previous/delta summary to
+`dev/benchmarks/SMOKE_LEDGER.md`; the former `scripts/bench_*.py` retention tree
+is not present in this checkout. SQLite baselines are usually frozen and
+refreshed only when fixtures, SQL/indexes, durability, or knobs change — this
 keeps laptop cost down while preserving a comparison target.
 
 > **Known staleness:**

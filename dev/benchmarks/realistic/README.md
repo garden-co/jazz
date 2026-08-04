@@ -23,7 +23,7 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 Run from workspace root:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz --features client,rocksdb --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w1_interactive.json
 ```
@@ -31,7 +31,7 @@ RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realis
 `W3` requires a running server and `--server-url`:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz --features client,rocksdb --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
@@ -42,11 +42,11 @@ RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realis
 Run the local realistic benchmark suite:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1
+cargo bench -p jazz --features rocksdb --bench realistic_phase1
 ```
 
 It currently hard-codes the S profile inside
-`crates/jazz-tools/benches/realistic_phase1.rs` and runs the active
+`crates/jazz/benches/realistic_phase1.rs` and runs the active
 core ports of selected realistic scenarios.
 
 Current topology coverage:
@@ -63,7 +63,7 @@ Current topology coverage:
 Run only the cold-load benchmark:
 
 ```bash
-cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
+cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- realistic_phase1/r3_rocksdb_cold_load
 ```
 
 R3 preserves the historical combined Criterion measurement and also emits one
@@ -75,9 +75,14 @@ decode/materialization, row finishing, projection, and an unattributed
 facade/clock residual. Its default is the existing 120-task CI profile with the
 OS page cache left uncontrolled after fixture seeding:
 
+Each `*_p50_us` field is the median of that field across all samples. These
+independent medians describe the typical cost of each phase, but they need not
+add up to `total_p50_us` or `first_read_p50_us`; use an individual sample when
+an exactly balanced timing decomposition is required.
+
 ```bash
 JAZZ_R3_PROFILES=ci \
-  cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+  cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
   realistic_phase1/r3_rocksdb_cold_load
 ```
 
@@ -90,7 +95,7 @@ JAZZ_R3_PROFILES=ci,s,m \
 JAZZ_R3_CACHE_MODES=warm,evicted \
 JAZZ_R3_PHASE_SAMPLES=3 \
 JAZZ_R3_PHASE_ONLY=1 \
-  cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 -- \
+  cargo bench -p jazz --features rocksdb --bench realistic_phase1 -- \
   realistic_phase1/r3_rocksdb_cold_load
 ```
 

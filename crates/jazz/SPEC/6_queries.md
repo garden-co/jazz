@@ -100,6 +100,50 @@ maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
 
+### 6.1.1 Membership and containment filters
+
+Membership and containment semantics are core-owned query semantics. Binding
+layers may provide typed builders and literal conversion, but must lower into
+the core predicate vocabulary without re-implementing match rules.
+
+Supported matrix:
+
+| Column type                          | `in`                                                                                                      | `contains`                                                                                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text/String                          | Membership in a list of text values. UUID literals may be coerced to their string form for compatibility. | Substring containment with a text needle.                                                                                                    |
+| Integer / BigInt / Float / Timestamp | Membership in a list of same-type scalar values.                                                          | Rejected.                                                                                                                                    |
+| Boolean                              | Membership in a list of boolean values.                                                                   | Rejected.                                                                                                                                    |
+| UUID/reference                       | Membership in a list of UUID values. String UUID literals may be coerced to UUIDs at lowering boundaries. | Rejected.                                                                                                                                    |
+| Enum                                 | Membership in a list of enum-compatible values. String literals may be coerced to discriminants.          | Rejected.                                                                                                                                    |
+| Bytea                                | Membership in a list of whole byte-array values.                                                          | Rejected.                                                                                                                                    |
+| Json                                 | Whole-value equality membership only where the binding layer can represent the literal.                   | Rejected.                                                                                                                                    |
+| Array<T>                             | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
+
+Invalid operator/type combinations must be rejected before execution with a
+clear type error. In particular, `contains` on a scalar non-text column is never
+interpreted as stringification, and `in` candidates (including parameters) must
+match the column's whole-value type except for the narrow compatibility
+coercions listed above. Thus an `Array<T>` `in` candidate must itself be an
+array; a scalar `T` is rejected rather than being rewritten as a singleton array
+or a `contains` predicate. Compatibility coercions may recurse into an
+array-valued literal only when they preserve that array shape. The broader
+literal-vs-column coercion policy remains intentionally unspecified; new
+coercions need an explicit spec decision before implementation.
+
+🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
+a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why
+that shape gets written at all. `in` gives whole-value membership and `contains`
+gives single-element membership; there is currently nothing for "this array
+contains all of these" or "this array is contained by these". A user wanting
+that has no operator to reach for, and `in` with a list of elements is the
+natural wrong guess.
+
+If we add the capability it MUST be an explicit predicate with its own
+semantics — never an implicit reinterpretation of `in` that changes meaning
+depending on whether the column happens to be an array. The value of rejecting
+today is exactly that the gap stays visible, rather than being filled by a
+coercion whose meaning nobody chose (Anselm, 2026-07-29).
+
 ### 6.2 Shapes: validated, content-addressed, schema-stamped
 
 A shape is the validated, schema-stamped identity of a query. Validation
@@ -137,6 +181,42 @@ composition (ch. 7). `sub` is the canonical identity claim and resolves to the
 authenticated `AuthorId`; additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
+
+#### Prepared claim parameters
+
+When a query program contains policy claims, lowering MUST first walk the
+entire policy graph and declare one ordered, graph-wide parameter set before it
+emits any graph node. The walk includes every binding source at every nesting
+level, including recursive seed/step paths and every union route. Each claim
+reference is declared by its canonical parameter name and type; a repeated
+reference denotes the same declaration. Every binding source in the emitted
+prepared graph MUST use that one shared declaration environment. A claim in a
+prepared graph MUST lower as a parameter reference and MUST NOT lower as a
+policy-context value literal.
+
+The prepared graph descriptor MUST encode that parameter set -- names and
+types, including claim-path identity where names alone do not establish it --
+but MUST NOT encode the values bound for a particular identity. Parameter
+values are bound independently for each execution from the authenticated policy
+context. Thus two identities with the same query/policy shape legitimately
+share one prepared graph while receiving results evaluated with their respective
+claims. This is the query-level application of
+`groove/SPEC/INVARIANTS.md::INV-QUERY-1A`: the descriptor captures every
+output-affecting input's declared identity and type, while a binding supplies
+its execution-time value.
+
+A claim has one of two semantic roles wherever lowering considers an
+arrangement key. In a **filter role**, such as `row.team == claim.team`, it is
+an execution-time parameter and MUST NOT be baked as a constant into an
+arrangement key; one shared arrangement serves every identity and filters using
+the bound value. In a **partition role**, such as a maintained `top_by` window
+partitioned by `claim.team`, the claim value MAY and MUST participate as a
+partition dimension: the one shared arrangement contains all partitions and
+each binding reads its own partition. A partition dimension describes key
+structure, not a subject-specific constant, and therefore preserves graph
+sharing. Lowering MUST use the established policy-comparison path for claim
+comparisons; any policy-only normalization remains scoped to that comparison
+path and MUST NOT change ordinary arrangement-key encodings.
 
 ### 6.4 Result sets, include paths, and relation payloads
 
@@ -337,7 +417,7 @@ surface. The test plan below records additional intended coverage.
   allocation/byte expectation so ordered insertion remains covered by
   `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 - Keep Rust tests aligned with
-  `crates/jazz-tools/TESTING_GUIDELINES.md`: prefer black-box integration tests
+  `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.

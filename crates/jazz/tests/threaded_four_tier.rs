@@ -429,7 +429,7 @@ fn threaded_four_tier_converges_with_fifo_links() {
             worker_to_edge_tx,
             edge_to_worker_rx,
             worker_to_ui_tx,
-            PeerState::for_author(ui_author),
+            PeerState::client_link(ui_author),
         )
     });
     let ui_handle =

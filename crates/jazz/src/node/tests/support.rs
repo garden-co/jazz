@@ -1367,8 +1367,8 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let (core_dir, mut core) = open_node_with_schema(node(9), harness_schema.clone());
     let (reader_a_dir, mut reader_a) = open_node_with_schema(node(3), harness_schema.clone());
     let (reader_b_dir, mut reader_b) = open_node_with_schema(node(4), harness_schema.clone());
-    let mut link_a = PeerState::for_author(author_a);
-    let mut link_b = PeerState::for_author(author_b);
+    let mut link_a = PeerState::client_link(author_a);
+    let mut link_b = PeerState::client_link(author_b);
     let owner_shape = crate::query::Query::from("todos")
         .filter(eq(col("owner"), param("owner")))
         .validate(&harness_schema)
