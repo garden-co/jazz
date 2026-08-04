@@ -313,25 +313,43 @@ one, MUST be rejected in arrangement keys and durable primary keys; it is an
 opaque rendered value, never an ordering/key codec (`groove/SPEC/2_storage_model.md`
 §2.2 and `groove/SPEC/3_queries_operators.md` §3.6.1).
 
-🔶 **Open question: child identity.** Whole-parent replacement needs only the
-stable parent/output-occurrence address; deterministic array position is enough
-for semantic correctness, including reorder. An explicitly projected child id
-could preserve consumer-side object identity across reorders (for example,
-animations or per-child caches), but increases every child schema and payload
-and is not needed to apply v1 deltas. If adopted, it MUST be an explicit
-projected field; a source-row id alone is not an occurrence identity because a
-row can appear under more than one parent or path.
+**Decision, Anselm 2026-08-04 — children carry explicit ids.** Every child
+record in a structured result MUST carry its source row id as an explicitly
+projected field. Deterministic array position alone would satisfy delta
+application, but an explicit id is what lets a consumer preserve object identity
+across reorders without re-deriving keys — and key derivation in the consumer is
+precisely the duplicated semantics this design removes.
 
-🔶 **Open question: unbounded array subqueries.** An array query without a
-finite limit can render a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
-`crates/jazz/src/protocol_limits.rs:16`); today one over-size unit fails.
-Choose one policy before accepting such output: (1) reject an unbounded array at
-query validation, which makes the size bound explicit but narrows the surface;
-(2) fragment one logical parent replacement across chunks, which preserves the
-surface but requires atomic receiver assembly and a recursive fragment format;
-or (3) return a runtime over-size error, which preserves expressiveness but
-makes successful execution data-dependent. This decision does not relax the
-mandatory bounded form above.
+The id MUST be an explicit projected field. It MUST NOT be recovered from
+implicit source-row bytes, because that would make an internal encoding load
+bearing at the public boundary.
+
+A child id identifies the source **row**, not the output **occurrence**: one row
+may appear under more than one parent, and under bag semantics the same row may
+occur more than once within a single parent's array. Position therefore remains
+the occurrence discriminator, and consumers MUST NOT assume a child id is unique
+within one parent's array unless the query shape guarantees it.
+
+**Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
+over-size error as backstop.** Two mechanisms, both required:
+
+1. **Validation enforces the bound.** An array subquery MUST carry a finite
+   child limit; query validation MUST reject an unbounded array subquery in a
+   structured result. This makes the size bound a property of the query rather
+   than of the data.
+2. **A runtime over-size error backstops it.** A bounded array can still render
+   a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
+   `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
+   The terminal MUST then fail with a structured, named error identifying the
+   parent row, the relation, the rendered byte size and the limit exceeded. It
+   MUST NOT silently truncate the array, drop children, or emit a partial
+   parent: a partial parent is a wrong answer, whereas a named error is a
+   diagnosable one.
+
+Fragmenting one logical parent replacement across chunks was considered and
+rejected for this revision: it preserves expressiveness at the cost of atomic
+receiver assembly and a recursive fragment format, and the mandatory child limit
+already makes the common case bounded. Nothing here forecloses adding it later.
 
 Alpha-style relation traversal has an output-changing query surface. A
 relation-query facade MUST normalize into the same row-set program vocabulary as
