@@ -4293,7 +4293,10 @@ mod tests {
             },
         ]);
 
-        assert_eq!(relation_predicate_to_query_predicate(&predicate).unwrap(), None);
+        assert_eq!(
+            relation_predicate_to_query_predicate(&predicate).unwrap(),
+            None
+        );
     }
 
     #[test]
