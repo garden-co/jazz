@@ -5506,7 +5506,7 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            ingest_context.identity,
+                                            peer.identity(),
                                             &opts.read_view,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
@@ -5680,7 +5680,7 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    ingest_context.identity,
+                                    peer.identity(),
                                     &opts.read_view,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
