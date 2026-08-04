@@ -23,11 +23,6 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo test -p jazz`
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features test` (matches `crates/jazz/TESTING_GUIDELINES.md`).
-  This replaces the former `cargo test -p jazz-tools --features test`: `jazz-tools`
-  and `jazz-server` are now part of `jazz`, so their suites run here. Note it also
-  runs `jazz-tools`' library unit and doc tests, which its old `[lib] test = false`
-  had suppressed.
-- `cargo test -p jazz-server`
 
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
