@@ -145,7 +145,7 @@ export type PersistentBrowserSubscriptionMessage = {
   subscription: number;
 } & (
   | { frame: PersistentBrowserSubscriptionFrame }
-  | { error: { name?: string; message?: string } }
+  | { error: { name?: string; message?: string; stack?: string } }
 );
 
 export function isNativeRowDelta(value: unknown): value is NativeRowDelta {

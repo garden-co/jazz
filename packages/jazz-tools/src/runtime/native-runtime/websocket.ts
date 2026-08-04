@@ -31,7 +31,10 @@ export type BrowserWebSocket = {
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
   addEventListener(type: "error", listener: (event: unknown) => void): void;
-  addEventListener(type: "close", listener: () => void): void;
+  addEventListener(
+    type: "close",
+    listener: (event: { code: number; reason: string }) => void,
+  ): void;
 };
 
 export const WIRE_PROTOCOL_VERSION = 3;
