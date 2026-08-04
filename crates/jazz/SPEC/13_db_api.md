@@ -535,8 +535,8 @@ serialize query IR, cache prepared handles, transport frames, and hydrate typed
 application objects — but they must not independently evaluate predicates,
 ordering, limit/offset/windowing, relation/include membership, permission
 visibility, identity/dedupe rules, or semantic delta coalescing. A client-side
-reducer over delivered deltas is legitimate only as a *specified wire-protocol
-reducer*: its behavior must be fully determined by the delivered stream, never
+reducer over delivered deltas is legitimate only as a _specified wire-protocol
+reducer_: its behavior must be fully determined by the delivered stream, never
 by re-evaluating the query against row sets.
 
 When a client API needs an alternate read view — read-your-writes inside an

@@ -569,9 +569,9 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (message.ok) {
       pending.resolve(message.result);
     } else {
-        const error = new Error(message.error.message ?? "Persistent browser worker call failed");
-        if (message.error.stack) error.stack = message.error.stack;
-        pending.reject(error);
+      const error = new Error(message.error.message ?? "Persistent browser worker call failed");
+      if (message.error.stack) error.stack = message.error.stack;
+      pending.reject(error);
     }
   }
 
