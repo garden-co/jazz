@@ -16,13 +16,24 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
 } from "./websocket.js";
-import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { formatUuid, NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
 import { decodeNativeDelta } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 
 const previousWebSocket = globalThis.WebSocket;
+
+describe("formatUuid", () => {
+  it("formats the first 16 bytes without depending on the view offset", () => {
+    const bytes = Uint8Array.from([
+      255, 255, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+      0x0e, 0x0f, 255,
+    ]);
+
+    expect(formatUuid(bytes.subarray(2, 18))).toBe("00010203-0405-0607-0809-0a0b0c0d0e0f");
+  });
+});
 
 function decodeTestDeltas(
   deltas: unknown[],
