@@ -55,7 +55,8 @@ use crate::protocol_limits::{
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery, relation_query_to_query,
+    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
+    relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
@@ -195,9 +196,24 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type UpstreamSubscriptionOwners =
+    Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
+
+/// Per-subscriber state for a shape/read-view registration.
+///
+/// A missing runtime shape is ambiguous: catalogue admission is temporary,
+/// whereas a capability rejection is permanent for this connection. Keep the
+/// distinction at the protocol boundary instead of inferring either from the
+/// node's registered-shape map.
+#[derive(Clone)]
+enum SubscriberShapeRegistration {
+    Registered(RegisterShapeOptions),
+    PendingCatalogueAdmission(RegisterShapeOptions),
+    RejectedUnsupportedCapability(String),
+}
 
 fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
     match (column_type, default) {
@@ -433,6 +449,23 @@ where
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only authority finalization for a locally committed mergeable
+    /// transaction.
+    ///
+    /// This allows scale fixtures to use the ordinary batched transaction API
+    /// before performing the same self-acceptance step as
+    /// [`Db::seed_settled_mergeable_for_bootstrap`].
+    pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .finalize_local_mergeable_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
+        Ok(())
     }
 
     /// Return the locally observed fate and durability for a write transaction.
@@ -786,8 +819,16 @@ where
         ensure_default_read_view(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.all_relation_snapshot_for_identity(&prepared, opts, author)
-            .await
+        // Output-changing relation queries currently normalize to a single
+        // root row set.  They have no array payload edges, so request ordinary
+        // app rows instead of the relation-snapshot fact output (which is
+        // reserved for correlated array/path materialization).
+        let rows = self.all_for_identity(&prepared, opts, author).await?;
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
     }
 
     /// Subscribe to a query and return a stream of materialized subscription events.
@@ -875,7 +916,6 @@ where
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         Ok(QueryAttachment {
@@ -896,7 +936,6 @@ where
         author: AuthorId,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
         let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
@@ -980,8 +1019,18 @@ where
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        ensure_supported_subscription_shape(&prepared.shape)?;
+        self.validate_prepared_shape_for_registration(prepared)?;
         let read_tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                &prepared.shape,
+                &prepared.binding,
+                read_tier,
+                author,
+                &opts.read_view,
+            )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -1008,7 +1057,7 @@ where
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
-        let mut cleanup = None;
+        let mut upstream_subscription_handles = Vec::new();
         let propagates_upstream = opts.propagation == Propagation::Full;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
@@ -1033,7 +1082,7 @@ where
             remote_read_tier = Some(upstream_opts.tier);
             let upstream_subscriptions =
                 self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            cleanup = Some(self.upstream_subscription_cleanup(upstream_subscriptions));
+            upstream_subscription_handles = upstream_subscriptions;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         let settled = subscription_is_settled(
@@ -1045,18 +1094,21 @@ where
         );
         let (sender, receiver) = unbounded();
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
+        let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         let state = Rc::new(RefCell::new(SubscriptionState {
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,
                 maintained_subscription,
             },
+            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
             propagates_upstream,
             author,
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
+            snapshot_index,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             sender,
@@ -1070,11 +1122,34 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
+        let cleanup = if upstream_subscription_handles.is_empty() {
+            None
+        } else {
+            let owner = Rc::downgrade(&state);
+            register_upstream_subscription_owner(
+                &self.node.upstream_subscription_owners,
+                &upstream_subscription_handles,
+                &state,
+            );
+            Some(self.upstream_subscription_cleanup(upstream_subscription_handles, owner))
+        };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup,
         })
+    }
+
+    fn validate_prepared_shape_for_registration(
+        &self,
+        prepared: &PreparedQuery,
+    ) -> Result<(), Error> {
+        let ast = ShapeAst::from_validated(&prepared.shape);
+        let validation = {
+            let node = self.node.node.borrow();
+            validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
+        };
+        validation.map(|_| ()).map_err(Error::from)
     }
 
     async fn open_relation_subscription(
@@ -1096,7 +1171,16 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
-        ensure_supported_subscription_shape(shape)?;
+        self.node
+            .node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                opts.tier,
+                identity,
+                &opts.read_view,
+            )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node
@@ -1138,14 +1222,21 @@ where
     fn upstream_subscription_cleanup(
         &self,
         upstream_subscriptions: Vec<UpstreamCoverageHandle>,
+        owner: Weak<RefCell<SubscriptionState>>,
     ) -> Box<dyn FnOnce()> {
         let node = Rc::clone(&self.node.node);
         let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
         let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
+        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
         let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
         let scheduler = Rc::clone(&self.node.scheduler);
         Box::new(move || {
             for handle in upstream_subscriptions {
+                unregister_upstream_subscription_owner(
+                    &upstream_subscription_owners,
+                    handle.subscription,
+                    &owner,
+                );
                 let mut refcounts = upstream_coverage_refcounts.borrow_mut();
                 let Some(count) = refcounts.get_mut(&handle.coverage) else {
                     continue;
@@ -1905,13 +1996,12 @@ where
     }
 
     /// Build a mergeable transaction that commits multiple writes under one id.
-    pub fn mergeable_tx(&self) -> MergeableTx<'_, S> {
-        MergeableTx {
+    pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
+        Ok(MergeableTx {
             db: self,
-            author: self.identity.author,
-            permission_subject: None,
-            writes: Vec::new(),
-        }
+            tx_id: self.begin_mergeable()?,
+            committed: false,
+        })
     }
 
     /// Run `callback` in a mergeable transaction and commit all staged writes as one transaction.
@@ -1922,20 +2012,19 @@ where
         &self,
         callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
-        let mut tx = self.mergeable_tx();
+        let mut tx = self.mergeable_tx()?;
         let value = callback(&mut tx)?;
         let tx_id = tx.commit()?;
         Ok((value, tx_id))
     }
 
     /// Build a mergeable transaction authored and permission-checked as `author`.
-    pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> MergeableTx<'_, S> {
-        MergeableTx {
+    pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> Result<MergeableTx<'_, S>, Error> {
+        Ok(MergeableTx {
             db: self,
-            author,
-            permission_subject: Some(author),
-            writes: Vec::new(),
-        }
+            tx_id: self.begin_mergeable_for_identity(author)?,
+            committed: false,
+        })
     }
 
     /// Run `callback` in a mergeable transaction authored and permission-checked as `author`.
@@ -1946,7 +2035,7 @@ where
         author: AuthorId,
         callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
-        let mut tx = self.mergeable_tx_for_identity(author);
+        let mut tx = self.mergeable_tx_for_identity(author)?;
         let value = callback(&mut tx)?;
         let tx_id = tx.commit()?;
         Ok((value, tx_id))
@@ -1994,6 +2083,12 @@ where
             .map_err(Into::into)
     }
 
+    /// Set whether this authority may settle session-scoped reads and writes.
+    /// Enabling it rehydrates all live subscriber views.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.set_permissions_ready(ready)
+    }
+
     /// Return the current write-schema pointer known to this database.
     pub fn current_write_schema(&self) -> CurrentWriteSchema {
         self.node.node.borrow().current_write_schema()
@@ -2009,23 +2104,195 @@ where
             .map(|schema| schema.schema.clone())
     }
 
+    /// Open a mergeable transaction and return its id.
+    ///
+    /// The caller owns this transaction's lifetime and must commit it with
+    /// [`Db::commit_mergeable_handle`] or abandon it with
+    /// [`Db::abandon_transaction_handle`]. Perform its writes through a
+    /// [`MergeableTxRef`], which can be reconstructed from this id for each
+    /// foreign-function call. Rust callers that want RAII should use
+    /// [`Db::mergeable_tx`] instead.
+    pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_mergeable(self.identity.author, None)
+            .map_err(Into::into)
+    }
+
+    /// Open a mergeable transaction authored and permission-checked as `author`.
+    ///
+    /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
+    pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_mergeable(author, Some(author))
+            .map_err(Into::into)
+    }
+
+    /// Return a non-owning operations handle for an already-open mergeable transaction.
+    ///
+    /// This handle never closes the transaction when dropped, so it is suitable
+    /// for a single call in a binding that retains `tx_id` between calls. Its
+    /// CRUD API is defined by [`MergeableTxOps`] and is shared with the owning
+    /// [`MergeableTx`] handle.
+    pub fn mergeable_tx_ref(&self, tx_id: OpenTxId) -> MergeableTxRef<'_, S> {
+        MergeableTxRef { db: self, tx_id }
+    }
+
+    fn stage_mergeable_insert(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
+            .map_err(Into::into)
+    }
+
+    fn stage_mergeable_update(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
+            .map_err(Into::into)
+    }
+
+    fn stage_mergeable_delete(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable(
+                tx_id,
+                table,
+                row,
+                BTreeMap::new(),
+                Some(DeletionEvent::Deleted),
+                Vec::new(),
+                now_ms,
+                false,
+            )
+            .map_err(Into::into)
+    }
+
+    fn stage_mergeable_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        let content_parents = node
+            .local_content_winner_tx_id(table, row)?
+            .into_iter()
+            .collect();
+        let deletion_parents = node
+            .local_deletion_winner_tx_id(table, row)?
+            .into_iter()
+            .collect();
+        node.tx_write_mergeable(
+            tx_id,
+            table,
+            row,
+            cells,
+            None,
+            content_parents,
+            now_ms,
+            true,
+        )?;
+        node.tx_write_mergeable(
+            tx_id,
+            table,
+            row,
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            deletion_parents,
+            now_ms,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// Commit an owned mergeable transaction handle.
+    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_open(open_tx_id, || self.next_now_ms())?;
+        self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(tx_id)
+    }
+
+    /// Abandon an owned open transaction handle.
+    pub fn abandon_transaction_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .abandon_tx(open_tx_id)
+            .map_err(Into::into)
+    }
+
     /// Open an exclusive transaction over the current local snapshot.
+    ///
+    /// This is the owning, RAII flavour. It abandons an uncommitted transaction
+    /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
+    /// `OpenTxId` and owns that lifetime explicitly.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
         let tx_id = self.open_exclusive_handle()?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
-            has_reads: Cell::new(false),
+            committed: false,
         })
     }
 
-    /// Open an owned exclusive transaction handle over the current local snapshot.
+    /// Open an exclusive transaction and return its id.
+    ///
+    /// The caller owns this transaction's lifetime and must commit it with
+    /// [`Db::commit_exclusive_handle`] or abandon it with
+    /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
+    /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
+    /// [`Db::exclusive_tx`] instead.
     pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
         self.open_exclusive_handle()
     }
 
-    /// Read one row inside an owned exclusive transaction handle.
-    pub fn exclusive_read(
+    /// Return a non-owning operations handle for an already-open exclusive transaction.
+    ///
+    /// This handle never closes the transaction when dropped, so it is suitable
+    /// for a single call in a binding that retains `tx_id` between calls. Its
+    /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
+    /// [`ExclusiveTx`] handle.
+    pub fn exclusive_tx_ref(&self, tx_id: OpenTxId) -> ExclusiveTxRef<'_, S> {
+        ExclusiveTxRef { db: self, tx_id }
+    }
+
+    fn exclusive_read(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2038,8 +2305,28 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage a full row value inside an owned exclusive transaction handle.
-    pub fn exclusive_write(
+    fn exclusive_all(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+    }
+
+    fn exclusive_all_for_identity(
+        &self,
+        tx_id: OpenTxId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
+            .map_err(Into::into)
+    }
+
+    fn stage_exclusive_insert(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2054,21 +2341,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Stage an update inside an owned exclusive transaction handle.
-    pub fn exclusive_update(
-        &self,
-        tx_id: OpenTxId,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-    ) -> Result<(), Error> {
-        let mut cells = self.exclusive_read(tx_id, table, row)?.unwrap_or_default();
-        cells.extend(patch);
-        self.exclusive_write(tx_id, table, row, cells)
-    }
-
-    /// Stage a soft delete inside an owned exclusive transaction handle.
-    pub fn exclusive_delete(
+    fn stage_exclusive_delete(
         &self,
         tx_id: OpenTxId,
         table: &str,
@@ -2087,6 +2360,30 @@ where
             .map_err(Into::into)
     }
 
+    fn stage_exclusive_restore(
+        &self,
+        tx_id: OpenTxId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        // Restore needs one content version and one deletion-register version:
+        // `tx_write` rejects a version carrying both. The layers have separate
+        // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
+        // Keep this staged form aligned with the committed restore path.
+        node.tx_write(tx_id, table, row, cells, None)?;
+        node.tx_write(
+            tx_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owned exclusive transaction handle.
     pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
@@ -2099,6 +2396,11 @@ where
         Ok(tx_id)
     }
 
+    /// Abandon an owned exclusive transaction handle.
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+        self.abandon_transaction_handle(open_tx_id)
+    }
+
     pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
         self.node
             .node
@@ -2107,7 +2409,7 @@ where
             .map_err(Into::into)
     }
 
-    /// Restore a row locally. Data is required by the public API contract.
+    /// Restore a row locally, applying defaults for omitted columns.
     ///
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
@@ -2128,9 +2430,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = {
@@ -2174,9 +2473,6 @@ where
         row: RowUuid,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = {
@@ -2243,9 +2539,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2279,9 +2572,6 @@ where
         cells: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
@@ -2774,6 +3064,18 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test/bench-only reset for logical storage-read attribution.
+    pub fn reset_storage_read_metrics_for_test(&self) {
+        self.node.node.borrow().reset_storage_read_metrics();
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test/bench-only drain for logical storage-read attribution.
+    pub fn take_storage_read_metrics_for_test(&self) -> groove::db::StorageReadMetrics {
+        self.node.node.borrow().take_storage_read_metrics()
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only snapshot of sync-path counters.
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
@@ -3111,6 +3413,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
@@ -3133,6 +3436,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -3146,6 +3450,19 @@ where
     /// Borrow the served node.
     pub fn node(&self) -> Rc<RefCell<NodeState<S>>> {
         Rc::clone(&self.node)
+    }
+
+    /// Change whether subscriber links may serve their registered views.
+    /// Publishing a permissions head always rehydrates every live view, so a
+    /// tighter head retracts rows without requiring a reconnect.
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.node.borrow_mut().set_permissions_ready(ready);
+        if ready {
+            for connection in self.connections.borrow().iter() {
+                connection.borrow_mut().rehydrate_subscriber_views()?;
+            }
+        }
+        Ok(())
     }
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
@@ -3321,10 +3638,12 @@ where
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+            observed_session_claim_revision: Cell::new(0),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Upstream {
                 pending,
@@ -3465,14 +3784,17 @@ where
         edge_authority: bool,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
+        let session_claim_revision = self.node.borrow().session_claim_revision(identity);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
+            upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+            observed_session_claim_revision: Cell::new(session_claim_revision),
             next_now_ms: Cell::new(1),
             link: ConnectionLink::Subscriber {
                 peer,
@@ -3485,7 +3807,8 @@ where
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
                 coverage_groups: BTreeMap::new(),
-                registered_shape_opts: BTreeMap::new(),
+                shape_registrations: BTreeMap::new(),
+                deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 serve_dirty: true,
             },
@@ -3578,6 +3901,7 @@ where
     let pending_authoritative_resets = node
         .borrow_mut()
         .take_pending_authoritative_reset_binding_views();
+    node.borrow_mut().flush_query_runtime()?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;
@@ -3593,6 +3917,54 @@ where
                 state.author,
             )
         };
+        let groove_runtime_token = node.borrow().groove_runtime_token();
+        if state.borrow().groove_runtime_token != groove_runtime_token {
+            let (shape, binding) = {
+                let state = state.borrow();
+                match &state.kind {
+                    SubscriptionKind::Prepared { shape, binding, .. } => {
+                        (shape.clone(), binding.clone())
+                    }
+                }
+            };
+            let (maintained, snapshot) =
+                node.borrow_mut().open_local_maintained_view_subscription(
+                    &shape, &binding, author, read_tier, &read_view, None,
+                )?;
+            let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled = subscription_is_settled(
+                &node.borrow(),
+                &shape,
+                &binding,
+                settled_tier,
+                read_view.clone(),
+            );
+            let mut state_ref = state.borrow_mut();
+            match &mut state_ref.kind {
+                SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } => *maintained_subscription = Some(maintained),
+            }
+            let event = subscription_delta_event_with_reset(
+                read_tier,
+                settled,
+                &state_ref.snapshot,
+                &snapshot,
+                true,
+            );
+            state_ref.groove_runtime_token = groove_runtime_token;
+            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+            state_ref.settled = settled;
+            if state_ref.sender.unbounded_send(event).is_ok() {
+                changed += 1;
+            }
+            drop(state_ref);
+            retained.push(Rc::downgrade(&state));
+            continue;
+        }
         let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             match &mut state_ref.kind {
@@ -3744,8 +4116,11 @@ where
                                 (fallback, false)
                             };
                         if let Some(update) = maintained_update {
+                            let mut snapshot_index =
+                                RelationSnapshotIndex::from_snapshot(&snapshot);
                             let _ = apply_maintained_update_to_snapshot(
                                 &mut snapshot,
+                                &mut snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3786,8 +4161,10 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
+                            let state_ref = &mut *state_ref;
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
+                                &mut state_ref.snapshot_index,
                                 update,
                                 snapshot_tier,
                                 previous_settled,
@@ -3938,6 +4315,7 @@ where
                 subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+            state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -3948,6 +4326,85 @@ where
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)
+}
+
+fn register_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    handles: &[UpstreamCoverageHandle],
+    state: &Rc<RefCell<SubscriptionState>>,
+) {
+    let weak = Rc::downgrade(state);
+    let mut owners = owners.borrow_mut();
+    for handle in handles {
+        owners
+            .entry(handle.subscription)
+            .or_default()
+            .push(weak.clone());
+    }
+}
+
+fn unregister_upstream_subscription_owner(
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    state: &Weak<RefCell<SubscriptionState>>,
+) {
+    let mut owners = owners.borrow_mut();
+    let Some(entries) = owners.get_mut(&subscription) else {
+        return;
+    };
+    entries.retain(|entry| !entry.ptr_eq(state) && entry.strong_count() > 0);
+    if entries.is_empty() {
+        owners.remove(&subscription);
+    }
+}
+
+fn route_upstream_subscription_rejection(
+    subscriptions: &SubscriptionList,
+    owners: &UpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    reason: SubscribeRejectReason,
+) -> usize {
+    let mut delivered = 0;
+    if let Some(entries) = owners.borrow_mut().get_mut(&subscription) {
+        entries.retain(|entry| entry.strong_count() > 0);
+        for state in entries.iter().filter_map(Weak::upgrade) {
+            let event = SubscriptionEvent::Rejected {
+                reason: reason.clone(),
+            };
+            if state.borrow().sender.unbounded_send(event).is_ok() {
+                delivered += 1;
+            }
+        }
+        if delivered > 0 {
+            return delivered;
+        }
+    }
+
+    for state in subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        let state_ref = state.borrow();
+        if !state_ref.propagates_upstream {
+            continue;
+        }
+        let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
+        let read_view =
+            upstream_register_shape_options(state_ref.read_tier, state_ref.read_view.clone())
+                .read_view_key();
+        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+            continue;
+        }
+        if subscription.binding_id != BindingId(uuid::Uuid::nil())
+            && binding.binding_id() != subscription.binding_id
+        {
+            continue;
+        }
+        let event = SubscriptionEvent::Rejected {
+            reason: reason.clone(),
+        };
+        if state_ref.sender.unbounded_send(event).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
 }
 
 /// Binding-supplied transport for one peer link.
@@ -4248,10 +4705,12 @@ where
     transport: Box<dyn Transport>,
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
+    upstream_subscription_owners: UpstreamSubscriptionOwners,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
+    observed_session_claim_revision: Cell<u64>,
     next_now_ms: Cell<u64>,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
@@ -4291,8 +4750,12 @@ enum ConnectionLink {
         served: BTreeMap<SubscriptionKey, CoverageKey>,
         /// Shared maintained views keyed by query shape, binding, and options.
         coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
-        /// Options from each subscriber `RegisterShape`, keyed by shape and derived read-view key.
-        registered_shape_opts: BTreeMap<ShapeRegistrationKey, RegisterShapeOptions>,
+        /// Explicit state for each subscriber `RegisterShape`, keyed by shape and read view.
+        shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
+        /// Permanent rejections received as later `Subscribe` messages. These
+        /// wait until an unrelated view update has been flushed, so they cannot
+        /// starve a supported subscription on the same connection.
+        deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
         /// True when this subscriber's maintained views may have queued deltas
@@ -4321,6 +4784,76 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Rebuild this subscriber's maintained views if its process-local claims
+    /// changed. Policy claim values are bound when a maintained view opens, so
+    /// retaining the old view after a claim change would retain its authority.
+    fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+        let identity = match &self.link {
+            ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
+            ConnectionLink::Upstream { .. } => return Ok(false),
+        };
+        let current_revision = self.node.borrow().session_claim_revision(identity);
+        if self.observed_session_claim_revision.get() == current_revision {
+            return Ok(false);
+        }
+
+        let ConnectionLink::Subscriber {
+            peer,
+            coverage_groups,
+            served_current_rows,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("subscriber identity requires a subscriber link")
+        };
+        let groups = coverage_groups
+            .iter()
+            .map(|(coverage, group)| {
+                (
+                    coverage.clone(),
+                    group.shape.clone(),
+                    group.binding.clone(),
+                    group.subscribers.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (coverage, shape, binding, subscribers) in groups {
+            let maintained_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let update = {
+                let mut node = self.node.borrow_mut();
+                peer.rehydrate_query_for_subscription_with_opts(
+                    &mut node,
+                    maintained_subscription,
+                    &shape,
+                    &binding,
+                    coverage.opts,
+                )?
+            };
+            for subscription in subscribers {
+                send_with_content_extents(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    retarget_view_update(update.clone(), subscription),
+                )?;
+            }
+        }
+        for table in served_current_rows.values() {
+            let update = {
+                let mut node = self.node.borrow_mut();
+                peer.current_rows_update(&mut node, table)?
+            };
+            send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+        }
+
+        self.observed_session_claim_revision.set(current_revision);
+        Ok(true)
+    }
+
     /// Serve a whole-table current-row view to this subscriber immediately and
     /// refresh it on later ticks.
     pub fn serve_current_rows(&mut self, table: &str) -> Result<(), Error> {
@@ -4366,12 +4899,73 @@ where
         })
     }
 
+    /// Rehydrate every view served on this subscriber link. This is used when
+    /// an authority installs its first permissions head or replaces it with a
+    /// tighter one: the client keeps the same subscription, but its visible
+    /// membership must be recalculated immediately.
+    fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let ConnectionLink::Subscriber {
+            peer,
+            coverage_groups,
+            serve_dirty,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        let groups = coverage_groups
+            .iter()
+            .map(|(coverage, group)| {
+                (
+                    coverage.clone(),
+                    group.shape.clone(),
+                    group.binding.clone(),
+                    group.subscribers.iter().copied().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (coverage, shape, binding, subscribers) in groups {
+            let group_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let mut update = {
+                let mut node = self.node.borrow_mut();
+                peer.rehydrate_query_for_subscription_with_opts(
+                    &mut node,
+                    group_subscription,
+                    &shape,
+                    &binding,
+                    coverage.opts.clone(),
+                )?
+            };
+            // A policy-head rehydrate is authoritative. Force reset framing
+            // even when the peer's known-state cursor is current: permissions
+            // are not represented in that cursor.
+            if let SyncMessage::ViewUpdate {
+                reset_result_set, ..
+            } = &mut update
+            {
+                *reset_result_set = true;
+            }
+            for subscription in subscribers {
+                let update = retarget_view_update(update.clone(), subscription);
+                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+            }
+        }
+        *serve_dirty = true;
+        Ok(())
+    }
+
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
         let tick_now_ms = self.next_now_ms();
         self.observe_shared_subscriber_dirty_epoch();
+        self.rebind_subscriber_views_after_claim_change()?;
         match &mut self.link {
             ConnectionLink::Upstream {
                 pending,
@@ -4601,6 +5195,17 @@ where
                                 });
                             }
                         }
+                        SyncMessage::SubscribeRejected {
+                            subscription,
+                            reason,
+                        } => {
+                            stats.subscription_events += route_upstream_subscription_rejection(
+                                &self.subscriptions,
+                                &self.upstream_subscription_owners,
+                                subscription,
+                                reason,
+                            );
+                        }
                         message => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -4642,12 +5247,14 @@ where
                 upstream_subscriptions,
                 served,
                 coverage_groups,
-                registered_shape_opts,
+                shape_registrations,
+                deferred_subscribe_rejections,
                 served_current_rows,
                 serve_dirty,
             } => {
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
+                let mut sent_view_update = false;
                 while let Some(received) = self.transport.try_recv_received() {
                     applied_inbound = true;
                     #[cfg(feature = "sync-autopsy")]
@@ -4662,30 +5269,129 @@ where
                             opts,
                             ast,
                         } => {
+                            let registration_key = (shape_id, opts.read_view_key());
                             if let Err(message) = validate_shape_ast_size(&ast) {
-                                let _ = message;
-                                drop_peer_request(&self.node);
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        message.clone(),
+                                    ),
+                                );
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if ensure_supported_register_shape_options(&opts).is_err() {
-                                drop_peer_request(&self.node);
+                            if let Err(error) = ensure_supported_register_shape_options(&opts) {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        error.message.clone(),
+                                    ),
+                                );
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        opts.read_view_key(),
+                                    ),
+                                    error.message,
+                                )
+                                .map_err(transport_error)?;
                                 continue;
                             }
-                            if let Some(query) = ast.query() {
-                                if ensure_supported_maintained_coverage_query_shape(query).is_err()
-                                {
+                            let shape_validation = {
+                                let node = self.node.borrow();
+                                validate_shape_ast_for_registration(&node, shape_id, &ast)
+                            };
+                            let shape = match shape_validation {
+                                Ok(Some(shape)) => Some(shape),
+                                Ok(None) => None,
+                                Err(_) => {
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
+                            };
+                            if let Some(shape) = &shape {
+                                if shape.params().is_empty() {
+                                    let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
+                                    let binding = match binding {
+                                        Ok(binding) => binding,
+                                        Err(_) => {
+                                            drop_peer_request(&self.node);
+                                            continue;
+                                        }
+                                    };
+                                    let supported = self
+                                        .node
+                                        .borrow_mut()
+                                        .ensure_peer_maintained_subscription_view_supported(
+                                            shape,
+                                            &binding,
+                                            opts.tier,
+                                            ingest_context.identity,
+                                            &opts.read_view,
+                                        );
+                                    if let Err(crate::node::Error::QueryCapability(detail)) =
+                                        supported
+                                    {
+                                        shape_registrations.insert(
+                                            registration_key,
+                                            SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                                detail.clone(),
+                                            ),
+                                        );
+                                        let subscription = SubscriptionKey {
+                                            shape_id,
+                                            binding_id: binding.binding_id(),
+                                            read_view: opts.read_view_key(),
+                                        };
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    } else if supported.is_err() {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                }
                             }
-                            let registration_key = (shape_id, opts.read_view_key());
-                            if let Some(existing) = registered_shape_opts.get(&registration_key)
-                                && existing != &opts
-                            {
-                                drop_peer_request(&self.node);
-                                continue;
+                            let awaiting_catalogue_admission = shape.is_none();
+                            if let Some(existing) = shape_registrations.get(&registration_key) {
+                                match existing {
+                                    SubscriberShapeRegistration::Registered(existing_opts)
+                                    | SubscriberShapeRegistration::PendingCatalogueAdmission(
+                                        existing_opts,
+                                    ) if existing_opts != &opts => {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                        detail,
+                                    ) => {
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            register_shape_rejection_subscription(
+                                                shape_id,
+                                                opts.read_view_key(),
+                                            ),
+                                            detail.clone(),
+                                        )
+                                        .map_err(transport_error)?;
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
-                            registered_shape_opts.insert(registration_key, opts);
                             let register_result = {
                                 self.node.borrow_mut().apply_sync_message(
                                     SyncMessage::RegisterShape {
@@ -4705,6 +5411,12 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let registration = if awaiting_catalogue_admission {
+                                SubscriberShapeRegistration::PendingCatalogueAdmission(opts)
+                            } else {
+                                SubscriberShapeRegistration::Registered(opts)
+                            };
+                            shape_registrations.insert(registration_key, registration);
                         }
                         SyncMessage::Subscribe(subscribe) => {
                             if let Err(message) =
@@ -4718,12 +5430,50 @@ where
                             let subscription = subscribe.subscription;
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
-                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
-                                continue;
-                            };
-                            if ensure_supported_subscription_shape(&shape).is_err() {
+                            let registration_key = (shape_id, subscription.read_view);
+                            let Some(registration) =
+                                shape_registrations.get(&registration_key).cloned()
+                            else {
                                 drop_peer_request(&self.node);
                                 continue;
+                            };
+                            let pending_catalogue_admission = matches!(
+                                &registration,
+                                SubscriberShapeRegistration::PendingCatalogueAdmission(_)
+                            );
+                            let opts = match registration {
+                                SubscriberShapeRegistration::RejectedUnsupportedCapability(
+                                    detail,
+                                ) => {
+                                    // Keep the original permanent rejection, but let views
+                                    // already served by this connection flush first. A rejected
+                                    // shape must not starve unrelated subscriptions.
+                                    deferred_subscribe_rejections.push_back((subscription, detail));
+                                    continue;
+                                }
+                                SubscriberShapeRegistration::Registered(opts)
+                                | SubscriberShapeRegistration::PendingCatalogueAdmission(opts) => {
+                                    opts
+                                }
+                            };
+                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                                if pending_catalogue_admission {
+                                    self.transport
+                                        .send(SyncMessage::SubscribeRejected {
+                                            subscription,
+                                            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+                                        })
+                                        .map_err(transport_error)?;
+                                } else {
+                                    drop_peer_request(&self.node);
+                                }
+                                continue;
+                            };
+                            if pending_catalogue_admission {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::Registered(opts.clone()),
+                                );
                             }
                             let value_map = shape
                                 .params()
@@ -4738,23 +5488,29 @@ where
                                     continue;
                                 }
                             };
-                            let opts = registered_shape_opts
-                                .get(&(shape_id, subscription.read_view))
-                                .cloned()
-                                .ok_or_else(|| {
-                                    Error::new(
-                                        ErrorCode::Protocol,
-                                        "subscription referenced unregistered shape/read view",
-                                    )
-                                });
-                            let opts = match opts {
-                                Ok(opts) => opts,
-                                Err(_) => {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                }
-                            };
                             if ensure_supported_register_shape_options(&opts).is_err() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let supported = self
+                                .node
+                                .borrow_mut()
+                                .ensure_peer_maintained_subscription_view_supported(
+                                    &shape,
+                                    &binding,
+                                    opts.tier,
+                                    ingest_context.identity,
+                                    &opts.read_view,
+                                );
+                            if let Err(crate::node::Error::QueryCapability(detail)) = supported {
+                                send_unsupported_shape_capability_rejection(
+                                    &mut *self.transport,
+                                    subscription,
+                                    detail,
+                                )
+                                .map_err(transport_error)?;
+                                continue;
+                            } else if supported.is_err() {
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -4767,7 +5523,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let update = if first_subscriber {
+                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let update = if !permissions_ready {
+                                None
+                            } else if first_subscriber {
                                 peer.declare_known_state(group_subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
                                 let update_result = peer
@@ -4781,14 +5540,12 @@ where
                                 let update = match update_result {
                                     Ok(update) => update,
                                     Err(crate::node::Error::QueryCapability(detail)) => {
-                                        self.transport
-                                            .send(SyncMessage::SubscribeRejected {
-                                                subscription,
-                                                reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                                                    detail,
-                                                },
-                                            })
-                                            .map_err(transport_error)?;
+                                        send_unsupported_shape_capability_rejection(
+                                            &mut *self.transport,
+                                            subscription,
+                                            detail,
+                                        )
+                                        .map_err(transport_error)?;
                                         continue;
                                     }
                                     Err(error) => return Err(error.into()),
@@ -4800,7 +5557,7 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                retarget_view_update(update, subscription)
+                                Some(retarget_view_update(update, subscription))
                             } else {
                                 peer.declare_known_state(subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
@@ -4818,23 +5575,11 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                update
+                                Some(update)
                             };
-                            #[cfg(feature = "sync-autopsy")]
-                            sync_autopsy::record(format!(
-                                "subscriber send rehydrate {}",
-                                summarize_sync_message(&update)
-                            ));
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
-                            self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                            send_with_content_extents(
-                                &self.node,
-                                peer,
-                                self.transport.as_mut(),
-                                update,
-                            )?;
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -4845,6 +5590,21 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             served.insert(subscription, coverage);
+                            if let Some(update) = update {
+                                #[cfg(feature = "sync-autopsy")]
+                                sync_autopsy::record(format!(
+                                    "subscriber send rehydrate {}",
+                                    summarize_sync_message(&update)
+                                ));
+                                self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
+                                sent_view_update = true;
+                            }
                             if first_subscriber {
                                 upstream_subscriptions.borrow_mut().push(
                                     PendingUpstreamCommand::Subscribe(
@@ -4921,6 +5681,26 @@ where
                                 }
                                 _ => None,
                             };
+                            if let Some((tx_id, _)) = &relay_upload
+                                && !self.node.borrow().permissions_ready()
+                            {
+                                let response = SyncMessage::FateUpdate {
+                                    tx_id: *tx_id,
+                                    fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                                        "permissions_head_missing: no published permissions head"
+                                            .to_owned(),
+                                    )),
+                                    global_seq: None,
+                                    durability: None,
+                                };
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                                continue;
+                            }
                             let write_state_tx_id = write_state_update_tx_id(&other);
                             // RegisterShape (registers the shape ahead of its
                             // binding), plus the write-upload path: any
@@ -4987,7 +5767,13 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty {
+                if *serve_dirty && self.node.borrow().permissions_ready() {
+                    // A coverage-group refresh drains every maintained view below.
+                    // Tick the shared runtime once before that drain rather than once
+                    // per group.
+                    if !coverage_groups.is_empty() {
+                        self.node.borrow_mut().flush_query_runtime()?;
+                    }
                     for (coverage, group) in coverage_groups.iter() {
                         let group_subscription = SubscriptionKey {
                             shape_id: coverage.shape_id,
@@ -4996,7 +5782,7 @@ where
                         };
                         let update = {
                             let mut node = self.node.borrow_mut();
-                            peer.query_update_for_subscription_with_opts(
+                            peer.query_update_for_subscription_with_opts_after_runtime_flush(
                                 &mut node,
                                 group_subscription,
                                 &group.shape,
@@ -5024,6 +5810,7 @@ where
                                     self.transport.as_mut(),
                                     update,
                                 )?;
+                                sent_view_update = true;
                             }
                         }
                     }
@@ -5039,9 +5826,22 @@ where
                                 self.transport.as_mut(),
                                 update,
                             )?;
+                            sent_view_update = true;
                         }
                     }
                     *serve_dirty = false;
+                }
+                if sent_view_update {
+                    while let Some((subscription, detail)) =
+                        deferred_subscribe_rejections.pop_front()
+                    {
+                        send_unsupported_shape_capability_rejection(
+                            &mut *self.transport,
+                            subscription,
+                            detail,
+                        )
+                        .map_err(transport_error)?;
+                    }
                 }
                 let fate_updates = {
                     let mut node = self.node.borrow_mut();
@@ -5103,11 +5903,27 @@ fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {
 }
 
 fn serialized_sync_message_len(message: &SyncMessage) -> usize {
-    encode_sync_message(message).map_or(0, |bytes| bytes.len())
+    #[cfg(feature = "cold-settle-attribution")]
+    let started = Instant::now();
+    let encoded = encode_sync_message(message);
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_payload(
+        started.elapsed().as_nanos() as u64,
+        encoded.as_ref().map_or(0, Vec::len),
+    );
+    encoded.map_or(0, |bytes| bytes.len())
 }
 
 fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
-    let Ok(payload) = encode_sync_message(message) else {
+    #[cfg(feature = "cold-settle-attribution")]
+    let payload_started = Instant::now();
+    let payload = encode_sync_message(message);
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_payload(
+        payload_started.elapsed().as_nanos() as u64,
+        payload.as_ref().map_or(0, Vec::len),
+    );
+    let Ok(payload) = payload else {
         return usize::MAX;
     };
     let envelope = WireEnvelope::new(
@@ -5115,7 +5931,15 @@ fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
         payload,
     );
-    encode_frame(&WireFrame::Message(envelope)).map_or(usize::MAX, |bytes| bytes.len())
+    #[cfg(feature = "cold-settle-attribution")]
+    let frame_started = Instant::now();
+    let frame = encode_frame(&WireFrame::Message(envelope));
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_preflight_frame(
+        frame_started.elapsed().as_nanos() as u64,
+        frame.as_ref().map_or(0, Vec::len),
+    );
+    frame.map_or(usize::MAX, |bytes| bytes.len())
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -5478,7 +6302,12 @@ struct ViewUpdateChunkUnit {
 }
 
 fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
-    if validate_wire_frame_len(serialized_uncompressed_wire_message_len(&message)).is_ok() {
+    let initial_encoded_bytes = serialized_uncompressed_wire_message_len(&message);
+    if validate_wire_frame_len(initial_encoded_bytes).is_ok() {
+        #[cfg(feature = "cold-settle-attribution")]
+        if matches!(&message, SyncMessage::ViewUpdate { .. }) {
+            crate::cold_settle_attribution::record_view_update_fit(initial_encoded_bytes);
+        }
         return Ok(vec![message]);
     }
     let SyncMessage::ViewUpdate {
@@ -5496,6 +6325,8 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
     else {
         return Ok(vec![message]);
     };
+    #[cfg(feature = "cold-settle-attribution")]
+    crate::cold_settle_attribution::record_view_update_split();
     version_bundles.extend(
         expand_version_carriers(&version_carriers)
             .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
@@ -5518,16 +6349,30 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
         let mut low = 1;
         let mut high = remaining;
         let mut best = 0;
+        #[cfg(feature = "cold-settle-attribution")]
+        let mut best_encoded_bytes = 0;
         while low <= high {
             let mid = low + (high - low) / 2;
+            #[cfg(feature = "cold-settle-attribution")]
+            let candidate_started = Instant::now();
             let candidate = view_update_chunk_from_units(
                 subscription,
                 settled_through,
                 reset_chunk,
                 &units[start..start + mid],
             );
-            if serialized_uncompressed_wire_message_len(&candidate) <= MAX_WIRE_FRAME_BYTES {
+            let encoded_bytes = serialized_uncompressed_wire_message_len(&candidate);
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::record_candidate(
+                encoded_bytes,
+                candidate_started.elapsed().as_nanos() as u64,
+            );
+            if encoded_bytes <= MAX_WIRE_FRAME_BYTES {
                 best = mid;
+                #[cfg(feature = "cold-settle-attribution")]
+                {
+                    best_encoded_bytes = encoded_bytes;
+                }
                 low = mid + 1;
             } else {
                 high = mid.saturating_sub(1);
@@ -5545,6 +6390,8 @@ fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>,
             reset_chunk,
             &units[start..start + best],
         ));
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_selected_payload(best_encoded_bytes);
         start += best;
     }
     if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {
@@ -6178,15 +7025,6 @@ fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error>
     ensure_supported_read_view(opts)
 }
 
-fn ensure_supported_subscription_shape(shape: &ValidatedQuery) -> Result<(), Error> {
-    ensure_supported_maintained_coverage_query_shape(shape.query())
-}
-
-fn ensure_supported_maintained_coverage_query_shape(query: &Query) -> Result<(), Error> {
-    let _ = query;
-    Ok(())
-}
-
 fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
@@ -6204,6 +7042,39 @@ fn ensure_supported_register_shape_options(opts: &RegisterShapeOptions) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_shape_ast_for_registration<S>(
+    node: &NodeState<S>,
+    shape_id: ShapeId,
+    ast: &ShapeAst,
+) -> Result<Option<ValidatedQuery>, crate::node::Error>
+where
+    S: OrderedKvStorage,
+{
+    node.validate_shape_ast_for_registration(shape_id, ast)
+}
+
+fn send_unsupported_shape_capability_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    detail: String,
+) -> Result<(), TransportError> {
+    transport.send(SyncMessage::SubscribeRejected {
+        subscription,
+        reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    })
+}
+
+fn register_shape_rejection_subscription(
+    shape_id: ShapeId,
+    read_view: ReadViewKey,
+) -> SubscriptionKey {
+    SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view,
+    }
 }
 
 fn coverage_key(
@@ -6302,50 +7173,36 @@ macro_rules! row {
     }};
 }
 
-struct PendingMergeableWrite {
-    table: String,
-    row_uuid: RowUuid,
-    cells: RowCells,
-    deletion: Option<DeletionEvent>,
-    parents: Vec<TxId>,
-    now_ms: Option<u64>,
-}
-
-/// Builder for a group of mergeable writes committed as one transaction.
-pub struct MergeableTx<'a, S>
+/// CRUD operations for an open mergeable transaction.
+///
+/// [`MergeableTx`] and [`MergeableTxRef`] implement this trait, so mergeable
+/// CRUD has one definition regardless of who owns the transaction lifetime.
+/// Import this trait to call its methods.
+pub trait MergeableTxOps<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    db: &'a Db<S>,
-    author: AuthorId,
-    permission_subject: Option<AuthorId>,
-    writes: Vec<PendingMergeableWrite>,
-}
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
 
-impl<S> MergeableTx<'_, S>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTxId;
+
     /// Stage an insert with a generated row id.
-    pub fn insert(&mut self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db.row_id_source.borrow_mut().next_row_id();
+    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
         self.insert_with_id(table, row, cells)?;
         Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id.
-    pub fn insert_with_id(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
+    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.insert_with_id_at_ms_option(table, row, cells, None)
     }
 
     /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    pub fn insert_with_id_at_ms(
-        &mut self,
+    fn insert_with_id_at_ms(
+        &self,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -6354,33 +7211,14 @@ where
         self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
     }
 
-    fn insert_with_id_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let cells = self.db.apply_insert_defaults(table, cells)?;
-        self.stage_value_write(PendingMergeableWrite {
-            table: table.to_owned(),
-            row_uuid: row,
-            cells,
-            deletion: None,
-            parents: Vec::new(),
-            now_ms,
-        });
-        Ok(())
-    }
-
     /// Stage an update; omitted fields keep the transaction-local value.
-    pub fn update(&mut self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
         self.update_at_ms_option(table, row, patch, None)
     }
 
     /// Stage an update with an explicit millisecond provenance time.
-    pub fn update_at_ms(
-        &mut self,
+    fn update_at_ms(
+        &self,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -6389,54 +7227,24 @@ where
         self.update_at_ms_option(table, row, patch, Some(now_ms))
     }
 
-    fn update_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        let mut cells = self.current_cells(table, row)?;
-        cells.extend(patch);
-        self.insert_with_id_at_ms_option(table, row, cells, now_ms)
-    }
-
     /// Stage a soft delete.
-    pub fn delete(&mut self, table: &str, row: RowUuid) -> Result<(), Error> {
+    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.delete_at_ms_option(table, row, None)
     }
 
     /// Stage a soft delete with explicit millisecond provenance time.
-    pub fn delete_at_ms(&mut self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
+    fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
         self.delete_at_ms_option(table, row, Some(now_ms))
     }
 
-    fn delete_at_ms_option(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db.table_schema(table)?;
-        self.stage_deletion_write(PendingMergeableWrite {
-            table: table.to_owned(),
-            row_uuid: row,
-            cells: BTreeMap::new(),
-            deletion: Some(DeletionEvent::Deleted),
-            parents: Vec::new(),
-            now_ms,
-        });
-        Ok(())
-    }
-
-    /// Stage a restore with explicit row data.
-    pub fn restore(&mut self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    /// Stage a restore, applying defaults for omitted columns.
+    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
         self.restore_at_ms_option(table, row, cells, None)
     }
 
-    /// Stage a restore with explicit row data and millisecond provenance time.
-    pub fn restore_at_ms(
-        &mut self,
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
+    fn restore_at_ms(
+        &self,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -6445,220 +7253,307 @@ where
         self.restore_at_ms_option(table, row, cells, Some(now_ms))
     }
 
-    fn restore_at_ms_option(
-        &mut self,
+    /// Read one row with this transaction's pending writes overlaid.
+    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db()
+            .node
+            .node
+            .borrow_mut()
+            .tx_read(self.tx_id(), table, row)
+            .map_err(Into::into)
+    }
+
+    /// Stage an insert with an optional explicit provenance time.
+    fn insert_with_id_at_ms_option(
+        &self,
         table: &str,
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if cells.is_empty() {
-            return Err(Error::new(ErrorCode::Schema, "restore requires row data"));
-        }
-        let cells = self.db.apply_insert_defaults(table, cells)?;
-        let (content_parents, deletion_parents) = {
-            let mut node = self.db.node.node.borrow_mut();
-            let content_parents = node
-                .local_content_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            let deletion_parents = node
-                .local_deletion_winner_tx_id(table, row)?
-                .into_iter()
-                .collect::<Vec<_>>();
-            (content_parents, deletion_parents)
-        };
-        self.stage_value_write(PendingMergeableWrite {
-            table: table.to_owned(),
-            row_uuid: row,
-            cells,
-            deletion: None,
-            parents: content_parents,
-            now_ms,
-        });
-        self.stage_deletion_write(PendingMergeableWrite {
-            table: table.to_owned(),
-            row_uuid: row,
-            cells: BTreeMap::new(),
-            deletion: Some(DeletionEvent::Restored),
-            parents: deletion_parents,
-            now_ms,
-        });
-        Ok(())
+        self.db()
+            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
     }
 
-    /// Commit all staged writes as one mergeable transaction.
-    pub fn commit(self) -> Result<TxId, Error> {
-        let writes = self
-            .writes
-            .into_iter()
-            .map(|write| {
-                let mut commit = MergeableCommit::new(
-                    write.table,
-                    write.row_uuid,
-                    write.now_ms.unwrap_or_else(|| self.db.next_now_ms()),
-                )
-                .made_by(self.author)
-                .parents(write.parents)
-                .cells(write.cells);
-                if let Some(subject) = self.permission_subject {
-                    commit = commit.permission_subject(subject);
-                }
-                if let Some(deletion) = write.deletion {
-                    commit = commit.deletion(deletion);
-                }
-                commit
-            })
-            .collect();
-        let tx_id = self
-            .db
-            .node
-            .node
-            .borrow_mut()
-            .commit_mergeable_many(writes)?;
-        self.db.finalize_local_commit(tx_id)?;
-        self.db.refresh_subscriptions()?;
-        Ok(tx_id)
+    /// Stage an update with an optional explicit provenance time.
+    fn update_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
     }
 
-    fn current_cells(&self, table: &str, row: RowUuid) -> Result<RowCells, Error> {
-        let table_schema = self.db.table_schema(table)?;
-        for write in self.writes.iter().rev() {
-            if write.table == table && write.row_uuid == row && write.deletion.is_none() {
-                if self.writes.iter().rev().any(|deletion| {
-                    deletion.table == table
-                        && deletion.row_uuid == row
-                        && deletion.deletion == Some(DeletionEvent::Deleted)
-                }) {
-                    return Ok(BTreeMap::new());
-                }
-                return Ok(write.cells.clone());
-            }
-        }
-        let mut cells = BTreeMap::new();
-        if let Some(existing) = self.db.local_current_row(table, row)? {
-            for column in &table_schema.columns {
-                if let Some(value) = existing.cell(table_schema, &column.name) {
-                    cells.insert(column.name.clone(), value);
-                }
-            }
-        }
-        Ok(cells)
+    /// Stage a deletion with an optional explicit provenance time.
+    fn delete_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
     }
 
-    fn stage_value_write(&mut self, write: PendingMergeableWrite) {
-        if let Some(existing) = self.writes.iter_mut().find(|existing| {
-            existing.table == write.table
-                && existing.row_uuid == write.row_uuid
-                && existing.deletion.is_none()
-        }) {
-            *existing = write;
-        } else {
-            self.writes.push(write);
-        }
-    }
-
-    fn stage_deletion_write(&mut self, write: PendingMergeableWrite) {
-        self.writes.retain(|existing| {
-            existing.table != write.table
-                || existing.row_uuid != write.row_uuid
-                || match write.deletion {
-                    Some(DeletionEvent::Deleted) => false,
-                    Some(DeletionEvent::Restored) => existing.deletion.is_none(),
-                    None => true,
-                }
-        });
-        self.writes.push(write);
+    /// Stage a restore with an optional explicit provenance time.
+    fn restore_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
     }
 }
 
-/// Builder for an exclusive transaction over a stable snapshot.
-pub struct ExclusiveTx<'a, S>
+/// Owning, Rust-facing handle for a group of mergeable writes.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
+/// [`OpenTxId`] between calls and must not close the transaction on return.
+pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenTxId,
-    has_reads: Cell<bool>,
+    /// Set once the transaction has been committed, so `Drop` does not then
+    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
+    /// `abandon_transaction_handle` on an already-committed transaction — benign
+    /// only because `abandon_tx` tolerates an unknown id, and silent because the
+    /// result was discarded.
+    committed: bool,
 }
 
-impl<S> ExclusiveTx<'_, S>
+impl<S> MergeableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Read one row inside the exclusive transaction.
-    pub fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.has_reads.set(true);
+    /// Commit all staged writes as one mergeable transaction.
+    ///
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
+    pub fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_mergeable_handle(self.tx_id);
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl<S> MergeableTxOps<S> for MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
         self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_read(self.tx_id, table, row)
-            .map_err(Into::into)
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
+    }
+}
+
+/// Non-owning operations handle for an already-open mergeable transaction.
+///
+/// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
+/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct MergeableTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+}
+
+impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
+    }
+}
+
+impl<S> Drop for MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = self.db.abandon_transaction_handle(self.tx_id);
+    }
+}
+
+/// CRUD and read operations for an open exclusive transaction.
+///
+/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
+/// operations have one definition regardless of who owns the transaction
+/// lifetime. Import this trait to call its methods.
+pub trait ExclusiveTxOps<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
+
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTxId;
+
+    /// Read one row inside the exclusive transaction.
+    fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db().exclusive_read(self.tx_id(), table, row)
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
-    pub fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.has_reads.set(true);
-        self.db
+    fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
             .node
             .node
             .borrow_mut()
-            .tx_current_rows(self.tx_id, table)
+            .tx_current_rows(self.tx_id(), table)
             .map_err(Into::into)
     }
 
+    /// Read a prepared query inside the exclusive transaction.
+    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.db().exclusive_all(self.tx_id(), prepared)
+    }
+
+    /// Read a prepared query inside the exclusive transaction as `author`.
+    fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+    }
+
     /// Stage an insert with a generated row id.
-    pub fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db.row_id_source.borrow_mut().next_row_id();
+    fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
         self.insert_with_id(table, row, cells)?;
         Ok(row)
     }
 
     /// Stage an insert with a caller-supplied row id.
-    pub fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        let cells = self.db.apply_insert_defaults(table, cells)?;
-        self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_write(self.tx_id, table, row, cells, None)
-            .map_err(Into::into)
+    fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_insert(self.tx_id(), table, row, cells)
     }
 
     /// Stage an update; omitted fields keep the transaction-local value.
-    pub fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+    fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
         let mut cells = self.read(table, row)?.unwrap_or_default();
         cells.extend(patch);
         self.insert_with_id(table, row, cells)
     }
 
     /// Stage a soft delete.
-    pub fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.db
-            .node
-            .node
-            .borrow_mut()
-            .tx_write(
-                self.tx_id,
-                table,
-                row,
-                BTreeMap::<String, Value>::new(),
-                Some(DeletionEvent::Deleted),
-            )
-            .map_err(Into::into)
+    fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db().stage_exclusive_delete(self.tx_id(), table, row)
     }
 
+    /// Stage a restore, applying defaults for omitted columns.
+    fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+    }
+}
+
+/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
+/// [`OpenTxId`] between calls and must not close the transaction on return.
+pub struct ExclusiveTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+    committed: bool,
+}
+
+impl<S> ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     /// Commit the exclusive transaction.
-    pub fn commit(self) -> Result<TxId, Error> {
-        let (tx_id, unit) = self.db.node.node.borrow_mut().commit_exclusive(
-            self.tx_id,
-            self.db.identity.author,
-            self.db.next_now_ms(),
-        )?;
-        self.db.finalize_local_exclusive_unit(tx_id, unit)?;
-        self.db.refresh_subscriptions()?;
-        Ok(tx_id)
+    ///
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
+    pub fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_exclusive_handle(self.tx_id);
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
+    }
+}
+
+impl<S> Drop for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = self.db.abandon_exclusive_handle(self.tx_id);
+    }
+}
+
+/// Non-owning operations handle for an already-open exclusive transaction.
+///
+/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
+/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct ExclusiveTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTxId,
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTxId {
+        self.tx_id
     }
 }
 
@@ -6752,15 +7647,43 @@ fn write_rejected(reason: RejectionReason) -> Error {
 
 struct SubscriptionState {
     kind: SubscriptionKind,
+    groove_runtime_token: u64,
     propagates_upstream: bool,
     author: AuthorId,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
     snapshot: RelationSnapshot,
+    snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
     sender: UnboundedSender<SubscriptionEvent>,
+}
+
+#[derive(Clone, Default)]
+struct RelationSnapshotIndex {
+    roots: BTreeMap<(String, RowUuid), usize>,
+    related: BTreeMap<(String, RowUuid), usize>,
+    edges: BTreeSet<RelationEdge>,
+}
+
+impl RelationSnapshotIndex {
+    fn from_snapshot(snapshot: &RelationSnapshot) -> Self {
+        let mut index = Self::default();
+        for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
+            index
+                .roots
+                .insert((row.table().to_owned(), row.row_uuid()), position);
+        }
+        for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
+            index.related.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count + offset,
+            );
+        }
+        index.edges = snapshot.edges.iter().cloned().collect();
+        index
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6819,6 +7742,11 @@ pub enum SubscriptionEvent {
         settled: bool,
         /// Read tier used to materialize the rows.
         tier: DurabilityTier,
+    },
+    /// The serving peer rejected the propagated upstream subscription.
+    Rejected {
+        /// Stable rejection class plus diagnostic detail from the serving peer.
+        reason: SubscribeRejectReason,
     },
     /// The subscription stream was closed by the producer.
     Closed,
@@ -6988,14 +7916,11 @@ fn subscription_delta_event_with_reset(
 
 fn apply_maintained_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
 ) -> SubscriptionEvent {
-    fn row_matches(row: &CurrentRow, table: &str, row_uuid: RowUuid) -> bool {
-        row.table() == table && row.row_uuid() == row_uuid
-    }
-
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
         removed: update_removed,
@@ -7013,6 +7938,7 @@ fn apply_maintained_update_to_snapshot(
             snapshot.root_count = update_added.len();
             snapshot.rows.reserve(update_added.len());
             snapshot.rows.extend(update_added.iter().cloned());
+            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
             return SubscriptionEvent::Delta {
                 reset: false,
                 added: update_added,
@@ -7053,6 +7979,7 @@ fn apply_maintained_update_to_snapshot(
             .reserve(event_added.len() + added_related.len());
         snapshot.rows.extend(event_added.iter().cloned());
         snapshot.rows.extend(added_related.iter().cloned());
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
 
         return SubscriptionEvent::Delta {
             reset: false,
@@ -7076,20 +8003,21 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
                 updated.push(row.clone());
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
+            for position in snapshot_index.related.values_mut() {
+                *position += 1;
+            }
+            snapshot_index.roots.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count,
+            );
             snapshot.root_count += 1;
             added.push(row.clone());
         }
@@ -7097,12 +8025,17 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
+        let row_key = (
+            snapshot.rows[index].table().to_owned(),
+            snapshot.rows[index].row_uuid(),
+        );
         if update_removed
             .iter()
-            .any(|(table, row_uuid)| row_matches(&snapshot.rows[index], table.as_str(), *row_uuid))
+            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
+            snapshot_index.roots.remove(&row_key);
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
@@ -7111,62 +8044,56 @@ fn apply_maintained_update_to_snapshot(
             index += 1;
         }
     }
+    if !update_removed.is_empty() {
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+    }
 
-    snapshot
-        .edges
-        .retain(|edge| !update_removed_edges.iter().any(|removed| removed == edge));
+    if !update_removed_edges.is_empty() {
+        snapshot.edges.retain(|edge| {
+            let remove = update_removed_edges.iter().any(|removed| removed == edge);
+            if remove {
+                snapshot_index.edges.remove(edge);
+            }
+            !remove
+        });
+    }
 
     for (edge, row) in &update_added_edges {
-        if !snapshot.edges.iter().any(|current| current == edge) {
+        if snapshot_index.edges.insert(edge.clone()) {
             snapshot.edges.push(edge.clone());
         }
         let Some(row) = row else {
             continue;
         };
-        let table = row.table();
-        let row_uuid = row.row_uuid();
-        if snapshot
-            .rows
-            .iter()
-            .take(snapshot.root_count)
-            .any(|root| row_matches(root, table, row_uuid))
-        {
+        let key = (row.table().to_owned(), row.row_uuid());
+        if snapshot_index.roots.contains_key(&key) {
             continue;
         }
-        if let Some(position) = snapshot
-            .rows
-            .iter()
-            .skip(snapshot.root_count)
-            .position(|current| row_matches(current, table, row_uuid))
-        {
-            let position = snapshot.root_count + position;
+        if let Some(position) = snapshot_index.related.get(&key).copied() {
             snapshot.rows[position] = row.clone();
         } else {
+            snapshot_index.related.insert(key, snapshot.rows.len());
             snapshot.rows.push(row.clone());
         }
         added_related.push(row.clone());
     }
 
     for removed_edge in &update_removed_edges {
-        let still_referenced = snapshot.edges.iter().any(|edge| {
+        let still_referenced = snapshot_index.edges.iter().any(|edge| {
             edge.target_table == removed_edge.target_table
                 && edge.target_row == removed_edge.target_row
         });
-        let is_root = snapshot.rows.iter().take(snapshot.root_count).any(|row| {
-            row_matches(
-                row,
-                removed_edge.target_table.as_str(),
-                removed_edge.target_row,
-            )
-        });
+        let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
+        let is_root = snapshot_index.roots.contains_key(&target_key);
         if !still_referenced && !is_root {
-            snapshot.rows.retain(|row| {
-                !row_matches(
-                    row,
-                    removed_edge.target_table.as_str(),
-                    removed_edge.target_row,
-                )
-            });
+            if let Some(position) = snapshot_index.related.remove(&target_key) {
+                snapshot.rows.remove(position);
+                for indexed_position in snapshot_index.related.values_mut() {
+                    if *indexed_position > position {
+                        *indexed_position -= 1;
+                    }
+                }
+            }
         }
     }
 

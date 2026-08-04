@@ -3,22 +3,21 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
+#[path = "support/duplex_transport.rs"]
+mod duplex_transport;
+
+use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, Transport,
+    SubscriptionEvent,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
-use jazz::wire::TransportError;
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
 enum CoverageMode {
@@ -50,22 +49,6 @@ struct RowSummary {
     owner: Option<AuthorId>,
 }
 
-struct DuplexTransport {
-    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-}
-
-impl Transport for DuplexTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound.borrow_mut().push_back(message);
-        Ok(())
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inbound.borrow_mut().pop_front()
-    }
-}
-
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
@@ -76,21 +59,6 @@ fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
-}
-
-fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
-    (
-        Box::new(DuplexTransport {
-            outbound: Rc::clone(&left),
-            inbound: Rc::clone(&right),
-        }),
-        Box::new(DuplexTransport {
-            outbound: right,
-            inbound: left,
-        }),
-    )
 }
 
 fn row(seed: u64) -> RowUuid {
@@ -240,6 +208,9 @@ fn event_trace(
                 updated,
                 removed,
             }
+        }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
         }
         SubscriptionEvent::Closed => panic!("subscription closed unexpectedly"),
     }

@@ -9,6 +9,11 @@ RUN_LABEL="${SMOKE_LABEL:-smoke}"
 RUN_NOTES="${SMOKE_NOTES:-}"
 EXCERPT_LINES="${SMOKE_LEDGER_EXCERPT_LINES:-18}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Prebuild parallelism. The historical fixed `-j 2` existed to avoid linker OOM
+# on a memory-constrained laptop; on a large host it left most cores idle and
+# cost ~15 minutes. Override with JAZZ_SMOKE_JOBS if a machine needs the old cap.
+SMOKE_JOBS="${JAZZ_SMOKE_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
 RESULT_DIR="$RESULT_ROOT/$RUN_ID"
 MANIFEST="$RESULT_DIR/manifest.tsv"
 PREBUILD_S="0.000000"
@@ -41,8 +46,8 @@ prebuild_benches() {
   start="$(perl -MTime::HiRes=time -e 'print time')"
   (
     cd "$ROOT"
-    cargo bench -p jazz --no-run -j 2
-    cargo bench -p jazz-sim --no-run -j 2
+    cargo bench -p jazz --no-run -j "$SMOKE_JOBS"
+    cargo bench -p jazz-sim --no-run -j "$SMOKE_JOBS"
   ) >"$log" 2>&1
   status=$?
   end="$(perl -MTime::HiRes=time -e 'print time')"
@@ -57,7 +62,7 @@ prebuild_benches() {
     profile_start="$(perl -MTime::HiRes=time -e 'print time')"
     (
       cd "$ROOT"
-      cargo bench -p jazz-sim --no-run -j 2 --features profiling
+      cargo bench -p jazz-sim --no-run -j "$SMOKE_JOBS" --features profiling
     ) >>"$log" 2>&1
     profile_status=$?
     profile_end="$(perl -MTime::HiRes=time -e 'print time')"
@@ -416,6 +421,11 @@ run_scenario \
   "jazz/large_value_checkpointing" \
   "JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing" \
   env JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing
+
+run_scenario \
+  "jazz/relation_include_delivery" \
+  "JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery" \
+  env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
 
 run_scenario \
   "jazz-sim/micro" \

@@ -99,6 +99,42 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
 }
 
 #[test]
+fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), param("owner")))
+        .validate(&core.catalogue.schema)
+        .expect("validate parameterized owner query");
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "owner".to_owned(),
+            Value::Uuid(owner.0),
+        )]))
+        .expect("bind owner parameter");
+
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+        .expect("run parameterized indexed one-shot");
+    let metrics = core.take_storage_read_metrics();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![first]
+    );
+    assert_eq!(metrics.global_current_indexes.reads, 1);
+    assert_eq!(
+        metrics.global_current_rows.reads, 1,
+        "the concrete index-selected program must not be replaced by a cached full-scan plan"
+    );
+}
+
+#[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());

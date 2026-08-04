@@ -1,0 +1,957 @@
+#![cfg(feature = "test")]
+
+mod support;
+
+use std::time::Duration;
+
+use jazz::row_input;
+use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
+use jazz::tools::server::JazzServer;
+use jazz::tools::{
+    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, SubscriptionStreamItem,
+    TableSchema, Value, policy_expr,
+};
+use serde_json::json;
+use support::{
+    TestingClient, has_added, has_removed, wait_for_query, wait_for_subscription_update,
+};
+
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+
+fn branch_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("rooms")
+                .column("name", ColumnType::Text)
+                .column("join_code", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "join_code",
+                            vec!["claims".into(), "join_code".into()],
+                        )),
+                ),
+        )
+        .build()
+}
+
+fn role_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("role_in_list_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::SessionInList {
+                            path: vec!["claims".into(), "role".into()],
+                            values: vec!["admin".into(), "member".into()],
+                        }),
+                ),
+        )
+        .table(
+            TableSchema::builder("role_or_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::Or(vec![
+                            policy_expr::session_where("claims.role", "admin"),
+                            policy_expr::session_where("claims.role", "member"),
+                        ])),
+                ),
+        )
+        .build()
+}
+
+fn admin_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admin_rooms")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(policy_expr::session_where("claims.admin", true)),
+                ),
+        )
+        .build()
+}
+
+fn numeric_claims_write_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("integer_claim_rows")
+                .column("access_level", ColumnType::Integer)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
+        )
+        .table(
+            TableSchema::builder("bigint_claim_rows")
+                .column("access_level", ColumnType::BigInt)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::eq_session(
+                    "access_level",
+                    vec!["claims".into(), "access_level".into()],
+                ))),
+        )
+        .build()
+}
+
+fn numeric_claims_gated_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("integer_claim_rows")
+                .column("access_level", ColumnType::Integer)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "access_level",
+                            vec!["claims".into(), "access_level".into()],
+                        )),
+                ),
+        )
+        .table(
+            TableSchema::builder("bigint_claim_rows")
+                .column("access_level", ColumnType::BigInt)
+                .policies(
+                    TablePolicies::new()
+                        .with_insert(PolicyExpr::True)
+                        .with_select(PolicyExpr::eq_session(
+                            "access_level",
+                            vec!["claims".into(), "access_level".into()],
+                        )),
+                ),
+        )
+        .build()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn query_applies_claims_select_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = branch_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa1")
+                .as_admin()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (room_id, _, batch_id) = admin
+                .insert(
+                    "rooms",
+                    row_input!("name" => "Party Room", "join_code" => "secret-123"),
+                )
+                .expect("admin creates claims-gated room");
+            admin
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("room reaches edge");
+
+            let query = QueryBuilder::new("rooms").build();
+
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa2")
+                .with_claims(json!({"join_code": "secret-123"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "matching claim sees row",
+                |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
+            )
+            .await;
+
+            let bob = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3")
+                .with_claims(json!({"join_code": "wrong-code"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let bob_rows = bob
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("bob queries rooms");
+            assert!(
+                bob_rows.iter().all(|(id, _)| *id != room_id),
+                "wrong claim should not see row: {bob_rows:?}"
+            );
+
+            let carol = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4")
+                .as_user()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let carol_rows = carol
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("carol queries rooms");
+            assert!(
+                carol_rows.iter().all(|(id, _)| *id != room_id),
+                "missing claim should not see row: {carol_rows:?}"
+            );
+
+            admin.shutdown().await.expect("shutdown admin");
+            alice.shutdown().await.expect("shutdown alice");
+            bob.shutdown().await.expect("shutdown bob");
+            carol.shutdown().await.expect("shutdown carol");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_claims_match_integer_columns_across_core_widths() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = numeric_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb1")
+                .as_admin()
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (integer_row_id, _, integer_batch) = admin
+                .insert(
+                    "integer_claim_rows",
+                    row_input!("access_level" => Value::Integer(-7)),
+                )
+                .expect("admin creates integer claims row");
+            admin
+                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("integer row reaches edge");
+            let (bigint_row_id, _, bigint_batch) = admin
+                .insert(
+                    "bigint_claim_rows",
+                    row_input!("access_level" => Value::BigInt(7)),
+                )
+                .expect("admin creates bigint claims row");
+            admin
+                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("bigint row reaches edge");
+
+            let bigint_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb2")
+                // Negative JWT integers are carried by the core as I64.
+                .with_claims(json!({"access_level": -7}))
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            wait_for_query(
+                &bigint_claim_user,
+                QueryBuilder::new("integer_claim_rows").build(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "I64 claim matches I32 column",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, _)| *id == integer_row_id)
+                        .then_some(())
+                },
+            )
+            .await;
+
+            let integer_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb3")
+                // Small positive JWT integers are carried by the core as U32.
+                .with_claims(json!({"access_level": 7}))
+                .ready_on("bigint_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            wait_for_query(
+                &integer_claim_user,
+                QueryBuilder::new("bigint_claim_rows").build(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "U32 claim matches I64 column",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, _)| *id == bigint_row_id)
+                        .then_some(())
+                },
+            )
+            .await;
+
+            admin.shutdown().await.expect("shutdown admin");
+            bigint_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown bigint claim user");
+            integer_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown integer claim user");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_role_in_list_matches_equivalent_or_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = role_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("dddddddd-dddd-4ddd-dddd-ddddddddddd1")
+                .as_admin()
+                .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (in_list_row_id, _, in_list_batch_id) = admin
+                .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
+                .expect("admin creates in-list room");
+            admin
+                .wait_for_batch(in_list_batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("in-list room reaches edge");
+            let (or_row_id, _, or_batch_id) = admin
+                .insert("role_or_rooms", row_input!("name" => "or room"))
+                .expect("admin creates or room");
+            admin
+                .wait_for_batch(or_batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("or room reaches edge");
+
+            let in_list_query = QueryBuilder::new("role_in_list_rooms").build();
+            let or_query = QueryBuilder::new("role_or_rooms").build();
+
+            for (role, user_id) in [
+                ("admin", "dddddddd-dddd-4ddd-dddd-ddddddddddd2"),
+                ("member", "dddddddd-dddd-4ddd-dddd-ddddddddddd3"),
+            ] {
+                let client = TestingClient::builder()
+                    .with_server(&server)
+                    .with_schema(schema.clone())
+                    .with_user_id(user_id)
+                    .with_claims(json!({"role": role}))
+                    .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                    .connect()
+                    .await;
+
+                wait_for_query(
+                    &client,
+                    in_list_query.clone(),
+                    Some(DurabilityTier::EdgeServer),
+                    QUERY_TIMEOUT,
+                    "matching role sees SessionInList row",
+                    |rows| {
+                        rows.iter()
+                            .any(|(id, _)| *id == in_list_row_id)
+                            .then_some(())
+                    },
+                )
+                .await;
+                wait_for_query(
+                    &client,
+                    or_query.clone(),
+                    Some(DurabilityTier::EdgeServer),
+                    QUERY_TIMEOUT,
+                    "matching role sees Or-of-equals row",
+                    |rows| rows.iter().any(|(id, _)| *id == or_row_id).then_some(()),
+                )
+                .await;
+
+                client
+                    .shutdown()
+                    .await
+                    .unwrap_or_else(|error| panic!("shutdown {role}: {error}"));
+            }
+
+            for (label, user_id, claims) in [
+                (
+                    "non-matching role",
+                    "dddddddd-dddd-4ddd-dddd-ddddddddddd4",
+                    json!({"role": "viewer"}),
+                ),
+                (
+                    "missing role",
+                    "dddddddd-dddd-4ddd-dddd-ddddddddddd5",
+                    json!({}),
+                ),
+            ] {
+                let client = TestingClient::builder()
+                    .with_server(&server)
+                    .with_schema(schema.clone())
+                    .with_user_id(user_id)
+                    .with_claims(claims)
+                    .ready_on("role_in_list_rooms", READY_TIMEOUT)
+                    .connect()
+                    .await;
+
+                let in_list_rows = client
+                    .query(in_list_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} queries SessionInList rooms: {error}"));
+                let or_rows = client
+                    .query(or_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} queries Or-of-equals rooms: {error}"));
+
+                assert!(
+                    in_list_rows.iter().all(|(id, _)| *id != in_list_row_id),
+                    "{label} should not see SessionInList row: {in_list_rows:?}"
+                );
+                assert!(
+                    or_rows.iter().all(|(id, _)| *id != or_row_id),
+                    "{label} should not see Or-of-equals row: {or_rows:?}"
+                );
+
+                client
+                    .shutdown()
+                    .await
+                    .unwrap_or_else(|error| panic!("shutdown {label}: {error}"));
+            }
+
+            admin.shutdown().await.expect("shutdown admin");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn subscription_matches_claims_select_query() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = branch_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb1")
+                .as_admin()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (room_id, _, batch_id) = admin
+                .insert(
+                    "rooms",
+                    row_input!("name" => "Subscription Room", "join_code" => "secret-123"),
+                )
+                .expect("admin creates claims-gated room");
+            admin
+                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .await
+                .expect("room reaches edge");
+
+            let query = QueryBuilder::new("rooms").build();
+
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb2")
+                .with_claims(json!({"join_code": "secret-123"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut alice_stream = alice
+                .subscribe(query.clone())
+                .await
+                .expect("alice subscribes to rooms");
+            let mut alice_log = Vec::new();
+
+            wait_for_subscription_update(
+                &mut alice_stream,
+                &mut alice_log,
+                QUERY_TIMEOUT,
+                "matching claim subscription sees row",
+                |updates| has_added(updates, room_id),
+            )
+            .await;
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "matching claim one-shot sees row",
+                |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
+            )
+            .await;
+
+            let bob = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb3")
+                .with_claims(json!({"join_code": "wrong-code"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut bob_stream = bob
+                .subscribe(query.clone())
+                .await
+                .expect("bob subscribes to rooms");
+            let mut bob_log = Vec::new();
+            wait_for_subscription_update(
+                &mut bob_stream,
+                &mut bob_log,
+                QUERY_TIMEOUT,
+                "wrong claim subscription receives initial snapshot",
+                |updates| !updates.is_empty(),
+            )
+            .await;
+            assert!(
+                !has_added(&bob_log, room_id),
+                "wrong claim subscription should not see row: {bob_log:?}"
+            );
+            let bob_rows = bob
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("bob queries rooms");
+            assert!(
+                bob_rows.iter().all(|(id, _)| *id != room_id),
+                "wrong claim one-shot should not see row: {bob_rows:?}"
+            );
+
+            let carol = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb4")
+                .as_user()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut carol_stream = carol
+                .subscribe(query.clone())
+                .await
+                .expect("carol subscribes to rooms");
+            let mut carol_log = Vec::new();
+            wait_for_subscription_update(
+                &mut carol_stream,
+                &mut carol_log,
+                QUERY_TIMEOUT,
+                "missing claim subscription receives initial snapshot",
+                |updates| !updates.is_empty(),
+            )
+            .await;
+            assert!(
+                !has_added(&carol_log, room_id),
+                "missing claim subscription should not see row: {carol_log:?}"
+            );
+            let carol_rows = carol
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("carol queries rooms");
+            assert!(
+                carol_rows.iter().all(|(id, _)| *id != room_id),
+                "missing claim one-shot should not see row: {carol_rows:?}"
+            );
+
+            admin.shutdown().await.expect("shutdown admin");
+            alice.shutdown().await.expect("shutdown alice");
+            bob.shutdown().await.expect("shutdown bob");
+            carol.shutdown().await.expect("shutdown carol");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claim_revocation_stops_existing_subscription_from_serving_future_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = admin_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let writer = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbc1")
+                .as_admin()
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let identity = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbc2";
+            let authorized = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(identity)
+                .with_claims(json!({"admin": true}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let query = QueryBuilder::new("admin_rooms").build();
+
+            let (initial_id, _, initial_batch) = writer
+                .insert(
+                    "admin_rooms",
+                    row_input!("name" => "visible before revocation"),
+                )
+                .expect("writer inserts initially visible room");
+            writer
+                .wait_for_batch(initial_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("initial room reaches edge");
+
+            let mut stream = authorized
+                .subscribe(query.clone())
+                .await
+                .expect("authorized identity subscribes");
+            let mut stream_log = Vec::new();
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "authorized subscription receives its initial room",
+                |updates| has_added(updates, initial_id),
+            )
+            .await;
+
+            let revoked = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(identity)
+                .with_claims(json!({"admin": false}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let revoked_rows = revoked
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("revoked identity performs one-shot read");
+            assert!(
+                revoked_rows.is_empty(),
+                "one-shot read must fail closed after claim revocation: {revoked_rows:?}"
+            );
+
+            // A claim change must rebuild the maintained view under the new
+            // authorization, not merely drain its pending deltas. In
+            // particular, this removal has to arrive before a later write can
+            // trigger another view update.
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "claim revocation removes rows already materialized under the old claim",
+                |updates| has_removed(updates, initial_id),
+            )
+            .await;
+
+            let (future_id, _, future_batch) = writer
+                .insert("admin_rooms", row_input!("name" => "must remain private"))
+                .expect("writer inserts post-revocation room");
+            writer
+                .wait_for_batch(future_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("post-revocation room reaches edge");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while tokio::time::Instant::now() < deadline {
+                let wait = (deadline - tokio::time::Instant::now()).min(Duration::from_millis(50));
+                match tokio::time::timeout(wait, stream.next()).await {
+                    Ok(Some(SubscriptionStreamItem::Delta(delta))) => stream_log.push(delta),
+                    Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+                        panic!(
+                            "claim revocation rejected instead of keeping the stream live: {reason:?}"
+                        )
+                    }
+                    Ok(None) => panic!("claim revocation closed the existing subscription"),
+                    Err(_) => {}
+                }
+            }
+            assert!(
+                !has_added(&stream_log, future_id),
+                "revoked subscription must never receive post-revocation rows: {stream_log:#?}"
+            );
+
+            let restored = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id(identity)
+                .with_claims(json!({"admin": true}))
+                .ready_on("admin_rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (restored_id, _, restored_batch) = writer
+                .insert(
+                    "admin_rooms",
+                    row_input!("name" => "visible after restoration"),
+                )
+                .expect("writer inserts post-restoration room");
+            writer
+                .wait_for_batch(restored_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("post-restoration room reaches edge");
+            wait_for_subscription_update(
+                &mut stream,
+                &mut stream_log,
+                QUERY_TIMEOUT,
+                "restored claim keeps the existing subscription live",
+                |updates| has_added(updates, restored_id),
+            )
+            .await;
+
+            writer.shutdown().await.expect("shutdown writer");
+            authorized
+                .shutdown()
+                .await
+                .expect("shutdown authorized client");
+            revoked.shutdown().await.expect("shutdown revoked client");
+            restored.shutdown().await.expect("shutdown restored client");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_shape_subscriptions_route_claims_per_identity() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = branch_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let admin = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("cccccccc-cccc-4ccc-cccc-ccccccccccc1")
+                .as_admin()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let (alpha_id, _, alpha_batch) = admin
+                .insert(
+                    "rooms",
+                    row_input!("name" => "Alpha Room", "join_code" => "alpha"),
+                )
+                .expect("admin creates alpha room");
+            admin
+                .wait_for_batch(alpha_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("alpha room reaches edge");
+            let (beta_id, _, beta_batch) = admin
+                .insert(
+                    "rooms",
+                    row_input!("name" => "Beta Room", "join_code" => "beta"),
+                )
+                .expect("admin creates beta room");
+            admin
+                .wait_for_batch(beta_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("beta room reaches edge");
+
+            let query = QueryBuilder::new("rooms").build();
+
+            let simple = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("cccccccc-cccc-4ccc-cccc-ccccccccccc2")
+                .with_claims(json!({"join_code": "alpha"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut simple_stream = simple
+                .subscribe(query.clone())
+                .await
+                .expect("simple subscribes to rooms");
+            let mut simple_log = Vec::new();
+            wait_for_subscription_update(
+                &mut simple_stream,
+                &mut simple_log,
+                QUERY_TIMEOUT,
+                "simple subscription sees only alpha",
+                |updates| has_added(updates, alpha_id),
+            )
+            .await;
+            assert!(
+                !has_added(&simple_log, beta_id),
+                "simple claim route must not receive beta row: {simple_log:?}"
+            );
+            let simple_rows = simple
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("simple queries rooms");
+            assert_eq!(
+                simple_rows.iter().filter(|(id, _)| *id == alpha_id).count(),
+                1,
+                "simple one-shot should see alpha row: {simple_rows:?}"
+            );
+            assert!(
+                simple_rows.iter().all(|(id, _)| *id != beta_id),
+                "simple one-shot must not see beta row: {simple_rows:?}"
+            );
+
+            let admin_reader = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("cccccccc-cccc-4ccc-cccc-ccccccccccc3")
+                .as_admin()
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut admin_stream = admin_reader
+                .subscribe(query.clone())
+                .await
+                .expect("admin subscribes to rooms");
+            let mut admin_log = Vec::new();
+            wait_for_subscription_update(
+                &mut admin_stream,
+                &mut admin_log,
+                QUERY_TIMEOUT,
+                "admin subscription sees all rooms",
+                |updates| has_added(updates, alpha_id) && has_added(updates, beta_id),
+            )
+            .await;
+            let admin_rows = admin_reader
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("admin queries rooms");
+            assert!(
+                admin_rows.iter().any(|(id, _)| *id == alpha_id)
+                    && admin_rows.iter().any(|(id, _)| *id == beta_id),
+                "admin one-shot should see both rows: {admin_rows:?}"
+            );
+
+            let spy = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("cccccccc-cccc-4ccc-cccc-ccccccccccc4")
+                .with_claims(json!({"join_code": "spy"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let mut spy_stream = spy
+                .subscribe(query.clone())
+                .await
+                .expect("spy subscribes to rooms");
+            let mut spy_log = Vec::new();
+            wait_for_subscription_update(
+                &mut spy_stream,
+                &mut spy_log,
+                QUERY_TIMEOUT,
+                "spy subscription receives an initial empty snapshot",
+                |updates| !updates.is_empty(),
+            )
+            .await;
+            assert!(
+                !has_added(&spy_log, alpha_id) && !has_added(&spy_log, beta_id),
+                "spy subscription must not receive rows: {spy_log:?}"
+            );
+            let spy_rows = spy
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("spy queries rooms");
+            assert!(
+                spy_rows
+                    .iter()
+                    .all(|(id, _)| *id != alpha_id && *id != beta_id),
+                "spy one-shot must see no rooms: {spy_rows:?}"
+            );
+
+            admin.shutdown().await.expect("shutdown writer admin");
+            simple.shutdown().await.expect("shutdown simple");
+            admin_reader
+                .shutdown()
+                .await
+                .expect("shutdown reader admin");
+            spy.shutdown().await.expect("shutdown spy");
+            server.shutdown().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "tracking: public QueryBuilder::branch is not wired into JazzClient read/subscribe opts yet"]
+async fn explicit_branch_subscription_should_match_claims_select_query() {
+    panic!(
+        "tracking: wire QueryBuilder::branch into the core read view for both one-shot reads and subscriptions"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn numeric_claims_authorize_writes_across_core_widths() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = numeric_claims_write_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+
+            let bigint_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb2")
+                // Negative JWT integers are carried by the core as I64.
+                .with_claims(json!({"access_level": -7}))
+                .ready_on("integer_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (_, _, integer_batch) = bigint_claim_user
+                .insert(
+                    "integer_claim_rows",
+                    row_input!("access_level" => Value::Integer(-7)),
+                )
+                .expect("I64 claim creates I32 row");
+            bigint_claim_user
+                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("I64 claim matches I32 write policy");
+
+            let integer_claim_user = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb3")
+                // Small positive JWT integers are carried by the core as U32.
+                .with_claims(json!({"access_level": 7}))
+                .ready_on("bigint_claim_rows", READY_TIMEOUT)
+                .connect()
+                .await;
+            let (_, _, bigint_batch) = integer_claim_user
+                .insert(
+                    "bigint_claim_rows",
+                    row_input!("access_level" => Value::BigInt(7)),
+                )
+                .expect("U32 claim creates I64 row");
+            integer_claim_user
+                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("U32 claim matches I64 write policy");
+
+            bigint_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown bigint claim user");
+            integer_claim_user
+                .shutdown()
+                .await
+                .expect("shutdown integer claim user");
+            server.shutdown().await;
+        })
+        .await;
+}

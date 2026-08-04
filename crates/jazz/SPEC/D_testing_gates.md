@@ -10,80 +10,64 @@ detail rather than duplicating it.
 
 Invariant digest:
 
-- `INV-TEST-1`: m3seededrunisdeterministicforfixedseed proves bit-for-bit replay; lensparallelmaterializationoraclematchesenginereadsseeded is the schema/lens seeded oracle gate.
-- `INV-TEST-2`: Node-core simulation must be deterministic: time, randomness, and delivery order are injected by drivers, and failure to replay bit-for-bit is a bug. This is a guidanc...
-- `INV-TEST-3`: Every consistency claim gets randomized oracle coverage; the oracle suite covers domination, merge convergence, exclusive validation, and sync convergence.
-- `INV-TEST-4`: Jazz gates (cargo test -p jazz, scenario smoke, workspace clippy, seeded sync sweep) are local-only until CI closes the groove-only gap. This is a guidance/process anc...
+- `INV-TEST-1`: Fixed-seed simulation and schema/lens materialization checks MUST replay deterministically.
+- `INV-TEST-2`: Node-core simulation MUST be deterministic under driver-supplied time, randomness, and delivery order.
+- `INV-TEST-3`: Every consistency claim MUST have randomized oracle coverage.
+- `INV-TEST-4`: The canonical local gate set MUST be maintained as the pre-push verification contract, and any difference from CI MUST be explicit.
 
 ## Details
 
-### D.1 The local gate stack
+### D.1 Canonical gate source
 
-The local gate stack is ordered so cheap, broad failures surface before more
-specialized simulation checks. From the repository root, run:
+`.claude/CLAUDE.md` is the operational source of truth for the repository's
+canonical gates. This appendix mirrors that source for SPEC readers; if the two
+diverge, update this appendix from `.claude/CLAUDE.md` rather than treating the
+appendix as authoritative.
 
-1. `cargo fmt --all --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test -p groove` · `cargo test -p jazz` ·
-   `cargo test -p jazz-server`
-4. `cargo test --doc -p groove` · `cargo test --doc -p jazz` (when public
-   examples/docs change)
-5. `node jazz/fixtures/js/decode_abi_fixtures.js`
-6. `scripts/test_wasm_bindings.sh` when binding ABI/example code changes
-7. `cargo test -p jazz-sim --test scenario_smoke`
-8. `JAZZ_SEED_COUNT=<n> cargo test -p jazz m3_seeded_sync` when widening the
-   seeded sync sweep beyond the fixed default crate-test coverage
+For ordinary Rust/core work, the full gate set is:
+
+1. `cargo test -p jazz`
+2. `cargo test -p groove`
+3. `cargo test -p jazz --no-default-features --features test`
+4. `cargo test -p jazz-server`
+5. `cargo check -p jazz-sim --benches`
+6. `dev/gates/ts-wire-codec.sh`
+7. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+8. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
+9. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
+   through the optional lefthook hook
+
+Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine,
+storage, or benchmark harnesses. A change to a public `jazz` type additionally
+gates the full workspace, including examples.
+
+Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
+replacing the former fixed `-j 2` guidance.
 
 ### D.2 The tiers
 
-- **Crate tests** — unit tests and `tests/` integration tests for `groove` and
-  `jazz`.
-- **Doctests** — public examples and API documentation, gated when those
-  surfaces change.
-- **Scenario smoke** — the scenario benchmark modules compile as tests and run
-  small correctness profiles cheaply: `s1_saas_smoke`,
-  `s1_saas_db_surface_smoke`,
-  `s2_canvas_smoke`, `s3_permissions_smoke`,
-  `s4_order_processing_smoke_debug_profile`, `s5_durable_stream_smoke`,
-  `s6_text_traces_smoke`, `s7_migrations_smoke`, `s9_durable_execution_smoke`
-  (no S8 — no harness yet). Binding gates should be rebuilt around direct
-  WASM/NAPI-style object wrappers plus decoded row-record payloads.
-- **Binding payload surface** — focused tests should prove core payload round
-  trips for row batches, encoded patches, subscription events, write state, and
-  structured errors. Direct binding behavior belongs in WASM/NAPI wrapper tests,
-  not in a Rust command runtime.
-  that drives `Db::tick` and decodes emitted wire frames, plus a memory storage
-  snapshot import/export round trip that reopens readable rows.
-- **Seeded deterministic sweep** — `m3_seeded_sync_interleavings_converge_against_oracle`
-  drives seeded duplication, reordering, and redelivery, then asserts
-  convergence against the oracle. `JAZZ_SEED=<u64>` forces a single replay,
-  `JAZZ_SEED_COUNT` widens the sweep, and `JAZZ_COMMIT_COUNT` deepens each seed
-  (default 24). A separate
-  `m3_seeded_run_is_deterministic_for_fixed_seed` proves bit-for-bit replay
-  (`INV-TEST-1`), while
-  `lens_parallel_materialization_oracle_matches_engine_reads_seeded` serves as
-  the schema/lens seeded oracle gate.
-- **DTO/wire fixture gates** — future fixture tests should prove checked-in
-  postcard canaries still decode to expected protocol and binding DTO shapes.
-  payload fixtures should be generated directly from core APIs and cover future
-  row-record binding payloads plus wire `WireFrame` envelopes.
-- **TS/WASM binding harness** — `scripts/test_wasm_bindings.sh` should be rebuilt
-  around direct object bindings: the alpha-shaped Node todo gate, browser-worker
-  package, and WASM/NAPI wrappers over real `Db`/subscription/transport objects.
-  The harness should rebuild `jazz-wasm` for Node and web targets, typecheck the
-  TypeScript examples, pump an alpha-style local-first todo flow through byte transport,
-  exercise alpha todo bool equality and title `contains` reads, cover
-  shared-with-me access through `todo_shares`, verify deterministic
-  identity-scoped policy reads through `dbReadForIdentity`, assert
-  identity-scoped update dry-runs through `dbCanUpdateEncodedForIdentity`,
-  exercise the alpha in-process server facade plus HTTP/SSE server gate
-  including snapshot-backed restart, spawn a Rust `jazz-server` loopback
-  WebSocket listener and prove two-client todo convergence plus durable todo/chat
-  restart through binary `WireFrame` messages, bundle the browser scaffold, and
-  run headless Chromium smokes against the Web Worker-backed scenario and
-  snapshot-backed reload
-  persistence. Use `scripts/test_wasm_bindings.sh --install` on a fresh
-  checkout to run `npm ci` in each example package before the gates.
+- **Crate tests** — integration and crate tests for `jazz`, `groove`,
+  `jazz-tools` with its `test` feature, and `jazz-server`.
+- **Bench API compilation** — `cargo check -p jazz-sim --benches` is always in
+  the ordinary gate set because benchmark API rot has previously hidden until
+  late in a lane.
+- **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
+  TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
+  this gate and no legacy JS ABI decoder or WASM binding script.
+- **Maintained-vs-one-shot oracle** —
+  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  is the canonical randomized equivalence gate; `JAZZ_SEED_COUNT=2000` is the
+  wide soak form.
+- **Incremental delivery canary** —
+  `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
+  enforces `groove/SPEC/INVARIANTS.md::INV-INC-1` for relation/include delivery.
+- **Sensitive-data guard** — the guard in `jazz-private/dev/gates/` keeps
+  customer-specific fixture names, domains, and ids out of the public
+  repository.
+- **Benchmark smoke** — `dev/benchmarks/smoke.sh` is conditional on changes to
+  protocol, engine, storage, or benchmark harnesses.
+- **Public type changes** — changes to public `jazz` types additionally gate the
+  full workspace, including examples.
 - **Server shell** — `cargo test -p jazz-server` exercises the in-memory Rust
   server shell over the public frame pump, including subscriber accept, detach
   for resume, resume-token rejection, drain/health transitions, and metrics. It
@@ -106,14 +90,23 @@ spawns inside node logic. A failure to replay bit-for-bit is itself a bug
 (`INV-TEST-2`). The three driver modes provide complementary evidence:
 **deterministic** runs use a stable order, **fuzz** runs inject seeded
 duplication/reordering/redelivery, and **threaded** runs exercise load realism.
-Wide soaks run `--release` (e.g. `JAZZ_SEED_COUNT=1000 cargo test --release -p
-jazz m3_seeded_sync`).
+Wide soaks use the maintained-vs-one-shot oracle form named above, alongside the
+existing M3 soak conventions.
+
+**Implementation status (verified).**
+`m3_seeded_run_is_deterministic_for_fixed_seed` and
+`m3_maintained_one_shot_differential_oracle` exercise deterministic replay and
+randomized maintained-vs-one-shot equivalence.
 
 ### D.4 Oracle norm and public-surface preference
 
 Every consistency claim gets randomized oracle coverage. The coverage includes
 domination, merge convergence, exclusive validation, and sync convergence
 (`INV-TEST-3`).
+
+**Implementation status (verified).**
+`m3_seeded_sync_interleavings_converge_against_oracle` is the seeded sync
+oracle test.
 
 Tests prefer the public surfaces: the jazz `Db` facade and groove `Database`.
 The SaaS `Db` smoke test is the model: subscribe via `db.subscribe`, mutate
@@ -125,22 +118,16 @@ lower-level tests that best pin an invariant.
 ### D.5 Current CI gap
 
 The required local gates and the GitHub Actions workflow are not equivalent yet.
-GitHub Actions runs rustfmt, groove clippy/tests/bench-smoke, jazz crate tests
-(`cargo test -p jazz`), jazz-server crate tests (`cargo test -p jazz-server`),
-the JS ABI fixture decoder canary, and the jazz scenario smoke tier (`cargo test
--p jazz-sim --test scenario_smoke`). Workspace clippy, conditional doctests, and
-the TS/WASM binding harness are still local pre-merge discipline
-(`INV-TEST-4` would require closing that gap fully). The default jazz crate test
-run includes the fixed-seed sync sweep.
+The canonical set above is the pre-push discipline mirrored from
+`.claude/CLAUDE.md`; this distinction remains explicit as required by
+`INV-TEST-4`.
 
 ## Open Questions
 
 ### Open questions
 
-- 🔶 **CI scope.** Should CI run workspace clippy, or keep it as pre-merge
-  discipline?
-- 🔶 **Fixed-seed count.** Earlier docs said seven fixed M3 seeds; the code
-  defines eight. Reconcile, and pin the canonical count in D.2.
+- 🔶 **CI scope.** Decide which canonical local gates should become GitHub
+  Actions gates.
 - 🔶 **Test catalogue ownership.** The old test-catalogue inventory is folded
   here: keep tests organized by public contract owner, not by historical module,
   and prefer black-box integration coverage for Rust crate behavior.

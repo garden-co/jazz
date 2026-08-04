@@ -6,7 +6,10 @@ export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
   const [showDoneOnly, setShowDoneOnly] = useState(false);
   const trimmedFilterTitle = filterTitle.trim();
-  let todosQuery = app.todos.limit(100);
+  // The maintained-subscription engine only lowers windowed (limit) views that
+  // have a deterministic order — an unordered limit(100) is rejected with
+  // "maintained subscription view window shape is not lowered yet".
+  let todosQuery = app.todos.orderBy("title", "asc").limit(100);
   if (trimmedFilterTitle) {
     todosQuery = todosQuery.where({ title: { contains: trimmedFilterTitle } });
   }

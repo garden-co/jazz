@@ -2403,6 +2403,9 @@ fn apply_db_subscription_event(
                 current.insert(row.row_uuid(), row);
             }
         }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("subscription rejected unexpectedly: {reason:?}")
+        }
         SubscriptionEvent::Closed => {}
     }
 }

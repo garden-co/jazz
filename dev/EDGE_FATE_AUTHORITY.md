@@ -39,11 +39,11 @@ Current focused result:
 
 ## Review Lesson
 
-The first fix was over-broad: it used the peer role as the authority discriminator. That is wrong because ordinary client links on core servers and client links terminated by edge servers both carry the same link-level role; only host wiring decides whether that link has edge fate authority. `crates/jazz-server/tests/cli_dry_run.rs::server_command_loads_published_schema_and_persists_ws_data_across_restart` correctly caught this by exercising a core-role durable server: client uploads there must keep the generic core authority path and settle at `Global`.
+The first fix was over-broad: it used the peer role as the authority discriminator. That is wrong because ordinary client links on core servers and client links terminated by edge servers both carry the same link-level role; only host wiring decides whether that link has edge fate authority. `crates/jazz/tests/cli_dry_run.rs::server_command_loads_published_schema_and_persists_ws_data_across_restart` correctly caught this by exercising a core-role durable server: client uploads there must keep the generic core authority path and settle at `Global`.
 
 ## Wiring Diff Summary
 
-- `crates/jazz-server/src/lib.rs`
+- `crates/jazz/src/serving/mod.rs`
   - `NodeRole::Edge` session links now call the DB edge-authority subscriber admission helper.
   - `NodeRole::Core` session links continue to use the generic subscriber admission path.
 
@@ -56,7 +56,7 @@ The first fix was over-broad: it used the peer role as the authority discriminat
 - `crates/jazz/src/node/mod.rs`
   - `CommitUnitIngestContext` includes the host-wired `edge_authority` discriminator.
 
-- `crates/jazz-server/tests/edge_fate_authority.rs`
+- `crates/jazz/tests/edge_fate_authority.rs`
   - Added the server-shell regression covering client A -> edge -> core and client B subscribed globally on the same edge.
   - Added the core-role discriminator test proving the same client upload on a core shell still reaches `Global`.
 
@@ -67,50 +67,33 @@ The first fix was over-broad: it used the peer role as the authority discriminat
 
 ## Gate Table
 
-| Gate | Result |
-| --- | --- |
+| Gate                                                                                                                                     | Result             |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
 | `cargo test -p jazz-server --test edge_fate_authority edge_shell_does_not_report_global_or_serve_global_before_core_ack -j 2` before fix | failed, exit `101` |
-| `cargo test -p jazz-server --test edge_fate_authority -j 2` | passed, exit `0` |
-| `cargo test -p jazz-server -j 2` | passed, exit `0` |
-| `cargo test -p jazz -j 2` | passed, exit `0` |
-| `cargo test -p jazz --test four_tier -j 2` | passed, exit `0` |
-| `cargo test -p jazz --test incremental_delivery_canary -j 2` | passed, exit `0` |
-| `cargo test -p groove -j 2` | passed, exit `0` |
-| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2` | passed, exit `0` |
-| `cargo check -p jazz-sim --benches -j 2` | passed, exit `0` |
-| `cargo fmt -p jazz -p jazz-server` | passed, exit `0` |
-| `cargo fmt --check -p jazz -p jazz-server` | passed, exit `0` |
+| `cargo test -p jazz-server --test edge_fate_authority -j 2`                                                                              | passed, exit `0`   |
+| `cargo test -p jazz-server -j 2`                                                                                                         | passed, exit `0`   |
+| `cargo test -p jazz -j 2`                                                                                                                | passed, exit `0`   |
+| `cargo test -p jazz --test four_tier -j 2`                                                                                               | passed, exit `0`   |
+| `cargo test -p jazz --test incremental_delivery_canary -j 2`                                                                             | passed, exit `0`   |
+| `cargo test -p groove -j 2`                                                                                                              | passed, exit `0`   |
+| `JAZZ_SEED_COUNT=100 cargo test -p jazz m3_maintained_one_shot_differential_oracle -j 2`                                                 | passed, exit `0`   |
+| `cargo check -p jazz-sim --benches -j 2`                                                                                                 | passed, exit `0`   |
+| `cargo fmt -p jazz -p jazz-server`                                                                                                       | passed, exit `0`   |
+| `cargo fmt --check -p jazz -p jazz-server`                                                                                               | passed, exit `0`   |
 
 ## Fold-ins
 
 ### Naming Decision
 
-`PeerState::for_author` was removed instead of deprecated. Its replacement is
-`PeerState::client_link(identity)`: ch. 9 uses "client" for a client-attached
-edge/server link, and "link" keeps the name scoped to transport identity instead
-of implying fate authority. Edge-specific construction sites still call
-`PeerState::edge_client(identity)` explicitly.
-
-`PeerRole::EdgeClient` was renamed to `PeerRole::ClientLink`. Post-fix, this
-role is used for any author-terminated client link on core or edge servers; edge
-fate authority now comes only from host-shell wiring via
-`CommitUnitIngestContext::edge_authority`.
+`PeerState::for_author` was removed in favor of `PeerState::client_link(identity)`:
+“client link” describes the transport identity without implying fate authority.
+`PeerRole::EdgeClient` was correspondingly renamed to `PeerRole::ClientLink`.
+The role covers client links on both core and edge servers; edge fate authority
+comes only from `CommitUnitIngestContext::edge_authority` supplied by the host.
 
 ### Implementation Discipline
 
-Added `crates/jazz/SPEC/A_impl_discipline.md` section A.8, establishing the
-production-shell wiring canary convention. The edge-fate case is cited as the
-motivating example because hand-wired harness tests used the intended topology
-but could not catch the production server shell routing client uploads through
-the wrong authority path.
-
-### Fold-in Gate Table
-
-| Gate | Result |
-| --- | --- |
-| `cargo test -p jazz -j 2` | passed, exit `0` |
-| `cargo test -p jazz-server -j 2` | passed, exit `0` |
-| `cargo test -p jazz --test four_tier -j 2` | passed, exit `0` |
-| `cargo test -p groove -j 2` | passed, exit `0` |
-| `cargo check -p jazz-sim --benches -j 2` | passed, exit `0` |
-| `cargo fmt --check -p jazz -p jazz-server -p groove` | passed, exit `0` |
+The production-shell wiring-canary convention in
+`crates/jazz/SPEC/A_impl_discipline.md` is motivated by this regression:
+hand-wired topology tests exercised the intended path but could not catch a
+production shell routing uploads through the wrong authority path.

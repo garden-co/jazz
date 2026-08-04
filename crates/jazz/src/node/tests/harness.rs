@@ -26,11 +26,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 include!("support.rs");
 include!("catalogue_lenses.rs");
+include!("lens_projected_maintained.rs");
 include!("branching.rs");
 include!("time_travel.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
+include!("mergeable_open_transactions.rs");
 include!("policies_rls.rs");
+include!("write_policy_lowering.rs");
 include!("sync.rs");
 include!("m3_differential.rs");
 include!("counter_merge.rs");

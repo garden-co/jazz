@@ -10,6 +10,7 @@ bench-alloc-sites = ["dep:backtrace"]
 profiling = ["dep:pprof"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
+cold-settle-attribution = ["jazz/cold-settle-attribution"]
 
 [dependencies]
 automerge = "0.10.0"

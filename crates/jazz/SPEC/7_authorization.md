@@ -27,11 +27,15 @@ Invariant digest:
 - `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
-- `INV-RLS-14`: Policy predicate direct evaluation in the node policy engine MUST treat unsupported predicate/operator forms and unresolved operands as denial, not allowance.
+- `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
 - `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
+  reader only when its target row exists as a current row AND satisfies the target
+  table's read policy for that reader; a parent whose required target is missing or
+  unreadable MUST be dropped from the result set.
 
 ## Details
 
@@ -55,16 +59,21 @@ operand is the authenticated `AuthorId`, not a caller-supplied parameter
 it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
 
-Policy evaluation is **fail-closed**: an unsupported predicate/operator form or
-an unresolved operand denies rather than allows (`INV-RLS-14`). Direct policy
-evaluation supports equality and inequality, membership/containment predicates,
-boolean composition, columns, literals, and authenticated/admission-controlled
-claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over column / literal /
-`claim(...)`. `claim("sub")` resolves to the authenticated `AuthorId`.
-Additional claim names are runtime session claims supplied by the trusted
+Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
+a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
+this is enforced during policy compilation and claim binding: unsupported
+authorization forms compile to no authorized rows in
+`NodeState::policy_filtered_current_source_graph_via_query_engine`, and
+`NodeState::program_binding_for_shape_and_policy` calls `prepared_claim_value`,
+which refuses an unresolved claim rather than binding it as an allowance. The
+compiler currently lowers equality and inequality, membership/containment,
+boolean composition, columns, literals, and authenticated,
+admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
+column / literal / `claim(...)`. `claim("sub")` resolves to the authenticated
+`AuthorId`. Additional claim names are session claims supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
-forms outside the supported direct-evaluation subset, such as range and null
-checks, deny until explicitly supported.
+forms the compiler cannot authorize, such as range and null checks, deny until
+explicitly supported.
 
 At the public policy DSL boundary, scalar session-claim checks lower into that
 same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
@@ -135,6 +144,16 @@ result-row add/remove, version bundle, rehydrate output, or query update
 (`INV-RLS-5`). A relay link carries `AuthorId::SYSTEM` and therefore does not
 narrow; an edge-client link narrows under its terminated `AuthorId`
 (`INV-RLS-11`, ch. 9).
+
+Include modes participate in this narrowing rather than sitting outside it. A
+required include — an `Include` with `JoinMode::Inner` or `require: true` — counts
+as resolvable for a non-system reader only when the target row both exists as a
+current row and passes the target table's read policy for that reader. A parent
+row whose required target is missing or unreadable is dropped from the result set,
+so required-include membership cannot be used as an existence oracle for a row the
+reader may not read. Optional and `Holes` includes keep the parent and withhold the
+unreadable target instead (`INV-RLS-5`), and `AuthorId::SYSTEM` bypasses the policy
+half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
 revocation removes rows from **future** settled result sets but does **not**

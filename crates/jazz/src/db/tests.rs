@@ -17,8 +17,9 @@ use crate::protocol_limits::{
     MAX_SHAPE_AST_BYTES, MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
-    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate, ShapeId,
-    all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit, lte, ne, not,
+    ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
+    RelationOrderBy, ShapeId, all_of, any_of, claim, col, contains, eq, gt, in_list, is_null, lit,
+    lte, ne, not,
 };
 use crate::schema::{Policy, TableSchema, WritePolicies};
 use crate::time::{GlobalSeq, TxTime};
@@ -144,6 +145,9 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                     snapshot.rows.remove(index);
                 }
             }
+        }
+        SubscriptionEvent::Rejected { reason } => {
+            panic!("unexpected subscription rejection while applying delta: {reason:?}")
         }
         SubscriptionEvent::Closed => {}
     }
@@ -318,6 +322,7 @@ fn ordered_limited_related_text_values(
 fn event_settled(event: &SubscriptionEvent) -> bool {
     match event {
         SubscriptionEvent::Delta { settled, .. } => *settled,
+        SubscriptionEvent::Rejected { .. } => false,
         SubscriptionEvent::Closed => false,
     }
 }
@@ -388,6 +393,37 @@ fn assert_subscribe_rejected_branch_overlay(
             assert_eq!(subscription, expected_subscription);
             assert!(
                 detail.contains("BranchOverlay"),
+                "unexpected rejection detail: {detail}"
+            );
+        }
+        other => panic!("expected SubscribeRejected, got {other:?}"),
+    }
+}
+
+fn assert_subscribe_rejected_unsupported_window(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+) {
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        message,
+        expected_subscription,
+        "maintained subscription view window shape is not lowered yet",
+    );
+}
+
+fn assert_subscribe_rejected_unsupported_shape_capability_detail(
+    message: SyncMessage,
+    expected_subscription: SubscriptionKey,
+    expected_detail: &str,
+) {
+    match message {
+        SyncMessage::SubscribeRejected {
+            subscription,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        } => {
+            assert_eq!(subscription, expected_subscription);
+            assert!(
+                detail.contains(expected_detail),
                 "unexpected rejection detail: {detail}"
             );
         }
@@ -1158,7 +1194,7 @@ fn relation_hop_schema() -> JazzSchema {
             "teams",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("org_id", ColumnType::Uuid),
+                ColumnSchema::new("org_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("org_id", "orgs")
@@ -1168,7 +1204,7 @@ fn relation_hop_schema() -> JazzSchema {
             "users",
             [
                 ColumnSchema::new("name", ColumnType::String),
-                ColumnSchema::new("team_id", ColumnType::Uuid),
+                ColumnSchema::new("team_id", ColumnType::Nullable(Box::new(ColumnType::Uuid))),
             ],
         )
         .with_reference("team_id", "teams")
@@ -2072,7 +2108,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2081,7 +2120,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2167,6 +2209,10 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
 fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = users_to_orgs_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
     db.insert_with_id(
         "orgs",
         row(0x01),
@@ -2178,7 +2224,10 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
-            ("org_id".to_owned(), Value::Uuid(row(0x01).0)),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
         ]),
     )
     .unwrap();
@@ -2187,14 +2236,14 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
         row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
-            ("team_id".to_owned(), Value::Uuid(row(0x11).0)),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
         ]),
     )
     .unwrap();
 
-    let query = users_to_orgs_relation_query();
-
-    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     let opened = opened_rows(stream.try_next_event().expect("opened event"));
     assert_eq!(row_ids(&opened), vec![row(0x01)]);
 }
@@ -2204,9 +2253,22 @@ fn users_to_orgs_relation_query() -> RelationQuery {
         rel: RelationExpr::Project {
             input: Box::new(RelationExpr::Join {
                 left: Box::new(RelationExpr::Join {
-                    left: Box::new(RelationExpr::TableScan {
-                        table: "users".to_owned(),
-                        alias: None,
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "users".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("users".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::Literal(serde_json::json!({
+                                "type": "Uuid",
+                                "value": row(0x21).0.to_string(),
+                            })),
+                        },
                     }),
                     right: Box::new(RelationExpr::TableScan {
                         table: "teams".to_owned(),
@@ -2256,6 +2318,221 @@ fn users_to_orgs_relation_query() -> RelationQuery {
                     }),
                 },
             ],
+        },
+    }
+}
+
+#[test]
+fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscriptions() {
+    // This is an integration-level facade test: the public relation-query read
+    // and subscription APIs must both use the same maintained reachability
+    // program for the canonical gather IR emitted by the TypeScript builder.
+    let schema = JazzSchema::new([TableSchema::new(
+        "teams",
+        [
+            ColumnSchema::new("name", ColumnType::String),
+            ColumnSchema::new(
+                "parent_id",
+                ColumnType::Nullable(Box::new(ColumnType::Uuid)),
+            ),
+        ],
+    )
+    .with_reference("parent_id", "teams")
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = teams_gather_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
+    let root = row(0x01);
+    let middle = row(0x02);
+    let leaf = row(0x03);
+    db.insert_with_id(
+        "teams",
+        root,
+        BTreeMap::from([("name".to_owned(), Value::String("root".to_owned()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        middle,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("middle".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "teams",
+        leaf,
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("leaf".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(middle.0)))),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let changed = opened_rows(stream.try_next_event().expect("gathered rows event"));
+    assert_eq!(
+        row_ids(&changed).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let filtered_query = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Ne,
+                right: RelationValueRef::Literal(serde_json::Value::String("middle".to_owned())),
+            },
+        },
+    };
+    let filtered = block_on(db.all_relation_query(&filtered_query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&filtered.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, leaf])
+    );
+
+    let or_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Or(vec![
+                RelationPredicate::True,
+                RelationPredicate::False,
+            ]),
+        },
+    };
+    let unfiltered = block_on(db.all_relation_query(&or_true, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&unfiltered.rows)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let not_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Not(Box::new(RelationPredicate::True)),
+        },
+    };
+    let empty = block_on(db.all_relation_query(&not_true, ReadOpts::default())).unwrap();
+    assert!(empty.rows.is_empty());
+
+    let filter_after_limit = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel.clone()),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                limit: 1,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("root".to_owned())),
+            },
+        },
+    };
+    let error =
+        block_on(db.all_relation_query(&filter_after_limit, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("gather output filters cannot wrap limit or offset")
+    );
+}
+
+fn teams_gather_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("teams".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::Value::String("leaf".to_owned())),
+                },
+            }),
+            step: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "teams".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::And(vec![RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("teams".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                        }]),
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "teams".to_owned(),
+                        alias: Some("__recursive_hop_0".to_owned()),
+                    }),
+                    on: vec![crate::query::RelationJoinCondition {
+                        left: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "parent_id".to_owned(),
+                        },
+                        right: RelationColumnRef {
+                            scope: Some("__recursive_hop_0".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__recursive_hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                }],
+            }),
+            frontier_key: crate::query::RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: crate::query::RecursionBound::MaxDepth(10),
+            dedupe_key: vec![crate::query::RelationKeyRef::RowId(
+                RelationRowIdRef::Current,
+            )],
         },
     }
 }
@@ -3479,7 +3756,7 @@ fn mergeable_tx_commits_multiple_writes_under_one_tx_id() {
     let table = &doctest_support::schema().tables[0];
     let row_one = row(1);
     let row_two = row(2);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row_one, doctest_support::todo_cells("one", false))
         .unwrap();
@@ -3513,7 +3790,7 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("draft", false))
         .unwrap();
@@ -3553,7 +3830,7 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     db.delete("todos", row).unwrap();
     assert!(prepared_read(&db, &db.table("todos")).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     tx.restore("todos", row, doctest_support::todo_cells("restored", false))
         .unwrap();
     tx.update(
@@ -3600,7 +3877,7 @@ fn mergeable_tx_coalesces_repeated_same_row_updates() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
 
     tx.insert_with_id("todos", row, doctest_support::todo_cells("first", false))
         .unwrap();
@@ -3642,7 +3919,7 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
 
     db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
         .unwrap();
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     tx.update(
         "todos",
         row,
@@ -3660,6 +3937,183 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
     assert_eq!(tx.tx_id, tx_id);
     assert_eq!(tx.n_total_writes, 1);
     assert_eq!(versions.len(), 1);
+}
+
+#[test]
+fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
+    let builder = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let handle = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let restored = row(1);
+    let reinserted = row(2);
+
+    for db in [&builder, &handle] {
+        db.insert_with_id(
+            "todos",
+            restored,
+            doctest_support::todo_cells("archived", false),
+        )
+        .unwrap();
+        db.delete("todos", restored).unwrap();
+        db.insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("original", false),
+        )
+        .unwrap();
+    }
+
+    let builder_tx = builder.mergeable_tx().unwrap();
+    builder_tx
+        .restore(
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+        )
+        .unwrap();
+    builder_tx
+        .update(
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    builder_tx.delete("todos", reinserted).unwrap();
+    builder_tx
+        .insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+        )
+        .unwrap();
+    builder_tx.commit().unwrap();
+
+    let open_tx = handle.begin_mergeable().unwrap();
+    {
+        let tx = handle.mergeable_tx_ref(open_tx);
+        tx.restore(
+            "todos",
+            restored,
+            doctest_support::todo_cells("restored", false),
+        )
+        .unwrap();
+        tx.update(
+            "todos",
+            restored,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+        tx.delete("todos", reinserted).unwrap();
+        tx.insert_with_id(
+            "todos",
+            reinserted,
+            doctest_support::todo_cells("reinserted", true),
+        )
+        .unwrap();
+    }
+    handle.commit_mergeable_handle(open_tx).unwrap();
+
+    let read_state = |db: &Db<_>| {
+        let query = db.prepare_query(&db.table("todos")).unwrap();
+        doctest_support::block_on(db.all(
+            &query,
+            ReadOpts {
+                include_deleted: true,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                (
+                    row.is_deleted(),
+                    row.cell(table, "title"),
+                    row.cell(table, "done"),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
+    };
+
+    let builder_state = read_state(&builder);
+    let handle_state = read_state(&handle);
+    assert_eq!(builder_state, handle_state);
+    assert_eq!(
+        builder_state.get(&restored),
+        Some(&(
+            false,
+            Some(Value::String("restored".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+    assert_eq!(
+        builder_state.get(&reinserted),
+        Some(&(
+            true,
+            Some(Value::String("reinserted".to_owned())),
+            Some(Value::Bool(true)),
+        ))
+    );
+}
+
+#[test]
+fn mergeable_tx_read_observes_its_staged_restore() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let row = row(1);
+
+    db.insert_with_id("todos", row, doctest_support::todo_cells("archived", false))
+        .unwrap();
+    db.delete("todos", row).unwrap();
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.restore("todos", row, doctest_support::todo_cells("restored", false))
+        .unwrap();
+    tx.update(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        tx.read("todos", row).unwrap(),
+        Some(doctest_support::todo_cells("restored", true))
+    );
+}
+
+#[test]
+fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let table = &doctest_support::schema().tables[0];
+    let row = row(1);
+
+    db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
+        .unwrap();
+
+    let open_tx = db.begin_exclusive().unwrap();
+    {
+        let tx = db.exclusive_tx_ref(open_tx);
+        assert_eq!(
+            tx.read("todos", row).unwrap(),
+            Some(doctest_support::todo_cells("base", false))
+        );
+        tx.update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    }
+    db.commit_exclusive_handle(open_tx).unwrap();
+
+    let current = prepared_one(&db, &db.table("todos")).unwrap();
+    assert_eq!(
+        current.cell(table, "title"),
+        Some(Value::String("base".to_owned()))
+    );
+    assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
 }
 
 #[test]
@@ -4118,7 +4572,7 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
 
-    let mut tx = db.mergeable_tx();
+    let tx = db.mergeable_tx().unwrap();
     for index in 0..100u8 {
         tx.insert_with_id(
             "todos",
@@ -4736,6 +5190,34 @@ fn subscribe_uses_prepared_non_simple_plan() {
             .borrow()
             .prepared_query_plan_cache_is_empty_for_test(),
         "initial subscribe read should consume the stored prepared plan"
+    );
+}
+
+#[test]
+fn subscription_reset_preserves_ordered_window_rank() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0xa3, author, &schema);
+    for (id, title) in [(4, "alpha"), (1, "bravo"), (3, "charlie"), (2, "delta")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "todos",
+            row(id),
+            author,
+            cells(title, false, author),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos")
+        .order_by("title", OrderDirection::Asc)
+        .offset(1)
+        .limit(2);
+    let mut subscription = prepared_subscribe(&db, &query, global_subscribe_opts()).unwrap();
+
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        vec![row(1), row(3)],
+        "reset rows must retain the selected ordered window rather than member-key order"
     );
 }
 
@@ -5777,6 +6259,137 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
 }
 
 #[test]
+fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let db = open_db(0x51, owner, &schema);
+    let (client_transport, mut server_transport) = duplex();
+    let upstream = db.connect_upstream(client_transport);
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("local subscription should open before upstream response");
+    assert!(matches!(
+        block_on(subscription.next_event()),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    upstream.borrow_mut().tick().unwrap();
+    let mut subscribed = None;
+    while let Some(message) = server_transport.try_recv() {
+        if let SyncMessage::Subscribe(subscribe) = message {
+            subscribed = Some(subscribe.subscription);
+        }
+    }
+    let subscribed = subscribed.expect("expected upstream subscribe command");
+
+    server_transport
+        .send(SyncMessage::SubscribeRejected {
+            subscription: subscribed,
+            reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                detail: "server does not support this maintained shape".to_owned(),
+            },
+        })
+        .unwrap();
+    upstream.borrow_mut().tick().unwrap();
+
+    match block_on(subscription.next_event()) {
+        Some(SubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
+        }) => assert_eq!(detail, "server does not support this maintained shape"),
+        other => panic!("expected stream-carried rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn subscriber_connection_rejects_unsupported_maintained_shape_and_keeps_serving_others() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("first", false, owner));
+    seed(&server, "todos", cells("second", false, owner));
+
+    // Protocol-level coverage: jazz-tools subscriptions do not expose raw
+    // SubscribeRejected messages, so this exercises the first layer where the
+    // rejection is directly observable while still using public query builders.
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let supported_shape = Query::from("todos").validate(&schema).unwrap();
+    let unsupported_shape = Query::from("todos")
+        .offset(1)
+        .limit(1)
+        .validate(&schema)
+        .unwrap();
+    let supported_binding = supported_shape.bind(BTreeMap::new()).unwrap();
+    let unsupported_binding = unsupported_shape.bind(BTreeMap::new()).unwrap();
+    let supported_subscription = SubscriptionKey {
+        shape_id: supported_shape.shape_id(),
+        binding_id: supported_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+    let unsupported_subscription = SubscriptionKey {
+        shape_id: unsupported_shape.shape_id(),
+        binding_id: unsupported_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: unsupported_shape.shape_id(),
+            ast: ShapeAst::from_validated(&unsupported_shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: supported_shape.shape_id(),
+            ast: ShapeAst::from_validated(&supported_shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: supported_shape.shape_id(),
+            subscription: supported_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_subscribe_rejected_unsupported_window(
+        client_transport
+            .try_recv()
+            .expect("expected unsupported shape rejection"),
+        unsupported_subscription,
+    );
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("expected supported subscription update after rejection"),
+        supported_subscription,
+    );
+
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: unsupported_shape.shape_id(),
+            subscription: unsupported_subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    seed(&server, "todos", cells("third", false, owner));
+    subscriber.borrow_mut().tick().unwrap();
+    assert_view_update_for_subscription(
+        client_transport
+            .try_recv()
+            .expect("supported subscription should continue after unsupported subscribe"),
+        supported_subscription,
+    );
+}
+
+#[test]
 fn subscriber_connection_rejects_local_tier_register_shape() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -5794,6 +6407,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         tier: DurabilityTier::Local,
         read_view: ReadViewSpec::default(),
     };
+    let rejected_read_view = opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
@@ -5804,13 +6418,16 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_eq!(
-        server
-            .node()
-            .borrow()
-            .sync_metrics()
-            .dropped_peer_request_messages,
-        1
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        client_transport
+            .try_recv()
+            .expect("expected local-tier registration rejection"),
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::nil()),
+            read_view: rejected_read_view,
+        },
+        "global-tier registration",
     );
 
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -6170,6 +6787,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
         tier: DurabilityTier::Edge,
         read_view: ReadViewSpec::default(),
     };
+    let rejected_read_view = edge_opts.read_view_key();
 
     client_transport
         .send(SyncMessage::RegisterShape {
@@ -6180,13 +6798,16 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_eq!(
-        server
-            .node()
-            .borrow()
-            .sync_metrics()
-            .dropped_peer_request_messages,
-        1
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        client_transport
+            .try_recv()
+            .expect("expected edge-tier registration rejection"),
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::nil()),
+            read_view: rejected_read_view,
+        },
+        "global-tier registration",
     );
 }
 
@@ -8823,6 +9444,9 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
                 removed,
                 ..
             } => (added, updated, removed),
+            SubscriptionEvent::Rejected { reason } => {
+                panic!("unexpected subscription rejection: {reason:?}")
+            }
             SubscriptionEvent::Closed => (Vec::new(), Vec::new(), Vec::new()),
         };
         assert!(added.is_empty());

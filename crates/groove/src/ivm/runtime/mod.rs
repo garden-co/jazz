@@ -27,7 +27,8 @@ use crate::ivm::{
     IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
     NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
     ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp,
+    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
+    UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
     self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
@@ -1688,12 +1689,14 @@ impl IvmRuntime {
                             input: *left,
                             fields: Arc::from(plan_expr_names(&join.left_key)),
                             descriptor: join.left_descriptor,
+                            comparison: join.comparison,
                         });
                         referenced.insert(ArrangementKey {
                             scope: ScopeId::root(),
                             input: *right,
                             fields: Arc::from(plan_expr_names(&join.right_key)),
                             descriptor: join.right_descriptor,
+                            comparison: join.comparison,
                         });
                     }
                 }
@@ -1704,6 +1707,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(arg_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1714,6 +1718,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(arg_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1724,6 +1729,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(top_by.group_fields.clone()),
                             descriptor: node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -1736,6 +1742,7 @@ impl IvmRuntime {
                             input: *input,
                             fields: Arc::from(plan_expr_names(&aggregate.group_key)),
                             descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
                         });
                     }
                 }
@@ -2075,9 +2082,6 @@ impl IvmRuntime {
                 offset,
                 limit,
             } => {
-                if *limit == 0 {
-                    return Err(IvmRuntimeError::UnsupportedOperator);
-                }
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let output = inferred_output;
                 let group_field_indices = group_cols
@@ -2179,7 +2183,11 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
-            GraphBuilder::Filter { input, predicate } => {
+            GraphBuilder::Filter {
+                input,
+                predicate,
+                comparison,
+            } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_node = compiled_input.node;
                 let output = inferred_output;
@@ -2187,6 +2195,7 @@ impl IvmRuntime {
                     NodeDescriptor::new(
                         OpType::Filter(FilterOp {
                             predicate: predicate.clone(),
+                            comparison: *comparison,
                         }),
                         [input_node],
                         output,
@@ -2302,6 +2311,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2324,6 +2334,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2339,6 +2350,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2361,6 +2373,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2376,6 +2389,7 @@ impl IvmRuntime {
                 right,
                 left_on,
                 right_on,
+                comparison,
             } => {
                 let compiled_left = self.add_dedup_graph_cached(left, output_memo)?;
                 let compiled_right = self.add_dedup_graph_cached(right, output_memo)?;
@@ -2398,6 +2412,7 @@ impl IvmRuntime {
                         left_descriptor,
                         right_descriptor,
                         residual_predicate: None,
+                        comparison: *comparison,
                     }),
                     [compiled_left.node, compiled_right.node],
                     output,
@@ -2677,6 +2692,7 @@ struct ArrangementKey {
     input: NodeId,
     fields: Arc<[String]>,
     descriptor: RecordDescriptor,
+    comparison: ValueComparison,
 }
 
 /// Database tick plus recursive sub-tick for scoped arrangement freshness.
@@ -3092,46 +3108,52 @@ impl MultisinkSubscription {
 }
 
 impl PredicateExpr {
-    fn matches(&self, record: BorrowedRecord<'_>) -> Result<bool, IvmRuntimeError> {
+    fn matches(
+        &self,
+        record: BorrowedRecord<'_>,
+        comparison: ValueComparison,
+    ) -> Result<bool, IvmRuntimeError> {
         match self {
             Self::Eq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_eq())
+                compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
             }
             Self::Neq { field, value } => {
-                compare_record_field(record, field, value, |ord| !ord.is_eq())
+                compare_record_field(record, field, value, |ord| !ord.is_eq(), comparison)
             }
-            Self::Contains { field, value } => contains_record_field(record, field, value),
+            Self::Contains { field, value } => {
+                contains_record_field(record, field, value, comparison)
+            }
             Self::EqField { field, value_field } => {
-                compare_record_fields(record, field, value_field, |ord| ord.is_eq())
+                compare_record_fields(record, field, value_field, |ord| ord.is_eq(), comparison)
             }
             Self::ContainsField {
                 field,
                 needle_field,
-            } => contains_record_field_value(record, field, needle_field),
+            } => contains_record_field_value(record, field, needle_field, comparison),
             Self::NeqField { field, value_field } => {
-                compare_record_fields(record, field, value_field, |ord| !ord.is_eq())
+                compare_record_fields(record, field, value_field, |ord| !ord.is_eq(), comparison)
             }
             Self::Gt { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_gt())
+                compare_record_field(record, field, value, |ord| ord.is_gt(), comparison)
             }
             Self::GtEq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_ge())
+                compare_record_field(record, field, value, |ord| ord.is_ge(), comparison)
             }
             Self::Lt { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_lt())
+                compare_record_field(record, field, value, |ord| ord.is_lt(), comparison)
             }
             Self::LtEq { field, value } => {
-                compare_record_field(record, field, value, |ord| ord.is_le())
+                compare_record_field(record, field, value, |ord| ord.is_le(), comparison)
             }
             Self::IsNull { field } => Ok(is_sql_null_value(&record.get(field)?)),
             Self::IsNotNull { field } => Ok(!is_sql_null_value(&record.get(field)?)),
             Self::And(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record))
+                .map(|predicate| predicate.matches(record, comparison))
                 .try_fold(true, |acc, matches| matches.map(|matches| acc && matches)),
             Self::Or(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record))
+                .map(|predicate| predicate.matches(record, comparison))
                 .try_fold(false, |acc, matches| matches.map(|matches| acc || matches)),
         }
     }
@@ -3525,7 +3547,11 @@ fn lift_literal_filter(
     binding_field: &str,
 ) -> Result<Option<LiftedLiteralFilter>, IvmRuntimeError> {
     match graph {
-        GraphBuilder::Filter { input, predicate } => {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
             if let PredicateExpr::Eq { field, value } = predicate {
                 let joined =
                     literal_filter_binding_join((**input).clone(), field, value, binding_field)?;
@@ -3552,6 +3578,7 @@ fn lift_literal_filter(
                     graph: GraphBuilder::Filter {
                         input: Box::new(lifted.graph),
                         predicate: predicate.clone(),
+                        comparison: *comparison,
                     },
                     value: lifted.value,
                 }));
@@ -3564,6 +3591,7 @@ fn lift_literal_filter(
                 right,
                 left_on,
                 right_on,
+                comparison,
             } = input.as_ref()
             {
                 if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
@@ -3572,6 +3600,7 @@ fn lift_literal_filter(
                         right: right.clone(),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
+                        comparison: *comparison,
                     };
                     let mut fields =
                         project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
@@ -3591,6 +3620,7 @@ fn lift_literal_filter(
                         right: Box::new(lifted.graph),
                         left_on: left_on.clone(),
                         right_on: right_on.clone(),
+                        comparison: *comparison,
                     };
                     let mut fields =
                         project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
@@ -3608,6 +3638,7 @@ fn lift_literal_filter(
             if let GraphBuilder::Filter {
                 input: filtered_input,
                 predicate: PredicateExpr::Eq { field, value },
+                ..
             } = input.as_ref()
             {
                 let joined = literal_filter_binding_join(
@@ -3629,6 +3660,13 @@ fn lift_literal_filter(
                             field.output_name.clone(),
                             value.clone(),
                         )),
+                        ProjectExpr::TypedLiteral { value, value_type } => {
+                            Ok(ProjectField::literal_typed(
+                                field.output_name.clone(),
+                                value.clone(),
+                                value_type.clone(),
+                            ))
+                        }
                         ProjectExpr::Null(value_type) => Ok(ProjectField::null_typed(
                             field.output_name.clone(),
                             value_type.clone(),
@@ -3679,6 +3717,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
                 let original_output = runtime.infer_builder_output(graph)?;
@@ -3687,6 +3726,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 };
                 return Ok(Some(LiftedLiteralFilter {
                     graph: project_to_output_with_binding(
@@ -3705,6 +3745,7 @@ fn lift_literal_filter(
                     right: Box::new(lifted.graph),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 };
                 return Ok(Some(LiftedLiteralFilter {
                     graph: project_to_output_with_binding(
@@ -3723,6 +3764,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
                 return Ok(None);
@@ -3733,6 +3775,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 },
                 value: lifted.value,
             }))
@@ -3742,6 +3785,7 @@ fn lift_literal_filter(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
                 return Ok(None);
@@ -3752,6 +3796,7 @@ fn lift_literal_filter(
                     right: right.clone(),
                     left_on: left_on.clone(),
                     right_on: right_on.clone(),
+                    comparison: *comparison,
                 },
                 value: lifted.value,
             }))
@@ -3920,7 +3965,9 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
-                ProjectExpr::Literal(_) | ProjectExpr::Null(_) => return Ok(field.clone()),
+                ProjectExpr::Literal(_)
+                | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::Null(_) => return Ok(field.clone()),
             };
             let source = field_ref_name(&original_output, field_ref)?;
             if rewritten_output.field_index(&source).is_none() {
@@ -4054,12 +4101,17 @@ fn propagate_binding_through_frontier(
                 RecordDescriptor::new(fields),
             ))
         }
-        GraphBuilder::Filter { input, predicate } => {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
             let input =
                 propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
             Some(GraphBuilder::Filter {
                 input: Box::new(input),
                 predicate: predicate.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::Project { input, fields } => {
@@ -4102,6 +4154,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left = propagate_binding_through_frontier(
                 left,
@@ -4118,6 +4171,7 @@ fn propagate_binding_through_frontier(
                 right: Box::new(right),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::SemiJoin {
@@ -4125,6 +4179,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
@@ -4133,6 +4188,7 @@ fn propagate_binding_through_frontier(
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::AntiJoin {
@@ -4140,6 +4196,7 @@ fn propagate_binding_through_frontier(
             right,
             left_on,
             right_on,
+            comparison,
         } => {
             let left =
                 propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
@@ -4148,6 +4205,7 @@ fn propagate_binding_through_frontier(
                 right: right.clone(),
                 left_on: left_on.clone(),
                 right_on: right_on.clone(),
+                comparison: *comparison,
             })
         }
         GraphBuilder::Table { .. }
@@ -4178,9 +4236,14 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             frontier,
             max_iters,
         },
-        GraphBuilder::Filter { input, predicate } => GraphBuilder::Filter {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => GraphBuilder::Filter {
             input: Box::new(replace_binding_shape(*input, shape)),
             predicate,
+            comparison,
         },
         GraphBuilder::Project { input, fields } => GraphBuilder::Project {
             input: Box::new(replace_binding_shape(*input, shape)),
@@ -4252,33 +4315,39 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::Join {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         GraphBuilder::SemiJoin {
             left,
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::SemiJoin {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         GraphBuilder::AntiJoin {
             left,
             right,
             left_on,
             right_on,
+            comparison,
         } => GraphBuilder::AntiJoin {
             left: Box::new(replace_binding_shape(*left, shape)),
             right: Box::new(replace_binding_shape(*right, shape)),
             left_on,
             right_on,
+            comparison,
         },
         graph => graph,
     }
@@ -4444,7 +4513,7 @@ impl NodeState {
         let predicate = &filter.predicate;
         let mut deltas = Vec::new();
         for delta in &input.deltas {
-            if predicate.matches(delta.borrowed(&input.descriptor))? {
+            if predicate.matches(delta.borrowed(&input.descriptor), filter.comparison)? {
                 deltas.push(delta.clone());
             }
         }
@@ -4984,7 +5053,8 @@ where
                 .descriptor
                 .output;
             let group_fields = self.aggregate_group_fields(node, &aggregate);
-            let arrangement_key = self.arrangement_key(*input, input_desc, group_fields)?;
+            let arrangement_key =
+                self.arrangement_key(*input, input_desc, group_fields, ValueComparison::Exact)?;
             if self
                 .arrangement_states
                 .get(&arrangement_key)
@@ -5093,12 +5163,22 @@ where
                 let input = self.update_unary_input(graph_node, node)?;
                 let raw_projection =
                     self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
-                NodeState::update_map_project(
+                let result = NodeState::update_map_project(
                     project,
                     output_desc,
                     &input,
                     raw_projection.as_deref(),
-                )
+                );
+                #[cfg(feature = "cold-settle-attribution")]
+                if let Ok(output) = &result {
+                    crate::cold_settle_attribution::record_map(
+                        self.context.eval_mode == EvalMode::Hydrate,
+                        self.depends_on_dominant_child(node)?,
+                        input.deltas.len(),
+                        output.deltas.len(),
+                    );
+                }
+                result
             }
             OpType::UnwrapNullable(unwrap) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -5448,6 +5528,44 @@ where
         Ok(deltas)
     }
 
+    #[cfg(feature = "cold-settle-attribution")]
+    fn depends_on_dominant_child(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let graph_node = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        if matches!(
+            &graph_node.descriptor.operator,
+            OpType::TableSource(source) if source.table == "res_l_child_3"
+        ) {
+            return Ok(true);
+        }
+        // Policy lowering can replace the direct table source with an indexed
+        // source. The anonymous child shape is unique in this benchmark, so
+        // retain the tag through that lowering as well.
+        if ["parent_id", "value_text", "value_json"]
+            .into_iter()
+            .all(|field| {
+                graph_node
+                    .descriptor
+                    .output
+                    .fields()
+                    .iter()
+                    .any(|candidate| candidate.name.as_deref() == Some(field))
+            })
+        {
+            return Ok(true);
+        }
+        graph_node
+            .descriptor
+            .inputs
+            .iter()
+            .copied()
+            .map(|input| self.depends_on_dominant_child(input))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|dependencies| dependencies.into_iter().any(|dependency| dependency))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn update_join(
         &mut self,
@@ -5475,8 +5593,14 @@ where
             join.right_descriptor,
             output_desc,
         )?;
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5499,6 +5623,7 @@ where
             &output_mapping,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5511,6 +5636,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -5538,8 +5671,14 @@ where
         };
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5559,6 +5698,7 @@ where
             &output_desc,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5571,6 +5711,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -5598,8 +5746,14 @@ where
         };
         let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key = self.arrangement_key(left_input, join.left_descriptor, left_on)?;
-        let right_key = self.arrangement_key(right_input, join.right_descriptor, right_on)?;
+        let left_key =
+            self.arrangement_key(left_input, join.left_descriptor, left_on, join.comparison)?;
+        let right_key = self.arrangement_key(
+            right_input,
+            join.right_descriptor,
+            right_on,
+            join.comparison,
+        )?;
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -5619,6 +5773,7 @@ where
             &output_desc,
             &left_key.fields,
             &right_key.fields,
+            join.comparison,
             left_delta,
             right_delta,
             self.arrangement_sub_tick(&left_key),
@@ -5631,6 +5786,14 @@ where
             self.arrangement_states.insert(right_key, right_arrangement);
         }
         self.arrangement_states.insert(left_key, left_arrangement);
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_join(
+            self.context.eval_mode == EvalMode::Hydrate,
+            self.depends_on_dominant_child(node)?,
+            left_delta.len(),
+            right_delta.len(),
+            deltas.len(),
+        );
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas,
@@ -5661,6 +5824,7 @@ where
             *input_node,
             output_desc,
             Arc::from(spec.group_fields.to_vec()),
+            ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
@@ -5749,7 +5913,7 @@ where
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        if input.deltas.is_empty() {
+        if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -5766,6 +5930,7 @@ where
             *input_node,
             output_desc,
             Arc::from(top_by.group_fields.clone()),
+            ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
@@ -5866,8 +6031,12 @@ where
                     .push((delta.record.clone(), delta.weight));
             }
             if self.context.hydrate_arrangements {
-                let arrangement_key =
-                    self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+                let arrangement_key = self.arrangement_key(
+                    *input_node,
+                    input_desc,
+                    group_fields.clone(),
+                    ValueComparison::Exact,
+                )?;
                 let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
                 arrangement.value_mut().apply_record_deltas(
                     input_desc,
@@ -5891,8 +6060,12 @@ where
                 deltas: output,
             });
         }
-        let arrangement_key =
-            self.arrangement_key(*input_node, input_desc, group_fields.clone())?;
+        let arrangement_key = self.arrangement_key(
+            *input_node,
+            input_desc,
+            group_fields.clone(),
+            ValueComparison::Exact,
+        )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
             .arrangement_states
@@ -5992,12 +6165,14 @@ where
         input: NodeId,
         descriptor: RecordDescriptor,
         fields: Arc<[String]>,
+        comparison: ValueComparison,
     ) -> Result<ArrangementKey, IvmRuntimeError> {
         Ok(ArrangementKey {
             scope: self.operator_scope(input)?,
             input,
             fields,
             descriptor,
+            comparison,
         })
     }
 
@@ -6221,6 +6396,7 @@ fn project_descriptor(
                 ProjectExpr::Literal(value) => value
                     .value_type()
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                ProjectExpr::TypedLiteral { value_type, .. } => value_type.clone(),
                 ProjectExpr::Null(value_type) => value_type.clone(),
                 ProjectExpr::Nullable(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
@@ -6259,6 +6435,7 @@ fn project_field_expr(
     match &field.expression {
         ProjectExpr::Field(source) => Ok(PlanExpr::field(field_ref_name(input, source)?)),
         ProjectExpr::Literal(value) => Ok(PlanExpr::literal(value.clone())),
+        ProjectExpr::TypedLiteral { value, .. } => Ok(PlanExpr::literal(value.clone())),
         ProjectExpr::Null(value_type) => Ok(PlanExpr::null(value_type.clone())),
         ProjectExpr::Nullable(source) => Ok(PlanExpr::nullable(field_ref_name(input, source)?)),
         ProjectExpr::NullableFlat(source) => {
@@ -6507,6 +6684,8 @@ fn aggregate_output_type(
                 | ValueType::U16
                 | ValueType::U32
                 | ValueType::U64
+                | ValueType::I32
+                | ValueType::I64
                 | ValueType::F64 => value_type,
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
@@ -6816,6 +6995,11 @@ fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::I32 => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
+            Ok(())
+        }
         ValueType::I64 => {
             key.push(13);
             key.extend(order_preserving_i64_bits(borrowed.get_i64(field_idx)?).to_be_bytes());
@@ -6873,6 +7057,17 @@ fn encode_record_field_key_part(
                     key.push(9);
                     key.push(13);
                     key.extend(order_preserving_i64_bits(value).to_be_bytes());
+                }
+                None => key.push(8),
+            }
+            Ok(())
+        }
+        ValueType::Nullable(inner) if matches!(inner.as_ref(), ValueType::I32) => {
+            match borrowed.get_nullable_i32(field_idx)? {
+                Some(value) => {
+                    key.push(9);
+                    key.push(14);
+                    key.extend(order_preserving_i32_bits(value).to_be_bytes());
                 }
                 None => key.push(8),
             }
@@ -7019,6 +7214,7 @@ fn compare_record_field(
     field: &str,
     value: &LiteralValue,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let field_idx = record
         .descriptor()
@@ -7031,7 +7227,7 @@ fn compare_record_field(
     }
     let value = value.to_value();
     let actual = record.get(field)?;
-    Ok(compare_values_sql(&actual, &value).is_some_and(predicate))
+    Ok(compare_values_sql(&actual, &value, comparison).is_some_and(predicate))
 }
 
 enum FieldLiteralOrdering {
@@ -7055,6 +7251,9 @@ fn record_field_literal_ordering(
         }
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
+        }
+        (ValueType::I32, LiteralValue::I32(expected)) => {
+            Ok(ordering(&record.get_i32(field_idx)?, expected))
         }
         (ValueType::I64, LiteralValue::I64(expected)) => {
             Ok(ordering(&record.get_i64(field_idx)?, expected))
@@ -7108,6 +7307,10 @@ fn nullable_record_field_literal_ordering(
             .get_nullable_i64(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::I32, LiteralValue::I32(expected)) => Ok(record
+            .get_nullable_i32(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::F64, LiteralValue::F64(expected)) => {
             let expected = f64::from_bits(*expected);
             Ok(record
@@ -7149,49 +7352,58 @@ fn compare_record_fields(
     field: &str,
     value_field: &str,
     predicate: impl FnOnce(std::cmp::Ordering) -> bool,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let left = record.get(field)?;
     let right = record.get(value_field)?;
-    Ok(compare_values_sql(&left, &right).is_some_and(predicate))
+    Ok(compare_values_sql(&left, &right, comparison).is_some_and(predicate))
 }
 
 fn contains_record_field(
     record: BorrowedRecord<'_>,
     field: &str,
     value: &LiteralValue,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let needle = value.to_value();
     let haystack = record.get(field)?;
-    Ok(value_contains_sql(&haystack, &needle))
+    Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
 fn contains_record_field_value(
     record: BorrowedRecord<'_>,
     field: &str,
     needle_field: &str,
+    comparison: ValueComparison,
 ) -> Result<bool, IvmRuntimeError> {
     let haystack = record.get(field)?;
     let needle = record.get(needle_field)?;
-    Ok(value_contains_sql(&haystack, &needle))
+    Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
-fn value_contains_sql(left: &Value, right: &Value) -> bool {
+fn value_contains_sql(left: &Value, right: &Value, comparison: ValueComparison) -> bool {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => false,
-        (Value::Nullable(Some(left)), right) => value_contains_sql(left, right),
-        (left, Value::Nullable(Some(right))) => value_contains_sql(left, right),
+        (Value::Nullable(Some(left)), right) => value_contains_sql(left, right, comparison),
+        (left, Value::Nullable(Some(right))) => value_contains_sql(left, right, comparison),
         (Value::String(left), Value::String(right)) => left.contains(right),
-        (Value::Array(values), right) => values.iter().any(|value| value == right),
+        (Value::Array(values), right) => values.iter().any(|value| {
+            compare_values_sql(value, right, comparison).is_some_and(std::cmp::Ordering::is_eq)
+        }),
         _ => false,
     }
 }
 
-fn compare_values_sql(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+fn compare_values_sql(
+    left: &Value,
+    right: &Value,
+    comparison: ValueComparison,
+) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => None,
-        (Value::Nullable(Some(left)), right) => compare_values_sql(left, right),
-        (left, Value::Nullable(Some(right))) => compare_values_sql(left, right),
-        _ => compare_values(left, right),
+        (Value::Nullable(Some(left)), right) => compare_values_sql(left, right, comparison),
+        (left, Value::Nullable(Some(right))) => compare_values_sql(left, right, comparison),
+        _ => compare_values(left, right, comparison),
     }
 }
 
@@ -7203,12 +7415,25 @@ fn is_sql_null_value(value: &Value) -> bool {
     }
 }
 
-fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+fn compare_values(
+    left: &Value,
+    right: &Value,
+    comparison: ValueComparison,
+) -> Option<std::cmp::Ordering> {
+    if matches!(comparison, ValueComparison::Policy)
+        && let (Some(left), Some(right)) = (integer_value(left), integer_value(right))
+    {
+        // i128 represents every supported integer exactly, including U64
+        // values above i64::MAX. Floats deliberately do not participate: a
+        // numeric-width match must never turn into lossy integer/float equality.
+        return left.partial_cmp(&right);
+    }
     match (left, right) {
         (Value::U8(left), Value::U8(right)) => left.partial_cmp(right),
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
         (Value::Bool(left), Value::Bool(right)) => left.partial_cmp(right),
@@ -7219,15 +7444,27 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::Tuple(left), Value::Tuple(right)) => left
             .iter()
             .zip(right)
-            .map(|(left, right)| compare_values(left, right))
+            .map(|(left, right)| compare_values(left, right, comparison))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
         (Value::Array(left), Value::Array(right)) => left
             .iter()
             .zip(right)
-            .map(|(left, right)| compare_values(left, right))
+            .map(|(left, right)| compare_values(left, right, comparison))
             .find(|ordering| !matches!(ordering, Some(std::cmp::Ordering::Equal)))
             .unwrap_or_else(|| left.len().partial_cmp(&right.len())),
+        _ => None,
+    }
+}
+
+fn integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::U8(value) => Some(i128::from(*value)),
+        Value::U16(value) => Some(i128::from(*value)),
+        Value::U32(value) => Some(i128::from(*value)),
+        Value::U64(value) => Some(i128::from(*value)),
+        Value::I32(value) => Some(i128::from(*value)),
+        Value::I64(value) => Some(i128::from(*value)),
         _ => None,
     }
 }
@@ -7272,6 +7509,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -7337,6 +7578,10 @@ fn order_preserving_f64_bits(value: f64) -> u64 {
 
 fn order_preserving_i64_bits(value: i64) -> u64 {
     (value as u64) ^ (1_u64 << 63)
+}
+
+fn order_preserving_i32_bits(value: i32) -> u32 {
+    (value as u32) ^ (1_u32 << 31)
 }
 
 fn encode_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
@@ -7550,6 +7795,7 @@ fn aggregate_sum(
     };
     let mut kind = None;
     let mut u64_sum = 0_u64;
+    let mut i64_sum = 0_i64;
     let mut f64_sum = 0_f64;
     for (record, weight) in records {
         if *weight <= 0 {
@@ -7576,6 +7822,14 @@ fn aggregate_sum(
                 kind.get_or_insert(ValueType::U64);
                 u64_sum = add_weighted_u64(u64_sum, value, *weight)?;
             }
+            Value::I32(value) => {
+                kind.get_or_insert(ValueType::I32);
+                i64_sum = add_weighted_i64(i64_sum, i64::from(value), *weight)?;
+            }
+            Value::I64(value) => {
+                kind.get_or_insert(ValueType::I64);
+                i64_sum = add_weighted_i64(i64_sum, value, *weight)?;
+            }
             Value::F64(value) => {
                 kind.get_or_insert(ValueType::F64);
                 f64_sum += value * (*weight as f64);
@@ -7594,6 +7848,10 @@ fn aggregate_sum(
             .map(Value::U32)
             .map_err(|_| IvmRuntimeError::UnsupportedOperator),
         ValueType::U64 => Ok(Value::U64(u64_sum)),
+        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Value::I32)
+            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
+        ValueType::I64 => Ok(Value::I64(i64_sum)),
         ValueType::F64 => Ok(Value::F64(f64_sum)),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7676,12 +7934,24 @@ fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRun
         .ok_or(IvmRuntimeError::UnsupportedOperator)
 }
 
+fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
+    current
+        .checked_add(
+            value
+                .checked_mul(weight)
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )
+        .ok_or(IvmRuntimeError::UnsupportedOperator)
+}
+
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
     match value {
         Value::U8(value) => Ok(f64::from(*value)),
         Value::U16(value) => Ok(f64::from(*value)),
         Value::U32(value) => Ok(f64::from(*value)),
         Value::U64(value) => Ok(*value as f64),
+        Value::I32(value) => Ok(f64::from(*value)),
+        Value::I64(value) => Ok(*value as f64),
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
@@ -7716,7 +7986,7 @@ fn evaluate_aggregate_expr(
 }
 
 type SourceRecord = (Vec<u8>, Bytes);
-type RankedRecord = (Vec<TopBySortPart>, Bytes);
+type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TopBySortPart {
@@ -7810,19 +8080,48 @@ fn top_by_window_from_records(
     descriptor: RecordDescriptor,
     records: Vec<(Bytes, i64)>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
     let mut ranked = Vec::new();
     for (record, weight) in records {
         if weight > 0 {
-            ranked.push((top_by_sort_key(descriptor, &record, top_by)?, record));
+            ranked.push((
+                top_by_sort_key(descriptor, &record, top_by)?,
+                record,
+                weight,
+            ));
         }
     }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(ranked
-        .into_iter()
-        .skip(top_by.offset)
-        .take(top_by.limit)
-        .collect())
+    // Full record bytes are the final tie-breaker (INV-QUERY-23); the total
+    // order must not depend on arrangement iteration order.
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    // Bag semantics (INV-QUERY-24/25): a record with multiplicity m occupies m
+    // ordinals, and offset/limit consume copies, not distinct records.
+    let mut window = Vec::new();
+    let mut to_skip = top_by.offset;
+    let mut remaining = match top_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
+    for (_, record, weight) in ranked {
+        if remaining == Some(0) {
+            break;
+        }
+        let copies = weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
+        if taken > 0 {
+            window.push((
+                record,
+                i64::try_from(taken).expect("taken copies cannot exceed positive record weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
+        }
+    }
+    Ok(window)
 }
 
 fn top_by_window_before_from_deltas(
@@ -7830,27 +8129,18 @@ fn top_by_window_before_from_deltas(
     after_records: Vec<(Bytes, i64)>,
     deltas: Vec<RecordDelta>,
     top_by: &TopByOp,
-) -> Result<Vec<RankedRecord>, IvmRuntimeError> {
-    let mut records = BTreeMap::<Vec<u8>, (Bytes, i64)>::new();
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    // Reconstruct the pre-tick multiset keyed by record bytes — the same
+    // identity the arrangement consolidates by. Keying by sort key would
+    // collapse distinct records that tie through (order_cols, tie_cols).
+    let mut records = BTreeMap::<Bytes, i64>::new();
     for (record, weight) in after_records {
-        let key = encoded_record_key_part(descriptor, &record, &top_by.sort_field_indices)?;
-        records.insert(key, (record, weight));
+        *records.entry(record).or_default() += weight;
     }
     for delta in deltas {
-        let key = encoded_record_key_part(descriptor, delta.raw(), &top_by.sort_field_indices)?;
-        let entry = records
-            .entry(key)
-            .or_insert_with(|| (delta.record.clone(), 0));
-        entry.1 -= delta.weight;
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
     }
-    top_by_window_from_records(
-        descriptor,
-        records
-            .into_iter()
-            .map(|(_, (record, weight))| (record, weight))
-            .collect(),
-        top_by,
-    )
+    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
 }
 
 fn top_by_sort_key(
@@ -7871,13 +8161,16 @@ fn top_by_sort_key(
         .collect()
 }
 
-fn diff_record_windows(before: Vec<RankedRecord>, after: Vec<RankedRecord>) -> Vec<RecordDelta> {
+fn diff_record_windows(
+    before: Vec<WindowedRecord>,
+    after: Vec<WindowedRecord>,
+) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (_, record) in before {
-        *weights.entry(record).or_default() -= 1;
+    for (record, copies) in before {
+        *weights.entry(record).or_default() -= copies;
     }
-    for (_, record) in after {
-        *weights.entry(record).or_default() += 1;
+    for (record, copies) in after {
+        *weights.entry(record).or_default() += copies;
     }
     let mut retractions = Vec::new();
     let mut insertions = Vec::new();
@@ -7922,6 +8215,10 @@ fn encode_runtime_primary_key_part(key: &mut Vec<u8>, value: &Value) {
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            key.push(14);
+            key.extend(order_preserving_i32_bits(*value).to_be_bytes());
         }
         Value::I64(value) => {
             key.push(13);
@@ -8142,6 +8439,62 @@ mod tests {
             ("src", ColumnType::U64.value_type()),
             ("dst", ColumnType::U64.value_type()),
         ])
+    }
+
+    #[test]
+    fn top_by_distinguishes_finite_max_from_unbounded_limit() {
+        // Direct helper coverage is intentional: constructing more than
+        // u64::MAX derivations through public tables is not feasible, while
+        // synthetic weights exercise the semantic boundary without expanding
+        // multiplicity into individual records.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let records = [1, 2, 3]
+            .into_iter()
+            .map(|id| {
+                (
+                    Bytes::from(descriptor.create(&[Value::U64(id)]).unwrap()),
+                    i64::MAX,
+                )
+            })
+            .collect::<Vec<_>>();
+        let top_by = |limit| TopByOp {
+            group_fields: Vec::new(),
+            group_field_indices: Vec::new(),
+            order_fields: vec![TopByOrderField {
+                field: "id".to_owned(),
+                direction: TopByDirection::Asc,
+            }],
+            tie_fields: Vec::new(),
+            sort_field_indices: vec![0],
+            sort_directions: vec![TopByDirection::Asc],
+            offset: 0,
+            limit,
+        };
+
+        let finite = top_by_window_from_records(
+            descriptor,
+            records.clone(),
+            &top_by(TopByLimit::Finite(u64::MAX)),
+        )
+        .unwrap();
+        assert_eq!(
+            finite
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, 1]
+        );
+
+        let unbounded =
+            top_by_window_from_records(descriptor, records, &top_by(TopByLimit::Unbounded))
+                .unwrap();
+        assert_eq!(
+            unbounded
+                .into_iter()
+                .map(|(_, weight)| weight)
+                .collect::<Vec<_>>(),
+            [i64::MAX, i64::MAX, i64::MAX]
+        );
     }
 
     fn recursive_reach_graph() -> GraphBuilder {
@@ -8640,6 +8993,58 @@ mod tests {
                     -3,
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn project_typed_literal_preserves_nested_nullable_null_type() {
+        let schema = albums_schema();
+        let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
+        let storage = crate::storage::MemoryStorage::new(&["albums"]);
+        let subscription = runtime
+            .subscribe_one_sink(
+                GraphBuilder::table("albums").project_fields([
+                    ProjectField::renamed("id", "id"),
+                    ProjectField::literal_typed(
+                        "default_value",
+                        LiteralValue::Nullable(Some(Box::new(LiteralValue::Nullable(None)))),
+                        ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(
+                            ValueType::String,
+                        )))),
+                    ),
+                ]),
+                &storage,
+            )
+            .unwrap();
+
+        assert!(subscription.recv().unwrap().is_empty());
+        let albums = schema.table("albums").unwrap().record_schema();
+        runtime
+            .tick(
+                vec![TableDelta {
+                    table: "albums".to_owned(),
+                    descriptor: albums,
+                    deltas: vec![RecordDelta {
+                        record: albums
+                            .create(&[Value::U64(1), Value::String("one".to_owned())])
+                            .unwrap()
+                            .into(),
+                        weight: 1,
+                    }],
+                }],
+                &storage,
+            )
+            .unwrap();
+
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            vec![(
+                vec![
+                    Value::U64(1),
+                    Value::Nullable(Some(Box::new(Value::Nullable(None)))),
+                ],
+                1,
+            )],
         );
     }
 

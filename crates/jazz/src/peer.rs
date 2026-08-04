@@ -422,6 +422,7 @@ impl PeerState {
                 &binding,
                 subscription,
                 Some(table),
+                true,
             );
         }
         unreachable!("maintained subscription view state is either absent or present")
@@ -475,7 +476,23 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts)
+        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, true)
+    }
+
+    /// Build an incremental view update after the caller has already flushed
+    /// the shared Groove runtime for this refresh.
+    pub(crate) fn query_update_for_subscription_with_opts_after_runtime_flush<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        subscription: SubscriptionKey,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) -> Result<SyncMessage, Error>
+    where
+        S: OrderedKvStorage,
+    {
+        self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, false)
     }
 
     fn query_update_inner<S>(
@@ -498,6 +515,7 @@ impl PeerState {
             shape,
             binding,
             RegisterShapeOptions::default(),
+            true,
         )
     }
 
@@ -508,6 +526,7 @@ impl PeerState {
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
+        flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -535,6 +554,7 @@ impl PeerState {
                 binding,
                 subscription,
                 None,
+                flush_query_runtime,
             );
         }
         let previous_member_result_set = self
@@ -575,6 +595,7 @@ impl PeerState {
         _binding: &Binding,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
+        flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
         S: OrderedKvStorage,
@@ -589,6 +610,7 @@ impl PeerState {
             shape,
             subscription,
             result_table_filter,
+            flush_query_runtime,
         )?;
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
@@ -771,11 +793,14 @@ impl PeerState {
         _shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
+        flush_query_runtime: bool,
     ) -> Result<ResultTransitions, Error>
     where
         S: OrderedKvStorage,
     {
-        node.flush_query_runtime()?;
+        if flush_query_runtime {
+            node.flush_query_runtime()?;
+        }
         let previous_member_result_set = self
             .subscriptions
             .get(&subscription)
@@ -1203,6 +1228,7 @@ impl PeerState {
             shape,
             maintained_subscription,
             None,
+            true,
         )?;
         let ResultTransitions {
             adds: source_adds,
@@ -3866,6 +3892,9 @@ mod tests {
             .unwrap();
         accept_global(&mut core, first_tx, 1);
         accept_global(&mut core, second_tx, 2);
+        // Both shapes are unsupported on this branch: unordered limit > 1 is
+        // only lowered once default row-id ordering is injected, which lands
+        // with the default-ordering work, not here.
         let no_order_limit = Query::from("todos").limit(2).validate(&schema()).unwrap();
         let offset_limit_one = Query::from("todos")
             .limit(1)

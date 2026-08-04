@@ -12,11 +12,14 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 use std::ops::Range;
 
-use crate::records::{RecordDescriptor, ValueType};
+use crate::{
+    ivm::ValueComparison,
+    records::{RecordDescriptor, ValueType},
+};
 
 use super::{
     ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part, encode_record_field_key_part,
+    encode_key_part,
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
@@ -45,15 +48,51 @@ impl JoinState {
         left_descriptor: &RecordDescriptor,
         right_descriptor: &RecordDescriptor,
         output_descriptor: &RecordDescriptor,
+        // how to map the the fields from the inputs to the ouput
+        // example:
+        // Left album fields:
+        // 0 = id
+        // 1 = artist_id
+        // 2 = title
+        //
+        // Right artist fields:
+        // 0 = id
+        // 1 = name
+        //
+        // Desire output:
+        // 0 = album id
+        // 1 = album title
+        // 2 = artist name
+        //
+        // [
+        //    (0, 0), // output field 0 comes from left field 0
+        //    (0, 2), // output field 1 comes from left field 2
+        //    (1, 1), // output field 2 comes from right field 1
+        // ]
+        //
+        // 0 is left
+        // 1 is right
         output_mapping: &[(usize, usize)],
+        // left fields of join such as `["id"]
         left_on: &[String],
+        // right fields of join such as `["artist_id"]
         right_on: &[String],
+        comparison: ValueComparison,
+        // Changed left records with signed weights
         left_delta: &[RecordDelta],
         right_delta: &[RecordDelta],
         left_sub_tick: SubTick,
         right_sub_tick: SubTick,
         update_mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        // Fields have to be the same:
+        // left:  (country_id, artist_id)
+        // right: (country_id, id)
+        // This is ok!
+        //
+        // left:  (country_id, artist_id)
+        // right: (id)
+        // This is not ok
         if left_on.len() != right_on.len() {
             return Err(IvmRuntimeError::JoinKeyArityMismatch {
                 left: left_on.len(),
@@ -61,18 +100,32 @@ impl JoinState {
             });
         }
 
-        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
-        let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
+        // let's get the deltas left and right, adding the join keys. For example:
+        // Left RecordDelta:
+        // album(13, artist_id=7, "Yellow") -> +1
+        //
+        // Keyed left delta:
+        // key = encode(7)
+        // record = album(13, 7, "Yellow")
+        // weight = +1
+        //
+        // The Key will be use to get throught the right_arrangement.index.get(&left_delta.key) fast the matching raws:
+        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
+        let keyed_right_delta =
+            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
         let estimated_output_bytes = left_delta
             .iter()
             .chain(right_delta)
             .map(|delta| delta.record.len())
             .sum::<usize>();
+
         let mut output = JoinOutputBuffer {
             bytes: BytesMut::with_capacity(estimated_output_bytes),
             deltas: Vec::new(),
             variable_scratch: Vec::new(),
         };
+
+        // Let's create the context of the Join, with all the descriptors (schema-side description needed to interpret compact record bytes)
         let context = JoinChangeContext {
             left_descriptor,
             right_descriptor,
@@ -80,6 +133,7 @@ impl JoinState {
             output_mapping,
         };
 
+        // Update arrangement
         advance_arrangement(
             left_arrangement,
             &keyed_left_delta,
@@ -147,6 +201,7 @@ impl AntiJoinState {
         _output_descriptor: &RecordDescriptor,
         left_on: &[String],
         right_on: &[String],
+        comparison: ValueComparison,
         left_delta: &[RecordDelta],
         right_delta: &[RecordDelta],
         left_sub_tick: SubTick,
@@ -160,8 +215,10 @@ impl AntiJoinState {
             });
         }
 
-        let keyed_left_delta = keyed_join_deltas(&left_descriptor, left_on, left_delta)?;
-        let keyed_right_delta = keyed_join_deltas(&right_descriptor, right_on, right_delta)?;
+        let keyed_left_delta =
+            keyed_join_deltas(&left_descriptor, left_on, left_delta, comparison)?;
+        let keyed_right_delta =
+            keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?;
         let mut affected_keys = HashSet::<JoinKey>::default();
         let mut old_right_counts = HashMap::<JoinKey, i64>::default();
         let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -255,6 +312,7 @@ impl AntiJoinState {
         _output_descriptor: &RecordDescriptor,
         left_on: &[String],
         right_on: &[String],
+        comparison: ValueComparison,
         left_delta: &[RecordDelta],
         right_delta: &[RecordDelta],
         left_sub_tick: SubTick,
@@ -268,8 +326,9 @@ impl AntiJoinState {
             });
         }
 
-        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta)?;
-        let keyed_right_delta = keyed_join_deltas(right_descriptor, right_on, right_delta)?;
+        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
+        let keyed_right_delta =
+            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
         let mut affected_keys = HashSet::<JoinKey>::default();
         let mut old_right_counts = HashMap::<JoinKey, i64>::default();
         let mut old_left_buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -402,7 +461,7 @@ impl ArrangementState {
         deltas: &[RecordDelta],
         update_mode: ArrangementUpdateMode,
     ) -> Result<(), IvmRuntimeError> {
-        let keyed = keyed_join_deltas(&descriptor, fields, deltas)?;
+        let keyed = keyed_join_deltas(&descriptor, fields, deltas, ValueComparison::Exact)?;
         self.apply_update(&keyed, update_mode);
         Ok(())
     }
@@ -459,9 +518,31 @@ struct JoinChangeContext<'a> {
     output_mapping: &'a [(usize, usize)],
 }
 
+/// Builds the changed rows produced by a join.
+///
+/// All encoded rows are kept next to each other in `bytes`. For example:
+///
+/// ```text
+/// bytes:  [joined row A][joined row B]
+/// ranges:       0..20         20..45
+/// deltas: (0..20, +1), (20..45, -1)
+/// ```
+///
+/// When the join finishes, `bytes` is frozen once. Each range then becomes the
+/// `Bytes` value of one `RecordDelta`. This avoids one allocation per row.
 struct JoinOutputBuffer {
+    /// All encoded joined rows, stored one after another.
     bytes: BytesMut,
+    /// Where each row is inside `bytes`, together with its weight.
+    ///
+    /// For example, `(0..20, 1)` means “the row in bytes `0..20` has weight
+    /// `+1`.”
     deltas: Vec<(Range<usize>, i64)>,
+    /// Temporary work area for fields such as strings, bytes, and arrays.
+    ///
+    /// Each item stores which input row owns the field (`0` for left, `1` for
+    /// right) and where the field's bytes are in that row. The encoder clears
+    /// and reuses this vector for every joined row.
     variable_scratch: Vec<(usize, Range<usize>)>,
 }
 
@@ -543,13 +624,15 @@ fn keyed_join_deltas<'a>(
     descriptor: &RecordDescriptor,
     fields: &[String],
     deltas: &'a [RecordDelta],
+    comparison: ValueComparison,
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
     if let Some(field_indices) = scalar_join_field_indices(descriptor, fields)? {
         let mut keyed = Vec::with_capacity(deltas.len());
         for delta in deltas {
             let mut key = Vec::new();
             for field_idx in &field_indices {
-                encode_record_field_key_part(&mut key, descriptor, delta.raw(), *field_idx)?;
+                let value = descriptor.get_idx(delta.raw(), *field_idx)?;
+                encode_join_key_part(&mut key, &value, comparison)?;
             }
             keyed.push(KeyedRecordDelta {
                 delta,
@@ -561,7 +644,7 @@ fn keyed_join_deltas<'a>(
 
     let mut keyed = Vec::new();
     for delta in deltas {
-        for key in join_keys(descriptor, delta.raw(), fields)? {
+        for key in join_keys_with_comparison(descriptor, delta.raw(), fields, comparison)? {
             keyed.push(KeyedRecordDelta { delta, key });
         }
     }
@@ -626,6 +709,15 @@ pub(super) fn join_keys(
     record: &[u8],
     fields: &[String],
 ) -> Result<Vec<JoinKey>, IvmRuntimeError> {
+    join_keys_with_comparison(descriptor, record, fields, ValueComparison::Exact)
+}
+
+fn join_keys_with_comparison(
+    descriptor: &RecordDescriptor,
+    record: &[u8],
+    fields: &[String],
+    comparison: ValueComparison,
+) -> Result<Vec<JoinKey>, IvmRuntimeError> {
     if fields.len() == 1 {
         let values = descriptor.get(record, &fields[0])?;
         let parts = join_key_parts(values);
@@ -634,14 +726,14 @@ pub(super) fn join_keys(
         }
         if parts.len() == 1 {
             let mut key = Vec::new();
-            encode_key_part(&mut key, &parts[0])?;
+            encode_join_key_part(&mut key, &parts[0], comparison)?;
             return Ok(vec![JoinKey::from_vec(key)]);
         }
         let mut keys = Vec::with_capacity(parts.len());
         let mut seen = HashSet::default();
         for value in &parts {
             let mut key = Vec::new();
-            encode_key_part(&mut key, value)?;
+            encode_join_key_part(&mut key, value, comparison)?;
             if !seen.contains(&key) {
                 seen.insert(key.clone());
                 keys.push(JoinKey::from_vec(key));
@@ -665,7 +757,7 @@ pub(super) fn join_keys(
         for key in &keys {
             for value in &parts {
                 let mut next = key.clone();
-                encode_key_part(&mut next, value)?;
+                encode_join_key_part(&mut next, value, comparison)?;
                 if !seen.contains(&next) {
                     seen.insert(next.clone());
                     next_keys.push(next);
@@ -677,6 +769,47 @@ pub(super) fn join_keys(
     }
 
     Ok(keys.into_iter().map(JoinKey::from_vec).collect())
+}
+
+/// Encode a join key with the requested comparison semantics.
+fn encode_join_key_part(
+    key: &mut Vec<u8>,
+    value: &crate::records::Value,
+    comparison: ValueComparison,
+) -> Result<(), IvmRuntimeError> {
+    if matches!(comparison, ValueComparison::Policy) {
+        match value {
+            crate::records::Value::Nullable(Some(value)) => {
+                return encode_join_key_part(key, value, comparison);
+            }
+            crate::records::Value::U8(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            crate::records::Value::U16(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            crate::records::Value::U32(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            crate::records::Value::U64(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            crate::records::Value::I32(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            crate::records::Value::I64(value) => {
+                return encode_join_integer_key(key, i128::from(*value));
+            }
+            _ => {}
+        }
+    }
+    encode_key_part(key, value)
+}
+
+fn encode_join_integer_key(key: &mut Vec<u8>, value: i128) -> Result<(), IvmRuntimeError> {
+    key.push(0xfe);
+    key.extend(value.to_be_bytes());
+    Ok(())
 }
 
 fn join_key_parts(value: crate::records::Value) -> Vec<crate::records::Value> {
@@ -755,4 +888,52 @@ pub(super) fn join_output_mapping(
             }
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::{RecordDescriptor, Value, ValueType};
+
+    // Internal coverage is necessary because this verifies the arrangement-key
+    // boundary directly: public query results cannot establish that ordinary
+    // IVM keys retain their exact typed encoding.
+    #[test]
+    fn policy_join_keys_normalize_integer_widths_without_changing_exact_keys() {
+        let u32 = RecordDescriptor::new(vec![("value", ValueType::U32)]);
+        let i64 = RecordDescriptor::new(vec![("value", ValueType::I64)]);
+        let u64 = RecordDescriptor::new(vec![("value", ValueType::U64)]);
+        let f64 = RecordDescriptor::new(vec![("value", ValueType::F64)]);
+        let fields = vec!["value".to_owned()];
+
+        let u32_record = u32.create(&[Value::U32(7)]).unwrap();
+        let i64_record = i64.create(&[Value::I64(7)]).unwrap();
+        let large_u64_record = u64.create(&[Value::U64(i64::MAX as u64 + 1)]).unwrap();
+        let max_i64_record = i64.create(&[Value::I64(i64::MAX)]).unwrap();
+        let float_record = f64.create(&[Value::F64(7.0)]).unwrap();
+
+        assert_eq!(
+            join_keys_with_comparison(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys_with_comparison(&i64, &i64_record, &fields, ValueComparison::Policy).unwrap(),
+            "lowered join correlations match equal integer values across widths"
+        );
+        assert_ne!(
+            join_keys_with_comparison(&u64, &large_u64_record, &fields, ValueComparison::Policy)
+                .unwrap(),
+            join_keys_with_comparison(&i64, &max_i64_record, &fields, ValueComparison::Policy)
+                .unwrap(),
+            "U64 above i64::MAX remains exact"
+        );
+        assert_ne!(
+            join_keys_with_comparison(&u32, &u32_record, &fields, ValueComparison::Policy).unwrap(),
+            join_keys_with_comparison(&f64, &float_record, &fields, ValueComparison::Policy)
+                .unwrap(),
+            "integer and float join keys remain type-exact"
+        );
+        assert_ne!(
+            join_keys(&u32, &u32_record, &fields).unwrap(),
+            join_keys(&i64, &i64_record, &fields).unwrap(),
+            "ordinary arrangement keys retain their exact typed encoding"
+        );
+    }
 }

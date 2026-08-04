@@ -13,24 +13,24 @@ use std::time::Duration;
 use futures::future::FutureExt;
 use serde::Deserialize;
 
-use jazz_tools::binding_support::{
+use jazz::tools::binding_support::{
     default_read_durability_options as default_binding_read_durability_options,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_read_durability_options, parse_session_input, parse_transaction_id_input,
     parse_transaction_kind_input, parse_write_context_input, serialize_mutation_error_event,
     subscription_delta_to_json,
 };
-use jazz_tools::object::ObjectId;
-use jazz_tools::query_manager::query::Query;
-use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
-use jazz_tools::runtime_core::{
+use jazz::tools::object::ObjectId;
+use jazz::tools::query_manager::query::Query;
+use jazz::tools::query_manager::session::{Session, WriteContext};
+use jazz::tools::query_manager::types::{Schema, SchemaHash, Value};
+use jazz::tools::runtime_core::{
     MutationErrorCallback as CoreMutationErrorCallback, ReadDurabilityOptions, RuntimeCore,
     Scheduler, SubscriptionDelta, SubscriptionHandle,
 };
-use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
-use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
+use jazz::tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
+use jazz::tools::storage::{SqliteStorage, Storage};
+use jazz::tools::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
 
 // ============================================================================
 // Errors
@@ -988,7 +988,7 @@ impl RnRuntime {
     /// `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
     pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
         with_panic_boundary("connect", || {
-            let auth: jazz_tools::transport_manager::AuthConfig =
+            let auth: jazz::tools::transport_manager::AuthConfig =
                 serde_json::from_str(&auth_json).map_err(json_err)?;
             let scheduler = self
                 .core
@@ -1003,10 +1003,10 @@ impl RnRuntime {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
                 })?;
-                jazz_tools::runtime_core::install_transport::<
+                jazz::tools::runtime_core::install_transport::<
                     _,
                     _,
-                    jazz_tools::ws_stream::NativeWsStream,
+                    jazz::tools::ws_stream::NativeWsStream,
                     _,
                 >(&mut core, url, auth, tick)
             };
@@ -1040,7 +1040,7 @@ impl RnRuntime {
     /// Push updated auth credentials into the live transport.
     pub fn update_auth(&self, auth_json: String) -> Result<(), JazzRnError> {
         with_panic_boundary("update_auth", || {
-            let auth: jazz_tools::transport_manager::AuthConfig =
+            let auth: jazz::tools::transport_manager::AuthConfig =
                 serde_json::from_str(&auth_json).map_err(json_err)?;
             if let Ok(core) = self.core.lock() {
                 if let Some(handle) = core.transport() {
@@ -1081,7 +1081,7 @@ struct RnTickNotifier {
     scheduler: RnScheduler,
 }
 
-impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
+impl jazz::tools::transport_manager::TickNotifier for RnTickNotifier {
     fn notify(&self) {
         self.scheduler.schedule_batched_tick();
     }
@@ -1214,7 +1214,7 @@ pub fn mint_local_first_token(
         seed_b64,
         audience,
         ttl_seconds,
-        jazz_tools::identity::LOCAL_FIRST_ISSUER,
+        jazz::tools::identity::LOCAL_FIRST_ISSUER,
     )
 }
 
@@ -1233,7 +1233,7 @@ pub fn mint_anonymous_token(
         seed_b64,
         audience,
         ttl_seconds,
-        jazz_tools::identity::ANONYMOUS_ISSUER,
+        jazz::tools::identity::ANONYMOUS_ISSUER,
     )
 }
 
@@ -1252,6 +1252,6 @@ fn mint_token(
     let seed: [u8; 32] = bytes.try_into().map_err(|_| JazzRnError::Internal {
         message: "seed must be exactly 32 bytes".to_string(),
     })?;
-    jazz_tools::identity::mint_jazz_self_signed_token(&seed, issuer, &audience, ttl_seconds as u64)
+    jazz::tools::identity::mint_jazz_self_signed_token(&seed, issuer, &audience, ttl_seconds as u64)
         .map_err(|e| JazzRnError::Internal { message: e })
 }

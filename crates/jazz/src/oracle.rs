@@ -814,7 +814,11 @@ fn merged_cells_with_history(
                     .collect::<BTreeMap<_, _>>();
                 let mut memo = BTreeMap::new();
                 let merged = oracle_counter_merge_value(&column, &by_tx, &txs, &mut memo);
-                cells.insert(column, Value::U64(merged as u64));
+                let prototype = versions
+                    .iter()
+                    .find_map(|version| version.cells.get(&column))
+                    .expect("counter oracle expected at least one integer value");
+                cells.insert(column, oracle_counter_value_from_i128(prototype, merged));
             }
         }
     }
@@ -885,6 +889,20 @@ fn oracle_counter_value(value: &Value) -> i128 {
         Value::U16(value) => i128::from(*value),
         Value::U32(value) => i128::from(*value),
         Value::U64(value) => i128::from(*value),
+        Value::I32(value) => i128::from(*value),
+        Value::I64(value) => i128::from(*value),
+        other => panic!("counter oracle expected integer, got {other:?}"),
+    }
+}
+
+fn oracle_counter_value_from_i128(prototype: &Value, value: i128) -> Value {
+    match prototype {
+        Value::U8(_) => Value::U8(value.try_into().expect("counter oracle value out of range")),
+        Value::U16(_) => Value::U16(value.try_into().expect("counter oracle value out of range")),
+        Value::U32(_) => Value::U32(value.try_into().expect("counter oracle value out of range")),
+        Value::U64(_) => Value::U64(value.try_into().expect("counter oracle value out of range")),
+        Value::I32(_) => Value::I32(value.try_into().expect("counter oracle value out of range")),
+        Value::I64(_) => Value::I64(value.try_into().expect("counter oracle value out of range")),
         other => panic!("counter oracle expected integer, got {other:?}"),
     }
 }

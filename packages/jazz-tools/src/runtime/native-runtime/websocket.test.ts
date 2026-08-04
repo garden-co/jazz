@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -19,6 +20,15 @@ import {
 } from "./websocket.js";
 
 describe("websocket frame carrier", () => {
+  it("types close listeners with close event details", () => {
+    type CloseListener = Parameters<BrowserWebSocket["addEventListener"]>[1];
+
+    expectTypeOf<Parameters<CloseListener>[0]>().toEqualTypeOf<{
+      code: number;
+      reason: string;
+    }>();
+  });
+
   it("encodes websocket messages as postcard batches of encoded frames", () => {
     const frames = [Uint8Array.from([1, 2, 3]), Uint8Array.from([4, 5])];
 
@@ -178,8 +188,17 @@ class MessageWebSocket {
 
   close(): void {}
 
-  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
-    if (type === "message") this.messageListeners.push(listener);
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  addEventListener(type: "error", listener: (event: unknown) => void): void;
+  addEventListener(
+    type: "close",
+    listener: (event: { code: number; reason: string }) => void,
+  ): void;
+  addEventListener(type: string, listener: unknown): void {
+    if (type === "message") {
+      this.messageListeners.push(listener as (event: { data: unknown }) => void);
+    }
   }
 
   emitMessage(data: Uint8Array): void {

@@ -826,7 +826,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
             order_cols,
             tie_cols,
             offset: 1,
-            limit: 2,
+            limit: groove::ivm::TopByLimit::Finite(2),
         } if group_cols.is_empty()
             && matches!(order_cols.as_slice(), [groove::ivm::TopByOrder {
                 field: groove::ivm::FieldRef::Name(field),
@@ -839,6 +839,7 @@ fn current_source_filter_order_slice_chain_lowers_to_groove_graph() {
                 GraphBuilder::Filter {
                     input,
                     predicate: groove::ivm::PredicateExpr::Eq { field, value },
+                    ..
                 } if matches!(
                     input.as_ref(),
                     GraphBuilder::Table { table, .. } if table == "resolved_todos"
@@ -941,7 +942,7 @@ fn current_source_select_projection_and_unordered_slice_lower() {
             ref order_cols,
             ref tie_cols,
             offset: 2,
-            limit: 3,
+            limit: groove::ivm::TopByLimit::Finite(3),
         } if matches!(input.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
             && group_cols.is_empty()
             && order_cols.is_empty()
@@ -1063,6 +1064,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                         right,
                         left_on,
                         right_on,
+                        ..
                     } if matches!(left.as_ref(), GraphBuilder::Table { table, .. } if table == "resolved_todos")
                         && matches!(
                             right.as_ref(),
@@ -1070,7 +1072,7 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
                                 if matches!(field, groove::ivm::FieldRef::Name(name) if name == "user_todo")
                                     && matches!(
                                         input.as_ref(),
-                                        GraphBuilder::Filter { input, predicate }
+                                        GraphBuilder::Filter { input, predicate, .. }
                                             if matches!(
                                                 input.as_ref(),
                                                 GraphBuilder::Table { table, .. } if table == "resolved_todo_tags"
@@ -1369,7 +1371,7 @@ fn current_join_via_lowers_source_column_row_id_target_and_correlations() {
         GraphBuilder::Project { ref input, .. }
             if matches!(
                 input.as_ref(),
-                GraphBuilder::Join { left, right, left_on, right_on }
+                GraphBuilder::Join { left, right, left_on, right_on, .. }
                     if matches!(left.as_ref(), GraphBuilder::UnwrapNullable { .. })
                         && matches!(right.as_ref(), GraphBuilder::UnwrapNullable { .. })
                         && matches!(

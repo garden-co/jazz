@@ -90,6 +90,19 @@ pub struct PersistOp {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FilterOp {
     pub predicate: PredicateExpr,
+    pub comparison: ValueComparison,
+}
+
+/// Equality semantics attached to an operator that compares user values.
+///
+/// Normal query and arrangement work compares encoded value types exactly.
+/// Policy evaluation is the sole exception: policy claims compare integral
+/// widths and signedness by their exact `i128` value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ValueComparison {
+    #[default]
+    Exact,
+    Policy,
 }
 
 /// Projection operator descriptor.
@@ -158,6 +171,7 @@ pub struct JoinOp {
     pub left_descriptor: RecordDescriptor,
     pub right_descriptor: RecordDescriptor,
     pub residual_predicate: Option<PlanExpr>,
+    pub comparison: ValueComparison,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -223,8 +237,19 @@ pub struct TopByOp {
     pub sort_field_indices: Vec<usize>,
     /// Direction for each `sort_field_indices` entry.
     pub sort_directions: Vec<TopByDirection>,
-    pub offset: usize,
-    pub limit: usize,
+    /// Number of leading ordinals excluded from the retained window.
+    pub offset: u64,
+    /// Finite retained length or an explicitly unbounded suffix.
+    pub limit: TopByLimit,
+}
+
+/// Retained-length bound for a [`TopByOp`] window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TopByLimit {
+    /// Retain at most this many ordinals after the offset.
+    Finite(u64),
+    /// Retain every ordinal after the offset.
+    Unbounded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -301,6 +326,7 @@ pub enum LiteralValue {
     U32(u32),
     U64(u64),
     I64(i64),
+    I32(i32),
     /// Stored as raw bits so predicates remain `Eq + Hash + Ord`.
     F64(u64),
     Bool(bool),
@@ -321,6 +347,7 @@ impl From<Value> for LiteralValue {
             Value::U32(value) => Self::U32(value),
             Value::U64(value) => Self::U64(value),
             Value::I64(value) => Self::I64(value),
+            Value::I32(value) => Self::I32(value),
             Value::F64(value) => Self::F64(value.to_bits()),
             Value::Bool(value) => Self::Bool(value),
             Value::Enum(value) => Self::Enum(value),
@@ -342,6 +369,7 @@ impl LiteralValue {
             Self::U32(_) => Some(ValueType::U32),
             Self::U64(_) => Some(ValueType::U64),
             Self::I64(_) => Some(ValueType::I64),
+            Self::I32(_) => Some(ValueType::I32),
             Self::F64(_) => Some(ValueType::F64),
             Self::Bool(_) => Some(ValueType::Bool),
             Self::Enum(_) => Some(ValueType::U8),
@@ -371,6 +399,7 @@ impl LiteralValue {
             Self::U32(value) => Value::U32(*value),
             Self::U64(value) => Value::U64(*value),
             Self::I64(value) => Value::I64(*value),
+            Self::I32(value) => Value::I32(*value),
             Self::F64(value) => Value::F64(f64::from_bits(*value)),
             Self::Bool(value) => Value::Bool(*value),
             Self::Enum(value) => Value::Enum(*value),
