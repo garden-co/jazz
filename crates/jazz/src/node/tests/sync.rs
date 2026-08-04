@@ -690,6 +690,137 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
+// This stays internal because it directly exercises the protocol receiver's
+// single-message fragment assembly boundary.
+#[test]
+fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+    let updates = [
+        (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
+        (row(2), version_record(row(2), Vec::new(), title_cells("two"), None)),
+    ];
+
+    for (row_uuid, version) in updates {
+        reader
+            .apply_view_update(partial_exclusive_view_update(
+                subscription,
+                tx.clone(),
+                row_uuid,
+                version,
+            ))
+            .unwrap();
+    }
+
+    assert_eq!(
+        reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(1), title_cells("one")), (row(2), title_cells("two"))])
+    );
+}
+
+#[test]
+fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 2,
+        made_by: AuthorId::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        source_branch: None,
+        merge_strategy: None,
+    };
+    reader
+        .apply_view_update(partial_exclusive_view_update(
+            subscription,
+            tx.clone(),
+            row(1),
+            version_record(row(1), Vec::new(), title_cells("one"), None),
+        ))
+        .unwrap();
+
+    let mut conflicting_tx = tx;
+    conflicting_tx.made_by = AuthorId::from_bytes([0xa1; 16]);
+    assert!(matches!(
+        reader.apply_view_update(partial_exclusive_view_update(
+            subscription,
+            conflicting_tx,
+            row(2),
+            version_record(row(2), Vec::new(), title_cells("two"), None),
+        )),
+        Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+    ));
+    assert_eq!(
+        reader.query_versions_for_tx(tx_id).unwrap().len(),
+        1,
+        "the conflicting completing fragment must not be stored"
+    );
+    assert_eq!(
+        reader.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
+        AuthorId::SYSTEM,
+        "the original transaction metadata must remain authoritative"
+    );
+}
+
+fn partial_exclusive_view_update(
+    subscription: SubscriptionKey,
+    tx: Transaction,
+    row_uuid: RowUuid,
+    version: VersionRecord,
+) -> ViewUpdateParts {
+    let tx_id = tx.tx_id;
+    ViewUpdateParts {
+        subscription,
+        settled_through: GlobalSeq(1),
+        defer_settlement: false,
+        reset_result_set: false,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            tx,
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: DurabilityTier::Global,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        result_member_adds: vec![ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            row_uuid,
+            tx_id,
+        ))],
+        result_member_removes: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    }
+}
+
 #[test]
 fn receiver_batch_resolves_current_winner_across_bundles() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
@@ -1361,7 +1492,7 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
         .content_store()
         .append(author, visible_row, "title", b"unreferenced")
         .unwrap();
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
 
     assert!(matches!(
         peer.handle_content_extent_fetch(
@@ -1418,7 +1549,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
     ];
 
-    let mut alice_peer = PeerState::for_author(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     let messages = alice_peer
         .handle_row_versions_fetch(
             &mut core,

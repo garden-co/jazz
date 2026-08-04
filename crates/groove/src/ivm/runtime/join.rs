@@ -147,6 +147,32 @@ impl JoinState {
             update_mode,
         )?;
 
+        // Replace inputs are faithful full snapshots. Once both arrangements
+        // have been rebuilt, one probe produces the complete join result.
+        // The incremental identity below would emit that result twice and
+        // subtract one copy, only for consolidation to cancel it again.
+        if update_mode == ArrangementUpdateMode::Replace {
+            append_join_deltas(
+                &mut output,
+                &context,
+                &keyed_left_delta,
+                &right_arrangement.value().index,
+                JoinProbeSide::LeftDelta,
+                1,
+            )?;
+            let output_buffer = output.bytes.freeze();
+            return Ok(consolidate_deltas(
+                output
+                    .deltas
+                    .into_iter()
+                    .map(|(record, weight)| RecordDelta {
+                        record: output_buffer.slice(record),
+                        weight,
+                    })
+                    .collect(),
+            ));
+        }
+
         append_join_deltas(
             &mut output,
             &context,
@@ -892,6 +918,8 @@ pub(super) fn join_output_mapping(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::records::{RecordDescriptor, Value, ValueType};
 
@@ -935,5 +963,78 @@ mod tests {
             join_keys(&i64, &i64_record, &fields).unwrap(),
             "ordinary arrangement keys retain their exact typed encoding"
         );
+    }
+
+    #[test]
+    fn replace_join_matches_incremental_multiset_result() {
+        let left_descriptor =
+            RecordDescriptor::new([("id", ValueType::U64), ("key", ValueType::U64)]);
+        let right_descriptor =
+            RecordDescriptor::new([("key", ValueType::U64), ("value", ValueType::U64)]);
+        let output_descriptor =
+            RecordDescriptor::new([("left.id", ValueType::U64), ("right.value", ValueType::U64)]);
+        let left = [
+            RecordDelta {
+                record: Bytes::from(
+                    left_descriptor
+                        .create(&[Value::U64(1), Value::U64(7)])
+                        .expect("encode left row"),
+                ),
+                weight: 2,
+            },
+            RecordDelta {
+                record: Bytes::from(
+                    left_descriptor
+                        .create(&[Value::U64(2), Value::U64(7)])
+                        .expect("encode left row"),
+                ),
+                weight: 1,
+            },
+        ];
+        let right = [RecordDelta {
+            record: Bytes::from(
+                right_descriptor
+                    .create(&[Value::U64(7), Value::U64(9)])
+                    .expect("encode right row"),
+            ),
+            weight: 3,
+        }];
+        let left_on = ["key".to_owned()];
+        let right_on = ["key".to_owned()];
+        let output_mapping = [(0, 0), (1, 1)];
+        let sub_tick = SubTick {
+            tick: 1,
+            sub_tick: 0,
+        };
+
+        let run = |update_mode| {
+            JoinState
+                .apply(
+                    &mut AsOf::default(),
+                    &mut AsOf::default(),
+                    &left_descriptor,
+                    &right_descriptor,
+                    &output_descriptor,
+                    &output_mapping,
+                    &left_on,
+                    &right_on,
+                    ValueComparison::Exact,
+                    &left,
+                    &right,
+                    sub_tick,
+                    sub_tick,
+                    update_mode,
+                )
+                .expect("join snapshots")
+                .into_iter()
+                .map(|delta| (delta.record.to_vec(), delta.weight))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let incremental = run(ArrangementUpdateMode::Accumulate);
+        let replacement = run(ArrangementUpdateMode::Replace);
+
+        assert_eq!(replacement, incremental);
+        assert_eq!(replacement.values().copied().collect::<Vec<_>>(), [6, 3]);
     }
 }

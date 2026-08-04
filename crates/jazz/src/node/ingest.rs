@@ -571,6 +571,7 @@ where
         let ingest_context = Some(CommitUnitIngestContext {
             identity,
             trust: CommitUnitTrust::TrustedBackend,
+            edge_authority: true,
         });
         let mut updates = self.ingest_edge_authority_mergeable_commit_unit_once(
             tx,
@@ -836,7 +837,7 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = merge_rows_for_versions(&versions);
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1099,7 +1100,7 @@ where
         self.clock.next_global_seq = self.clock.next_global_seq.next();
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
-        let merge_rows = merge_rows_for_versions(&versions);
+        let merge_rows = self.merge_rows_for_versions(&versions)?;
         self.ingest_known_transaction(
             tx.clone(),
             versions,
@@ -1513,13 +1514,9 @@ where
             for version in versions {
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
-                let has_forward_lens = author_schema != self.catalogue.current_write_schema.schema
-                    && self.has_forward_lens_path(
-                        author_schema,
-                        self.catalogue.current_write_schema.schema,
-                        version.table(),
-                    );
-                let (table_schema, target_schema, stored) = if has_forward_lens {
+                let (table_schema, target_schema, stored) = if author_schema
+                    != self.catalogue.current_write_schema.schema
+                {
                     let mut target_table = version.table().to_owned();
                     let mut target_cells = source_table_schema
                         .columns
@@ -1531,13 +1528,13 @@ where
                                 .map(|value| (column.name.clone(), value))
                         })
                         .collect::<BTreeMap<_, _>>();
-                    let target_schema = self.catalogue.current_write_schema.schema;
-                    target_table = self.translate_cells_forward(
-                        author_schema,
-                        target_schema,
-                        &target_table,
-                        &mut target_cells,
-                    )?;
+                    let (target_schema, translated_table) = self
+                        .translate_cells_to_current_write_schema(
+                            author_schema,
+                            &target_table,
+                            &mut target_cells,
+                        )?;
+                    target_table = translated_table;
                     let table_schema = self.table_in_schema(&target_table, target_schema)?;
                     let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
                     let stored = VersionRow::from_parts_with_schema_version(
@@ -2612,7 +2609,29 @@ where
         &mut self,
         records: &[VersionRecord],
     ) -> Result<(), Error> {
-        self.create_merge_versions_for_rows(merge_rows_for_versions(records))
+        let rows = self.merge_rows_for_versions(records)?;
+        self.create_merge_versions_for_rows(rows)
+    }
+
+    fn merge_rows_for_versions(
+        &mut self,
+        records: &[VersionRecord],
+    ) -> Result<Vec<(String, RowUuid)>, Error> {
+        let mut rows = Vec::with_capacity(records.len());
+        for record in records {
+            if record.deletion().is_some() {
+                continue;
+            }
+            let (_, table) = self.translate_cells_to_current_write_schema(
+                record.schema_version(),
+                record.table(),
+                &mut BTreeMap::new(),
+            )?;
+            rows.push((table, record.row_uuid()));
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        Ok(rows)
     }
 
     pub(super) fn create_merge_versions_for_rows(
@@ -4358,22 +4377,12 @@ where
                         .map(|value| (column.name.clone(), value))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let mut target_schema = author_schema;
-            if author_schema != self.catalogue.current_write_schema.schema
-                && self.has_forward_lens_path(
-                    author_schema,
-                    self.catalogue.current_write_schema.schema,
-                    version.table(),
-                )
-            {
-                target_schema = self.catalogue.current_write_schema.schema;
-                target_table = self.translate_cells_forward(
-                    author_schema,
-                    target_schema,
-                    &target_table,
-                    &mut target_cells,
-                )?;
-            }
+            let (target_schema, translated_table) = self.translate_cells_to_current_write_schema(
+                author_schema,
+                &target_table,
+                &mut target_cells,
+            )?;
+            target_table = translated_table;
             let table_schema = self.table_in_schema(&target_table, target_schema)?;
             let schema_version_alias = self.ensure_schema_version_alias(target_schema)?;
             let layer = VersionLayer::for_record(&version);
@@ -4548,20 +4557,22 @@ where
         Ok(())
     }
 
-    fn translate_cells_forward(
+    fn translate_cells_to_current_write_schema(
         &mut self,
         source: SchemaVersionId,
-        target: SchemaVersionId,
         table: &str,
         cells: &mut BTreeMap<String, Value>,
-    ) -> Result<String, Error> {
+    ) -> Result<(SchemaVersionId, String), Error> {
+        let target = self.catalogue.current_write_schema.schema;
         if source == target {
-            return Ok(table.to_owned());
+            return Ok((source, table.to_owned()));
         }
-        let path = self
-            .compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-            .ok_or(Error::InvalidCatalogueUpdate("lens chain is unknown"))?;
-        Ok(apply_compiled_lens_path(&path, cells))
+        for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
+            if let Some(path) = self.compiled_lens_path(source, target, direction, table)? {
+                return Ok((target, apply_compiled_lens_path(&path, cells)));
+            }
+        }
+        Ok((source, table.to_owned()))
     }
 
     fn reject_source_delta_reason(&mut self, versions: &[VersionRecord]) -> Option<String> {
@@ -4599,16 +4610,6 @@ where
             }
         }
         None
-    }
-
-    fn has_forward_lens_path(
-        &mut self,
-        source: SchemaVersionId,
-        target: SchemaVersionId,
-        table: &str,
-    ) -> bool {
-        self.compiled_lens_path(source, target, LensPathDirection::Forward, table)
-            .is_ok_and(|path| path.is_some())
     }
 
     pub(super) fn ingest_rejected_transaction(
@@ -4734,18 +4735,6 @@ fn content_version_reaches_tx_in_staged_parents(
         stack.extend(parents.iter().copied());
     }
     Some(false)
-}
-
-fn merge_rows_for_versions(records: &[VersionRecord]) -> Vec<(String, RowUuid)> {
-    let mut rows = Vec::with_capacity(records.len());
-    for record in records {
-        if record.deletion().is_none() {
-            rows.push((record.table().to_owned(), record.row_uuid()));
-        }
-    }
-    rows.sort_unstable();
-    rows.dedup();
-    rows
 }
 
 fn counter_merge_value(

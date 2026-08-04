@@ -60,10 +60,15 @@ export type SubscriptionDeltaChunk = {
 };
 export type SubscriptionRejectedChunk = {
   type: "rejected";
-  reason: {
-    type: "UnsupportedShapeCapability";
-    detail: string;
-  };
+  reason:
+    | {
+        type: "UnsupportedShapeCapability";
+        detail: string;
+      }
+    | {
+        type: "ServerFailure";
+        code: string;
+      };
 };
 export type SubscriptionStreamChunk =
   | SubscriptionSnapshotChunk

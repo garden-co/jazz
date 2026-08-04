@@ -326,6 +326,7 @@ type NativeRowFieldPlan = {
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
@@ -4095,7 +4096,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
     }
   | {
       type: "rejected";
-      reason: { type: "UnsupportedShapeCapability"; detail: string };
+      reason:
+        | { type: "UnsupportedShapeCapability"; detail: string }
+        | { type: "ServerFailure"; code: string };
     }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
@@ -4150,25 +4153,31 @@ function normalizeSubscriptionChunk(chunk: unknown):
   throw new Error("unknown subscription chunk");
 }
 
-function normalizeSubscriptionRejectionReason(reason: unknown): {
-  type: "UnsupportedShapeCapability";
-  detail: string;
-} {
+function normalizeSubscriptionRejectionReason(
+  reason: unknown,
+):
+  | { type: "UnsupportedShapeCapability"; detail: string }
+  | { type: "ServerFailure"; code: string } {
   if (!reason || typeof reason !== "object") {
     throw new Error("expected subscription rejection reason");
   }
-  const record = reason as { type?: unknown; detail?: unknown };
+  const record = reason as { type?: unknown; detail?: unknown; code?: unknown };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
     return { type: "UnsupportedShapeCapability", detail: record.detail };
+  }
+  if (record.type === "ServerFailure" && typeof record.code === "string") {
+    return { type: "ServerFailure", code: record.code };
   }
   throw new Error("unknown subscription rejection reason");
 }
 
-function subscriptionRejectionError(reason: {
-  type: "UnsupportedShapeCapability";
-  detail: string;
-}): Error {
-  return new Error(`Subscription rejected: ${reason.type}: ${reason.detail}`);
+function subscriptionRejectionError(
+  reason:
+    | { type: "UnsupportedShapeCapability"; detail: string }
+    | { type: "ServerFailure"; code: string },
+): Error {
+  const detail = reason.type === "UnsupportedShapeCapability" ? reason.detail : reason.code;
+  return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
 }
 
 function subscriptionSource(
@@ -4526,10 +4535,28 @@ function deterministicBytes(seed: string): Uint8Array {
 }
 
 export function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
+  return (
+    byteHex[bytes[0]!] +
+    byteHex[bytes[1]!] +
+    byteHex[bytes[2]!] +
+    byteHex[bytes[3]!] +
+    "-" +
+    byteHex[bytes[4]!] +
+    byteHex[bytes[5]!] +
+    "-" +
+    byteHex[bytes[6]!] +
+    byteHex[bytes[7]!] +
+    "-" +
+    byteHex[bytes[8]!] +
+    byteHex[bytes[9]!] +
+    "-" +
+    byteHex[bytes[10]!] +
+    byteHex[bytes[11]!] +
+    byteHex[bytes[12]!] +
+    byteHex[bytes[13]!] +
+    byteHex[bytes[14]!] +
+    byteHex[bytes[15]!]
   );
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

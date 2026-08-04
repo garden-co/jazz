@@ -12,6 +12,7 @@ use jazz::tools::{
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use uuid::Uuid;
 
 mod permissions;
 
@@ -109,7 +110,17 @@ impl<'a> TestingClient<'a> {
     }
 
     pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = Some(user_id.into());
+        let user_id = user_id.into();
+        // WebSocket sessions now validate principals as UUIDs. Keep symbolic
+        // test identities useful while making their wire identity valid and
+        // deterministic; literal UUIDs remain unchanged.
+        self.user_id = Some(
+            Uuid::parse_str(&user_id)
+                .map(|uuid| uuid.to_string())
+                .unwrap_or_else(|_| {
+                    Uuid::new_v5(&Uuid::NAMESPACE_URL, user_id.as_bytes()).to_string()
+                }),
+        );
         self
     }
 

@@ -1062,6 +1062,11 @@ where
                 bundle.durability,
             )?;
             if matches!(bundle.fate, Fate::Accepted) {
+                // Ingesting only the previously missing versions replaces the
+                // transaction-version cache with that subset. Reload the full
+                // assembled transaction before applying its fate so every
+                // earlier fragment receives a current index.
+                self.invalidate_tx_version_tables_cache(tx_id);
                 self.apply_fate_update(
                     tx_id,
                     bundle.fate,

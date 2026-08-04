@@ -365,8 +365,8 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
     let author_b = user(0xb2);
     let tx_a = commit_core_owner_fixture(&mut core, row(1), author_a, "a row", 10);
     let tx_b = commit_core_owner_fixture(&mut core, row(2), author_b, "b row", 11);
-    let mut link_a = PeerState::for_author(author_a);
-    let mut link_b = PeerState::for_author(author_b);
+    let mut link_a = PeerState::client_link(author_a);
+    let mut link_b = PeerState::client_link(author_b);
 
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_a, BTreeSet::from([row(1)]));
@@ -437,7 +437,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     .unwrap();
     let shape = Query::from("announcements").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut bob_peer = PeerState::for_author(bob);
+    let mut bob_peer = PeerState::client_link(bob);
 
     let update = bob_peer
         .rehydrate_query(&mut core, &shape, &binding)
@@ -498,7 +498,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let author_b = user(0xb2);
     let row_uuid = row(7);
     let tx_a = commit_core_owner_fixture(&mut core, row_uuid, author_a, "owned by A", 10);
-    let mut link_a = PeerState::for_author(author_a);
+    let mut link_a = PeerState::client_link(author_a);
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
@@ -546,7 +546,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         vec![(row_uuid, owner_cells(author_a, "owned by A"))]
     );
 
-    let mut link_b = PeerState::for_author(author_b);
+    let mut link_b = PeerState::client_link(author_b);
     let update = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
     reader_b.apply_sync_message(update).unwrap();
@@ -660,7 +660,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         Some((Fate::Accepted, _, DurabilityTier::Global))
     ));
 
-    let mut invited_link = PeerState::for_author(invited);
+    let mut invited_link = PeerState::client_link(invited);
     let invited_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
@@ -687,7 +687,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         )])
     );
 
-    let mut uninvited_link = PeerState::for_author(uninvited);
+    let mut uninvited_link = PeerState::client_link(uninvited);
     let uninvited_update = uninvited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
@@ -1247,7 +1247,7 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut alice_peer = PeerState::for_author(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     alice_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
@@ -1906,8 +1906,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     )
     .unwrap();
 
-    let mut invited_link = PeerState::for_author(invited);
-    let mut spy_link = PeerState::for_author(spy);
+    let mut invited_link = PeerState::client_link(invited);
+    let mut spy_link = PeerState::client_link(spy);
     let invited_initial = invited_link
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
@@ -2832,7 +2832,7 @@ fn maintained_subscription_view_multi_segment_inner_include_payload_references_v
     let shape = required_include_shape(&maintained_core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut maintained_peer = PeerState::for_author(reader);
+    let mut maintained_peer = PeerState::client_link(reader);
 
     let full_recompute_rows = required_include_rows(&mut full_recompute_core, &shape, reader);
     assert_eq!(
@@ -2877,7 +2877,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     seed_multi_segment_include_fixture(&mut core, reader);
     let shape = required_include_shape(&core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = PeerState::for_author(reader);
+    let mut peer = PeerState::client_link(reader);
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     let update_tx = core
@@ -2923,7 +2923,7 @@ fn maintained_inner_multi_segment_include_payload_references_visible_path_only()
     let shape = required_include_shape(&maintained_core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut maintained_peer = PeerState::for_author(reader);
+    let mut maintained_peer = PeerState::client_link(reader);
 
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
@@ -3005,7 +3005,7 @@ fn maintained_subscription_view_multi_segment_holes_include_payload_references_v
     );
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut maintained_peer = PeerState::for_author(reader);
+    let mut maintained_peer = PeerState::client_link(reader);
 
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
@@ -3283,7 +3283,7 @@ fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_s
             Value::String("owned".to_owned()),
         )]))
         .unwrap();
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
     assert_eq!(
@@ -3440,7 +3440,7 @@ fn maintained_view_allows_join_policy_slice() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = PeerState::for_author(user(0xa1));
+    let mut peer = PeerState::client_link(user(0xa1));
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 }
 
@@ -3495,7 +3495,7 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
         .collect::<BTreeSet<_>>();
     assert_eq!(prepared_rows, expected_rows);
 
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
     let update = peer
         .rehydrate_query(&mut core, &retained_shape, &retained_binding)
         .unwrap();
@@ -3576,7 +3576,7 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
     assert!(one_shot_metrics.policy_authorization_graphs > 0);
     assert!(one_shot_metrics.policy_authorized_source_joins > 0);
 
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
     core.reset_query_engine_read_metrics();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
@@ -3642,7 +3642,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut peer = PeerState::for_author(reader);
+    let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows(&initial),
@@ -3788,7 +3788,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
         vec![entry]
     );
 
-    let mut peer = PeerState::for_author(reader);
+    let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows_for_table(&initial, "entries"),
@@ -3968,7 +3968,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
         .validate(&ref_core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut ref_peer = PeerState::for_author(user(0xa1));
+    let mut ref_peer = PeerState::client_link(user(0xa1));
     ref_peer
         .rehydrate_query(&mut ref_core, &shape, &binding)
         .unwrap();
@@ -3986,7 +3986,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
         .validate(&plain_core.catalogue.schema)
         .unwrap();
     let plain_binding = plain_shape.bind(BTreeMap::new()).unwrap();
-    let mut plain_peer = PeerState::for_author(user(0xa1));
+    let mut plain_peer = PeerState::client_link(user(0xa1));
     plain_peer
         .rehydrate_query(&mut plain_core, &plain_shape, &plain_binding)
         .unwrap();
@@ -4038,7 +4038,7 @@ fn maintained_subscription_view_explicit_include_keeps_other_implicit_references
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = PeerState::for_author(user(0xa1));
+    let mut peer = PeerState::client_link(user(0xa1));
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included, excluded]));
@@ -4408,7 +4408,7 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     let mut peer = if identity == AuthorId::SYSTEM {
         PeerState::new()
     } else {
-        PeerState::for_author(identity)
+        PeerState::client_link(identity)
     };
     let update = peer.rehydrate_query(core, shape, binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
@@ -4933,7 +4933,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
 
     let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = PeerState::for_author(reader);
+    let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let (adds, removes) = canonical_view_update_rows(&update);
 
@@ -5239,11 +5239,11 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    let mut peer_b = PeerState::for_author(owner_b);
+    let mut peer_b = PeerState::client_link(owner_b);
     let update_b = peer_b
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    let mut peer_a = PeerState::for_author(owner_a);
+    let mut peer_a = PeerState::client_link(owner_a);
     let update_a = peer_a
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
@@ -5254,4 +5254,150 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
     assert!(removes_b.is_empty());
     assert_eq!(adds_a.len(), 100, "owner A should receive its own full window");
     assert_eq!(adds_b.len(), 100, "owner B should receive its own full window");
+}
+
+#[test]
+fn authorization_proofs_are_existential_before_top_by_windows() {
+    let reader = user(0xa1);
+    let documents_policy = Query::from("documents")
+        .join_via(
+            "documentAccess",
+            "document",
+            [eq(col("reader"), claim("sub"))],
+        )
+        .policy_branch(PolicyBranch::single_alternative_from_query(
+            Query::from("documents").filter(eq(col("published"), lit(true))),
+        ));
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "documents",
+            [
+                ColumnSchema::new("updated_at", ColumnType::U64),
+                ColumnSchema::new("published", ColumnType::Bool),
+            ],
+        )
+        .with_read_policy(Policy::shape(documents_policy)),
+        TableSchema::new(
+            "documentAccess",
+            [
+                ColumnSchema::new("document", ColumnType::Uuid),
+                ColumnSchema::new("reader", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("document", "documents"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let mut document_txs = Vec::new();
+    let mut grant_txs = Vec::new();
+    for index in 0..100_u64 {
+        let document = row(index as u8);
+        document_txs.push(accept_global(
+            &mut core,
+            MergeableCommit::new("documents", document, index * 3 + 1).cells(BTreeMap::from([
+                ("updated_at".to_owned(), Value::U64(index)),
+                ("published".to_owned(), Value::Bool(index >= 95)),
+            ])),
+        ));
+        let grant = row((index + 100) as u8);
+        grant_txs.push(accept_global(
+            &mut core,
+            MergeableCommit::new("documentAccess", grant, index * 3 + 2).cells(BTreeMap::from([
+                ("document".to_owned(), Value::Uuid(document.0)),
+                ("reader".to_owned(), Value::Uuid(reader.0)),
+            ])),
+        ));
+    }
+    let shape = Query::from("documents")
+        .order_by("updated_at", OrderDirection::Desc)
+        .limit(100)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let query_rows = |core: &mut NodeState<RocksDbStorage>| {
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+    };
+    let expected_initial = (0..100_u8).rev().map(row).collect::<Vec<_>>();
+    let initial_one_shot = query_rows(&mut core);
+    assert_eq!(initial_one_shot, expected_initial);
+    assert_eq!(initial_one_shot.iter().copied().collect::<BTreeSet<_>>().len(), 100);
+
+    let mut peer = PeerState::for_author(reader);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (initial_adds, initial_removes) =
+        canonical_view_update_rows_for_table(&initial, "documents");
+    assert!(initial_removes.is_empty());
+    assert_eq!(
+        initial_adds
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<BTreeSet<_>>(),
+        expected_initial.iter().copied().collect()
+    );
+
+    let duplicate_grant = row(0xfe);
+    let duplicate_grant_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("documentAccess", duplicate_grant, 302).cells(BTreeMap::from([
+            ("document".to_owned(), Value::Uuid(row(99).0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let duplicate = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&duplicate, "documents"),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(query_rows(&mut core).len(), 100);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documentAccess", row(199), 303)
+            .parents(vec![grant_txs[99]])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let partial_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&partial_revoke, "documents"),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(query_rows(&mut core).len(), 100);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documentAccess", duplicate_grant, 304)
+            .parents(vec![duplicate_grant_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let overlapping_branch = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&overlapping_branch, "documents"),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(query_rows(&mut core).len(), 100);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documents", row(99), 305)
+            .parents(vec![document_txs[99]])
+            .cells(BTreeMap::from([
+                ("updated_at".to_owned(), Value::U64(99)),
+                ("published".to_owned(), Value::Bool(false)),
+            ])),
+    );
+    let final_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&final_revoke, "documents"),
+        (
+            Vec::new(),
+            vec![("documents".to_owned().into(), row(99), document_txs[99])]
+        )
+    );
+    assert_eq!(
+        query_rows(&mut core),
+        (0..99_u8).rev().map(row).collect::<Vec<_>>()
+    );
 }
