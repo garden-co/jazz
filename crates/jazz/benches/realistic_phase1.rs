@@ -38,6 +38,8 @@ use jazz::wire::{
     WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
 };
 #[cfg(feature = "rocksdb")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "rocksdb")]
 use tempfile::TempDir;
 
 type BenchDb = Db<MemoryStorage>;
@@ -1123,6 +1125,11 @@ struct R3PhaseSample {
     first_read_apply_projection: Duration,
     first_read_unattributed: Duration,
     rows: usize,
+    result_digest: String,
+    storage_reads: usize,
+    storage_ranges: usize,
+    hydration_memo_computes: u64,
+    hydration_memo_hits: u64,
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1259,6 +1266,10 @@ fn measure_r3_phase_sample(
     let query = project_board_query(&db, project);
     let prepare = prepare_started.elapsed();
 
+    #[cfg(feature = "testing")]
+    db.reset_storage_read_metrics_for_test();
+    #[cfg(feature = "testing")]
+    let runtime_before = db.runtime_stats_for_test();
     let read_started = Instant::now();
     let (rows, read_profile) = db
         .read_profiled(&query)
@@ -1269,6 +1280,17 @@ fn measure_r3_phase_sample(
         expected_rows,
         "R3 project-board result count changed"
     );
+    #[cfg(feature = "testing")]
+    let storage_reads = db.take_storage_read_metrics_for_test();
+    #[cfg(feature = "testing")]
+    let runtime_after = db.runtime_stats_for_test();
+    let mut row_ids = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+    row_ids.sort_unstable();
+    let mut digest = Sha256::new();
+    for row_id in row_ids {
+        digest.update(row_id.0.as_bytes());
+    }
+    let result_digest = format!("{:x}", digest.finalize());
 
     R3PhaseSample {
         storage_open,
@@ -1284,6 +1306,27 @@ fn measure_r3_phase_sample(
         first_read_apply_projection: read_profile.apply_projection,
         first_read_unattributed: first_read.saturating_sub(read_profile.total),
         rows: rows.len(),
+        result_digest,
+        #[cfg(feature = "testing")]
+        storage_reads: storage_reads.total.reads,
+        #[cfg(not(feature = "testing"))]
+        storage_reads: 0,
+        #[cfg(feature = "testing")]
+        storage_ranges: storage_reads.total.ranges,
+        #[cfg(not(feature = "testing"))]
+        storage_ranges: 0,
+        #[cfg(feature = "testing")]
+        hydration_memo_computes: runtime_after
+            .hydration_memo_computes
+            .saturating_sub(runtime_before.hydration_memo_computes),
+        #[cfg(not(feature = "testing"))]
+        hydration_memo_computes: 0,
+        #[cfg(feature = "testing")]
+        hydration_memo_hits: runtime_after
+            .hydration_memo_hits
+            .saturating_sub(runtime_before.hydration_memo_hits),
+        #[cfg(not(feature = "testing"))]
+        hydration_memo_hits: 0,
     }
 }
 
@@ -1309,6 +1352,17 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
         let samples = (0..sample_count)
             .map(|sample| measure_r3_phase_sample(path, project, expected_rows, sample, cache_mode))
             .collect::<Vec<_>>();
+        assert!(
+            samples.iter().all(|sample| {
+                sample.rows == samples[0].rows
+                    && sample.result_digest == samples[0].result_digest
+                    && sample.storage_reads == samples[0].storage_reads
+                    && sample.storage_ranges == samples[0].storage_ranges
+                    && sample.hydration_memo_computes == samples[0].hydration_memo_computes
+                    && sample.hydration_memo_hits == samples[0].hydration_memo_hits
+            }),
+            "R3 result and attributed work must be deterministic across samples: {samples:?}"
+        );
 
         println!(
             "{}",
@@ -1325,6 +1379,11 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                 "watchers_per_task": selected.profile.watchers_per_task,
                 "activity_events": selected.profile.activity_events,
                 "result_rows": samples[0].rows,
+                "result_digest": samples[0].result_digest,
+                "storage_reads": samples[0].storage_reads,
+                "storage_ranges": samples[0].storage_ranges,
+                "hydration_memo_computes": samples[0].hydration_memo_computes,
+                "hydration_memo_hits": samples[0].hydration_memo_hits,
                 "samples": sample_count,
                 "durability": "wal_no_sync",
                 "total_p50_us": median_us(&samples, |sample| {

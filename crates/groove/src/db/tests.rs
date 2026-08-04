@@ -4452,8 +4452,11 @@ fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
 #[test]
 #[ignore = "receipt-only timing for equivalent-terminal snapshot hydration"]
 fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
-    const ROWS: usize = 4_096;
     const SAMPLES: usize = 7;
+    let rows = std::env::var("GROOVE_HYDRATION_RECEIPT_ROWS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4_096);
 
     for terminal_count in [1_usize, 2, 4, 8] {
         let mut elapsed_us = Vec::with_capacity(SAMPLES);
@@ -4463,7 +4466,7 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
             let counter = storage.clone();
             let mut database = Database::new(albums_schema(), storage).unwrap();
             let mut batch = database.open_batch();
-            for id in 0..ROWS as u64 {
+            for id in 0..rows as u64 {
                 batch.insert(
                     "albums",
                     vec![Value::U64(id), Value::String(format!("album-{id}"))],
@@ -4519,7 +4522,7 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
         let (snapshot_queries, child_visits, memo_computes, memo_hits, result_rows, digest) =
             receipt.unwrap();
         println!(
-            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{ROWS},\"samples\":{SAMPLES},\"storage_prefix_scans\":{snapshot_queries},\"storage_records_visited\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"total_result_rows\":{result_rows},\"per_terminal_rows\":{},\"per_terminal_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
+            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{rows},\"samples\":{SAMPLES},\"storage_prefix_scans\":{snapshot_queries},\"storage_records_visited\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"total_result_rows\":{result_rows},\"per_terminal_rows\":{},\"per_terminal_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
             result_rows / terminal_count,
             elapsed_us[SAMPLES / 2]
         );
