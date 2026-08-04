@@ -525,7 +525,12 @@ where
     }
 
     pub(super) fn record_applied_global_seq(&mut self, global_seq: GlobalSeq) -> Vec<GlobalSeq> {
-        self.clock.next_global_seq = self.clock.next_global_seq.max(global_seq.next());
+        if global_seq == GlobalSeq(u64::MAX) {
+            self.clock.next_global_seq = global_seq;
+            self.clock.global_seq_exhausted = true;
+        } else if !self.clock.global_seq_exhausted {
+            self.clock.next_global_seq = self.clock.next_global_seq.max(global_seq.next());
+        }
         if global_seq <= self.clock.applied_global_watermark {
             return Vec::new();
         }

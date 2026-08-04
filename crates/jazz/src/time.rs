@@ -26,7 +26,7 @@ pub struct GlobalSeq(pub u64);
 impl GlobalSeq {
     /// Return the next global sequence value.
     pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+        Self(self.0.checked_add(1).expect("global sequence exhausted"))
     }
 }
 

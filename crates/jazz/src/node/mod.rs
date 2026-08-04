@@ -323,10 +323,27 @@ struct Clock {
     tx_time: TxTime,
     /// Next global sequence number to allocate when accepting local work globally.
     next_global_seq: GlobalSeq,
+    /// Whether the maximum global sequence has already been allocated or recovered.
+    global_seq_exhausted: bool,
     /// Contiguous global sequence watermark already applied to local storage.
     applied_global_watermark: GlobalSeq,
     /// Applied global sequence numbers above the contiguous watermark.
     applied_global_above_watermark: BTreeSet<GlobalSeq>,
+}
+
+impl Clock {
+    fn allocate_global_seq(&mut self) -> Result<GlobalSeq, Error> {
+        if self.global_seq_exhausted {
+            return Err(Error::InvalidStoredValue("global sequence exhausted"));
+        }
+        let global_seq = self.next_global_seq;
+        if global_seq == GlobalSeq(u64::MAX) {
+            self.global_seq_exhausted = true;
+        } else {
+            self.next_global_seq = global_seq.next();
+        }
+        Ok(global_seq)
+    }
 }
 
 /// Payloads parked until missing schema or catalogue context arrives.
@@ -690,6 +707,7 @@ where
             clock: Clock {
                 tx_time: TxTime::default(),
                 next_global_seq: GlobalSeq(1),
+                global_seq_exhausted: false,
                 applied_global_watermark: GlobalSeq(0),
                 applied_global_above_watermark: BTreeSet::new(),
             },
@@ -918,6 +936,7 @@ where
         self.catalogue.current_schema_version_alias = None;
         self.clock.tx_time = TxTime::default();
         self.clock.next_global_seq = GlobalSeq(1);
+        self.clock.global_seq_exhausted = false;
         self.clock.applied_global_watermark = GlobalSeq(0);
         self.clock.applied_global_above_watermark.clear();
         self.node_aliases.clear();
