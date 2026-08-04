@@ -1130,6 +1130,7 @@ struct R3PhaseSample {
     storage_ranges: usize,
     hydration_memo_computes: u64,
     hydration_memo_hits: u64,
+    instrumentation_available: bool,
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1284,11 +1285,15 @@ fn measure_r3_phase_sample(
     let storage_reads = db.take_storage_read_metrics_for_test();
     #[cfg(feature = "testing")]
     let runtime_after = db.runtime_stats_for_test();
-    let mut row_ids = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
-    row_ids.sort_unstable();
+    let mut canonical_rows = rows
+        .iter()
+        .map(|row| format!("{row:?}"))
+        .collect::<Vec<_>>();
+    canonical_rows.sort_unstable();
     let mut digest = Sha256::new();
-    for row_id in row_ids {
-        digest.update(row_id.0.as_bytes());
+    for row in canonical_rows {
+        digest.update((row.len() as u64).to_be_bytes());
+        digest.update(row.as_bytes());
     }
     let result_digest = format!("{:x}", digest.finalize());
 
@@ -1327,6 +1332,7 @@ fn measure_r3_phase_sample(
             .saturating_sub(runtime_before.hydration_memo_hits),
         #[cfg(not(feature = "testing"))]
         hydration_memo_hits: 0,
+        instrumentation_available: cfg!(feature = "testing"),
     }
 }
 
@@ -1384,6 +1390,7 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                 "storage_ranges": samples[0].storage_ranges,
                 "hydration_memo_computes": samples[0].hydration_memo_computes,
                 "hydration_memo_hits": samples[0].hydration_memo_hits,
+                "instrumentation_available": samples[0].instrumentation_available,
                 "samples": sample_count,
                 "durability": "wal_no_sync",
                 "total_p50_us": median_us(&samples, |sample| {
