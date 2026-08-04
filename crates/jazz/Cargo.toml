@@ -246,6 +246,13 @@ name = "query_membership_filters"
 required-features = ["test"]
 
 [[test]]
+name = "flush_once_per_refresh"
+required-features = ["test"]
+
+[[test]]
+name = "coverage_group_flush_once"
+
+[[test]]
 name = "rename_write_authorization"
 required-features = ["test"]
 
