@@ -7,6 +7,7 @@
 //! In the layer map it is the schema bridge from Jazz concepts to groove tables.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use groove::records::{EnumSchema, RecordDescriptor, Value, ValueType};
 use groove::schema::{
@@ -45,6 +46,11 @@ pub const STORAGE_CONSISTENCY_MARKERS_STORE: &str = "jazz_storage_consistency_ma
 /// Node-local derived content-head table used to avoid row-history scans on
 /// ordinary accepted writes. It is storage metadata, never wire or app data.
 pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
+
+type JsonSchemaValidatorCache = BTreeMap<String, Arc<jsonschema::Validator>>;
+
+static JSON_SCHEMA_VALIDATORS: LazyLock<RwLock<JsonSchemaValidatorCache>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 /// Complete logical Jazz schema.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -85,6 +91,8 @@ impl JazzSchema {
     }
 
     fn validated(self) -> Self {
+        admit_json_schema_validators(&self)
+            .unwrap_or_else(|error| panic!("invalid Jazz schema: {error}"));
         for table in &self.tables {
             for (column_name, strategy) in &table.merge_strategies {
                 let column = table
@@ -391,6 +399,62 @@ impl JazzSchema {
                 ]),
             ))
     }
+}
+
+/// Compile every JSON Schema in an admitted Jazz schema exactly once per
+/// process. Deserialized catalogue schemas call this explicitly at node
+/// admission because serde construction bypasses [`JazzSchema::validated`].
+pub(crate) fn admit_json_schema_validators(schema: &JazzSchema) -> Result<(), String> {
+    for table in &schema.tables {
+        for column in &table.columns {
+            admit_json_schema_type(
+                &column.column_type,
+                &format!("{}.{}", table.name, column.name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn admit_json_schema_type(column_type: &ColumnType, column_path: &str) -> Result<(), String> {
+    match column_type {
+        ColumnType::Nullable(inner) | ColumnType::Array(inner) => {
+            admit_json_schema_type(inner, column_path)
+        }
+        ColumnType::Tuple(members) => {
+            for (index, member) in members.iter().enumerate() {
+                admit_json_schema_type(member, &format!("{column_path}.{index}"))?;
+            }
+            Ok(())
+        }
+        ColumnType::Json {
+            schema: Some(schema),
+        } => {
+            let mut validators = JSON_SCHEMA_VALIDATORS
+                .write()
+                .expect("JSON Schema validator cache lock poisoned");
+            if validators.contains_key(schema) {
+                return Ok(());
+            }
+            let parsed = serde_json::from_str(schema).map_err(|error| {
+                format!("invalid JSON schema for column `{column_path}`: {error}")
+            })?;
+            let validator = jsonschema::validator_for(&parsed).map_err(|error| {
+                format!("invalid JSON schema for column `{column_path}`: {error}")
+            })?;
+            validators.insert(schema.clone(), Arc::new(validator));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn admitted_json_schema_validator(schema: &str) -> Option<Arc<jsonschema::Validator>> {
+    JSON_SCHEMA_VALIDATORS
+        .read()
+        .expect("JSON Schema validator cache lock poisoned")
+        .get(schema)
+        .cloned()
 }
 
 pub(crate) fn branch_metadata_table_schema() -> TableSchema {

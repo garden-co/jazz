@@ -281,6 +281,7 @@ where
                 "schema id does not match schema payload",
             ));
         }
+        admit_json_schema_validators(&schema.schema).map_err(Error::InvalidJsonCell)?;
         let active_schema_changed = schema.id == self.catalogue.current_schema_version_id
             && self.catalogue.schema != schema.schema;
         self.catalogue
