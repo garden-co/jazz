@@ -27,6 +27,10 @@ fn row(tag: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
+    schema_with_membership_policy(Policy::public())
+}
+
+fn schema_with_membership_policy(membership_policy: Option<Query>) -> JazzSchema {
     let policy = Query::from(DOCUMENTS).join_via_column(
         MEMBERSHIPS,
         "team",
@@ -49,7 +53,7 @@ fn schema() -> JazzSchema {
             ],
         )
         .with_reference("team", TEAMS)
-        .with_read_policy(Policy::public())
+        .with_read_policy(membership_policy)
         .with_write_policy(Policy::public()),
         TableSchema::new(
             DOCUMENTS,
@@ -65,7 +69,10 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db() -> BenchDb {
-    let schema = schema();
+    open_db_with_schema(schema())
+}
+
+fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -260,4 +267,91 @@ fn prepared_policy_claims_route_retained_subscriptions() {
 #[test]
 fn prepared_policy_claims_support_equal_custom_string_values() {
     assert_retained_subscription_regions("shared-region", "shared-region");
+}
+
+#[test]
+fn prepared_binding_includes_claims_from_auxiliary_source_policies() {
+    let membership_policy = Policy::shape(
+        Query::from(MEMBERSHIPS).filter(eq(col("region"), claim("membership_region"))),
+    );
+    let db = open_db_with_schema(schema_with_membership_policy(membership_policy));
+    let team_a = row(0x11);
+    let team_b = row(0x12);
+    seed(&db, team_a, team_b, "region-a", "region-b");
+    db.set_identity_claims(
+        USER_A,
+        BTreeMap::from([
+            ("region".to_owned(), Value::String("region-a".to_owned())),
+            (
+                "membership_region".to_owned(),
+                Value::String("region-a".to_owned()),
+            ),
+        ]),
+    );
+    db.set_identity_claims(
+        USER_B,
+        BTreeMap::from([
+            ("region".to_owned(), Value::String("region-b".to_owned())),
+            (
+                "membership_region".to_owned(),
+                Value::String("region-b".to_owned()),
+            ),
+        ]),
+    );
+    let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
+
+    for (identity, team, expected) in [(USER_A, team_a, row(0x41)), (USER_B, team_b, row(0x42))] {
+        let prepared = db
+            .prepare_query_bound(
+                &query,
+                BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]),
+            )
+            .expect("prepare auxiliary-policy binding");
+        let rows = block_on(db.all_for_identity(&prepared, opts(), identity))
+            .expect("read through auxiliary policy")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![expected]);
+    }
+}
+
+#[test]
+fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
+    let root_policy = Query::from(DOCUMENTS)
+        .filter(eq(col("team"), claim("shared_scope")))
+        .join_via_column(MEMBERSHIPS, "team", "team", [eq(col("user"), claim("sub"))]);
+    let membership_policy =
+        Query::from(MEMBERSHIPS).filter(eq(col("region"), claim("shared_scope")));
+    let schema = JazzSchema::new([
+        TableSchema::new(TEAMS, [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            MEMBERSHIPS,
+            [
+                ColumnSchema::new("team", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+                ColumnSchema::new("region", ColumnType::String),
+            ],
+        )
+        .with_reference("team", TEAMS)
+        .with_read_policy(membership_policy),
+        TableSchema::new(DOCUMENTS, [ColumnSchema::new("team", ColumnType::Uuid)])
+            .with_reference("team", TEAMS)
+            .with_read_policy(root_policy),
+    ]);
+    let db = open_db_with_schema(schema);
+    db.set_identity_claims(
+        USER_A,
+        BTreeMap::from([("shared_scope".to_owned(), Value::Uuid(row(0x11).0))]),
+    );
+    let prepared = db
+        .prepare_query(&Query::from(DOCUMENTS))
+        .expect("prepare conflicting-policy shape");
+
+    let error = block_on(db.all_for_identity(&prepared, opts(), USER_A))
+        .expect_err("conflicting policy claim types must fail explicitly");
+    assert!(
+        error.to_string().contains("conflicting policy types"),
+        "unexpected error: {error}"
+    );
 }

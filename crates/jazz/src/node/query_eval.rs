@@ -7,7 +7,7 @@
 
 use super::*;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 use std::time::Instant;
 
@@ -5972,14 +5972,10 @@ where
         let mut binding_claim_params =
             self.binding_claim_params_for_shape(&input_shape, shape.schema_version())?;
         if identity != AuthorId::SYSTEM {
-            binding_claim_params.extend(self.read_policy_claim_params_for_table(
-                self.read_policy_schema_for_table_name(
-                    &shape.query().table,
-                    shape.schema_version(),
-                    &input_shape,
-                ),
-                &shape.query().table,
-            )?);
+            merge_claim_params(
+                &mut binding_claim_params,
+                self.read_policy_claim_params_for_shape(shape.schema_version(), &input_shape)?,
+            )?;
         }
         let source_shape = use_prepared_binding_source
             .then(|| {
@@ -6268,42 +6264,74 @@ where
             reachable_contributions,
             nodes,
         };
-        retarget_predicate_claims_to_binding_params(&mut normalized, schema);
-        let claim_params = collect_binding_claim_params_for_shape(&normalized, schema);
+        let inferred_claim_params =
+            retarget_predicate_claims_to_binding_params(&mut normalized, schema)?;
+        let mut claim_params = collect_binding_claim_params_for_shape(&normalized, schema)?;
+        merge_claim_params(&mut claim_params, inferred_claim_params)?;
         let binding_source_shape =
             query_binding_source_shape_for_parts(shape.params(), &claim_params);
         retarget_binding_value_sources(&mut normalized, &binding_source_shape);
         Ok(normalized)
     }
 
-    fn read_policy_claim_params_for_table(
+    fn read_policy_claim_params_for_shape(
         &self,
-        policy_schema_version: SchemaVersionId,
-        table_name: &str,
+        query_schema: SchemaVersionId,
+        input_shape: &NormalizedRowSetShape,
     ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            &self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?
-                .schema
-        };
-        let table = policy_schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == table_name)
-            .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let query = authorization_query_from_read_policy(table);
-        let shape = query.validate(policy_schema)?;
-        let binding = shape.bind(BTreeMap::new())?;
-        let normalized = self.normalized_row_set_shape(&shape, &binding)?;
-        let mut claims = collect_binding_claim_params_for_shape(&normalized, policy_schema);
-        collect_reachable_seed_claim_params(policy_schema, shape.query(), &mut claims)?;
+        let mut pending = source_tables_for_shape(input_shape)
+            .into_iter()
+            .map(|table| {
+                (
+                    self.read_policy_schema_for_table_name(&table, query_schema, input_shape),
+                    table,
+                )
+            })
+            .collect::<VecDeque<_>>();
+        let mut visited = BTreeSet::new();
+        let mut claims = BTreeMap::new();
+        while let Some((policy_schema_version, table_name)) = pending.pop_front() {
+            if !visited.insert((policy_schema_version, table_name.clone())) {
+                continue;
+            }
+            let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id
+            {
+                &self.catalogue.schema
+            } else {
+                &self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&policy_schema_version)
+                    .ok_or(Error::InvalidStoredValue(
+                        "policy schema version is unknown",
+                    ))?
+                    .schema
+            };
+            let table = policy_schema
+                .tables
+                .iter()
+                .find(|candidate| candidate.name == table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+            let query = authorization_query_from_read_policy(table);
+            let shape = query.validate(policy_schema)?;
+            let binding = shape.bind(BTreeMap::new())?;
+            let normalized = self.normalized_row_set_shape(&shape, &binding)?;
+            merge_claim_params(
+                &mut claims,
+                collect_binding_claim_params_for_shape(&normalized, policy_schema)?,
+            )?;
+            collect_reachable_seed_claim_params(policy_schema, shape.query(), &mut claims)?;
+            for source_table in source_tables_for_shape(&normalized) {
+                let source_policy_schema = self.read_policy_schema_for_table_name(
+                    &source_table,
+                    policy_schema_version,
+                    &normalized,
+                );
+                if !visited.contains(&(source_policy_schema, source_table.clone())) {
+                    pending.push_back((source_policy_schema, source_table));
+                }
+            }
+        }
         Ok(claims)
     }
 
@@ -6322,7 +6350,7 @@ where
                 .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
                 .schema
         };
-        Ok(collect_binding_claim_params_for_shape(shape, schema))
+        collect_binding_claim_params_for_shape(shape, schema)
     }
 
     fn normalized_include_deleted_row_set_shape(
@@ -6494,10 +6522,10 @@ where
                 &binding,
                 query_binding_source_shape_for_parts_if_needed(
                     policy_shape.params(),
-                    &collect_binding_claim_params_for_shape(&input_shape, policy_schema),
+                    &collect_binding_claim_params_for_shape(&input_shape, policy_schema)?,
                 ),
                 BTreeMap::new(),
-                collect_binding_claim_params_for_shape(&input_shape, policy_schema),
+                collect_binding_claim_params_for_shape(&input_shape, policy_schema)?,
             ),
             shape: input_shape,
         };
@@ -9204,7 +9232,7 @@ where
         }
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
-        let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema);
+        let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema)?;
         collect_reachable_seed_claim_params(
             policy_schema,
             policy_shape.query(),
@@ -9344,7 +9372,7 @@ where
         } else {
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
-        let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema);
+        let mut claim_params = collect_binding_claim_params_for_shape(&input_shape, policy_schema)?;
         collect_reachable_seed_claim_params(
             policy_schema,
             policy_shape.query(),
@@ -9433,7 +9461,7 @@ where
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let mut claim_params =
-            collect_binding_claim_params_for_shape(&input_shape, &self.catalogue.schema);
+            collect_binding_claim_params_for_shape(&input_shape, &self.catalogue.schema)?;
         collect_reachable_seed_claim_params(
             &self.catalogue.schema,
             policy_shape.query(),
@@ -10087,15 +10115,15 @@ fn retarget_binding_value_sources(shape: &mut NormalizedRowSetShape, binding_sou
 fn retarget_predicate_claims_to_binding_params(
     shape: &mut NormalizedRowSetShape,
     schema: &JazzSchema,
-) {
+) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
     let mut claims = BTreeMap::<String, ProgramClaimParam>::new();
     for node in shape.nodes.values_mut() {
         match node {
             RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
-                retarget_predicate_claim_values(predicate, schema, &mut claims);
+                retarget_predicate_claim_values(predicate, schema, &mut claims)?;
             }
             RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
-                retarget_predicate_claim_values(correlation, schema, &mut claims);
+                retarget_predicate_claim_values(correlation, schema, &mut claims)?;
             }
             RowSetExpr::ValueSource { .. }
             | RowSetExpr::FrontierSource { .. }
@@ -10109,69 +10137,126 @@ fn retarget_predicate_claims_to_binding_params(
             | RowSetExpr::Aggregate { .. } => {}
         }
     }
+    Ok(claims)
+}
+
+fn source_tables_for_shape(shape: &NormalizedRowSetShape) -> BTreeSet<String> {
+    shape
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            RowSetExpr::Source { source, .. } => Some(source.table.clone()),
+            _ => None,
+        })
+        .chain(
+            shape
+                .auxiliary_sources
+                .iter()
+                .map(|source| source.table.clone()),
+        )
+        .collect()
+}
+
+fn merge_claim_params(
+    target: &mut BTreeMap<String, ProgramClaimParam>,
+    incoming: BTreeMap<String, ProgramClaimParam>,
+) -> Result<(), Error> {
+    for (name, claim) in incoming {
+        insert_claim_param(target, name, claim)?;
+    }
+    Ok(())
+}
+
+fn insert_claim_param(
+    target: &mut BTreeMap<String, ProgramClaimParam>,
+    name: String,
+    claim: ProgramClaimParam,
+) -> Result<(), Error> {
+    if let Some(existing) = target.get(&name)
+        && existing != &claim
+    {
+        return Err(Error::QueryCapability(format!(
+            "claim parameter '{name}' has conflicting policy types: {:?} and {:?}",
+            existing.ty, claim.ty
+        )));
+    }
+    target.insert(name, claim);
+    Ok(())
 }
 
 fn retarget_predicate_claim_values(
     predicate: &mut NormalizedPredicateExpr,
     schema: &JazzSchema,
     claims: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     match predicate {
         NormalizedPredicateExpr::Compare { left, right, .. } => {
             let left_type = normalized_value_column_type(right, schema);
             let right_type = normalized_value_column_type(left, schema);
-            retarget_claim_value(left, left_type, claims);
-            retarget_claim_value(right, right_type, claims);
+            retarget_claim_value(left, left_type, claims)?;
+            retarget_claim_value(right, right_type, claims)?;
         }
         NormalizedPredicateExpr::In { value, options } => {
             let value_type = options
                 .iter()
                 .find_map(|option| normalized_value_column_type(option, schema));
             let option_type = normalized_value_column_type(value, schema);
-            retarget_claim_value(value, value_type, claims);
+            retarget_claim_value(value, value_type, claims)?;
             for option in options {
-                retarget_claim_value(option, option_type.clone(), claims);
+                retarget_claim_value(option, option_type.clone(), claims)?;
             }
         }
-        NormalizedPredicateExpr::ArrayContains { value, needle }
-        | NormalizedPredicateExpr::TextContains { value, needle } => {
+        NormalizedPredicateExpr::ArrayContains { value, needle } => {
+            let value_type = normalized_value_column_type(needle, schema)
+                .map(|element| ColumnType::Array(Box::new(element)));
+            let needle_type = normalized_value_column_type(value, schema).and_then(|ty| match ty {
+                ColumnType::Array(element) => Some(*element),
+                _ => None,
+            });
+            retarget_claim_value(value, value_type, claims)?;
+            retarget_claim_value(needle, needle_type, claims)?;
+        }
+        NormalizedPredicateExpr::TextContains { value, needle } => {
             let value_type = normalized_value_column_type(needle, schema);
             let needle_type = normalized_value_column_type(value, schema);
-            retarget_claim_value(value, value_type, claims);
-            retarget_claim_value(needle, needle_type, claims);
+            retarget_claim_value(value, value_type, claims)?;
+            retarget_claim_value(needle, needle_type, claims)?;
         }
         NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
-            retarget_claim_value(value, None, claims);
+            retarget_claim_value(value, None, claims)?;
         }
         NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
             for child in children {
-                retarget_predicate_claim_values(child, schema, claims);
+                retarget_predicate_claim_values(child, schema, claims)?;
             }
         }
         NormalizedPredicateExpr::Not(child) => {
-            retarget_predicate_claim_values(child, schema, claims)
+            retarget_predicate_claim_values(child, schema, claims)?;
         }
         NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
     }
+    Ok(())
 }
 
 fn retarget_claim_value(
     value: &mut NormalizedValueRef,
     ty: Option<ColumnType>,
     claims: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     let NormalizedValueRef::Claim(path) = value else {
-        return;
+        return Ok(());
     };
     let name = claim_param_field(path);
-    claims.insert(
+    insert_claim_param(
+        claims,
         name.clone(),
         ProgramClaimParam {
             path: path.clone(),
             ty: ty.unwrap_or(ColumnType::Uuid),
         },
-    );
+    )?;
     *value = NormalizedValueRef::Param(name);
+    Ok(())
 }
 
 fn normalized_value_column_type(
@@ -10197,7 +10282,7 @@ fn normalized_value_column_type(
 fn collect_binding_claim_params_for_shape(
     shape: &NormalizedRowSetShape,
     schema: &JazzSchema,
-) -> BTreeMap<String, ProgramClaimParam> {
+) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
     let mut params = BTreeMap::new();
     for node in shape.nodes.values() {
         if let RowSetExpr::ValueSource {
@@ -10210,18 +10295,19 @@ fn collect_binding_claim_params_for_shape(
                 let NormalizedValueRef::Claim(path) = &column.value else {
                     continue;
                 };
-                params.insert(
+                insert_claim_param(
+                    &mut params,
                     claim_param_field(path),
                     ProgramClaimParam {
                         path: path.clone(),
                         ty: column.ty.clone(),
                     },
-                );
+                )?;
             }
         }
-        collect_claim_field_params_from_node(node, schema, &mut params);
+        collect_claim_field_params_from_node(node, schema, &mut params)?;
     }
-    params
+    Ok(params)
 }
 
 fn collect_reachable_seed_claim_params(
@@ -10254,13 +10340,14 @@ fn collect_reachable_seed_claim_params(
                 "reachable seed column is missing from schema",
             ))?;
         let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
-        params.insert(
+        insert_claim_param(
+            params,
             claim_param_field(&path),
             ProgramClaimParam {
                 path,
                 ty: column.column_type.clone(),
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -10269,19 +10356,19 @@ fn collect_claim_field_params_from_node(
     node: &RowSetExpr,
     schema: &JazzSchema,
     params: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     match node {
         RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
-            collect_claim_field_params_from_predicate(predicate, schema, params);
+            collect_claim_field_params_from_predicate(predicate, schema, params)?;
         }
         RowSetExpr::RecursiveRelation {
             frontier_key,
             dedupe_keys,
             ..
         } => {
-            collect_claim_field_param(frontier_key, ColumnType::Uuid, params);
+            collect_claim_field_param(frontier_key, ColumnType::Uuid, params)?;
             for key in dedupe_keys {
-                collect_claim_field_param(key, ColumnType::Uuid, params);
+                collect_claim_field_param(key, ColumnType::Uuid, params)?;
             }
         }
         RowSetExpr::Project { columns, .. } => {
@@ -10290,20 +10377,20 @@ fn collect_claim_field_params_from_node(
                     &column.value,
                     column.output.ty.clone(),
                     params,
-                );
+                )?;
             }
         }
         RowSetExpr::Distinct { keys, .. } => {
             for key in keys {
-                collect_claim_field_param(key, ColumnType::Uuid, params);
+                collect_claim_field_param(key, ColumnType::Uuid, params)?;
             }
         }
         RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
-            collect_claim_field_params_from_predicate(correlation, schema, params);
+            collect_claim_field_params_from_predicate(correlation, schema, params)?;
         }
         RowSetExpr::OrderBy { keys, .. } => {
             for key in keys {
-                collect_claim_field_param(&key.value, ColumnType::Uuid, params);
+                collect_claim_field_param(&key.value, ColumnType::Uuid, params)?;
             }
         }
         RowSetExpr::Slice {
@@ -10312,18 +10399,18 @@ fn collect_claim_field_params_from_node(
             ..
         } => {
             for value in partition_by.iter().chain(tie_breaker) {
-                collect_claim_field_param(value, ColumnType::Uuid, params);
+                collect_claim_field_param(value, ColumnType::Uuid, params)?;
             }
         }
         RowSetExpr::Aggregate {
             group_by, outputs, ..
         } => {
             for value in group_by {
-                collect_claim_field_param(value, ColumnType::Uuid, params);
+                collect_claim_field_param(value, ColumnType::Uuid, params)?;
             }
             for output in outputs {
                 if let Some(input) = &output.input {
-                    collect_claim_field_param(input, output.output.ty.clone(), params);
+                    collect_claim_field_param(input, output.output.ty.clone(), params)?;
                 }
             }
         }
@@ -10332,13 +10419,14 @@ fn collect_claim_field_params_from_node(
         | RowSetExpr::Source { .. }
         | RowSetExpr::Union { .. } => {}
     }
+    Ok(())
 }
 
 fn collect_claim_field_params_from_predicate(
     predicate: &NormalizedPredicateExpr,
     schema: &JazzSchema,
     params: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     match predicate {
         NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
         NormalizedPredicateExpr::Compare { left, right, .. } => {
@@ -10346,66 +10434,97 @@ fn collect_claim_field_params_from_predicate(
                 left,
                 normalized_value_column_type(right, schema).unwrap_or(ColumnType::Uuid),
                 params,
-            );
+            )?;
             collect_claim_field_param(
                 right,
                 normalized_value_column_type(left, schema).unwrap_or(ColumnType::Uuid),
                 params,
-            );
+            )?;
         }
         NormalizedPredicateExpr::In { value, options } => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
+            let value_type = options
+                .iter()
+                .find_map(|option| normalized_value_column_type(option, schema))
+                .unwrap_or(ColumnType::Uuid);
+            let option_type =
+                normalized_value_column_type(value, schema).unwrap_or(ColumnType::Uuid);
+            collect_claim_field_param(value, value_type, params)?;
             for option in options {
-                collect_claim_field_param(option, ColumnType::Uuid, params);
+                collect_claim_field_param(option, option_type.clone(), params)?;
             }
         }
-        NormalizedPredicateExpr::ArrayContains { value, needle }
-        | NormalizedPredicateExpr::TextContains { value, needle } => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
-            collect_claim_field_param(needle, ColumnType::Uuid, params);
+        NormalizedPredicateExpr::ArrayContains { value, needle } => {
+            collect_claim_field_param(
+                value,
+                normalized_value_column_type(needle, schema)
+                    .map(|element| ColumnType::Array(Box::new(element)))
+                    .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Uuid))),
+                params,
+            )?;
+            collect_claim_field_param(
+                needle,
+                normalized_value_column_type(value, schema)
+                    .and_then(|ty| match ty {
+                        ColumnType::Array(element) => Some(*element),
+                        _ => None,
+                    })
+                    .unwrap_or(ColumnType::Uuid),
+                params,
+            )?;
+        }
+        NormalizedPredicateExpr::TextContains { value, needle } => {
+            collect_claim_field_param(
+                value,
+                normalized_value_column_type(needle, schema).unwrap_or(ColumnType::String),
+                params,
+            )?;
+            collect_claim_field_param(
+                needle,
+                normalized_value_column_type(value, schema).unwrap_or(ColumnType::String),
+                params,
+            )?;
         }
         NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
+            collect_claim_field_param(value, ColumnType::Uuid, params)?;
         }
         NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
             for child in children {
-                collect_claim_field_params_from_predicate(child, schema, params);
+                collect_claim_field_params_from_predicate(child, schema, params)?;
             }
         }
         NormalizedPredicateExpr::Not(child) => {
-            collect_claim_field_params_from_predicate(child, schema, params);
+            collect_claim_field_params_from_predicate(child, schema, params)?;
         }
     }
+    Ok(())
 }
 
 fn collect_claim_field_param(
     value: &NormalizedValueRef,
     ty: ColumnType,
     params: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     let NormalizedValueRef::Param(param) = value else {
-        return;
+        return Ok(());
     };
     let Some(path) = claim_path_from_param_field(param) else {
-        return;
+        return Ok(());
     };
-    params
-        .entry(param.clone())
-        .or_insert(ProgramClaimParam { path, ty });
+    insert_claim_param(params, param.clone(), ProgramClaimParam { path, ty })
 }
 
 fn collect_claim_field_param_authoritative(
     value: &NormalizedValueRef,
     ty: ColumnType,
     params: &mut BTreeMap<String, ProgramClaimParam>,
-) {
+) -> Result<(), Error> {
     let NormalizedValueRef::Param(param) = value else {
-        return;
+        return Ok(());
     };
     let Some(path) = claim_path_from_param_field(param) else {
-        return;
+        return Ok(());
     };
-    params.insert(param.clone(), ProgramClaimParam { path, ty });
+    insert_claim_param(params, param.clone(), ProgramClaimParam { path, ty })
 }
 
 fn bind_query_predicate(
@@ -13348,6 +13467,142 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(visible, BTreeSet::from([row(1)]));
+    }
+
+    #[test]
+    fn non_equality_claim_params_use_schema_inferred_types() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("state", ColumnType::String),
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+            ],
+        )]);
+        let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([9; 16]), schema.clone());
+        let shape = Query::from("issues")
+            .filter(in_list(col("state"), [claim("visible_state")]))
+            .filter(contains(claim("team_ids"), col("assignee")))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+        let claims = collect_binding_claim_params_for_shape(&normalized, &schema).unwrap();
+
+        assert_eq!(
+            claims
+                .get(&claim_param_field(&ClaimPath(vec![
+                    "visible_state".to_owned()
+                ])))
+                .map(|claim| &claim.ty),
+            Some(&ColumnType::String)
+        );
+        assert_eq!(
+            claims
+                .get(&claim_param_field(&ClaimPath(vec!["team_ids".to_owned()])))
+                .map(|claim| &claim.ty),
+            Some(&ColumnType::Array(Box::new(ColumnType::Uuid)))
+        );
+    }
+
+    #[test]
+    fn one_policy_rejects_conflicting_types_for_the_same_claim() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("state", ColumnType::String),
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+            ],
+        )]);
+        let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([11; 16]), schema.clone());
+        let shape = Query::from("issues")
+            .filter(eq(col("state"), claim("shared_scope")))
+            .filter(eq(col("assignee"), claim("shared_scope")))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+
+        let error = node
+            .normalized_row_set_shape(&shape, &binding)
+            .expect_err("one claim path cannot have two prepared descriptor types");
+        assert!(
+            error.to_string().contains("conflicting policy types"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_policy_claims_use_each_tables_policy_schema() {
+        let base = JazzSchema::new([
+            TableSchema::new("documents", [ColumnSchema::new("team", ColumnType::Uuid)])
+                .with_reference("team", "teams"),
+            TableSchema::new(
+                "memberships",
+                [
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                    ColumnSchema::new("region", ColumnType::String),
+                ],
+            )
+            .with_reference("team", "teams"),
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+        ]);
+        let evolved = JazzSchema::new([
+            TableSchema::new("documents", [ColumnSchema::new("team", ColumnType::Uuid)])
+                .with_reference("team", "teams"),
+            TableSchema::new(
+                "memberships",
+                [
+                    ColumnSchema::new("team", ColumnType::Uuid),
+                    ColumnSchema::new("region", ColumnType::String),
+                ],
+            )
+            .with_reference("team", "teams")
+            .with_read_policy(
+                Query::from("memberships").filter(eq(col("region"), claim("membership_region"))),
+            ),
+            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
+        ]);
+        let evolved_payload = SchemaVersion::new(evolved);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([10; 16]), base.clone());
+        node.apply_sync_message(SyncMessage::PublishSchema {
+            author: AuthorId::SYSTEM,
+            schema: Box::new(evolved_payload.clone()),
+        })
+        .unwrap();
+        node.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 2,
+                schema: evolved_payload.id,
+            },
+        })
+        .unwrap();
+
+        let shape = Query::from("documents")
+            .join_via_column("memberships", "team", "team", Vec::<Predicate>::new())
+            .validate(&base)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+        let claims = node
+            .read_policy_claim_params_for_shape(&normalized)
+            .unwrap();
+
+        assert_eq!(
+            node.read_policy_schema_for_table_name("documents"),
+            base.version_id()
+        );
+        assert_eq!(
+            node.read_policy_schema_for_table_name("memberships"),
+            evolved_payload.id
+        );
+        assert_eq!(
+            claims
+                .get(&claim_param_field(&ClaimPath(vec![
+                    "membership_region".to_owned()
+                ])))
+                .map(|claim| &claim.ty),
+            Some(&ColumnType::String)
+        );
     }
 
     #[test]
