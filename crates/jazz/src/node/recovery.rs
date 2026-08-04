@@ -160,6 +160,39 @@ where
                 ));
             }
         }
+        if !cleanly_closed {
+            for (table_name, schema_version) in self.catalogue.partitions.clone() {
+                if schema_version == self.catalogue.current_schema_version_id {
+                    continue;
+                }
+                let table = self.table_in_schema(&table_name, schema_version)?;
+                let storage_tables = if self
+                    .catalogue
+                    .schema
+                    .tables
+                    .iter()
+                    .any(|table| table.name == table_name)
+                {
+                    table.ahead_current_partition_storage_tables(schema_version)
+                } else {
+                    table.ahead_current_storage_tables()
+                };
+                for (storage_table, layer) in storage_tables
+                    .iter()
+                    .zip([VersionLayer::Content, VersionLayer::Deletion])
+                {
+                    self.validate_ahead_current_rows(
+                        storage_table,
+                        layer,
+                        #[cfg(feature = "testing")]
+                        &mut validated_current_rows,
+                        #[cfg(feature = "testing")]
+                        &mut ahead_current_entries,
+                        &mut ahead_current_tx_ids,
+                    )?;
+                }
+            }
+        }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, stage_started) {
             receipt.validate_current_rows = started.elapsed();

@@ -197,6 +197,26 @@ where
             .unwrap_or_else(|| self.tx_version_scan_tables());
         let mut versions = Vec::new();
         for table in tables {
+            if self
+                .table_in_schema(&table, self.catalogue.current_schema_version_id)
+                .is_err()
+            {
+                for layer in [VersionLayer::Content, VersionLayer::Deletion] {
+                    let raws = self
+                        .database
+                        .index_scan_raw(
+                            &version_storage_table_name(&table, layer),
+                            "by_tx",
+                            &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
+                        )?
+                        .into_iter()
+                        .map(|raw| OwnedRecord::new(raw.raw().to_vec(), raw.record().descriptor()))
+                        .collect::<Vec<_>>();
+                    for raw in raws {
+                        versions.push(self.decode_history_record(&table, raw.borrowed())?);
+                    }
+                }
+            }
             for (storage_table, descriptor) in self.version_storage_sources(&table)? {
                 let raws = self
                     .database
