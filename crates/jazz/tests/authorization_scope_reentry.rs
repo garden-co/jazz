@@ -183,12 +183,29 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>()
     };
+    let writer_page = || {
+        block_on(db.all_for_identity(&prepared, opts(), WRITER))
+            .expect("one-shot writer page")
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+    };
     let mut stream = block_on(db.subscribe_for_identity(&prepared, opts(), READER))
         .expect("subscribe reader page");
 
     let mut maintained = initial_rows(&mut stream);
     assert_eq!(maintained, BTreeSet::from([winner, second]));
     assert_eq!(one_shot(), vec![winner, second]);
+
+    // The whole scenario rests on WRITER being able to write these documents
+    // without being able to read them. Assert that premise directly: without
+    // this, a read policy that accidentally admitted WRITER would leave every
+    // other assertion in this test passing while testing nothing.
+    assert!(
+        writer_page().is_empty(),
+        "WRITER must not be able to read documents; the partial-update scenario \
+         is only meaningful for a write-only principal"
+    );
 
     db.update(
         DOCUMENTS,
@@ -205,6 +222,10 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     maintained.insert(refill);
     assert_eq!(maintained, BTreeSet::from([second, refill]));
     assert_eq!(one_shot(), vec![second, refill]);
+    assert!(
+        writer_page().is_empty(),
+        "WRITER must still not read documents after the move out of scope"
+    );
 
     db.update(
         DOCUMENTS,
