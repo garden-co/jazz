@@ -428,6 +428,11 @@ run_scenario \
   env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
 
 run_scenario \
+  "jazz/policy_cost_receipt" \
+  "cargo bench -p jazz --bench policy_cost_receipt --quiet" \
+  cargo bench -p jazz --bench policy_cost_receipt --quiet
+
+run_scenario \
   "jazz-sim/micro" \
   "JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain" \
   env JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro

@@ -24,6 +24,7 @@ the facade-level Criterion and realistic lanes, including:
 - `merge_back_cost`
 - `relation_include_delivery`
 - `selective_global_hydration`
+- `policy_cost_receipt`
 
 All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy
@@ -64,6 +65,12 @@ total table rows increase, then records exact result digests and logical
 Global-current row/index reads. It is intentionally not a timing gate: the
 deterministic read counts establish whether hydration is selective before an
 engine optimization is attempted.
+
+`policy_cost_receipt` is a compact JSON receipt over five cumulative read-policy
+tiers. It holds the fixture and principal result pages fixed while adding team
+membership, organization-admin, direct-ACL, public/published, and trusted-admin
+branches. An independent oracle gates every one-shot result and the maintained
+grant, revoke, restore, scope-exit, and scope-re-entry lifecycle.
 
 ## Intended next ports
 

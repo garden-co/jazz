@@ -113,7 +113,7 @@ fn main() {
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&Receipt {
+        serde_json::to_string(&Receipt {
             scenario: "policy_cost_receipt",
             rows: DOCUMENT_COUNT,
             page_size: PAGE_SIZE,
@@ -465,7 +465,11 @@ fn build_fixture() -> Fixture {
             organization: organizations[index % 2],
             team: teams[index % 2],
             updated_at: index as u64,
-            public: index % 20 == 7,
+            // Public rows stay inside the member/admin scope so adding the
+            // public branch changes policy complexity without changing those
+            // identities' expected result page. Five of the ACL reader's
+            // highest-ranked 100 rows deliberately overlap this branch.
+            public: index % 20 == 6,
         })
         .collect::<Vec<_>>();
     let acl_rows = documents
