@@ -227,6 +227,73 @@ identity. Result members MUST retain the typed membership, source, and version
 information needed to deliver the result correctly; synthetic and path-tuple
 members follow that same result-set contract (`INV-QUERY-8`).
 
+#### Multi-source output rows
+
+An ordinary join is allowed to be a root-membership predicate: it may decide
+whether one root `RealRow` is in a result without making its witness an output
+column. A query whose output selects columns from more than one table is a
+different terminal contract, called a **multi-source output row**. It is not a
+root row with borrowed cells and it is not a client-side post-processing step.
+
+A multi-source output row has a stable composite identity and an ordered list
+of **source slots**. A source slot contains the logical source role (root or a
+canonical join/path role), the source table, and the complete `RealRow` member
+identity for that source: row UUID, visible content/deletion version as
+applicable, source/read-view, schema projection, branch/prefix, and all other
+dimensions of `RealRowMemberEntry`. The composite identity is the ordered tuple
+of those slot identities. Roles, rather than table names alone, distinguish two
+uses of the same table. A source slot also carries the source row's provenance
+(`created_by`, `created_at`, `updated_by`, `updated_at`) resolved for that
+source's visible version. The output payload is a projection over these slots;
+the default flattened projection is each slot's ordinary application columns in
+slot order. Qualified projection references select an individual source slot.
+
+The root row UUID remains a convenience/public API identifier for a result that
+has a root slot, but it is not the membership identity of the flattened result:
+two joined tuples with the same root are distinct results. A wire/result-set
+entry for a multi-source output MUST therefore carry the composite identity and
+its per-slot provenance, and the accompanying row/version payload MUST be
+attributable to the matching slot. Replacing this with one synthetic row or one
+root `RealRowMemberEntry` is incorrect because it loses the version and
+provenance of the other sources.
+
+Permission evaluation is per source slot, against that source's visible row
+after its applicable lens/schema transform and under the caller's current
+policy/claims. A flattened inner result is emitted only when every projected
+source slot is readable. In particular, visibility of a root row does not make
+an unreadable joined row visible, nor may its cells or provenance be carried as
+a witness. A policy change, lens transform, or source-version change affecting
+one slot retracts/replaces precisely the composite rows containing that slot.
+This source-wise rule also applies to one-shot reads and to reset hydration.
+
+Source slots have a canonical order: root first, followed by the canonical
+output-role order derived from the validated join/path graph. This order is
+encoded in the shape; source declaration order that validation treats as
+commutative cannot change output columns. A multi-source `order_by` names
+qualified slot columns. It compares the declared terms lexicographically and
+then breaks ties by the lexicographic tuple of source-slot identities (role,
+table, row UUID); this is a total, replay-stable order. With no explicit order,
+that same tuple order is the default. The order contract applies to snapshots,
+one-shot reads, reset result sets, and incremental additions/removals.
+
+The maintained and one-shot paths MUST evaluate the same validated output
+program and emit the same ordered composite identities, projections, source
+versions, and per-source provenance at the same read frontier. One-shot is the
+first-delta observation of that maintained program, not a separately assembled
+join. A maintained source delta is joined through the relevant arrangements and
+emits only the affected composite-row transitions; it MUST NOT re-materialize
+or diff the accumulated output state (`INV-INC-1`).
+
+Every descriptor participating in the program MUST encode every
+output-affecting input (`INV-QUERY-1A`): the ordered source-role/output schema;
+all source table and read-view selections; projection mapping; join/path keys,
+filters, and null/inner semantics; per-source policy programs and their
+canonical claim/binding declarations; lens/schema projections; ordering and
+window configuration; and the provenance/version fields needed at the terminal.
+Subject-specific claim values remain execution bindings, not baked constants.
+Descriptors that differ in any such input MUST NOT share a groove node or a
+maintained result set.
+
 Membership includes more than the projected output rows. Each result set carries
 the matched include-reference targets and join/junction rows that contributed to
 the output. Include payload material is not a separate public or internal mode:

@@ -157,6 +157,27 @@ logical-time delta at most once per arrangement key/scope (ch. 4).
 `INV-QUERY-13` — anti-join changes only when the right count crosses zero.
 `INV-QUERY-14` — same-tick arrivals suppress/emit a left row exactly once.
 
+#### Multi-source terminal records
+
+When a consumer exposes a joined record as a multi-source output rather than
+using the join only for root membership, its terminal `RecordDescriptor` MUST
+retain ordered source-slot identity/version/provenance fields in addition to
+the projected application fields. The descriptor records each slot's canonical
+role, source relation/read-view selection, projection mapping, and ordering
+tie fields; source roles distinguish repeated uses of one table. It also
+contains the per-source policy/lens inputs or their canonical graph references.
+This is required by `INV-QUERY-1A`: a node producing one source tuple must not
+be deduplicated with one whose source provenance, policy, read view, or output
+slot mapping differs.
+
+The physical join remains the ordinary weighted join defined above. Hydration
+and incremental ticks consume the same source records and terminal descriptor,
+so they produce the same weighted composite records. A source delta may update
+only composites reachable through its join arrangements; the terminal contract
+does not permit recomputing a consumer's full output relation on each tick.
+Jazz defines the protocol-visible composite membership and source-wise
+authorization semantics in jazz SPEC 6 §6.4.
+
 ### 3.5 `ArgMaxBy` / `ArgMinBy` (maintained per-group winners)
 
 Per-group winner selection maintains the current winning row for each group and
