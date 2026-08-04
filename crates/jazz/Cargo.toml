@@ -298,6 +298,10 @@ required-features = ["test"]
 name = "parameterized_subscription_routing"
 required-features = ["test"]
 
+[[test]]
+name = "authorization_scope_reentry"
+required-features = ["test"]
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
