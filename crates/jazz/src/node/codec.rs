@@ -555,37 +555,34 @@ impl VersionRow {
         tx_time: TxTime,
         storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
-        let (storage_table, values) = if let Some(deletion) = version.deletion() {
-            (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
-                register_values_from_wire(
-                    version,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time,
-                    deletion,
-                ),
-            )
-        } else {
-            (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
-                history_values_from_wire(
-                    table,
-                    version,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time,
-                )?,
-            )
-        };
-        Ok(Self {
-            table: groove::Intern::new(version.table().to_owned()),
-            record: owned_record_from_storage_values(&storage_table, values)?,
-        })
+        let cells = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| {
+                version
+                    .optional_cell_at(idx)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect();
+        Self::from_parts_with_schema_version(
+            table,
+            VersionRowParts {
+                table: version.table().to_owned(),
+                row_uuid: version.row_uuid(),
+                tx_node_alias,
+                schema_version_alias,
+                tx_time,
+                parents: version.parents(),
+                created_by: version.created_by(),
+                created_at: version.created_at(),
+                updated_by: version.updated_by(),
+                updated_at: version.updated_at(),
+                cells,
+                deletion: version.deletion(),
+            },
+            storage_schema_version,
+        )
     }
 
     pub(super) fn table(&self) -> &str {
@@ -1262,6 +1259,7 @@ pub(super) fn history_values_from_parts(
     table: &TableSchema,
     version: &VersionRowParts,
 ) -> Result<Vec<Value>, Error> {
+    validate_cells_map(table, &version.cells)?;
     let mut values = vec![
         Value::Uuid(version.row_uuid.0),
         Value::U64(version.tx_time.0),
@@ -1283,39 +1281,6 @@ pub(super) fn history_values_from_parts(
         values.push(Value::Nullable(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
-    }
-    Ok(values)
-}
-
-fn history_values_from_wire(
-    table: &TableSchema,
-    version: &VersionRecord,
-    tx_node_alias: NodeAlias,
-    schema_version_alias: SchemaVersionAlias,
-    tx_time: TxTime,
-) -> Result<Vec<Value>, Error> {
-    let mut values = Vec::with_capacity(HistoryRowRecord::USER_CELLS + table.columns.len());
-    values.push(Value::Uuid(version.row_uuid().0));
-    values.push(Value::U64(tx_time.0));
-    values.push(Value::U64(tx_node_alias.0));
-    values.push(Value::U64(schema_version_alias.0));
-    values.push(Value::Array(
-        version
-            .parents()
-            .iter()
-            .map(|parent| tx_id_value(*parent))
-            .collect(),
-    ));
-    values.push(Value::Uuid(version.created_by().0));
-    values.push(Value::U64(version.created_at().0));
-    values.push(Value::Uuid(version.updated_by().0));
-    values.push(Value::U64(version.updated_at().0));
-    for (idx, column) in table.columns.iter().enumerate() {
-        let value = version.optional_cell_at(idx);
-        if let Some(value) = value.as_ref() {
-            validate_cell_value(column, value)?;
-        }
-        values.push(Value::Nullable(value.map(Box::new)));
     }
     Ok(values)
 }
@@ -1342,33 +1307,6 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
         Value::U64(version.updated_at.0),
         deletion_event_value(deletion),
     ])
-}
-
-fn register_values_from_wire(
-    version: &VersionRecord,
-    tx_node_alias: NodeAlias,
-    schema_version_alias: SchemaVersionAlias,
-    tx_time: TxTime,
-    deletion: DeletionEvent,
-) -> Vec<Value> {
-    vec![
-        Value::Uuid(version.row_uuid().0),
-        Value::U64(tx_time.0),
-        Value::U64(tx_node_alias.0),
-        Value::U64(schema_version_alias.0),
-        Value::Array(
-            version
-                .parents()
-                .iter()
-                .map(|parent| tx_id_value(*parent))
-                .collect(),
-        ),
-        Value::Uuid(version.created_by().0),
-        Value::U64(version.created_at().0),
-        Value::Uuid(version.updated_by().0),
-        Value::U64(version.updated_at().0),
-        deletion_event_value(deletion),
-    ]
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
