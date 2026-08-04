@@ -98,7 +98,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         );
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
-        .route("/schema/:hash", get(schema_handler))
+        .route("/schema/{hash}", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
         .route_layer(middleware::from_fn_with_state(
@@ -111,7 +111,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/internal/shutdown", post(internal_shutdown_handler))
-        .nest("/apps/:app_id", traced_routes)
+        .nest("/apps/{app_id}", traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -616,7 +616,7 @@ mod tests {
                 }),
             )
             .route(
-                &test_app_route("/schema/:hash"),
+                &test_app_route("/schema/{hash}"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     move |Path(hash): Path<String>, headers: HeaderMap| {
