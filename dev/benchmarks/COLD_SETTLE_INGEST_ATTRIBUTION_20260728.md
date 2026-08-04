@@ -34,27 +34,27 @@ The cold harness is deliberately a semantic `SyncMessage` queue. It never
 constructs `WireTransportAdapter`; real-wire encodes were therefore **0**.
 The split is:
 
-| Class | Calls | Wall time | Meaning |
-| --- | ---: | ---: | --- |
-| Semantic `Db::tick` work | 4 ticks/node | 12.622 s | Core 2.928 s, relay 5.588 s, client 4.106 s; sequential and consistent with 12.626 s settle. |
-| Sender preflight sizing | 539 payload + 461 frame encodes | 991.097 ms | Required preflight serialization for resume/chunk sizing; 956 MB payload and 922 MB framed bytes were encoded. |
-| Benchmark-only probe | 293 messages | 159.510 ms | In-memory transport's postcard/clone/compress/decompress probe; no real wire adapter call. |
-| Probe postcard serialization only | 293 messages | 32.177 ms | The part most directly represented by the sampled serialization frame. |
+| Class                             |                           Calls |  Wall time | Meaning                                                                                                        |
+| --------------------------------- | ------------------------------: | ---------: | -------------------------------------------------------------------------------------------------------------- |
+| Semantic `Db::tick` work          |                    4 ticks/node |   12.622 s | Core 2.928 s, relay 5.588 s, client 4.106 s; sequential and consistent with 12.626 s settle.                   |
+| Sender preflight sizing           | 539 payload + 461 frame encodes | 991.097 ms | Required preflight serialization for resume/chunk sizing; 956 MB payload and 922 MB framed bytes were encoded. |
+| Benchmark-only probe              |                    293 messages | 159.510 ms | In-memory transport's postcard/clone/compress/decompress probe; no real wire adapter call.                     |
+| Probe postcard serialization only |                    293 messages |  32.177 ms | The part most directly represented by the sampled serialization frame.                                         |
 
 The probe was also split by the two delivery hops: core→relay had 54 calls / 107.492 ms, and relay→client had 83 calls / 50.745 ms. The remaining calls are control traffic in the reverse directions.
 
 ## Oversized-update attribution
 
-| Counter | Result |
-| --- | ---: |
-| ViewUpdates fitting without split | 112 |
-| ViewUpdates split | 2 |
-| Emitted chunks / selected payloads | 137 |
-| Candidate builds | 347 |
+| Counter                                        |                    Result |
+| ---------------------------------------------- | ------------------------: |
+| ViewUpdates fitting without split              |                       112 |
+| ViewUpdates split                              |                         2 |
+| Emitted chunks / selected payloads             |                       137 |
+| Candidate builds                               |                       347 |
 | Excess candidate builds over selected payloads | 210 (60.5% of candidates) |
-| Candidate encoded bytes | 866,969,236 |
-| Selected-payload bytes | 54,796,149 |
-| Candidate build + encode wall time | 1.503 s |
+| Candidate encoded bytes                        |               866,969,236 |
+| Selected-payload bytes                         |                54,796,149 |
+| Candidate build + encode wall time             |                   1.503 s |
 
 `candidate_build + encode` deliberately measures the actual clone/repack and
 framed-size probe together. It is the useful upper bound for rank 3; it should

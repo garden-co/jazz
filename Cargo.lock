@@ -1955,6 +1955,7 @@ dependencies = [
  "internment",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "lz4_flex 0.11.6",
  "mimalloc",
  "opentelemetry",

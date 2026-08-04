@@ -9,6 +9,7 @@ use super::*;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::time::Instant;
 
 use groove::ivm::{LiteralValue, RoutedMultisinkTerminal, StaticScanSpec};
 use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
@@ -6552,6 +6553,21 @@ where
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
     }
 
+    pub(crate) fn query_rows_local_preview_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        self.query_rows_with_options_for_identity_profiled(
+            shape,
+            binding,
+            DurabilityTier::Local,
+            prepared_plan,
+            AuthorId::SYSTEM,
+        )
+    }
+
     pub(crate) fn query_rows_including_deleted_for_identity(
         &mut self,
         shape: &ValidatedQuery,
@@ -6705,6 +6721,159 @@ where
         self.finish_engine_query_rows(query, &mut rows)?;
         self.apply_projection(query, &mut rows)?;
         Ok(rows)
+    }
+
+    fn query_rows_with_options_for_identity_profiled(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        prepared_plan: Option<&PreparedQueryPlanHandle>,
+        identity: AuthorId,
+    ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        let total_started = Instant::now();
+        let phase_started = Instant::now();
+        let settled_binding_view = (tier == DurabilityTier::Global)
+            .then(|| self.settled_binding_view_key_for_query(shape, binding))
+            .transpose()?
+            .flatten();
+        // A concrete one-shot access path is binding-specific. Inline that
+        // binding so execution keeps the selected graph instead of replacing it
+        // with the generic cached parameterized plan.
+        let inline_query = if prepared_plan.is_none()
+            && settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
+        {
+            let schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+            let inline_shape =
+                inline_snapshot_bind_filter_literals(shape, binding, &schema.schema)?;
+            let inline_binding = inline_shape.bind(BTreeMap::new())?;
+            Some((inline_shape, inline_binding))
+        } else {
+            None
+        };
+        let (shape, binding) = inline_query
+            .as_ref()
+            .map(|(shape, binding)| (shape, binding))
+            .unwrap_or((shape, binding));
+        let prepared_plan = prepared_plan
+            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let mut profile = QueryReadProfile {
+            resolve_view: phase_started.elapsed(),
+            ..Default::default()
+        };
+
+        let phase_started = Instant::now();
+        let program = if prepared_plan.is_some() {
+            None
+        } else {
+            Some(self.compile_current_query_program_for_one_shot_read(
+                shape,
+                binding,
+                tier,
+                identity,
+                settled_binding_view,
+            )?)
+        };
+        profile.compile_program = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let needs_binding = || {
+            let parameters = &program
+                .as_ref()
+                .expect("program is compiled when no prepared plan is supplied")
+                .lowered
+                .parameters;
+            !parameters.user_params.is_empty() || !parameters.claim_params.is_empty()
+        };
+        let plan = match prepared_plan {
+            Some(plan) if settled_binding_view.is_none() => Some(plan.clone()),
+            Some(_) => None,
+            None if settled_binding_view.is_none()
+                && self.can_use_prepared_current_query_plan(shape)
+                && needs_binding() =>
+            {
+                Some(self.prepared_query_plan(shape, binding, tier, identity)?)
+            }
+            None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
+                self.prepared_query_plan_from_program(
+                    program
+                        .as_ref()
+                        .expect("program is compiled when no prepared plan is supplied"),
+                    shape,
+                    binding,
+                )?,
+            )),
+            None => None,
+        };
+        let policy = self.query_program_policy_context(identity);
+        let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
+        profile.select_plan = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let deltas_result = match plan {
+            None => self
+                .database
+                .query_graph(lowered_app_rows_graph(
+                    &program.expect("program is compiled when no prepared plan is supplied"),
+                )?)
+                .map_err(Error::Groove),
+            Some(plan) => match plan.as_ref() {
+                PreparedQueryPlan::Prepared { shape, params } => {
+                    let values = binding_values_for_plan(binding, params, &policy)?;
+                    self.database
+                        .bind_shape(*shape, &values)
+                        .map_err(Error::Groove)
+                        .and_then(|subscription| {
+                            subscription
+                                .recv()
+                                .map_err(|_| Error::SubscriptionClosed)
+                                .and_then(|deltas| {
+                                    take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK)
+                                })
+                        })
+                }
+                PreparedQueryPlan::Graph(graph) => self
+                    .database
+                    .query_graph(graph.clone())
+                    .map_err(Error::Groove),
+                PreparedQueryPlan::PeerMaintainedMarker => {
+                    unreachable!("peer maintained markers are filtered before query execution")
+                }
+            },
+        };
+        let deltas = deltas_result?;
+        profile.execute_plan = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        let mut rows = if shape.query().aggregate.is_some() {
+            self.materialize_aggregate_query_rows(shape.query(), &table_schema, deltas)?
+        } else {
+            let mut rows = Vec::new();
+            for (record, weight) in deltas.iter() {
+                if weight > 0 {
+                    let row = decode_current_row(&table_schema, record)?;
+                    rows.push(self.materialize_current_row(&table_schema, row)?);
+                }
+            }
+            rows
+        };
+        profile.decode_materialize = phase_started.elapsed();
+
+        let query = shape.query();
+        let phase_started = Instant::now();
+        self.finish_engine_query_rows(query, &mut rows)?;
+        profile.finish_rows = phase_started.elapsed();
+
+        let phase_started = Instant::now();
+        self.apply_projection(query, &mut rows)?;
+        profile.apply_projection = phase_started.elapsed();
+        profile.total = total_started.elapsed();
+        Ok((rows, profile))
     }
 
     fn settled_binding_view_key_for_query(
