@@ -2494,6 +2494,14 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
                         JsValue::from_str("ShapeRegistrationPendingCatalogueAdmission"),
                     )?;
                 }
+                jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                    set_prop(&reason_object, "type", JsValue::from_str("ServerFailure"))?;
+                    set_prop(
+                        &reason_object,
+                        "code",
+                        JsValue::from_str(&format!("{code:?}")),
+                    )?;
+                }
             }
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason_object.into())?;

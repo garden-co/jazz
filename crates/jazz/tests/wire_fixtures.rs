@@ -7,8 +7,9 @@ use jazz::node::content_store::Extent;
 use jazz::protocol::{
     CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, TableLens,
-    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
+    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
+    build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{BindingId, Query, ShapeId};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
@@ -103,6 +104,16 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 subscription,
                 reason: SubscribeRejectReason::UnsupportedShapeCapability {
                     detail: "SourceGap::BranchOverlay".to_owned(),
+                },
+            },
+        ),
+        (
+            "subscribe_rejected_server_table_not_found",
+            "SubscribeRejected",
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::TableNotFound,
                 },
             },
         ),

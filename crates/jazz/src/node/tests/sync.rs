@@ -1361,7 +1361,7 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
         .content_store()
         .append(author, visible_row, "title", b"unreferenced")
         .unwrap();
-    let mut peer = PeerState::for_author(author);
+    let mut peer = PeerState::client_link(author);
 
     assert!(matches!(
         peer.handle_content_extent_fetch(
@@ -1418,7 +1418,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         crate::protocol::RowVersionRef::new("todos", bob_row, bob_tx),
     ];
 
-    let mut alice_peer = PeerState::for_author(alice);
+    let mut alice_peer = PeerState::client_link(alice);
     let messages = alice_peer
         .handle_row_versions_fetch(
             &mut core,

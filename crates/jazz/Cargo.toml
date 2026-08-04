@@ -292,6 +292,9 @@ required-features = ["test"]
 name = "coverage_group_flush_once"
 
 [[test]]
+name = "edge_fate_authority"
+
+[[test]]
 name = "rename_write_authorization"
 required-features = ["test"]
 
