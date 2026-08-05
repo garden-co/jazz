@@ -410,10 +410,12 @@ impl MaintainedSubscriptionView {
             transitions
                 .result_payload_adds
                 .push((entry.clone(), payload.clone()));
+            self.result_payloads.insert(entry.clone(), payload);
         }
         if old > 0 && new <= 0 {
             transitions.removes.push(entry.clone());
             transitions.result_payload_removes.push(entry.clone());
+            self.result_payloads.remove(&entry);
         }
         if new == 0 {
             self.result_weights.remove(&entry);

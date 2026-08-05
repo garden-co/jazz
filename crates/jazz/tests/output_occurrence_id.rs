@@ -239,3 +239,87 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batch() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todos_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000025")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let (root, _, batch) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "root", "bucket" => "shared", "done" => false),
+                )
+                .expect("insert root");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("root settles");
+
+            let joined_query = QueryBuilder::new("todos")
+                .alias("root")
+                .filter_eq("done", Value::Boolean(false))
+                .join("todos")
+                .alias("joined")
+                .on("root.bucket", "joined.bucket")
+                .build();
+            let mut stream = client
+                .subscribe(joined_query)
+                .await
+                .expect("subscribe to flat joined output");
+            let _reset = next_delta(&mut stream).await;
+
+            let tx = client.begin_transaction().expect("begin transaction");
+            let (transient, _, _) = tx
+                .insert(
+                    "todos",
+                    row_input!("title" => "transient", "bucket" => "shared", "done" => true),
+                )
+                .expect("stage matching joined row");
+            tx.delete(transient)
+                .expect("stage removal of that same joined occurrence");
+            let batch = tx.commit().expect("commit add-then-remove batch");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("add-then-remove batch settles");
+
+            let (durable, _, batch) = client
+                .insert(
+                    "todos",
+                    row_input!("title" => "durable", "bucket" => "shared", "done" => true),
+                )
+                .expect("insert durable matching joined row");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("durable joined row settles");
+            let delta = next_delta_with_added(&mut stream).await;
+            assert!(
+                delta
+                    .added
+                    .iter()
+                    .any(|row| row.id == OutputOccurrenceId::new(root, [durable])),
+                "the final payload is the durable occurrence: {delta:?}"
+            );
+            assert!(
+                !delta
+                    .added
+                    .iter()
+                    .any(|row| row.id == OutputOccurrenceId::new(root, [transient])),
+                "the add-then-remove occurrence was netted out: {delta:?}"
+            );
+
+            client.shutdown().await.expect("shutdown test client");
+            server.shutdown().await;
+        })
+        .await;
+}
