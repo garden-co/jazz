@@ -49,14 +49,34 @@ mod recursion;
 use join::{AntiJoinState, ArrangementState, JoinState};
 use persist::apply_persist_delta;
 use recursion::{
-    RecursiveState, hydrate_recursive_arrangements, materialize_snapshot_table_deltas,
-    recompute_recursive, recursive_delta, recursive_read_tables, snapshot_table_deltas,
-    snapshot_table_sources,
+    RecursiveState, TableSnapshotSource, hydrate_recursive_arrangements,
+    materialize_snapshot_table_deltas, recompute_recursive, recursive_delta, recursive_read_tables,
+    snapshot_table_deltas, snapshot_table_sources,
 };
 
 const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;
 const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotSourceSet(HashMap<TableSnapshotSource, RecordDescriptor>);
+type SnapshotSourceGroup = (SnapshotSourceSet, Vec<(String, CompiledNode)>);
+
+impl Hash for SnapshotSourceSet {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut entry_hashes = self
+            .0
+            .iter()
+            .map(|entry| {
+                let mut hasher = DefaultHasher::new();
+                entry.hash(&mut hasher);
+                hasher.finish()
+            })
+            .collect::<Vec<_>>();
+        entry_hashes.sort_unstable();
+        entry_hashes.hash(state);
+    }
+}
 
 // These maps are keyed by local runtime/schema/graph metadata produced after
 // validation. Wire-facing or otherwise adversarial-input maps must keep the
@@ -93,6 +113,8 @@ pub struct IvmRuntime {
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
     hydration_memo_computed_nodes: HashSet<NodeId>,
+    hydration_snapshot_peak_cached_source_sets: usize,
+    hydration_join_evaluation_nanos: u64,
     /// Retainers and GC age live outside operator state so stateless leaf nodes
     /// can be retained without allocating fake operator state.
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
@@ -126,6 +148,8 @@ impl IvmRuntime {
             hydration_memo_hits: 0,
             hydration_memo_computes: 0,
             hydration_memo_computed_nodes: HashSet::default(),
+            hydration_snapshot_peak_cached_source_sets: 0,
+            hydration_join_evaluation_nanos: 0,
             node_meta: HashMap::default(),
             current_tick: 0,
             next_subscription_id: 1,
@@ -189,6 +213,7 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
+        self.hydration_snapshot_peak_cached_source_sets = 0;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
@@ -579,6 +604,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.hydration_snapshot_peak_cached_source_sets = 0;
         if let Some((sink, output)) = outputs.first_key_value().filter(|_| outputs.len() == 1) {
             let records = self.hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
@@ -589,29 +615,18 @@ impl IvmRuntime {
             });
         }
         let mut sinks = BTreeMap::new();
-        let mut table_snapshot_cache = Vec::new();
-        for (sink, output) in outputs {
-            let sources = snapshot_table_sources(&self.graph, output.node)?;
-            let cache_index = if let Some(index) = table_snapshot_cache
-                .iter()
-                .position(|(cached_sources, _)| cached_sources == &sources)
-            {
-                index
-            } else {
-                let table_deltas =
-                    materialize_snapshot_table_deltas(&self.schema, storage, sources.clone())?;
-                table_snapshot_cache.push((sources, table_deltas));
-                table_snapshot_cache.len() - 1
-            };
-            let records = self.hydration_snapshot_from_table_deltas(
-                output.node,
-                storage,
-                &table_snapshot_cache[cache_index].1,
-            )?;
-            if records.descriptor != output.output {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
+        let groups = group_outputs_by_snapshot_sources(&self.graph, outputs)?;
+        self.hydration_snapshot_peak_cached_source_sets = usize::from(!groups.is_empty());
+        for (sources, outputs) in groups {
+            let table_deltas = materialize_snapshot_table_deltas(&self.schema, storage, sources.0)?;
+            for (sink, output) in outputs {
+                let records =
+                    self.hydration_snapshot_from_table_deltas(output.node, storage, &table_deltas)?;
+                if records.descriptor != output.output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                sinks.insert(sink, records);
             }
-            sinks.insert(sink.clone(), records);
         }
         Ok(MultisinkDeltas { sinks })
     }
@@ -679,6 +694,7 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.hydration_snapshot_peak_cached_source_sets = 0;
         if let Some((sink, output)) = outputs.first_key_value().filter(|_| outputs.len() == 1) {
             let records = self.subscription_hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
@@ -689,29 +705,21 @@ impl IvmRuntime {
             });
         }
         let mut sinks = BTreeMap::new();
-        let mut table_snapshot_cache = Vec::new();
-        for (sink, output) in outputs {
-            let sources = snapshot_table_sources(&self.graph, output.node)?;
-            let cache_index = if let Some(index) = table_snapshot_cache
-                .iter()
-                .position(|(cached_sources, _)| cached_sources == &sources)
-            {
-                index
-            } else {
-                let table_deltas =
-                    materialize_snapshot_table_deltas(&self.schema, storage, sources.clone())?;
-                table_snapshot_cache.push((sources, table_deltas));
-                table_snapshot_cache.len() - 1
-            };
-            let records = self.subscription_hydration_snapshot_from_table_deltas(
-                output.node,
-                storage,
-                &table_snapshot_cache[cache_index].1,
-            )?;
-            if records.descriptor != output.output {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
+        let groups = group_outputs_by_snapshot_sources(&self.graph, outputs)?;
+        self.hydration_snapshot_peak_cached_source_sets = usize::from(!groups.is_empty());
+        for (sources, outputs) in groups {
+            let table_deltas = materialize_snapshot_table_deltas(&self.schema, storage, sources.0)?;
+            for (sink, output) in outputs {
+                let records = self.subscription_hydration_snapshot_from_table_deltas(
+                    output.node,
+                    storage,
+                    &table_deltas,
+                )?;
+                if records.descriptor != output.output {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                sinks.insert(sink, records);
             }
-            sinks.insert(sink.clone(), records);
         }
         Ok(MultisinkDeltas { sinks })
     }
@@ -1679,6 +1687,9 @@ impl IvmRuntime {
             hydration_memo_hits: self.hydration_memo_hits,
             hydration_memo_computes: self.hydration_memo_computes,
             hydration_memo_distinct_computed_nodes: self.hydration_memo_computed_nodes.len(),
+            hydration_snapshot_peak_cached_source_sets: self
+                .hydration_snapshot_peak_cached_source_sets,
+            hydration_join_evaluation_nanos: self.hydration_join_evaluation_nanos,
             logical_nodes_requested: self.logical_nodes_requested,
             deduped_graph_nodes: self.graph.nodes().len(),
             ..RuntimeStats::default()
@@ -1690,6 +1701,9 @@ impl IvmRuntime {
         self.hydration_memo_computes += metrics.hydration_memo_computes;
         self.hydration_memo_computed_nodes
             .extend(metrics.hydration_memo_computed_nodes.iter().copied());
+        self.hydration_join_evaluation_nanos = self
+            .hydration_join_evaluation_nanos
+            .saturating_add(metrics.join_evaluation_nanos);
     }
 
     fn add_retainer(&mut self, id: NodeId, retainer: Retainer) -> bool {
@@ -2819,6 +2833,23 @@ impl IvmRuntime {
     }
 }
 
+fn group_outputs_by_snapshot_sources(
+    graph: &IvmGraph,
+    outputs: &BTreeMap<String, CompiledNode>,
+) -> Result<Vec<SnapshotSourceGroup>, IvmRuntimeError> {
+    let mut groups = HashMap::<SnapshotSourceSet, Vec<(String, CompiledNode)>>::default();
+    for (sink, output) in outputs {
+        let sources = SnapshotSourceSet(snapshot_table_sources(graph, output.node)?);
+        groups
+            .entry(sources)
+            .or_default()
+            .push((sink.clone(), output.clone()));
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(_, left), (_, right)| left[0].0.cmp(&right[0].0));
+    Ok(groups)
+}
+
 /// Point-in-time runtime counters for benchmark and diagnostics reporting.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
@@ -2833,6 +2864,13 @@ pub struct RuntimeStats {
     pub hydration_memo_hits: u64,
     pub hydration_memo_computes: u64,
     pub hydration_memo_distinct_computed_nodes: usize,
+    /// Maximum number of complete source-set snapshots retained concurrently
+    /// by the most recent multisink hydration. Equivalent outputs are grouped,
+    /// so this is bounded to one; single-output hydration does not cache a set.
+    pub hydration_snapshot_peak_cached_source_sets: usize,
+    /// Join operator time collected during hydration when
+    /// `GROOVE_PROFILE_HYDRATION_OPERATORS` is set. Zero otherwise.
+    pub hydration_join_evaluation_nanos: u64,
     pub arrangement_rows: usize,
     pub arrangement_encoded_bytes: usize,
     pub recursive_state_count: usize,
@@ -2861,6 +2899,7 @@ pub struct TickMetrics {
     pub hydration_memo_hits: u64,
     pub hydration_memo_computes: u64,
     pub hydration_memo_computed_nodes: HashSet<NodeId>,
+    join_evaluation_nanos: u64,
     pub notifications_sent: usize,
     pub notification_records: usize,
     pub notification_encoded_bytes: usize,
@@ -5510,7 +5549,10 @@ where
                 };
                 let left = self.update_node(*left_input)?;
                 let right = self.update_node(*right_input)?;
-                self.update_join(
+                let profile = std::env::var_os("GROOVE_PROFILE_HYDRATION_OPERATORS").is_some()
+                    && self.context.eval_mode == EvalMode::Hydrate;
+                let started = profile.then(std::time::Instant::now);
+                let result = self.update_join(
                     node,
                     join,
                     output_desc,
@@ -5518,7 +5560,14 @@ where
                     *right_input,
                     &left.deltas,
                     &right.deltas,
-                )
+                );
+                if let Some(started) = started {
+                    self.metrics.join_evaluation_nanos = self
+                        .metrics
+                        .join_evaluation_nanos
+                        .saturating_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+                }
+                result
             }
             OpType::SemiJoin(join) => {
                 let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {

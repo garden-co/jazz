@@ -4482,6 +4482,17 @@ fn distinct_snapshot_groups_retain_at_most_one_materialized_source_set() {
         1,
         "distinct source sets must be materialized and released one group at a time"
     );
+
+    database
+        .query_graph(GraphBuilder::table("albums").project(["id"]))
+        .unwrap();
+    assert_eq!(
+        database
+            .runtime_stats()
+            .hydration_snapshot_peak_cached_source_sets,
+        0,
+        "a single terminal must not retain a reusable source-set snapshot"
+    );
 }
 
 #[test]
@@ -4494,8 +4505,7 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
         .unwrap_or(4_096);
 
     for terminal_count in [1_usize, 2, 4, 8] {
-        let mut elapsed_us = Vec::with_capacity(SAMPLES);
-        let mut receipt = None;
+        let mut samples = Vec::with_capacity(SAMPLES);
         for _ in 0..SAMPLES {
             let storage = ScanCountingStorage::new(&["albums"]);
             let counter = storage.clone();
@@ -4525,7 +4535,7 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
             let memo_before = database.runtime_stats();
             let started = Instant::now();
             let snapshots = database.query_graphs(sinks).unwrap();
-            elapsed_us.push(started.elapsed().as_micros() as u64);
+            let elapsed_us = started.elapsed().as_micros() as u64;
 
             let canonical = snapshots
                 .sinks
@@ -4540,11 +4550,14 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
             canonical[0].hash(&mut hasher);
             let digest = hasher.finish();
             let memo_after = database.runtime_stats();
-            receipt = Some((
+            samples.push((
+                elapsed_us,
                 counter.scan_prefix_count() - scans_before,
                 counter.visited_records() - visits_before,
                 memo_after.hydration_memo_computes - memo_before.hydration_memo_computes,
                 memo_after.hydration_memo_hits - memo_before.hydration_memo_hits,
+                memo_after.hydration_join_evaluation_nanos
+                    - memo_before.hydration_join_evaluation_nanos,
                 snapshots
                     .sinks
                     .values()
@@ -4553,13 +4566,21 @@ fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
                 digest,
             ));
         }
-        elapsed_us.sort_unstable();
-        let (snapshot_queries, child_visits, memo_computes, memo_hits, result_rows, digest) =
-            receipt.unwrap();
+        samples.sort_unstable_by_key(|sample| sample.0);
+        let (
+            first_read_us,
+            snapshot_queries,
+            child_visits,
+            memo_computes,
+            memo_hits,
+            join_evaluation_nanos,
+            result_rows,
+            digest,
+        ) = samples[SAMPLES / 2];
         println!(
-            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{rows},\"samples\":{SAMPLES},\"storage_prefix_scans\":{snapshot_queries},\"storage_records_visited\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"total_result_rows\":{result_rows},\"per_terminal_rows\":{},\"per_terminal_digest\":\"{digest:016x}\",\"first_read_p50_us\":{}}}",
+            "{{\"scenario\":\"equivalent_terminal_snapshot_hydration\",\"terminals\":{terminal_count},\"input_rows\":{rows},\"samples\":{SAMPLES},\"storage_prefix_scans\":{snapshot_queries},\"storage_records_visited\":{child_visits},\"hydration_memo_computes\":{memo_computes},\"hydration_memo_hits\":{memo_hits},\"join_evaluation_us\":{},\"total_result_rows\":{result_rows},\"per_terminal_rows\":{},\"per_terminal_digest\":\"{digest:016x}\",\"first_read_p50_us\":{first_read_us}}}",
+            join_evaluation_nanos / 1_000,
             result_rows / terminal_count,
-            elapsed_us[SAMPLES / 2]
         );
     }
 }
