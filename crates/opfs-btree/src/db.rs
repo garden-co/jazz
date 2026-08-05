@@ -593,6 +593,15 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    /// Force a durability boundary for data already written to the WAL.
+    ///
+    /// This intentionally bypasses [`SyncPolicy`]: callers use it for an
+    /// explicit bounded cadence while the ordinary write path remains free to
+    /// defer syncs between boundaries.
+    pub fn flush_file(&self) -> Result<(), BTreeError> {
+        self.file.flush()
+    }
+
     pub fn checkpoint_state(&self) -> CheckpointState {
         // Reports the latest durable logical state: checkpoint metadata plus
         // any replayed or newly flushed WAL commits. `active_slot` still names

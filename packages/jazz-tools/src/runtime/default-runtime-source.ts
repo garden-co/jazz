@@ -71,6 +71,14 @@ function authorBytesForSubject(subject: string, fallbackSeed: string): Uint8Arra
   return uuidBytes(subject) ?? deterministicBytes(`${fallbackSeed}:author`);
 }
 
+function initialSyncFlushEvery(config: DbConfig): number {
+  const value = config.initialSyncFlushEvery ?? 512;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error("initialSyncFlushEvery must be a positive integer");
+  }
+  return value;
+}
+
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
 
@@ -108,6 +116,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = subject
       ? authorBytesForSubject(subject, identitySeed)
       : deterministicBytes(`${identitySeed}:author`);
+    const flushEvery = initialSyncFlushEvery(config);
     const mainThreadPeerRuntime = persistentBrowserDbName
       ? new PersistentBrowserOpfsRuntime(
           config.runtimeSources,
@@ -115,8 +124,11 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           persistentBrowserDbName,
           node,
           author,
+          flushEvery,
         )
-      : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true);
+      : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true, {
+          initialSyncFlushEvery: flushEvery,
+        });
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
