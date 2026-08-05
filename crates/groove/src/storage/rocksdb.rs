@@ -7,6 +7,7 @@
 //! storage for tests lives in [`super`], and all schema-aware behavior lives
 //! above this adapter.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +55,13 @@ pub struct RocksDbStorage {
     column_families: BTreeSet<String>,
     db: DB,
     write_options: WriteOptions,
+    write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WriteFlushCadence {
+    every: usize,
+    pending: usize,
 }
 
 impl RocksDbStorage {
@@ -121,6 +129,7 @@ impl RocksDbStorage {
             column_families: opened_column_families,
             db,
             write_options,
+            write_flush_cadence: RefCell::new(None),
         })
     }
 
@@ -284,6 +293,20 @@ impl OrderedKvStorage for RocksDbStorage {
             .delete_cf_opt(self.cf_handle(cf)?, key, &self.write_options)?)
     }
 
+    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        assert!(every > 0, "write flush cadence must be non-zero");
+        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+        Ok(())
+    }
+
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        self.db.flush_wal(true)?;
+        if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+            cadence.pending = 0;
+        }
+        Ok(())
+    }
+
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -437,7 +460,25 @@ impl OrderedKvStorage for RocksDbStorage {
             }
         }
 
-        Ok(self.db.write_opt(&batch, &self.write_options)?)
+        let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
+            Some(cadence) => {
+                cadence.pending += 1;
+                if cadence.pending == cadence.every {
+                    cadence.pending = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => return Ok(self.db.write_opt(&batch, &self.write_options)?),
+        };
+        let mut write_options = WriteOptions::default();
+        write_options.disable_wal(false);
+        self.db.write_opt(&batch, &write_options)?;
+        if should_flush {
+            self.db.flush_wal(true)?;
+        }
+        Ok(())
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -497,7 +538,7 @@ mod tests {
     use super::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_CONTENT_CF, CLASS_GLOBAL_CURRENT_CF,
         CLASS_HISTORY_CF, CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile,
-        rocksdb_class_profile,
+        RocksDbStorage, rocksdb_class_profile,
     };
 
     #[test]
@@ -536,5 +577,14 @@ mod tests {
             rocksdb_class_profile("ordinary"),
             RocksDbClassProfile::Default
         );
+    }
+
+    #[test]
+    fn ordinary_rocksdb_open_does_not_enable_client_flush_cadence() {
+        // Server storage follows this ordinary open path. The client-only
+        // cadence must stay opt-in so its durability behavior is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert!(storage.write_flush_cadence.borrow().is_none());
     }
 }

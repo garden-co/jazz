@@ -7,10 +7,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
-    block_on, Db, DbConfig, DbIdentity, ExclusiveTxOps, LocalUpdates, MergeableTxOps,
-    PeerConnection, PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells,
-    SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    block_on, Db, DbConfig, DbIdentity, ExclusiveTxOps, InitialSyncFlushCadence, LocalUpdates,
+    MergeableTxOps, PeerConnection, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
+    RowCells, SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency,
+    WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -152,6 +152,7 @@ struct WasmOpenDbConfig {
     identity: WasmDbIdentity,
     row_id_seed: Option<u64>,
     history_complete: bool,
+    initial_sync_flush_every: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -2098,11 +2099,32 @@ where
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        block_on(Db::open_history_complete(db_config))
+        let db = block_on(Db::open_history_complete(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
     } else {
-        block_on(Db::open(db_config))
+        let db = block_on(Db::open(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
     }
+}
+
+fn configure_initial_sync_flush_cadence<S>(
+    db: &Db<S>,
+    every: Option<u32>,
+) -> Result<(), jazz::db::Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let Some(every) = every else {
+        return Ok(());
+    };
+    let Some(every) = std::num::NonZeroUsize::new(every as usize) else {
+        return Ok(());
+    };
+    db.set_initial_sync_flush_cadence(InitialSyncFlushCadence::every(every))
 }
 
 fn tick_connection<S>(connection: &Option<Rc<RefCell<PeerConnection<S>>>>) -> Result<u32, JsValue>

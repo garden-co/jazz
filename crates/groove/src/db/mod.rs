@@ -120,6 +120,17 @@ where
         Ok(self.storage.close()?)
     }
 
+    /// Configure explicit storage durability boundaries for future committed
+    /// write batches.
+    pub fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        Ok(self.storage.set_write_flush_cadence(every)?)
+    }
+
+    /// Complete the current storage durability boundary.
+    pub fn flush_write_boundary(&self) -> Result<(), Error> {
+        Ok(self.storage.flush_write_boundary()?)
+    }
+
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
     }
