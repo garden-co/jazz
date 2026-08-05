@@ -4450,6 +4450,41 @@ fn equivalent_query_graph_snapshot_work_is_constant_in_terminal_count() {
 }
 
 #[test]
+fn distinct_snapshot_groups_retain_at_most_one_materialized_source_set() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..32 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("album-{id}"))],
+        );
+    }
+    database.commit_batch(batch).unwrap();
+
+    let sinks = (0..64).map(|terminal| {
+        (
+            format!("terminal-{terminal}"),
+            GraphBuilder::table_scan(
+                "albums",
+                StaticScanSpec::Prefix(vec![LiteralValue::U64(terminal % 32)]),
+            )
+            .project(["id"]),
+        )
+    });
+    let snapshots = database.query_graphs(sinks).unwrap();
+
+    assert_eq!(snapshots.sinks.len(), 64);
+    assert_eq!(
+        database
+            .runtime_stats()
+            .hydration_snapshot_peak_cached_source_sets,
+        1,
+        "distinct source sets must be materialized and released one group at a time"
+    );
+}
+
+#[test]
 #[ignore = "receipt-only timing for equivalent-terminal snapshot hydration"]
 fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
     const SAMPLES: usize = 7;
