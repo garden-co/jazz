@@ -131,6 +131,7 @@ struct ClientDbInner {
     row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<BatchId, ExclusiveTransactionState>,
     closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+    delivery_failure_senders: Vec<mpsc::UnboundedSender<SubscriptionRejectReason>>,
 }
 
 #[derive(Clone)]
@@ -1016,6 +1017,7 @@ impl ClientDb {
                         crate::db::sync_autopsy::record(format!(
                             "client tick driver exited after db.tick error: {error}"
                         ));
+                        inner.borrow_mut().surface_subscription_delivery_failure();
                         return;
                     }
                 }
@@ -1058,6 +1060,7 @@ impl ClientDbInner {
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
+            delivery_failure_senders: Vec::new(),
         };
         inner.connect_upstream_transport().await?;
         Ok(inner)
@@ -1230,11 +1233,32 @@ impl ClientDbInner {
             .subscribe(&prepared, opts)
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
+        let (delivery_failure_tx, mut delivery_failure_rx) = mpsc::unbounded_channel();
+        inner
+            .borrow_mut()
+            .delivery_failure_senders
+            .retain(|sender| !sender.is_closed());
+        inner
+            .borrow_mut()
+            .delivery_failure_senders
+            .push(delivery_failure_tx);
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
-            while let Some(event) = stream.next_event().await {
+            loop {
+                let event = tokio::select! {
+                    delivery_failure = delivery_failure_rx.recv() => {
+                        if let Some(reason) = delivery_failure {
+                            let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+                        }
+                        break;
+                    }
+                    event = stream.next_event() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 match event {
                     CoreSubscriptionEvent::Delta {
                         reset,
@@ -1319,6 +1343,15 @@ impl ClientDbInner {
             }
         });
         Ok(())
+    }
+
+    fn surface_subscription_delivery_failure(&mut self) {
+        let reason = SubscriptionRejectReason::ServerFailure {
+            code: SubscriptionServerFailureCode::Internal,
+        };
+        for sender in self.delivery_failure_senders.drain(..) {
+            let _ = sender.send(reason.clone());
+        }
     }
 
     async fn handle_wait_for_batch(
@@ -2799,7 +2832,10 @@ mod tests {
     use super::*;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
-    use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+    use crate::tools::{
+        ClientStorage, ColumnType, QueryBuilder, SchemaBuilder, SubscriptionRejectReason,
+        SubscriptionServerFailureCode, SubscriptionStreamItem, TableSchema,
+    };
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -2855,6 +2891,50 @@ mod tests {
         );
         format!("{header}.{payload}.sig")
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn internal_delivery_failure_rejects_and_closes_the_public_subscription_stream() {
+        // A valid public client has no way to manufacture a core tick failure.
+        // Inject only that boundary condition here, then assert the public API
+        // observes the rejection and closure rather than waiting forever.
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = JazzClient::test_client(declared_todo_schema()).await;
+                let mut stream = client
+                    .subscribe(QueryBuilder::new("todos").build())
+                    .await
+                    .expect("subscribe through public client API");
+
+                client
+                    .db
+                    .inner
+                    .borrow_mut()
+                    .surface_subscription_delivery_failure();
+
+                let rejection = tokio::time::timeout(Duration::from_secs(1), async {
+                    while let Some(item) = stream.next().await {
+                        if let SubscriptionStreamItem::Rejected { reason } = item {
+                            return reason;
+                        }
+                    }
+                    panic!("delivery failure closed the stream without a rejection");
+                })
+                .await
+                .expect("delivery failure reaches the public stream");
+                assert!(matches!(
+                    rejection,
+                    SubscriptionRejectReason::ServerFailure {
+                        code: SubscriptionServerFailureCode::Internal,
+                    }
+                ));
+                assert!(
+                    stream.next().await.is_none(),
+                    "a delivery failure closes the public stream after rejection"
+                );
+            })
+            .await;
+    }
+
     #[test]
     fn core_integer_bridge_uses_signed_value_domain() {
         let core_value =
