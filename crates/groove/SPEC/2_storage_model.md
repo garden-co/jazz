@@ -438,26 +438,25 @@ framing. Those are CPU-only figures, not backend measurements.
   supports the structural choice of grouping attributes within a bounded page:
   it improves cache-line behavior for scans while keeping a row's parts local.
   It does not establish this delta, compaction, or write protocol.
-- [DBSP — Budiu et al., VLDB 2023](https://www.vldb.org/pvldb/vol16/p1601-budiu.pdf)
-  supports independently recomputing a touched grouping for aggregates that
-  need it. The proposed one-range/chunk compaction work bound is nevertheless
-  a custom storage-operator contract, not a theorem proved by DBSP or a claim
-  that all work is bounded by the cited model.
-- [Koch, Lupei, and Tannen, PODS 2016](https://arxiv.org/abs/1412.4320)
-  identifies inner-bag update as the difficult case and uses shredding for a
-  correlated child collection. This design is **not IncNRC+**: it does not
-  claim the paper's syntactic fragment or its results for member-addressed
-  updates to nested collections.
-- SAP HANA's delta merge is supporting precedent for a write-optimised row
-  delta before columnar merge; the [HTAP survey (arXiv:2404.15670)](https://arxiv.org/abs/2404.15670)
-  likewise distinguishes random-write-friendly rows from scan-friendly columns.
-  Modern-SSD work is supporting context for avoiding a “read bigger units”
-  conclusion and for treating decompression as a possible bottleneck. Neither
-  establishes the present thresholds or visibility semantics.
+- SAP HANA's delta merge is the closest shipping precedent for the shape
+  proposed here: a write-optimised delta in front of a read-optimised column
+  store, merged in the background. Notably its L1 delta holds updates in **row**
+  format. No production system appears to ship columnar-only for
+  transactional workloads.
+- The [HTAP survey (arXiv:2404.15670)](https://arxiv.org/abs/2404.15670)
+  likewise distinguishes random-write-friendly row layouts from scan-friendly
+  column layouts, and describes hybrids rather than a single format.
+- Modern-SSD work is supporting context in two directions: it undermines the
+  spinning-disk assumptions behind point-lookup-optimised layouts, but it also
+  cautions against concluding "read bigger units" — small random reads became
+  cheap, and decompression, not I/O, became the bottleneck.
 
-Ordered nested collections are not covered by those citations. A stable
-row-id tie-breaker can define a total order, but dense numeric positions make
-front insertion renumber successors; this draft does not solve that problem.
+None of these establish the thresholds, the compaction work bound, or the
+delta visibility semantics proposed above. Those are contracts this draft is
+asserting, to be pinned by measurement.
+
+The work bound in particular is a **custom storage-operator contract**, not a
+result carried over from any cited system.
 
 #### Deferred choices
 
