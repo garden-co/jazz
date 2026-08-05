@@ -24,9 +24,9 @@ pub enum Value {
     Tuple(Vec<Value>),
     Array(Vec<Value>),
     Nullable(Option<Box<Value>>),
-    Record(OwnedRecord),
     I64(i64),
     I32(i32),
+    Record(OwnedRecord),
 }
 
 impl From<u8> for Value {

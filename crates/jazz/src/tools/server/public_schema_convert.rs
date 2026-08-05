@@ -2405,6 +2405,47 @@ mod tests {
             GrooveColumnType::I32.array_of()
         );
 
+        let numeric_default_schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("numeric_defaults")
+                    .column_with_default("integer", ColumnType::Integer, Value::Integer(-7))
+                    .column_with_default("bigint", ColumnType::BigInt, Value::Integer(-7))
+                    .column_with_default("bigint_literal", ColumnType::BigInt, Value::BigInt(-7))
+                    .column_with_default(
+                        "integers",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Integer),
+                        },
+                        Value::Array(vec![Value::Integer(-7), Value::BigInt(8)]),
+                    ),
+            )
+            .build();
+        let numeric_default_table = convert_public_schema(&numeric_default_schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "numeric_defaults")
+            .unwrap();
+        assert_eq!(
+            numeric_default_table
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), &column.default))
+                .collect::<Vec<_>>(),
+            vec![
+                ("integer", &Some(GrooveValue::I32(-7))),
+                ("bigint", &Some(GrooveValue::I64(-7))),
+                ("bigint_literal", &Some(GrooveValue::I64(-7))),
+                (
+                    "integers",
+                    &Some(GrooveValue::Array(vec![
+                        GrooveValue::I32(-7),
+                        GrooveValue::I32(8),
+                    ])),
+                ),
+            ]
+        );
+
         let default_schema = [(
             TableName::new("todos"),
             TableSchema::new(RowDescriptor::new(vec![
