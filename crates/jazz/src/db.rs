@@ -7,6 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 #[cfg(feature = "sync-autopsy")]
@@ -290,6 +291,32 @@ pub struct WriteState {
     pub durability: DurabilityTier,
 }
 
+/// Explicit client durability cadence while the first server snapshot is
+/// loading.
+///
+/// A crash can lose up to `M - 1` writes since the last completed boundary,
+/// where `M` is this value. Older completed boundaries recover from the
+/// storage WAL. The final partial initial-sync batch is always flushed before
+/// the client returns to per-write durability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialSyncFlushCadence(NonZeroUsize);
+
+impl InitialSyncFlushCadence {
+    /// The client default: a durability boundary every 512 initial-sync writes.
+    pub const DEFAULT: Self = Self(NonZeroUsize::new(512).expect("non-zero"));
+
+    /// Create a cadence with one durability boundary per `writes` initial-sync
+    /// writes.
+    pub const fn every(writes: NonZeroUsize) -> Self {
+        Self(writes)
+    }
+
+    /// Number of writes between completed durability boundaries.
+    pub const fn writes(self) -> usize {
+        self.0.get()
+    }
+}
+
 /// Usage-site query coverage attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
@@ -422,6 +449,21 @@ where
     /// close the underlying storage.
     pub fn close(&self) -> Result<(), Error> {
         Ok(self.node.node.borrow_mut().close()?)
+    }
+
+    /// Configure this client database's first-snapshot durability cadence.
+    ///
+    /// Servers do not call this client-only setting and retain their existing
+    /// storage durability behavior.
+    pub fn set_initial_sync_flush_cadence(
+        &self,
+        cadence: InitialSyncFlushCadence,
+    ) -> Result<(), Error> {
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
     /// Seed a settled mergeable row for server bootstrap/import flows.

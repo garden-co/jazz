@@ -231,6 +231,13 @@ pub struct NodeState<S> {
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
+    /// Client-only write cadence selected for the first snapshot hydration.
+    initial_sync_flush_cadence: Option<usize>,
+    /// Whether the first snapshot is currently using the configured cadence.
+    initial_sync_flush_active: bool,
+    /// Once the initial snapshot has completed, ordinary writes return to their
+    /// existing per-write durability boundaries.
+    initial_sync_flush_completed: bool,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -630,6 +637,9 @@ where
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
+            initial_sync_flush_cadence: None,
+            initial_sync_flush_active: false,
+            initial_sync_flush_completed: false,
         };
         node.recover_from_storage()?;
         node.recover_known_state_facts()?;
@@ -3082,6 +3092,38 @@ where
 
     pub(crate) fn flush_query_runtime(&mut self) -> Result<(), Error> {
         self.database.flush().map_err(Error::Groove)
+    }
+
+    pub(crate) fn set_initial_sync_flush_cadence(&mut self, every: usize) -> Result<(), Error> {
+        debug_assert!(every > 0);
+        self.initial_sync_flush_cadence = Some(every);
+        // The cadence only relaxes durability while the first snapshot is
+        // active. Normal client writes retain a boundary per committed batch.
+        self.database.set_write_flush_cadence(1)?;
+        Ok(())
+    }
+
+    pub(super) fn begin_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
+        let Some(every) = self.initial_sync_flush_cadence else {
+            return Ok(());
+        };
+        if self.initial_sync_flush_active || self.initial_sync_flush_completed {
+            return Ok(());
+        }
+        self.database.set_write_flush_cadence(every)?;
+        self.initial_sync_flush_active = true;
+        Ok(())
+    }
+
+    pub(super) fn finish_initial_sync_flush_cadence(&mut self) -> Result<(), Error> {
+        if !self.initial_sync_flush_active {
+            return Ok(());
+        }
+        self.database.flush_write_boundary()?;
+        self.database.set_write_flush_cadence(1)?;
+        self.initial_sync_flush_active = false;
+        self.initial_sync_flush_completed = true;
+        Ok(())
     }
 
     pub(crate) fn post_tick_consolidate_history_windows(

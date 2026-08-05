@@ -389,10 +389,16 @@ export class NativeRuntimeAdapter implements Runtime {
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string; db?: NativeDb },
+    opts?: { persistentPath?: string; db?: NativeDb; initialSyncFlushEvery?: number },
   ) {
     this.schemaBytes = encodeSchema(schema);
-    this.configBytes = openConfig(node, author, sourceId, historyComplete);
+    this.configBytes = openConfig(
+      node,
+      author,
+      sourceId,
+      historyComplete,
+      opts?.initialSyncFlushEvery,
+    );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {

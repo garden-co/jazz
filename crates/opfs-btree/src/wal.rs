@@ -10,10 +10,14 @@ const WAL_COMMIT_MAGIC: [u8; 8] = *b"OPFSWC01";
 const WAL_FORMAT_VERSION: u32 = 1;
 const WAL_FRAME_FLAG_BLOB: u32 = 1;
 const WAL_FRAME_FLAG_FREELIST: u32 = 1 << 1;
+const WAL_FRAME_FLAG_BLOB_EXTENT: u32 = 1 << 2;
+const WAL_FRAME_FLAG_PAGE_COUNT_SHIFT: u32 = 3;
 
 const WAL_HEADER_CHECKSUM_OFFSET: usize = 56;
 const WAL_FRAME_CHECKSUM_OFFSET: usize = 32;
 const WAL_COMMIT_CHECKSUM_OFFSET: usize = 28;
+
+type WalFrameMeta = (PageId, bool, bool, Option<usize>, u32);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WalHeader {
@@ -49,19 +53,33 @@ impl WalHeader {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct WalFrame {
-    pub(crate) page_id: PageId,
-    pub(crate) is_blob: bool,
-    pub(crate) is_freelist: bool,
-    pub(crate) raw: Vec<u8>,
+pub(crate) enum WalFrame {
+    Page {
+        page_id: PageId,
+        is_blob: bool,
+        is_freelist: bool,
+        raw: Vec<u8>,
+    },
+    BlobExtent {
+        head_page_id: PageId,
+        page_count: usize,
+        raw: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct WalFrameRef<'a> {
-    pub(crate) page_id: PageId,
-    pub(crate) is_blob: bool,
-    pub(crate) is_freelist: bool,
-    pub(crate) raw: &'a [u8],
+pub(crate) enum WalFrameRef<'a> {
+    Page {
+        page_id: PageId,
+        is_blob: bool,
+        is_freelist: bool,
+        raw: &'a [u8],
+    },
+    BlobExtent {
+        head_page_id: PageId,
+        page_count: usize,
+        raw: &'a [u8],
+    },
 }
 
 pub(crate) fn append_commit<F: SyncFile>(
@@ -73,7 +91,8 @@ pub(crate) fn append_commit<F: SyncFile>(
 ) -> Result<u64, BTreeError> {
     let frame_count = u64::try_from(frames.len())
         .map_err(|_| BTreeError::Io("WAL frame count overflow".to_string()))?;
-    let wal_pages = commit_page_count(frame_count, "WAL page count overflow", BTreeError::Io)?;
+    let wal_pages =
+        commit_page_count(frames, page_size, "WAL page count overflow", BTreeError::Io)?;
     let required_pages = start_page_id
         .checked_add(wal_pages)
         .ok_or_else(|| BTreeError::Io("WAL file length overflow".to_string()))?;
@@ -83,29 +102,75 @@ pub(crate) fn append_commit<F: SyncFile>(
     file.truncate(required_len)?;
 
     let header = header.with_frame_count(frame_count);
-    write_page(
-        file,
-        page_size,
-        start_page_id,
-        &encode_wal_header_page(page_size, header)?,
-    )?;
-
-    let mut cursor = start_page_id + 1;
+    // One contiguous append is safe: the commit page remains last, and every
+    // frame payload is checksummed during replay. A torn append therefore
+    // cannot make an incomplete extent visible as a committed transaction.
+    let byte_len = usize::try_from(wal_pages)
+        .ok()
+        .and_then(|pages| pages.checked_mul(page_size))
+        .ok_or_else(|| BTreeError::Io("WAL commit buffer size overflow".to_string()))?;
+    let mut encoded = Vec::with_capacity(byte_len);
+    encoded.extend_from_slice(&encode_wal_header_page(page_size, header)?);
     for frame in frames {
-        let meta = encode_wal_frame_meta_page(
-            page_size,
-            frame.page_id,
-            frame.is_blob,
-            frame.is_freelist,
-            frame.raw,
-        )?;
-        write_page(file, page_size, cursor, &meta)?;
-        write_page(file, page_size, cursor + 1, frame.raw)?;
-        cursor += 2;
+        match frame {
+            WalFrameRef::Page {
+                page_id,
+                is_blob,
+                is_freelist,
+                raw,
+            } => {
+                if raw.len() != page_size {
+                    return Err(BTreeError::Corrupt(format!(
+                        "WAL page raw length {} does not match page size {}",
+                        raw.len(),
+                        page_size
+                    )));
+                }
+                encoded.extend_from_slice(&encode_wal_frame_meta_page(
+                    page_size,
+                    *page_id,
+                    *is_blob,
+                    *is_freelist,
+                    None,
+                    raw,
+                )?);
+                encoded.extend_from_slice(raw);
+            }
+            WalFrameRef::BlobExtent {
+                head_page_id,
+                page_count,
+                raw,
+            } => {
+                if *page_count == 0
+                    || raw.len()
+                        != page_count
+                            .checked_mul(page_size)
+                            .ok_or_else(|| BTreeError::Io("WAL extent size overflow".to_string()))?
+                {
+                    return Err(BTreeError::Corrupt(
+                        "WAL blob extent length does not match page count".to_string(),
+                    ));
+                }
+                encoded.extend_from_slice(&encode_wal_frame_meta_page(
+                    page_size,
+                    *head_page_id,
+                    true,
+                    false,
+                    Some(*page_count),
+                    raw,
+                )?);
+                encoded.extend_from_slice(raw);
+            }
+        }
     }
-
-    let commit = encode_wal_commit_page(page_size, header.generation, frame_count)?;
-    write_page(file, page_size, cursor, &commit)?;
+    encoded.extend_from_slice(&encode_wal_commit_page(
+        page_size,
+        header.generation,
+        frame_count,
+    )?);
+    debug_assert_eq!(encoded.len(), byte_len);
+    let offset = page_offset(start_page_id, page_size, "WAL write offset overflow")?;
+    file.write_all_at(offset, &encoded)?;
     Ok(wal_pages)
 }
 
@@ -145,42 +210,72 @@ fn read_commit_with_mode<F: SyncFile>(
     };
     let frame_count = usize::try_from(header.frame_count)
         .map_err(|_| BTreeError::Corrupt("WAL frame count too large".to_string()))?;
-    let wal_pages = commit_page_count(
-        header.frame_count,
-        "WAL page count overflow",
-        BTreeError::Corrupt,
-    )?;
-    let next_cursor = start_page_id
-        .checked_add(wal_pages)
+    let mut frames = Vec::with_capacity(frame_count);
+    let mut cursor = start_page_id + 1;
+    for _ in 0..frame_count {
+        let meta_end = cursor
+            .checked_add(1)
+            .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
+        if meta_end > persisted_pages {
+            truncate_tail(file, page_size, start_page_id)?;
+            return Ok(None);
+        }
+        reader.limit_to(meta_end);
+        let Some((page_id, is_blob, is_freelist, page_count, expected_checksum)) =
+            decode_wal_frame_meta_page(&reader.page(cursor)?, page_size)?
+        else {
+            truncate_tail(file, page_size, start_page_id)?;
+            return Ok(None);
+        };
+        let raw_page_count = page_count.unwrap_or(1);
+        let data_start = cursor
+            .checked_add(1)
+            .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
+        let data_end = data_start
+            .checked_add(raw_page_count as u64)
+            .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
+        if data_end > persisted_pages {
+            truncate_tail(file, page_size, start_page_id)?;
+            return Ok(None);
+        }
+        reader.limit_to(data_end);
+        let mut raw = Vec::with_capacity(
+            raw_page_count
+                .checked_mul(page_size)
+                .ok_or_else(|| BTreeError::Corrupt("WAL extent size overflow".to_string()))?,
+        );
+        for page_idx in 0..raw_page_count {
+            raw.extend_from_slice(&reader.page(data_start + page_idx as u64)?);
+        }
+        if checksum::hash(&raw) != expected_checksum {
+            truncate_tail(file, page_size, start_page_id)?;
+            return Ok(None);
+        }
+        if page_count.is_some() {
+            frames.push(WalFrame::BlobExtent {
+                head_page_id: page_id,
+                page_count: raw_page_count,
+                raw,
+            });
+        } else {
+            frames.push(WalFrame::Page {
+                page_id,
+                is_blob,
+                is_freelist,
+                raw,
+            });
+        }
+        cursor = data_end;
+    }
+
+    let next_cursor = cursor
+        .checked_add(1)
         .ok_or_else(|| BTreeError::Corrupt("WAL cursor overflow".to_string()))?;
     if next_cursor > persisted_pages {
         truncate_tail(file, page_size, start_page_id)?;
         return Ok(None);
     }
     reader.limit_to(next_cursor);
-
-    let mut frames = Vec::with_capacity(frame_count);
-    let mut cursor = start_page_id + 1;
-    for _ in 0..frame_count {
-        let Some((page_id, is_blob, is_freelist, expected_checksum)) =
-            decode_wal_frame_meta_page(&reader.page(cursor)?, page_size)?
-        else {
-            truncate_tail(file, page_size, start_page_id)?;
-            return Ok(None);
-        };
-        let raw = reader.page(cursor + 1)?.into_owned();
-        if checksum::hash(&raw) != expected_checksum {
-            truncate_tail(file, page_size, start_page_id)?;
-            return Ok(None);
-        }
-        frames.push(WalFrame {
-            page_id,
-            is_blob,
-            is_freelist,
-            raw,
-        });
-        cursor += 2;
-    }
 
     if !decode_wal_commit_page(&reader.page(cursor)?, header.generation, header.frame_count)? {
         truncate_tail(file, page_size, start_page_id)?;
@@ -190,14 +285,30 @@ fn read_commit_with_mode<F: SyncFile>(
 }
 
 fn commit_page_count(
-    frame_count: u64,
+    frames: &[WalFrameRef<'_>],
+    page_size: usize,
     overflow_message: &'static str,
     err: fn(String) -> BTreeError,
 ) -> Result<u64, BTreeError> {
-    frame_count
-        .checked_mul(2)
-        .and_then(|pages| pages.checked_add(2))
-        .ok_or_else(|| err(overflow_message.to_string()))
+    frames.iter().try_fold(2u64, |pages, frame| {
+        let payload_pages = match frame {
+            WalFrameRef::Page { .. } => 1,
+            WalFrameRef::BlobExtent {
+                page_count, raw, ..
+            } => {
+                if *page_count == 0
+                    || raw.len() != page_count.checked_mul(page_size).unwrap_or(usize::MAX)
+                {
+                    return Err(err(overflow_message.to_string()));
+                }
+                u64::try_from(*page_count).map_err(|_| err(overflow_message.to_string()))?
+            }
+        };
+        pages
+            .checked_add(1)
+            .and_then(|n| n.checked_add(payload_pages))
+            .ok_or_else(|| err(overflow_message.to_string()))
+    })
 }
 
 /// Page source for `read_commit_with_mode`: either the run-buffered reader or
@@ -319,23 +430,6 @@ impl<'a, F: SyncFile> PageRunReader<'a, F> {
     }
 }
 
-fn write_page<F: SyncFile>(
-    file: &F,
-    page_size: usize,
-    page_id: PageId,
-    raw: &[u8],
-) -> Result<(), BTreeError> {
-    if raw.len() != page_size {
-        return Err(BTreeError::Corrupt(format!(
-            "WAL page raw length {} does not match page size {}",
-            raw.len(),
-            page_size
-        )));
-    }
-    let offset = page_offset(page_id, page_size, "WAL write offset overflow")?;
-    file.write_all_at(offset, raw)
-}
-
 fn truncate_tail<F: SyncFile>(
     file: &F,
     page_size: usize,
@@ -402,6 +496,7 @@ fn encode_wal_frame_meta_page(
     page_id: PageId,
     is_blob: bool,
     is_freelist: bool,
+    blob_extent_page_count: Option<usize>,
     raw_page: &[u8],
 ) -> Result<Vec<u8>, BTreeError> {
     let mut page = vec![0u8; page_size];
@@ -417,6 +512,16 @@ fn encode_wal_frame_meta_page(
     if is_freelist {
         flags |= WAL_FRAME_FLAG_FREELIST;
     }
+    if let Some(page_count) = blob_extent_page_count {
+        let page_count = u32::try_from(page_count)
+            .map_err(|_| BTreeError::Io("WAL extent page count overflow".to_string()))?;
+        if page_count == 0 || page_count > (u32::MAX >> WAL_FRAME_FLAG_PAGE_COUNT_SHIFT) {
+            return Err(BTreeError::Io(
+                "WAL extent page count out of range".to_string(),
+            ));
+        }
+        flags |= WAL_FRAME_FLAG_BLOB_EXTENT | (page_count << WAL_FRAME_FLAG_PAGE_COUNT_SHIFT);
+    }
     write_u32_at(&mut page, 24, flags)?;
     write_u32_at(&mut page, 28, checksum::hash(raw_page))?;
     let checksum = checksum::hash(&page[..WAL_FRAME_CHECKSUM_OFFSET]);
@@ -427,7 +532,7 @@ fn encode_wal_frame_meta_page(
 fn decode_wal_frame_meta_page(
     raw: &[u8],
     page_size: usize,
-) -> Result<Option<(PageId, bool, bool, u32)>, BTreeError> {
+) -> Result<Option<WalFrameMeta>, BTreeError> {
     ensure_wal_page_capacity(raw, WAL_FRAME_CHECKSUM_OFFSET + 4)?;
     if raw[0..8] != WAL_FRAME_MAGIC {
         return Ok(None);
@@ -443,13 +548,27 @@ fn decode_wal_frame_meta_page(
         return Ok(None);
     }
     let flags = read_u32_at(raw, 24)?;
-    if flags & !(WAL_FRAME_FLAG_BLOB | WAL_FRAME_FLAG_FREELIST) != 0 {
+    let is_blob_extent = flags & WAL_FRAME_FLAG_BLOB_EXTENT != 0;
+    if !is_blob_extent && flags & !(WAL_FRAME_FLAG_BLOB | WAL_FRAME_FLAG_FREELIST) != 0 {
+        return Ok(None);
+    }
+    if is_blob_extent
+        && (flags & (WAL_FRAME_FLAG_BLOB | WAL_FRAME_FLAG_FREELIST) != WAL_FRAME_FLAG_BLOB)
+    {
+        return Ok(None);
+    }
+    let page_count = is_blob_extent.then(|| {
+        usize::try_from(flags >> WAL_FRAME_FLAG_PAGE_COUNT_SHIFT)
+            .expect("u32 fits in usize on supported targets")
+    });
+    if page_count == Some(0) {
         return Ok(None);
     }
     Ok(Some((
         read_u64_at(raw, 16)?,
         flags & WAL_FRAME_FLAG_BLOB != 0,
         flags & WAL_FRAME_FLAG_FREELIST != 0,
+        page_count,
         read_u32_at(raw, 28)?,
     )))
 }
@@ -553,13 +672,13 @@ mod tests {
         let page_a = vec![1u8; PAGE_SIZE];
         let page_b = vec![2u8; PAGE_SIZE];
         let frames = [
-            WalFrameRef {
+            WalFrameRef::Page {
                 page_id: 3,
                 is_blob: false,
                 is_freelist: false,
                 raw: &page_a,
             },
-            WalFrameRef {
+            WalFrameRef::Page {
                 page_id: 4,
                 is_blob: true,
                 is_freelist: false,
@@ -582,8 +701,14 @@ mod tests {
         assert_eq!(read_header.freelist_head_page_id, 4);
         assert_eq!(read_header.total_pages, 9);
         assert_eq!(read_frames.len(), 2);
-        assert_eq!(read_frames[0].raw, page_a);
-        assert_eq!(read_frames[1].raw, page_b);
+        assert!(matches!(
+            &read_frames[0],
+            WalFrame::Page { raw, .. } if raw == &page_a
+        ));
+        assert!(matches!(
+            &read_frames[1],
+            WalFrame::Page { raw, .. } if raw == &page_b
+        ));
         assert_eq!(next_cursor, persisted_pages);
     }
 
@@ -597,7 +722,7 @@ mod tests {
         let frames: Vec<WalFrameRef<'_>> = frame_pages
             .iter()
             .enumerate()
-            .map(|(i, raw)| WalFrameRef {
+            .map(|(i, raw)| WalFrameRef::Page {
                 page_id: 100 + i as PageId,
                 is_blob: i % 3 == 0,
                 is_freelist: i % 5 == 0,
@@ -619,19 +744,73 @@ mod tests {
             assert_eq!(next_cursor, persisted_pages);
             assert_eq!(read_frames.len(), 40);
             for (i, frame) in read_frames.iter().enumerate() {
-                assert_eq!(frame.page_id, 100 + i as PageId);
-                assert_eq!(frame.is_blob, i % 3 == 0);
-                assert_eq!(frame.is_freelist, i % 5 == 0);
-                assert_eq!(frame.raw, frame_pages[i]);
+                let WalFrame::Page {
+                    page_id,
+                    is_blob,
+                    is_freelist,
+                    raw,
+                } = frame
+                else {
+                    panic!("expected ordinary WAL page frame");
+                };
+                assert_eq!(*page_id, 100 + i as PageId);
+                assert_eq!(*is_blob, i % 3 == 0);
+                assert_eq!(*is_freelist, i % 5 == 0);
+                assert_eq!(*raw, frame_pages[i]);
             }
         }
+    }
+
+    #[test]
+    fn blob_extent_frame_round_trips_and_rejects_a_torn_payload() {
+        let file = MemoryFile::new();
+        let page_count = 32;
+        let payload = (0..page_count * PAGE_SIZE)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        let frames = [WalFrameRef::BlobExtent {
+            head_page_id: 40,
+            page_count,
+            raw: &payload,
+        }];
+
+        let pages_written =
+            append_commit(&file, PAGE_SIZE, START_PAGE_ID, header(), &frames).expect("append WAL");
+        assert_eq!(pages_written, 2 + 1 + page_count as u64);
+        let persisted_pages = START_PAGE_ID + pages_written;
+        let (_, frames, _) = read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
+            .expect("read WAL")
+            .expect("commit present");
+        assert!(matches!(
+            &frames[0],
+            WalFrame::BlobExtent {
+                head_page_id: 40,
+                page_count: 32,
+                raw,
+            } if raw == &payload
+        ));
+
+        // Simulate a crash that left a payload byte torn while the commit page
+        // was already present. The extent checksum must reject the whole WAL
+        // transaction rather than exposing a partly rewritten value.
+        file.write_all_at((START_PAGE_ID + 2) * PAGE_SIZE as u64, &[0xff])
+            .expect("tear extent payload");
+        assert!(
+            read_commit(&file, PAGE_SIZE, START_PAGE_ID, persisted_pages)
+                .expect("read torn WAL")
+                .is_none()
+        );
+        assert_eq!(
+            file.len().expect("file len"),
+            START_PAGE_ID * PAGE_SIZE as u64
+        );
     }
 
     #[test]
     fn read_commit_returns_none_and_truncates_truncated_tail() {
         let file = MemoryFile::new();
         let page = vec![1u8; PAGE_SIZE];
-        let frames = [WalFrameRef {
+        let frames = [WalFrameRef::Page {
             page_id: 3,
             is_blob: false,
             is_freelist: false,
@@ -657,7 +836,7 @@ mod tests {
     fn read_commit_returns_none_and_truncates_corrupt_frame() {
         let file = MemoryFile::new();
         let page = vec![1u8; PAGE_SIZE];
-        let frames = [WalFrameRef {
+        let frames = [WalFrameRef::Page {
             page_id: 3,
             is_blob: false,
             is_freelist: false,
