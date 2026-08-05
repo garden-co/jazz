@@ -352,9 +352,21 @@ included in a range scan. Compaction later reads a base-plus-delta view for a
 range, writes new immutable chunk(s), makes them current, and reclaims
 superseded material.
 
-How a reader locates the current base for a range, and how compaction makes new
-chunks current, is deliberately left open below. That mechanism is not chosen
-here, and this section should not be read as having chosen one.
+**Compaction of a range does not overlap a scan of that range.** The proposal
+is to exclude the two rather than to isolate a reader from a publish it is
+concurrent with. This is the smallest of the available options and the reason
+the rest of the section needs no multi-version machinery: because no reader is
+mid-scan across a publish, superseded chunks need not stay addressable
+afterwards, and nothing has to track which readers still hold an older base.
+Whether the exclusion is worth relaxing later is a performance question, not a
+correctness one, and it is recorded as future work below.
+
+That decision does not settle how a reader locates the current base for a
+range, or what makes a newly compacted chunk current. Chunk boundaries are
+data-dependent and change when compaction splits or merges ranges, so the
+mapping is itself mutable state whatever form it takes. That mechanism is
+deliberately left open below, and this section should not be read as having
+chosen one.
 
 In particular, inserts whose keys fall into an existing chunk range use the
 same durable delta path. Whether their later compaction cost and scheduling
@@ -491,28 +503,32 @@ record descriptors, and reopen/migration diagnostics.
 
 ### Open questions
 
-- 🔶 **How a base is located, made current, and reclaimed.** The draft above
-  fixes the representation (immutable chunks + durable delta) but deliberately
-  does not choose the mechanism that connects them. Four coupled decisions are
-  open, and this is a correctness and recovery question rather than a
-  performance-tuning one:
+- 🔶 **How a base is located and made current.** The draft above fixes the
+  representation (immutable chunks + durable delta) and excludes compaction
+  from overlapping a scan of the same range, but deliberately does not choose
+  the mechanism that connects base to delta. Two coupled decisions are open,
+  and they are correctness and recovery questions rather than
+  performance-tuning ones:
   - How a reader finds the current base for a primary-key range, given that
     chunk boundaries are data-dependent and change when compaction splits or
-    merges ranges.
-  - What makes a newly compacted chunk current, and at what point that becomes
-    observable to a reader.
-  - Whether a reader must be isolated from a compaction that publishes while
-    the reader is mid-scan. Note as input, not as a conclusion: today
-    `OrderedKvStorage` offers `get`/`scan_range`/`scan_prefix`/`write_many`
-    with no snapshot or read-version, so a scan observes whatever is committed
-    as it runs. Whichever way this is settled — by constraining when
-    compaction may run, by keeping superseded material addressable, by
-    changing the storage contract, or otherwise — should follow from the
-    decision, not drive it.
-  - When superseded chunks and folded-in delta entries may be reclaimed. One
-    concrete hazard to preserve in any answer: compaction must retire exactly
-    the delta entries it consumed, not a key range, or rows written during the
-    compaction window are lost.
+    merges ranges. Encoding the mapping in the key space and deriving it by
+    ordered seek, or holding it in separate metadata, are both open; each
+    trades a consistency obligation against a lookup.
+  - What makes a newly compacted chunk current, and how superseded chunks and
+    folded-in delta entries are retired. Because no reader is mid-scan across
+    that point, retirement may be immediate. One concrete hazard to preserve
+    in any answer: compaction must retire exactly the delta entries it
+    consumed, not a key range, or rows written during the compaction window
+    are lost.
+- 🔶 **Future: allow compaction concurrent with a scan of the same range.**
+  The draft avoids the problem by excluding the two, which costs compaction
+  scheduling freedom under sustained read load. Relaxing it needs a source of
+  reader isolation, and today there is none to draw on: `OrderedKvStorage`
+  offers `get`/`scan_range`/`scan_prefix`/`write_many` with no snapshot or
+  read-version, so a scan observes whatever is committed while it runs.
+  Keeping superseded material addressable and changing the storage contract
+  are both possible answers. Neither should be pursued before the exclusion is
+  measured and shown to bind.
 - 🔶 **Compaction rule: per backend or one portable rule?** RocksDB's observed
   coalescing points are `m=32`/`128`/`2048` at `k=64`/`512`/`4096`; OPFS is
   later or absent in the matched sweep (`none through 64`, `m=512`, and only a
