@@ -9446,9 +9446,9 @@ where
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
-        // remain addressed by the selected root row. Flat public join output,
-        // which can contain several occurrences for one root, remains rejected
-        // at the public-client boundary until it supplies source tuples.
+        // remain addressed by the selected root row. Flat public join output
+        // carries its source tuple through the maintained terminal, so it can
+        // safely address several occurrences for one root as well.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,

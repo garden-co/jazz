@@ -8620,10 +8620,6 @@ where
     })
 }
 
-fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
-}
-
 fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
     let root = ObjectId::from_uuid(row.row_uuid().0);
     let mut joined = Vec::new();
