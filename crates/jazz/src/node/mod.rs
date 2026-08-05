@@ -2548,6 +2548,27 @@ where
             .map(|stored| stored.to_record())
     }
 
+    /// Return locally-authored transactions that still need an upstream fate.
+    ///
+    /// Client reconnect restores these durable transactions into its in-memory
+    /// upload queue. Transactions from other authors are never replayed by this
+    /// client, even when they were recovered from the same local history.
+    pub fn pending_transaction_ids_for(&mut self, author: AuthorId) -> Result<Vec<TxId>, Error> {
+        let mut pending = Vec::new();
+        for tx_id in self.transaction_ids()? {
+            let Some(transaction) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if transaction.tx.made_by == author
+                && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
+                && transaction.durability < DurabilityTier::Global
+            {
+                pending.push(tx_id);
+            }
+        }
+        Ok(pending)
+    }
+
     /// Resolve creator/updater provenance for a projected current row.
     pub fn row_provenance(&mut self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
         row.provenance()

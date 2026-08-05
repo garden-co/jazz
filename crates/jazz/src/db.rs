@@ -405,11 +405,13 @@ where
             false,
             config.large_value_checkpoint_op_interval,
         )?;
+        let node = Node::new(node);
+        node.restore_pending_uploads(config.identity.author)?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             identity: config.identity,
-            node: Node::new(node),
+            node,
             row_id_source: RefCell::new(
                 config
                     .id_source
@@ -3507,6 +3509,19 @@ where
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
+    }
+
+    /// Restore durable local writes into the process-local upload queue after
+    /// reopening client storage.
+    fn restore_pending_uploads(&self, author: AuthorId) -> Result<(), Error> {
+        let pending = self
+            .node
+            .borrow_mut()
+            .pending_transaction_ids_for(author)?;
+        self.outbox
+            .borrow_mut()
+            .extend(pending.into_iter().map(|tx_id| PendingUpload { tx_id, unit: None }));
+        Ok(())
     }
 
     /// Borrow the served node.
