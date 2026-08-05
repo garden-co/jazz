@@ -749,3 +749,50 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
         .expect("local durability should be reachable");
 }
 }
+
+// A client may queue a large local-first import before asking for durability on
+// a later, single-row update. The later wait must observe its own global fate;
+// it must not be starved by the preceding outbox backlog.
+local_tokio_test! {
+async fn global_wait_after_large_pending_import_settles() {
+    let schema = todo_schema();
+    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let client = connect_user(&server, schema, &unique_user_id("bulk-global-wait")).await;
+
+    let (target_id, _, _) = client
+        .insert(
+            "todos",
+            row_input!("title" => "durability target", "completed" => false),
+        )
+        .expect("insert target row");
+
+    for index in 0..2_048 {
+        client
+            .insert(
+                "todos",
+                row_input!("title" => format!("imported row {index}"), "completed" => false),
+            )
+            .expect("queue import row");
+    }
+
+    let target_batch = client
+        .update(target_id, vec![("completed".to_owned(), Value::Boolean(true))])
+        .expect("update target row after import");
+
+    client
+        .wait_for_batch(target_batch, DurabilityTier::Local)
+        .await
+        .expect("target update should settle locally without draining the import backlog");
+
+    tokio::time::timeout(
+        Duration::from_secs(25),
+        client.wait_for_batch(target_batch, DurabilityTier::GlobalServer),
+    )
+    .await
+    .expect("global wait should settle after import backlog")
+    .expect("target update should reach global durability");
+
+    client.shutdown().await.expect("shutdown client");
+    server.shutdown().await;
+}
+}
