@@ -8703,12 +8703,11 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<(), Error> {
-        if !shape.query().joins.is_empty() {
-            return Err(Error::QueryCapability(
-                "maintained flat joined output requires complete OutputOccurrenceId source tuples; a root row id alone is unsafe"
-                    .to_owned(),
-            ));
-        }
+        // `JoinVia` is an existential constraint on this query's root-row
+        // result, not flat joined output: maintained membership and delivery
+        // remain addressed by the selected root row. Flat public join output,
+        // which can contain several occurrences for one root, remains rejected
+        // at the public-client boundary until it supplies source tuples.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,
