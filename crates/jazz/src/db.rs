@@ -8078,7 +8078,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert(single_source_occurrence_id(row), position);
+                .insert(subscription_row_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -8350,10 +8350,11 @@ fn subscription_delta_event_with_reset(
 
     for (key, _) in &previous_by_id {
         if !current_by_id.contains_key(key) {
+            let row = previous_by_id[key];
             removed.push(RemovedRow {
-                table: key.0.clone(),
-                row_uuid: key.1,
-                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: key.clone(),
             });
         }
     }
@@ -8467,7 +8468,7 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let key = single_source_occurrence_id(row);
+        let key = subscription_row_occurrence_id(row);
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
@@ -8480,7 +8481,7 @@ fn apply_maintained_update_to_snapshot(
             }
             snapshot_index
                 .roots
-                .insert(single_source_occurrence_id(row), snapshot.root_count);
+                .insert(subscription_row_occurrence_id(row), snapshot.root_count);
             snapshot.root_count += 1;
             added.push(subscription_output_row(row.clone()));
         }
@@ -8488,19 +8489,19 @@ fn apply_maintained_update_to_snapshot(
 
     let mut index = 0;
     while index < snapshot.root_count {
-        let row_key = (
-            snapshot.rows[index].table().to_owned(),
-            snapshot.rows[index].row_uuid(),
-        );
+        let occurrence_id = subscription_row_occurrence_id(&snapshot.rows[index]);
         if update_removed
             .iter()
-            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
+            .any(|removed| *removed == occurrence_id)
+            && !update_added
+                .iter()
+                .any(|added| subscription_row_occurrence_id(added) == occurrence_id)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
             snapshot_index
                 .roots
-                .remove(&single_source_occurrence_id(&row));
+                .remove(&subscription_row_occurrence_id(&row));
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
@@ -8531,7 +8532,7 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let root_key = single_source_occurrence_id(row);
+        let root_key = subscription_row_occurrence_id(row);
         if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
@@ -8623,15 +8624,28 @@ fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
     OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
 }
 
+fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    let root = ObjectId::from_uuid(row.row_uuid().0);
+    let mut joined = Vec::new();
+    for position in 1.. {
+        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
+        else {
+            break;
+        };
+        joined.push(ObjectId::from_uuid(row_id));
+    }
+    OutputOccurrenceId::new(root, joined)
+}
+
 fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
     SubscriptionOutputRow {
-        occurrence_id: single_source_occurrence_id(&row),
+        occurrence_id: subscription_row_occurrence_id(&row),
         row,
     }
 }
 
-fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
-    (row.table().to_owned(), row.row_uuid())
+fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
+    subscription_row_occurrence_id(row)
 }
 
 #[cfg(test)]
