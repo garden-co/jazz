@@ -1217,7 +1217,9 @@ pub enum OpType {
     ArgMaxBy(ArgMaxByOp),
     ArgMinBy(ArgMinByOp),
     TopBy(TopByOp),
-    CollectBy(CollectByOp),
+    /// Box the terminal collector descriptor so its wide payload does not
+    /// inflate every recursive graph-compilation frame.
+    CollectBy(Box<CollectByOp>),
     Recursive(RecursiveOp),
     Persist(PersistOp),
     Filter(FilterOp),
@@ -1556,7 +1558,7 @@ mod tests {
         ]);
         let collector = graph.dedup_node(
             NodeDescriptor::new(
-                OpType::CollectBy(CollectByOp {
+                OpType::CollectBy(Box::new(CollectByOp {
                     group_fields: vec!["f0".to_owned()],
                     group_field_indices: vec![0],
                     parent_fields: vec![CollectByProjection {
@@ -1581,7 +1583,7 @@ mod tests {
                     sort_directions: vec![TopByDirection::Asc, TopByDirection::Asc],
                     offset: 0,
                     limit: TopByLimit::Finite(1),
-                }),
+                })),
                 [source],
                 collected_output,
             ),

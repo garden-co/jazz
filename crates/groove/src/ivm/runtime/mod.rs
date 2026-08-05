@@ -23,12 +23,12 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
-    CollectByField, CollectByOp, CollectByProjection, DurableStorage, FieldRef, FilterOp,
-    FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp,
-    IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor, NodeDurability,
-    NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
-    RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection, TopByLimit, TopByOp,
-    TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
+    CollectByBuilder, CollectByField, CollectByOp, CollectByProjection, DurableStorage, FieldRef,
+    FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp,
+    InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor,
+    NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
+    ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
+    TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
@@ -2158,106 +2158,7 @@ impl IvmRuntime {
                 Ok(CompiledNode { output, node })
             }
             GraphBuilder::CollectBy { input, collect } => {
-                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
-                let input_output = compiled_input.output;
-                let output = inferred_output;
-                let group_field_indices = collect
-                    .group_cols
-                    .iter()
-                    .map(|field| resolve_field_ref(&input_output, field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
-                let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
-                // Parent values must be determined by the group, rather than
-                // by whichever child happens to be selected.
-                if parent_fields
-                    .iter()
-                    .any(|field| !group_field_indices.contains(&field.field_idx))
-                {
-                    return Err(IvmRuntimeError::InvalidCollectBy(
-                        "parent projection fields must be grouping fields".into(),
-                    ));
-                }
-                validate_collect_by_key_types(&input_output, &group_field_indices)?;
-                let order_field_indices = collect
-                    .order_cols
-                    .iter()
-                    .map(|order| resolve_field_ref(&input_output, &order.field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let tie_field_indices = collect
-                    .tie_cols
-                    .iter()
-                    .map(|field| resolve_field_ref(&input_output, field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if order_field_indices.is_empty() || tie_field_indices.is_empty() {
-                    return Err(IvmRuntimeError::InvalidCollectBy(
-                        "order and tie fields must both be complete and non-empty".into(),
-                    ));
-                }
-                validate_collect_by_key_types(&input_output, &order_field_indices)?;
-                validate_collect_by_key_types(&input_output, &tie_field_indices)?;
-                let group_fields = group_field_indices
-                    .iter()
-                    .map(|field| field_name_at(&input_output, *field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let order_fields = collect
-                    .order_cols
-                    .iter()
-                    .zip(&order_field_indices)
-                    .map(|(order, field_idx)| {
-                        Ok(TopByOrderField {
-                            field: field_name_at(&input_output, *field_idx)?,
-                            direction: order.direction,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-                let tie_fields = tie_field_indices
-                    .iter()
-                    .map(|field| field_name_at(&input_output, *field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let sort_field_indices = order_field_indices
-                    .iter()
-                    .chain(&tie_field_indices)
-                    .copied()
-                    .collect::<Vec<_>>();
-                let sort_directions = collect
-                    .order_cols
-                    .iter()
-                    .map(|order| order.direction)
-                    .chain(std::iter::repeat_n(
-                        TopByDirection::Asc,
-                        tie_field_indices.len(),
-                    ))
-                    .collect::<Vec<_>>();
-                let child_descriptor = RecordDescriptor::new(child_fields.iter().map(|field| {
-                    let value_type = input_output.fields()[field.field_idx].value_type.clone();
-                    (field.output_name.clone(), value_type)
-                }));
-                let collection_field_index = parent_fields.len();
-                let node = self.graph.dedup_node(
-                    NodeDescriptor::new(
-                        OpType::CollectBy(CollectByOp {
-                            group_fields,
-                            group_field_indices,
-                            parent_fields,
-                            child_fields,
-                            child_descriptor,
-                            collection_field: collect.collection_field.clone(),
-                            collection_field_index,
-                            order_fields,
-                            tie_fields,
-                            sort_field_indices,
-                            sort_directions,
-                            offset: collect.offset,
-                            limit: collect.limit,
-                        }),
-                        [compiled_input.node],
-                        output,
-                    ),
-                    NodeDurability::Ephemeral,
-                );
-                self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
             }
             GraphBuilder::Aggregate {
                 input,
@@ -2536,6 +2437,114 @@ impl IvmRuntime {
                 Ok(CompiledNode { output, node })
             }
         }
+    }
+
+    fn add_collect_by_graph(
+        &mut self,
+        input: &GraphBuilder,
+        collect: &CollectByBuilder,
+        output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+        let input_output = compiled_input.output;
+        let group_field_indices = collect
+            .group_cols
+            .iter()
+            .map(|field| resolve_field_ref(&input_output, field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
+        let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
+        // Parent values must be determined by the group, rather than by
+        // whichever child happens to be selected.
+        if parent_fields
+            .iter()
+            .any(|field| !group_field_indices.contains(&field.field_idx))
+        {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "parent projection fields must be grouping fields".into(),
+            ));
+        }
+        validate_collect_by_key_types(&input_output, &group_field_indices)?;
+        let order_field_indices = collect
+            .order_cols
+            .iter()
+            .map(|order| resolve_field_ref(&input_output, &order.field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tie_field_indices = collect
+            .tie_cols
+            .iter()
+            .map(|field| resolve_field_ref(&input_output, field))
+            .collect::<Result<Vec<_>, _>>()?;
+        if order_field_indices.is_empty() || tie_field_indices.is_empty() {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "order and tie fields must both be complete and non-empty".into(),
+            ));
+        }
+        validate_collect_by_key_types(&input_output, &order_field_indices)?;
+        validate_collect_by_key_types(&input_output, &tie_field_indices)?;
+        let group_fields = group_field_indices
+            .iter()
+            .map(|field| field_name_at(&input_output, *field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let order_fields = collect
+            .order_cols
+            .iter()
+            .zip(&order_field_indices)
+            .map(|(order, field_idx)| {
+                Ok(TopByOrderField {
+                    field: field_name_at(&input_output, *field_idx)?,
+                    direction: order.direction,
+                })
+            })
+            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        let tie_fields = tie_field_indices
+            .iter()
+            .map(|field| field_name_at(&input_output, *field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sort_field_indices = order_field_indices
+            .iter()
+            .chain(&tie_field_indices)
+            .copied()
+            .collect::<Vec<_>>();
+        let sort_directions = collect
+            .order_cols
+            .iter()
+            .map(|order| order.direction)
+            .chain(std::iter::repeat_n(
+                TopByDirection::Asc,
+                tie_field_indices.len(),
+            ))
+            .collect::<Vec<_>>();
+        let child_descriptor = RecordDescriptor::new(child_fields.iter().map(|field| {
+            let value_type = input_output.fields()[field.field_idx].value_type.clone();
+            (field.output_name.clone(), value_type)
+        }));
+        let collection_field_index = parent_fields.len();
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::CollectBy(Box::new(CollectByOp {
+                    group_fields,
+                    group_field_indices,
+                    parent_fields,
+                    child_fields,
+                    child_descriptor,
+                    collection_field: collect.collection_field.clone(),
+                    collection_field_index,
+                    order_fields,
+                    tie_fields,
+                    sort_field_indices,
+                    sort_directions,
+                    offset: collect.offset,
+                    limit: collect.limit,
+                })),
+                [compiled_input.node],
+                output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(CompiledNode { output, node })
     }
 
     fn add_dedup_schema_index(
