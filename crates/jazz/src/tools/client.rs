@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -647,7 +647,7 @@ impl ClientDb {
         .await?;
         let inner = Rc::new(RefCell::new(inner));
         if has_upstream {
-            Self::spawn_local_tick_driver(Rc::clone(&inner), Rc::clone(&scheduler));
+            Self::spawn_local_tick_driver(Rc::downgrade(&inner), Rc::clone(&scheduler));
         }
         Ok(Rc::new(Self { inner }))
     }
@@ -1016,7 +1016,7 @@ impl ClientDb {
     }
 
     fn spawn_local_tick_driver(
-        inner: Rc<RefCell<ClientDbInner>>,
+        inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) {
         let state = scheduler.wake_handle();
@@ -1024,6 +1024,9 @@ impl ClientDb {
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
