@@ -478,6 +478,29 @@ network wire-frame batches.
 
 ### Open questions
 
+- 🔶 **Temporary subscribe rejection: who re-drives admission?** `SubscribeRejected`
+  is specified only for a **permanent** capability gap, and states that after it
+  the subscription is not active and the requester must not expect `ViewUpdate`s.
+  The implementation also emits `ShapeRegistrationPendingCatalogueAdmission`,
+  which is **transient**: the serving peer parks the shape when its catalogue
+  schema is absent, admits it later, and drops the original `Subscribe`. Only a
+  new `Subscribe` re-registers. The client sends its registration once and
+  routes the rejection onward without retrying, so nothing re-drives admission
+  and delivery never begins.
+
+  No side owns re-drive under the current contract, and both candidate answers
+  change it. Either the serving peer follows up once admission completes —
+  which contradicts "not active, expect no `ViewUpdate`s" for this reason — or
+  a client retry/re-subscribe obligation is specified, which adds a duty the
+  protocol does not currently place on requesters. A third option is to split
+  the vocabulary so permanent and transient rejections are distinct message
+  semantics rather than two reasons sharing one contract.
+
+  Decide before implementing either: an unspecified retry loop against a
+  rejection defined as permanent would be a protocol behaviour no peer is
+  required to honour. Observed against a two-client browser scenario where the
+  local client recovers but cross-client delivery never starts.
+
 - 🔶 **Transport state.** The current binding-facing send/poll surface can
   express "send" and "no message staged"; it cannot express closed/error/
   backpressure, auth expiry, protocol-version mismatch, or resume-cursor
