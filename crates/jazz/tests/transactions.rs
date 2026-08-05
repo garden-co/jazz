@@ -750,11 +750,11 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
 }
 }
 
-// A client may queue a large local-first import before asking for durability on
-// a later, single-row update. The later wait must observe its own global fate;
-// it must not be starved by the preceding outbox backlog.
+// Regression guard for websocket transport batching: a local-first import whose
+// encoded wire frames exceed the server's 1 MiB WebSocket-message cap must be
+// split before a later batch can reach global durability.
 local_tokio_test! {
-async fn global_wait_after_large_pending_import_settles() {
+async fn global_wait_after_over_one_mib_websocket_import_settles() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let client = connect_user(&server, schema, &unique_user_id("bulk-global-wait")).await;
@@ -766,11 +766,12 @@ async fn global_wait_after_large_pending_import_settles() {
         )
         .expect("insert target row");
 
+    let import_payload = "x".repeat(600);
     for index in 0..2_048 {
         client
             .insert(
                 "todos",
-                row_input!("title" => format!("imported row {index}"), "completed" => false),
+                row_input!("title" => format!("imported row {index}: {import_payload}"), "completed" => false),
             )
             .expect("queue import row");
     }
@@ -785,7 +786,7 @@ async fn global_wait_after_large_pending_import_settles() {
         .expect("target update should settle locally without draining the import backlog");
 
     tokio::time::timeout(
-        Duration::from_secs(25),
+        Duration::from_secs(30),
         client.wait_for_batch(target_batch, DurabilityTier::GlobalServer),
     )
     .await
