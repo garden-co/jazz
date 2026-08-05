@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
@@ -3633,6 +3634,53 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         delivered.is_some(),
         "remote maintained array subscription must hydrate the child row referenced by relation-edge facts"
     );
+}
+
+#[test]
+fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
+    let schema = schema();
+    let server = open_core(0xd4, AuthorId::SYSTEM, &schema);
+    for ordinal in 0..3_u8 {
+        server
+            .insert_with_id(
+                "todos",
+                row(0xd0 + ordinal),
+                BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String(format!("server {ordinal}")),
+                    ),
+                    ("done".to_owned(), Value::Bool(false)),
+                ]),
+            )
+            .unwrap();
+    }
+
+    let client_author = AuthorId::from_bytes([0xd5; 16]);
+    let client = open_db(0xd5, client_author, &schema);
+    client
+        .set_initial_sync_flush_cadence(InitialSyncFlushCadence::every(
+            NonZeroUsize::new(2).unwrap(),
+        ))
+        .unwrap();
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = client.table("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(subscription.next_event()).unwrap();
+
+    for _ in 0..20 {
+        client.tick().unwrap();
+        server.server.tick().unwrap();
+        client.tick().unwrap();
+        if let Some(event) = subscription.try_next_event()
+            && opened_rows(event).len() == 3
+        {
+            return;
+        }
+    }
+    panic!("client configured with a cadence must receive the initial snapshot");
 }
 
 #[test]

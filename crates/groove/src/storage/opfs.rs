@@ -20,6 +20,13 @@ use super::{
 pub struct BtreeStorage<F: SyncFile> {
     tree: Rc<RefCell<OpfsBTree<F>>>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
+    write_flush_cadence: Rc<RefCell<Option<WriteFlushCadence>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WriteFlushCadence {
+    every: usize,
+    pending: usize,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -58,6 +65,7 @@ where
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
+            write_flush_cadence: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -157,6 +165,22 @@ where
         Ok(self.tree.borrow_mut().close()?)
     }
 
+    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        assert!(every > 0, "write flush cadence must be non-zero");
+        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+        Ok(())
+    }
+
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        let mut tree = self.tree.borrow_mut();
+        tree.flush_wal()?;
+        tree.flush_file()?;
+        if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+            cadence.pending = 0;
+        }
+        Ok(())
+    }
+
     fn scan_range(
         &self,
         cf: &ColumnFamilyName,
@@ -254,14 +278,74 @@ where
                 tree.delete(&key)?;
             }
         }
-        Ok(tree.flush_wal()?)
+        let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
+            Some(cadence) => {
+                cadence.pending += 1;
+                if cadence.pending == cadence.every {
+                    cadence.pending = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => true,
+        };
+        if should_flush {
+            tree.flush_wal()?;
+            if self.write_flush_cadence.borrow().is_some() {
+                tree.flush_file()?;
+            }
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opfs_btree::{BTreeOptions, MemoryFile};
+    use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, SyncFile};
+
+    #[derive(Clone)]
+    struct FlushCountingFile {
+        inner: MemoryFile,
+        flushes: Rc<RefCell<usize>>,
+    }
+
+    impl FlushCountingFile {
+        fn new() -> Self {
+            Self {
+                inner: MemoryFile::new(),
+                flushes: Rc::new(RefCell::new(0)),
+            }
+        }
+
+        fn flushes(&self) -> usize {
+            *self.flushes.borrow()
+        }
+    }
+
+    impl SyncFile for FlushCountingFile {
+        fn len(&self) -> Result<u64, BTreeError> {
+            self.inner.len()
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            self.inner.truncate(len)
+        }
+
+        fn flush(&self) -> Result<(), BTreeError> {
+            *self.flushes.borrow_mut() += 1;
+            self.inner.flush()
+        }
+    }
 
     fn memory_storage(column_families: &[&str]) -> BtreeStorage<MemoryFile> {
         BtreeStorage::from_file(MemoryFile::new(), column_families).unwrap()
@@ -325,6 +409,42 @@ mod tests {
         let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
             * BTreeOptions::default().page_size as u64;
         assert_eq!(file.len().unwrap(), checkpoint_len);
+    }
+
+    #[test]
+    fn configured_cadence_flushes_at_the_boundary_and_final_partial_batch() {
+        // This is intentionally a storage-level test: the public Db API cannot
+        // observe OPFS SyncAccessHandle flush calls, which are the physical
+        // durability boundary exercised by this setting.
+        let file = FlushCountingFile::new();
+        let tree = OpfsBTree::open(
+            file.clone(),
+            browser_fidelity_options_with_sync_policy(BtreeSyncPolicy::OnClose),
+        )
+        .unwrap();
+        let storage = BtreeStorage::from_tree(tree, &["records"]).unwrap();
+        let baseline = file.flushes();
+        storage.set_write_flush_cadence(2).unwrap();
+
+        storage
+            .write_many(&[WriteOperation::set("records", b"1", b"first")])
+            .unwrap();
+        assert_eq!(file.flushes(), baseline, "first write is below cadence");
+
+        storage
+            .write_many(&[WriteOperation::set("records", b"2", b"second")])
+            .unwrap();
+        assert_eq!(file.flushes(), baseline + 1, "second write crosses cadence");
+
+        storage
+            .write_many(&[WriteOperation::set("records", b"3", b"third")])
+            .unwrap();
+        storage.flush_write_boundary().unwrap();
+        assert_eq!(
+            file.flushes(),
+            baseline + 2,
+            "final partial batch is flushed"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

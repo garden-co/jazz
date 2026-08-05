@@ -125,6 +125,7 @@ export function openConfig(
   author: Uint8Array,
   sourceId?: number,
   historyComplete = false,
+  initialSyncFlushEvery?: number,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -135,6 +136,11 @@ export function openConfig(
     writer.some((value) => value.u64(sourceId));
   }
   writer.bool(historyComplete);
+  if (initialSyncFlushEvery == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.u64(initialSyncFlushEvery));
+  }
   return writer.finish();
 }
 

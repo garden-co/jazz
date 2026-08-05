@@ -278,6 +278,18 @@ pub trait OrderedKvStorage {
     fn close(&self) -> Result<(), Error> {
         Ok(())
     }
+    /// Configure the number of committed write batches between explicit local
+    /// durability boundaries. Backends that do not require an explicit boundary
+    /// may keep the default no-op implementation.
+    fn set_write_flush_cadence(&self, _every: usize) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Finish any pending write cadence and make all preceding writes locally
+    /// durable. Backends that do not require an explicit boundary may keep the
+    /// default no-op implementation.
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        Ok(())
+    }
     /// Process-local identity for cache partitioning. Backends may override
     /// this when cheap clones should share cache entries.
     fn cache_token(&self) -> usize
@@ -660,6 +672,14 @@ where
 
     fn close(&self) -> Result<(), Error> {
         self.inner.close()
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        self.inner.set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        self.inner.flush_write_boundary()
     }
 
     fn scan_range(

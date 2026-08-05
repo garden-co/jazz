@@ -631,6 +631,9 @@ where
         if updates.is_empty() {
             return Ok(());
         }
+        if updates.iter().any(|update| update.reset_result_set) {
+            self.begin_initial_sync_flush_cadence()?;
+        }
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -709,6 +712,9 @@ where
         // arrival order below.
         for update in updates {
             self.apply_view_update_inner(update, Some(&preloaded_tx_ids))?;
+        }
+        if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
+            self.finish_initial_sync_flush_cadence()?;
         }
         Ok(())
     }
@@ -1062,6 +1068,11 @@ where
                 bundle.durability,
             )?;
             if matches!(bundle.fate, Fate::Accepted) {
+                // Ingesting only the previously missing versions replaces the
+                // transaction-version cache with that subset. Reload the full
+                // assembled transaction before applying its fate so every
+                // earlier fragment receives a current index.
+                self.invalidate_tx_version_tables_cache(tx_id);
                 self.apply_fate_update(
                     tx_id,
                     bundle.fate,

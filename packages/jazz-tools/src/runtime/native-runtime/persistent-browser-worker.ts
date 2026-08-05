@@ -174,13 +174,13 @@ function dispatchWrite(message: WriteMessage): { transactionId: string } {
 }
 
 async function openRuntime(message: OpenMessage): Promise<void> {
-  const [runtimeSources, dbName, schema, node, author] = message.args;
+  const [runtimeSources, dbName, schema, node, author, initialSyncFlushEvery] = message.args;
   const wasmModule = await loadWasmModule(runtimeSources);
   runtimeNamespace = dbName;
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
     encodeSchema(schema as never),
-    openConfig(node, author, 1, true),
+    openConfig(node, author, 1, true, initialSyncFlushEvery),
   );
 
   runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, true);
