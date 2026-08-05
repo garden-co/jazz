@@ -2548,6 +2548,33 @@ where
             .map(|stored| stored.to_record())
     }
 
+    /// Return locally originated transactions that still need upstream settlement.
+    ///
+    /// Client reconnect restores these durable transactions into its in-memory
+    /// upload queue. A transaction is locally originated only when both its
+    /// creating node and author match the reopened client's identity; history
+    /// from other devices sharing an author is never replayed by this client.
+    pub fn pending_transaction_ids_for(
+        &mut self,
+        node: NodeUuid,
+        author: AuthorId,
+    ) -> Result<Vec<TxId>, Error> {
+        let mut pending = Vec::new();
+        for tx_id in self.transaction_ids()? {
+            let Some(transaction) = self.query_transaction(tx_id)? else {
+                continue;
+            };
+            if transaction.tx.tx_id.node == node
+                && transaction.tx.made_by == author
+                && matches!(transaction.fate, Fate::Pending | Fate::Accepted)
+                && transaction.durability < DurabilityTier::Global
+            {
+                pending.push(tx_id);
+            }
+        }
+        Ok(pending)
+    }
+
     /// Resolve creator/updater provenance for a projected current row.
     pub fn row_provenance(&mut self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
         row.provenance()

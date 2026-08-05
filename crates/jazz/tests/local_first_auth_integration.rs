@@ -17,8 +17,8 @@ use std::time::Duration;
 use jazz::tools::middleware::auth::TestClock;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema, SchemaBuilder,
-    Session, TableSchema, Value, identity,
+    AppContext, ClientId, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema,
+    SchemaBuilder, Session, TableSchema, Value, identity,
 };
 
 use support::{has_row, wait_for_rows};
@@ -431,6 +431,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     // server's test auth clock so the test can advance expiry deterministically
     // without sleeping on wall time.
     let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Persistent);
+    ctx.client_id = Some(ClientId::new());
     ctx.jwt_token = Some(
         identity::mint_jazz_self_signed_token_at(
             &seed,

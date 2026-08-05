@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
@@ -405,11 +405,13 @@ where
             false,
             config.large_value_checkpoint_op_interval,
         )?;
+        let node = Node::new(node);
+        node.restore_pending_uploads(config.identity)?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             identity: config.identity,
-            node: Node::new(node),
+            node,
             row_id_source: RefCell::new(
                 config
                     .id_source
@@ -3528,9 +3530,30 @@ where
     }
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
-        self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+        let mut outbox = self.outbox.borrow_mut();
+        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+            return;
+        }
+        outbox.push(PendingUpload { tx_id, unit });
+        drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    /// Restore locally originated, unsettled durable writes into the
+    /// process-local upload queue after reopening client storage.
+    fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
+        let pending = self
+            .node
+            .borrow_mut()
+            .pending_transaction_ids_for(identity.node, identity.author)?;
+        let mut restored = HashSet::new();
+        for tx_id in pending {
+            if restored.insert(tx_id) {
+                self.queue_pending_upload(tx_id, None);
+            }
+        }
+        Ok(())
     }
 
     fn mark_subscriber_connections_dirty(&self) {
