@@ -3514,13 +3514,12 @@ where
     /// Restore durable local writes into the process-local upload queue after
     /// reopening client storage.
     fn restore_pending_uploads(&self, author: AuthorId) -> Result<(), Error> {
-        let pending = self
-            .node
-            .borrow_mut()
-            .pending_transaction_ids_for(author)?;
-        self.outbox
-            .borrow_mut()
-            .extend(pending.into_iter().map(|tx_id| PendingUpload { tx_id, unit: None }));
+        let pending = self.node.borrow_mut().pending_transaction_ids_for(author)?;
+        self.outbox.borrow_mut().extend(
+            pending
+                .into_iter()
+                .map(|tx_id| PendingUpload { tx_id, unit: None }),
+        );
         Ok(())
     }
 
