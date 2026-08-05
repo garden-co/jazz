@@ -5085,6 +5085,31 @@ where
         member: &ResultMemberEntry,
         result_payloads: &BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     ) -> Result<Option<CurrentRow>, Error> {
+        // A flat output member is still a real row member for the root, but
+        // its occurrence address also names the joined contributors. Current
+        // storage only has the root row, so re-materializing it here would
+        // lose the tuple fields that delivery uses to reconstruct that
+        // address. Its terminal payload is the authoritative rendered tuple.
+        if member
+            .output_occurrence_id()
+            .is_some_and(|occurrence_id| !occurrence_id.joined().is_empty())
+        {
+            let payload = result_payloads
+                .get(member)
+                .ok_or(Error::InvalidStoredValue(
+                    "flat joined result member is missing its tuple payload",
+                ))?;
+            let Some(table_name) = member.table_name() else {
+                return Err(Error::InvalidStoredValue(
+                    "flat joined result member must name a table",
+                ));
+            };
+            let table = self.table(table_name)?.clone();
+            return self
+                .current_row_from_result_payload(&table, payload)
+                .map(Some);
+        }
+
         if member.as_row().is_none()
             && let Some(payload) = result_payloads.get(member)
         {
@@ -8917,9 +8942,9 @@ where
     ) -> Result<(), Error> {
         // `JoinVia` is an existential constraint on this query's root-row
         // result, not flat joined output: maintained membership and delivery
-        // remain addressed by the selected root row. Flat public join output,
-        // which can contain several occurrences for one root, remains rejected
-        // at the public-client boundary until it supplies source tuples.
+        // remain addressed by the selected root row. Flat public join output
+        // carries its source tuple through the maintained terminal, so it can
+        // safely address several occurrences for one root as well.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,

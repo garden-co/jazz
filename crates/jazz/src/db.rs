@@ -8255,7 +8255,7 @@ fn apply_maintained_update_to_snapshot(
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
-                occurrence_id: single_source_occurrence_id(&row),
+                occurrence_id,
             });
         } else {
             index += 1;
@@ -8368,10 +8368,6 @@ where
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions { tier, read_view }.read_view_key(),
     })
-}
-
-fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
 }
 
 fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
