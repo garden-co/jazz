@@ -960,7 +960,7 @@ fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, us
             assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
             (added.len(), updated.len(), removed.len())
         }
-        None => (0, 0, 0),
+        None => panic!("permission-filtered resume emitted no delta event"),
         other => panic!("expected permission-filtered resume delta event, got {other:?}"),
     }
 }
@@ -1939,14 +1939,12 @@ fn r13_permission_filtered_resume(c: &mut Criterion) {
 
             let (added, updated, removed) =
                 drain_permission_resume_delta(subscription.try_next_event());
-            if added + updated + removed > 0 {
-                assert_eq!(added + updated, 1);
-                assert_eq!(removed, 1);
-            }
-            let rows = client
-                .read(&prepared)
-                .expect("read final permission-filtered docs");
-            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_GRANTED]);
+            assert_eq!(added + updated, 1);
+            assert_eq!(removed, 1);
+            // `Db::read` is intentionally a local-preview read; it may still
+            // see retained row bodies after upstream membership is revoked.
+            // The authoritative reconnect contract is the subscription delta
+            // asserted above.
 
             black_box((resume_bytes, full_bytes, added, updated, removed))
         });
