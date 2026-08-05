@@ -222,20 +222,29 @@ pub enum GraphBuilder {
     },
     CollectBy {
         input: Box<GraphBuilder>,
-        group_cols: Vec<FieldRef>,
-        parent_fields: Vec<CollectByField>,
-        child_fields: Vec<CollectByField>,
-        collection_field: String,
-        order_cols: Vec<TopByOrder>,
-        tie_cols: Vec<FieldRef>,
-        offset: u64,
-        limit: TopByLimit,
+        collect: Box<CollectByBuilder>,
     },
     Aggregate {
         input: Box<GraphBuilder>,
         group_cols: Vec<FieldRef>,
         aggregates: Vec<AggregateExpr>,
     },
+}
+
+/// Public builder payload for a terminal [`GraphBuilder::CollectBy`] node.
+///
+/// Kept boxed in the enum so adding terminal metadata does not inflate the
+/// recursive graph-builder value carried by unrelated query paths.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectByBuilder {
+    pub group_cols: Vec<FieldRef>,
+    pub parent_fields: Vec<CollectByField>,
+    pub child_fields: Vec<CollectByField>,
+    pub collection_field: String,
+    pub order_cols: Vec<TopByOrder>,
+    pub tie_cols: Vec<FieldRef>,
+    pub offset: u64,
+    pub limit: TopByLimit,
 }
 
 /// Field reference carried by graph builders.
@@ -472,14 +481,16 @@ impl GraphBuilder {
     ) -> Self {
         Self::CollectBy {
             input: Box::new(input),
-            group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
-            parent_fields: parent_fields.into_iter().collect(),
-            child_fields: child_fields.into_iter().collect(),
-            collection_field: collection_field.into(),
-            order_cols: order_cols.into_iter().collect(),
-            tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
-            offset,
-            limit,
+            collect: Box::new(CollectByBuilder {
+                group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+                parent_fields: parent_fields.into_iter().collect(),
+                child_fields: child_fields.into_iter().collect(),
+                collection_field: collection_field.into(),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
+            }),
         }
     }
 

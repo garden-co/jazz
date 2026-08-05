@@ -1302,15 +1302,14 @@ impl IvmRuntime {
             | GraphBuilder::TopBy { input, .. } => {
                 self.infer_builder_output_cached(input, output_memo)
             }
-            GraphBuilder::CollectBy {
-                input,
-                parent_fields,
-                child_fields,
-                collection_field,
-                ..
-            } => {
+            GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
-                collect_by_descriptor(&input, parent_fields, child_fields, collection_field)
+                collect_by_descriptor(
+                    &input,
+                    &collect.parent_fields,
+                    &collect.child_fields,
+                    &collect.collection_field,
+                )
             }
             GraphBuilder::Aggregate {
                 input,
@@ -2158,26 +2157,17 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode { output, node })
             }
-            GraphBuilder::CollectBy {
-                input,
-                group_cols,
-                parent_fields,
-                child_fields,
-                collection_field,
-                order_cols,
-                tie_cols,
-                offset,
-                limit,
-            } => {
+            GraphBuilder::CollectBy { input, collect } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let group_field_indices = group_cols
+                let group_field_indices = collect
+                    .group_cols
                     .iter()
                     .map(|field| resolve_field_ref(&input_output, field))
                     .collect::<Result<Vec<_>, _>>()?;
-                let parent_fields = collect_by_projections(&input_output, parent_fields)?;
-                let child_fields = collect_by_projections(&input_output, child_fields)?;
+                let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
+                let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
                 // Parent values must be determined by the group, rather than
                 // by whichever child happens to be selected.
                 if parent_fields
@@ -2189,11 +2179,13 @@ impl IvmRuntime {
                     ));
                 }
                 validate_collect_by_key_types(&input_output, &group_field_indices)?;
-                let order_field_indices = order_cols
+                let order_field_indices = collect
+                    .order_cols
                     .iter()
                     .map(|order| resolve_field_ref(&input_output, &order.field))
                     .collect::<Result<Vec<_>, _>>()?;
-                let tie_field_indices = tie_cols
+                let tie_field_indices = collect
+                    .tie_cols
                     .iter()
                     .map(|field| resolve_field_ref(&input_output, field))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -2208,7 +2200,8 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_name_at(&input_output, *field))
                     .collect::<Result<Vec<_>, _>>()?;
-                let order_fields = order_cols
+                let order_fields = collect
+                    .order_cols
                     .iter()
                     .zip(&order_field_indices)
                     .map(|(order, field_idx)| {
@@ -2227,7 +2220,8 @@ impl IvmRuntime {
                     .chain(&tie_field_indices)
                     .copied()
                     .collect::<Vec<_>>();
-                let sort_directions = order_cols
+                let sort_directions = collect
+                    .order_cols
                     .iter()
                     .map(|order| order.direction)
                     .chain(std::iter::repeat_n(
@@ -2248,14 +2242,14 @@ impl IvmRuntime {
                             parent_fields,
                             child_fields,
                             child_descriptor,
-                            collection_field: collection_field.clone(),
+                            collection_field: collect.collection_field.clone(),
                             collection_field_index,
                             order_fields,
                             tie_fields,
                             sort_field_indices,
                             sort_directions,
-                            offset: *offset,
-                            limit: *limit,
+                            offset: collect.offset,
+                            limit: collect.limit,
                         }),
                         [compiled_input.node],
                         output,

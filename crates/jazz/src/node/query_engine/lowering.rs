@@ -254,15 +254,12 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 }))
                 .collect(),
         ),
-        GraphBuilder::CollectBy {
-            parent_fields,
-            collection_field,
-            ..
-        } => Some(
-            parent_fields
+        GraphBuilder::CollectBy { collect, .. } => Some(
+            collect
+                .parent_fields
                 .iter()
                 .map(|field| field.output_name.clone())
-                .chain(std::iter::once(collection_field.clone()))
+                .chain(std::iter::once(collect.collection_field.clone()))
                 .collect(),
         ),
         GraphBuilder::Filter { input, .. }
