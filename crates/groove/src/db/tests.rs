@@ -4499,6 +4499,10 @@ fn distinct_snapshot_groups_retain_at_most_one_materialized_source_set() {
 #[ignore = "receipt-only timing for equivalent-terminal snapshot hydration"]
 fn equivalent_terminal_snapshot_hydration_scaling_receipt() {
     const SAMPLES: usize = 7;
+    assert!(
+        std::env::var_os("GROOVE_PROFILE_HYDRATION_OPERATORS").is_some(),
+        "join attribution is unavailable; rerun with GROOVE_PROFILE_HYDRATION_OPERATORS=1"
+    );
     let rows = std::env::var("GROOVE_HYDRATION_RECEIPT_ROWS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -4668,6 +4672,35 @@ fn distinct_snapshot_scan_shapes_do_not_share_materialization() {
 }
 
 #[test]
+fn different_validated_schema_descriptors_do_not_share_snapshot_materialization() {
+    let storage = ScanCountingStorage::new(&["albums"]);
+    let counter = storage.clone();
+    let bytes_schema = DatabaseSchema::new([TableSchema::new(
+        "albums",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+
+    let mut strings = Database::new(albums_schema(), storage.clone()).unwrap();
+    let mut bytes = Database::new(bytes_schema, storage).unwrap();
+    strings
+        .query_graph(GraphBuilder::table("albums").project(["id"]))
+        .unwrap();
+    bytes
+        .query_graph(GraphBuilder::table("albums").project(["id"]))
+        .unwrap();
+
+    assert_eq!(
+        counter.scan_prefix_count(),
+        2,
+        "validated source descriptors from different schema runtimes remain request-local"
+    );
+}
+
+#[test]
 fn shared_snapshot_materialization_advances_after_data_change() {
     let storage = ScanCountingStorage::new(&["albums"]);
     let counter = storage.clone();
@@ -4733,6 +4766,14 @@ fn shared_snapshot_materialization_preserves_multiset_weights() {
         expected
     );
     assert_eq!(counter.scan_prefix_count() - scans_before, 1);
+
+    let mut fresh = Database::new(albums_schema(), counter.clone()).unwrap();
+    let rehydrated = fresh.query_graph(graph()).unwrap();
+    assert_eq!(
+        snapshots.get("first").unwrap().to_values().unwrap(),
+        rehydrated.to_values().unwrap(),
+        "shared multiset output must equal a fresh full hydration"
+    );
 }
 
 #[test]
