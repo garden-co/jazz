@@ -323,7 +323,7 @@ fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
             table: "posts".to_string(),
             column: "viewer_name".to_string(),
             column_type: ColumnType::Text,
-            default: Value::Text("bob".to_string()),
+            default: Value::Text(test_user_id("bob")),
         }]),
     )
 }
@@ -2585,7 +2585,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             Value::Text("bob".to_string()),
             Value::Text("bob".to_string()),
             Value::Text("Bob private post".to_string()),
-            Value::Text("bob".to_string()),
+            Value::Text(test_user_id("bob")),
         ]
     );
 
