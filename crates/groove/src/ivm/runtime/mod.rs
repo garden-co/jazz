@@ -23,16 +23,16 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, AggregateOp, ArgMaxByOp, ArgMinByOp, BindingSourceOp,
-    DurableStorage, FieldRef, FilterOp, FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp,
-    IndexSourceOp, InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp,
-    NodeDescriptor, NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr,
-    ProjectExpr, ProjectField, ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec,
-    TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField, UnnestOp,
-    UnwrapNullableOp, ValueComparison,
+    CollectByField, CollectByOp, CollectByProjection, DurableStorage, FieldRef, FilterOp,
+    FrontierName, FrontierSourceOp, GraphBuilder, IndexByOp, IndexSourceOp, InlineRecordsOp,
+    IvmGraph, JoinOp, JoinOpKind, LiteralValue, MapProjectOp, NodeDescriptor, NodeDurability,
+    NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr,
+    RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection, TopByLimit, TopByOp,
+    TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
 };
 use crate::records::{
-    self, BorrowedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor, Value,
-    ValueType,
+    self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
+    Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
 use crate::storage::{
@@ -1302,6 +1302,16 @@ impl IvmRuntime {
             | GraphBuilder::TopBy { input, .. } => {
                 self.infer_builder_output_cached(input, output_memo)
             }
+            GraphBuilder::CollectBy {
+                input,
+                parent_fields,
+                child_fields,
+                collection_field,
+                ..
+            } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                collect_by_descriptor(&input, parent_fields, child_fields, collection_field)
+            }
             GraphBuilder::Aggregate {
                 input,
                 group_cols,
@@ -1788,6 +1798,7 @@ impl IvmRuntime {
     }
 
     fn add_dedup_graph(&mut self, graph: &GraphBuilder) -> Result<CompiledNode, IvmRuntimeError> {
+        validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
         self.add_dedup_graph_cached(graph, &mut output_memo)
     }
@@ -2134,6 +2145,113 @@ impl IvmRuntime {
                             group_field_indices,
                             order_fields,
                             tie_fields: tie_field_names,
+                            sort_field_indices,
+                            sort_directions,
+                            offset: *offset,
+                            limit: *limit,
+                        }),
+                        [compiled_input.node],
+                        output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode { output, node })
+            }
+            GraphBuilder::CollectBy {
+                input,
+                group_cols,
+                parent_fields,
+                child_fields,
+                collection_field,
+                order_cols,
+                tie_cols,
+                offset,
+                limit,
+            } => {
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                let input_output = compiled_input.output;
+                let output = inferred_output;
+                let group_field_indices = group_cols
+                    .iter()
+                    .map(|field| resolve_field_ref(&input_output, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let parent_fields = collect_by_projections(&input_output, parent_fields)?;
+                let child_fields = collect_by_projections(&input_output, child_fields)?;
+                // Parent values must be determined by the group, rather than
+                // by whichever child happens to be selected.
+                if parent_fields
+                    .iter()
+                    .any(|field| !group_field_indices.contains(&field.field_idx))
+                {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "parent projection fields must be grouping fields".into(),
+                    ));
+                }
+                validate_collect_by_key_types(&input_output, &group_field_indices)?;
+                let order_field_indices = order_cols
+                    .iter()
+                    .map(|order| resolve_field_ref(&input_output, &order.field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let tie_field_indices = tie_cols
+                    .iter()
+                    .map(|field| resolve_field_ref(&input_output, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if order_field_indices.is_empty() || tie_field_indices.is_empty() {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "order and tie fields must both be complete and non-empty".into(),
+                    ));
+                }
+                validate_collect_by_key_types(&input_output, &order_field_indices)?;
+                validate_collect_by_key_types(&input_output, &tie_field_indices)?;
+                let group_fields = group_field_indices
+                    .iter()
+                    .map(|field| field_name_at(&input_output, *field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let order_fields = order_cols
+                    .iter()
+                    .zip(&order_field_indices)
+                    .map(|(order, field_idx)| {
+                        Ok(TopByOrderField {
+                            field: field_name_at(&input_output, *field_idx)?,
+                            direction: order.direction,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                let tie_fields = tie_field_indices
+                    .iter()
+                    .map(|field| field_name_at(&input_output, *field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sort_field_indices = order_field_indices
+                    .iter()
+                    .chain(&tie_field_indices)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let sort_directions = order_cols
+                    .iter()
+                    .map(|order| order.direction)
+                    .chain(std::iter::repeat_n(
+                        TopByDirection::Asc,
+                        tie_field_indices.len(),
+                    ))
+                    .collect::<Vec<_>>();
+                let child_descriptor = RecordDescriptor::new(child_fields.iter().map(|field| {
+                    let value_type = input_output.fields()[field.field_idx].value_type.clone();
+                    (field.output_name.clone(), value_type)
+                }));
+                let collection_field_index = parent_fields.len();
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::CollectBy(CollectByOp {
+                            group_fields,
+                            group_field_indices,
+                            parent_fields,
+                            child_fields,
+                            child_descriptor,
+                            collection_field: collection_field.clone(),
+                            collection_field_index,
+                            order_fields,
+                            tie_fields,
                             sort_field_indices,
                             sort_directions,
                             offset: *offset,
@@ -3427,6 +3545,7 @@ fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
         GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
         GraphBuilder::Join { left, right, .. }
@@ -3450,6 +3569,7 @@ fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
         GraphBuilder::Join { left, right, .. }
@@ -3518,6 +3638,7 @@ fn collect_builder_field_names(
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => {
             collect_builder_field_names(input, runtime, occupied)?;
         }
@@ -3895,6 +4016,7 @@ fn lift_literal_filter(
                 value: lifted.value,
             }))
         }
+        GraphBuilder::CollectBy { .. } => Ok(None),
         GraphBuilder::Aggregate {
             input,
             group_cols,
@@ -4061,6 +4183,7 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => graph_outputs_binding(input, binding_field),
         GraphBuilder::Recursive { seed, .. } => graph_outputs_binding(seed, binding_field),
         GraphBuilder::Join { left, right, .. }
@@ -4217,6 +4340,7 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::ArgMaxBy { .. }
         | GraphBuilder::ArgMinBy { .. }
         | GraphBuilder::TopBy { .. }
+        | GraphBuilder::CollectBy { .. }
         | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. } => None,
     }
@@ -4767,6 +4891,7 @@ fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
         GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
         GraphBuilder::Join { left, right, .. }
@@ -5219,6 +5344,10 @@ where
             OpType::TopBy(top_by) => {
                 let input = self.update_unary_input(graph_node, node)?;
                 self.update_top_by(node, top_by, output_desc, &input)
+            }
+            OpType::CollectBy(collect_by) => {
+                let input = self.update_unary_input(graph_node, node)?;
+                self.update_collect_by(node, collect_by, output_desc, &input)
             }
             OpType::Aggregate(aggregate) => {
                 let input = self.update_unary_input(graph_node, node)?;
@@ -5995,6 +6124,122 @@ where
         })
     }
 
+    /// Render touched flat groups as complete parents. This intentionally uses
+    /// a root-scope arrangement keyed by the collector input; a collector is
+    /// structurally terminal, so it can never become state in a recursive step
+    /// or inherit a recursive sub-tick work bound.
+    fn update_collect_by(
+        &mut self,
+        node: NodeId,
+        collect_by: &CollectByOp,
+        output_desc: RecordDescriptor,
+        input: &RecordDeltas,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
+            return Ok(RecordDeltas::empty(output_desc));
+        }
+        let [input_node] = self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
+            .descriptor
+            .inputs
+            .as_slice()
+        else {
+            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+        };
+        let input_desc = input.descriptor;
+        let arrangement_key = self.arrangement_key(
+            *input_node,
+            input_desc,
+            Arc::from(collect_by.group_fields.clone()),
+            ValueComparison::Exact,
+        )?;
+        // A CollectBy input is always a root graph node: validate this here as
+        // a runtime backstop to keep its materialization out of recursive state.
+        if arrangement_key.scope != ScopeId::root() {
+            return Err(IvmRuntimeError::CollectByMustBeTerminal);
+        }
+        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
+        let mut arrangement = self
+            .arrangement_states
+            .remove(&arrangement_key)
+            .unwrap_or_default();
+        let should_apply_arrangement = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || arrangement.as_of() != Some(sub_tick);
+        if should_apply_arrangement {
+            let replace_within_same_tick = self.context.arrangement_update_mode
+                == ArrangementUpdateMode::Replace
+                && arrangement
+                    .as_of()
+                    .is_some_and(|current| current.tick == sub_tick.tick);
+            if !replace_within_same_tick
+                && arrangement
+                    .as_of()
+                    .is_some_and(|current| current > sub_tick)
+            {
+                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
+                    next: format!("{sub_tick:?}"),
+                });
+            }
+            arrangement.value_mut().apply_record_deltas(
+                input_desc,
+                &collect_by.group_fields,
+                &input.deltas,
+                self.context.arrangement_update_mode,
+            )?;
+            if replace_within_same_tick {
+                arrangement.replace_as_of_at_least(sub_tick);
+            } else {
+                arrangement.mark_forward_as_of(sub_tick)?;
+            }
+        }
+
+        let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
+        for delta in &input.deltas {
+            let group_key =
+                encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+            touched_groups
+                .entry(group_key)
+                .or_default()
+                .push(delta.clone());
+        }
+
+        let mut output = Vec::new();
+        for (group_prefix, group_deltas) in touched_groups {
+            let after_records = arrangement.value().records_for_key(&group_prefix);
+            let before_records = records_before_deltas(after_records.clone(), &group_deltas);
+            let before = collect_by_parent_from_records(
+                input_desc,
+                output_desc,
+                collect_by,
+                &before_records,
+            )?;
+            let after = collect_by_parent_from_records(
+                input_desc,
+                output_desc,
+                collect_by,
+                &after_records,
+            )?;
+            if before == after {
+                continue;
+            }
+            if let Some(record) = before {
+                output.push(RecordDelta { record, weight: -1 });
+            }
+            if let Some(record) = after {
+                output.push(RecordDelta { record, weight: 1 });
+            }
+        }
+        self.arrangement_states.insert(arrangement_key, arrangement);
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas: output,
+        })
+    }
+
     fn update_aggregate(
         &mut self,
         node: NodeId,
@@ -6426,6 +6671,186 @@ fn project_descriptor(
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
         .map(RecordDescriptor::new)
+}
+
+fn collect_by_descriptor(
+    input: &RecordDescriptor,
+    parent_fields: &[CollectByField],
+    child_fields: &[CollectByField],
+    collection_field: &str,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if parent_fields.is_empty() || child_fields.is_empty() || collection_field.is_empty() {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "parent projection, child projection, and collection slot are required".into(),
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut output = Vec::with_capacity(parent_fields.len() + 1);
+    for field in parent_fields {
+        if !names.insert(field.output_name.clone()) || field.output_name == collection_field {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "output field names must be unique".into(),
+            ));
+        }
+        let index = resolve_field_ref(input, &field.field)?;
+        output.push((
+            field.output_name.clone(),
+            input.fields()[index].value_type.clone(),
+        ));
+    }
+    let mut child_names = HashSet::new();
+    let mut child = Vec::with_capacity(child_fields.len());
+    for field in child_fields {
+        if !child_names.insert(field.output_name.clone()) {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "child output field names must be unique".into(),
+            ));
+        }
+        let index = resolve_field_ref(input, &field.field)?;
+        child.push((
+            field.output_name.clone(),
+            input.fields()[index].value_type.clone(),
+        ));
+    }
+    output.push((
+        collection_field.to_owned(),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(
+            RecordDescriptor::new(child),
+        )))),
+    ));
+    Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_projections(
+    input: &RecordDescriptor,
+    fields: &[CollectByField],
+) -> Result<Vec<CollectByProjection>, IvmRuntimeError> {
+    fields
+        .iter()
+        .map(|field| {
+            Ok(CollectByProjection {
+                field: field_ref_name(input, &field.field)?,
+                field_idx: resolve_field_ref(input, &field.field)?,
+                output_name: field.output_name.clone(),
+            })
+        })
+        .collect()
+}
+
+fn validate_collect_by_key_types(
+    input: &RecordDescriptor,
+    indices: &[usize],
+) -> Result<(), IvmRuntimeError> {
+    for &index in indices {
+        let value_type = &input
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
+            .value_type;
+        let scalar = matches!(
+            value_type,
+            ValueType::U8
+                | ValueType::U16
+                | ValueType::U32
+                | ValueType::U64
+                | ValueType::I32
+                | ValueType::I64
+                | ValueType::F64
+                | ValueType::Bool
+                | ValueType::String
+                | ValueType::Bytes
+                | ValueType::Uuid
+                | ValueType::Enum(_)
+        );
+        if value_type.contains_record() || !scalar {
+            return Err(IvmRuntimeError::InvalidCollectBy(
+                "group, order, and tie fields must be scalar ordered values without records".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntimeError> {
+    fn contains_collect_by(graph: &GraphBuilder) -> bool {
+        match graph {
+            GraphBuilder::CollectBy { .. } => true,
+            GraphBuilder::Recursive { seed, step, .. } => {
+                contains_collect_by(seed) || contains_collect_by(step)
+            }
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::Project { input, .. }
+            | GraphBuilder::UnwrapNullable { input, .. }
+            | GraphBuilder::Unnest { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => contains_collect_by(input),
+            GraphBuilder::Union { inputs } => inputs.iter().any(contains_collect_by),
+            GraphBuilder::Join { left, right, .. }
+            | GraphBuilder::SemiJoin { left, right, .. }
+            | GraphBuilder::AntiJoin { left, right, .. } => {
+                contains_collect_by(left) || contains_collect_by(right)
+            }
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. }
+            | GraphBuilder::BindingSource { .. } => false,
+        }
+    }
+
+    match graph {
+        GraphBuilder::CollectBy { input, .. } => {
+            if contains_collect_by(input) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
+            validate_collect_by_terminality(input)
+        }
+        GraphBuilder::Recursive { seed, step, .. } => {
+            if contains_collect_by(seed) || contains_collect_by(step) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
+            validate_collect_by_terminality(seed)?;
+            validate_collect_by_terminality(step)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => {
+            if contains_collect_by(input) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
+            validate_collect_by_terminality(input)
+        }
+        GraphBuilder::Union { inputs } => {
+            if inputs.iter().any(contains_collect_by) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
+            for input in inputs {
+                validate_collect_by_terminality(input)?;
+            }
+            Ok(())
+        }
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            if contains_collect_by(left) || contains_collect_by(right) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
+            validate_collect_by_terminality(left)?;
+            validate_collect_by_terminality(right)
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => Ok(()),
+    }
 }
 
 fn project_field_expr(
@@ -8143,6 +8568,131 @@ fn top_by_window_before_from_deltas(
     top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
 }
 
+fn records_before_deltas(
+    after_records: Vec<(Bytes, i64)>,
+    deltas: &[RecordDelta],
+) -> Vec<(Bytes, i64)> {
+    let mut records = BTreeMap::<Bytes, i64>::new();
+    for (record, weight) in after_records {
+        *records.entry(record).or_default() += weight;
+    }
+    for delta in deltas {
+        *records.entry(delta.record.clone()).or_default() -= delta.weight;
+    }
+    records.into_iter().collect()
+}
+
+fn collect_by_parent_from_records(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    records: &[(Bytes, i64)],
+) -> Result<Option<Bytes>, IvmRuntimeError> {
+    let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
+        return Ok(None);
+    };
+    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let mut values = collect_by
+        .parent_fields
+        .iter()
+        .map(|field| {
+            parent_values
+                .get(field.field_idx)
+                .cloned()
+                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let window = collect_by_window_from_records(input_desc, records, collect_by)?;
+    let mut children = Vec::new();
+    for (record, copies) in window {
+        let source_values = BorrowedRecord::new(&record, &input_desc)
+            .to_values()
+            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let child_values = collect_by
+            .child_fields
+            .iter()
+            .map(|field| {
+                source_values
+                    .get(field.field_idx)
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let child = OwnedRecord::new(
+            collect_by.child_descriptor.create(&child_values)?,
+            collect_by.child_descriptor,
+        );
+        for _ in 0..copies {
+            children.push(Value::Record(child.clone()));
+        }
+    }
+    values.push(Value::Array(children));
+    Ok(Some(output_desc.create(&values)?.into()))
+}
+
+fn collect_by_window_from_records(
+    descriptor: RecordDescriptor,
+    records: &[(Bytes, i64)],
+    collect_by: &CollectByOp,
+) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
+    let mut ranked = Vec::new();
+    for (record, weight) in records {
+        if *weight > 0 {
+            ranked.push((
+                collect_by_sort_key(descriptor, record, collect_by)?,
+                record.clone(),
+                *weight,
+            ));
+        }
+    }
+    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut window = Vec::new();
+    let mut to_skip = collect_by.offset;
+    let mut remaining = match collect_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
+    for (_, record, weight) in ranked {
+        if remaining == Some(0) {
+            break;
+        }
+        let copies = weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
+        if taken > 0 {
+            window.push((
+                record,
+                i64::try_from(taken).expect("window copies cannot exceed positive input weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
+        }
+    }
+    Ok(window)
+}
+
+fn collect_by_sort_key(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    collect_by: &CollectByOp,
+) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    collect_by
+        .sort_field_indices
+        .iter()
+        .zip(&collect_by.sort_directions)
+        .map(|(field_idx, direction)| {
+            Ok(TopBySortPart {
+                key: encoded_record_key_part(descriptor, record, &[*field_idx])?,
+                direction: *direction,
+            })
+        })
+        .collect()
+}
+
 fn top_by_sort_key(
     descriptor: RecordDescriptor,
     record: &[u8],
@@ -8367,6 +8917,10 @@ pub enum IvmRuntimeError {
     UnsupportedNestedRecursion,
     #[error("unsupported arg_max_by graph: {0}")]
     UnsupportedArgMaxBy(String),
+    #[error("collect_by is terminal-only and cannot feed another graph node")]
+    CollectByMustBeTerminal,
+    #[error("invalid collect_by descriptor: {0}")]
+    InvalidCollectBy(String),
     #[error("unsupported operator")]
     UnsupportedOperator,
 }

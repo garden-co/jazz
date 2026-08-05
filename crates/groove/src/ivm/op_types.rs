@@ -264,6 +264,39 @@ pub enum TopByDirection {
     Desc,
 }
 
+/// One input field copied into a rendered `CollectBy` parent or child record.
+///
+/// The resolved field index is kept alongside the name because the descriptor
+/// is the graph sharing boundary, while the runtime must not re-resolve names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectByProjection {
+    pub field: String,
+    pub field_idx: usize,
+    pub output_name: String,
+}
+
+/// Terminal collector for one `Array<Record>` field on a rendered parent.
+///
+/// This descriptor intentionally contains all of the flat input projections
+/// and ranking data needed to render its output. No planner-side state is
+/// allowed to affect a shared collector node.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CollectByOp {
+    pub group_fields: Vec<String>,
+    pub group_field_indices: Vec<usize>,
+    pub parent_fields: Vec<CollectByProjection>,
+    pub child_fields: Vec<CollectByProjection>,
+    pub child_descriptor: RecordDescriptor,
+    pub collection_field: String,
+    pub collection_field_index: usize,
+    pub order_fields: Vec<TopByOrderField>,
+    pub tie_fields: Vec<String>,
+    pub sort_field_indices: Vec<usize>,
+    pub sort_directions: Vec<TopByDirection>,
+    pub offset: u64,
+    pub limit: TopByLimit,
+}
+
 /// Placeholder aggregate descriptor for future lowering/execution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AggregateOp {

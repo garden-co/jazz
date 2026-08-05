@@ -34,8 +34,8 @@ use crate::storage::{
 use thiserror::Error;
 
 pub use crate::ivm::{
-    GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr,
-    PreparedShapeId, RoutedMultisinkTerminal, Subscription, SubscriptionId,
+    CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
+    PredicateExpr, PreparedShapeId, RoutedMultisinkTerminal, Subscription, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
