@@ -22,7 +22,7 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 3;
+pub const WIRE_PROTOCOL_VERSION: u16 = 4;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -809,8 +809,8 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                "min_protocol_version": 3,
-                "max_protocol_version": 3,
+                "min_protocol_version": 4,
+                "max_protocol_version": 4,
                     "features": 5,
                     "role": "client"
                 }

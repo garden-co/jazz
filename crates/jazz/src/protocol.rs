@@ -1580,7 +1580,6 @@ pub struct RealRowMemberEntry {
     /// row for ordinary single-source output and the ordered source tuple for
     /// a flat join. It deliberately does not include content-version fields,
     /// so replacements retain their output address.
-    #[serde(default)]
     pub occurrence_id: Option<OutputOccurrenceId>,
     /// Visible content transaction, when this member has a content row.
     #[serde(default)]
