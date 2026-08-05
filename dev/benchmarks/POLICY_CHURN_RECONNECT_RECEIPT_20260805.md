@@ -50,16 +50,17 @@ security contract is the subscription result-set transition.
 
 ## Initial local result
 
-One full run on the local development box produced:
+One full run on the quiet local development box (load average
+`0.07 / 0.11 / 0.08` immediately before the run) produced:
 
 | Case             | Reconnect median | Resume response | Initial response | Added | Updated | Removed |
 | ---------------- | ---------------: | --------------: | ---------------: | ----: | ------: | ------: |
-| unchanged        |         1.855 ms |            61 B |            856 B |     0 |       2 |       0 |
-| grant only       |         2.179 ms |         1,256 B |            856 B |     1 |       0 |       0 |
-| revoke only      |         1.940 ms |           516 B |            856 B |     0 |       0 |       1 |
-| grant and revoke |         2.087 ms |           925 B |            856 B |     1 |       0 |       1 |
-| claim revoke     |         0.721 ms |           213 B |            824 B |     0 |       0 |       2 |
-| claim restore    |         0.890 ms |           824 B |             61 B |     2 |       0 |       0 |
+| unchanged        |         1.864 ms |            61 B |            856 B |     0 |       2 |       0 |
+| grant only       |         2.201 ms |         1,256 B |            856 B |     1 |       0 |       0 |
+| revoke only      |         1.963 ms |           516 B |            856 B |     0 |       0 |       1 |
+| grant and revoke |         2.105 ms |           925 B |            856 B |     1 |       0 |       1 |
+| claim revoke     |         0.728 ms |           213 B |            824 B |     0 |       0 |       2 |
+| claim restore    |         0.888 ms |           824 B |             61 B |     2 |       0 |       0 |
 
 The unchanged control retains a compact response at about 7% of its initial
 snapshot. Revokes are also smaller than the initial response because row-member
