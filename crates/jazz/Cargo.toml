@@ -220,6 +220,11 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
+[[bench]]
+name = "route_subscription_curve"
+harness = false
+required-features = ["testing"]
+
 [[test]]
 name = "large_blob_permissions"
 required-features = ["test"]
