@@ -1744,6 +1744,17 @@ fn source_requirements(
         requirements.insert(source, SourceRequirements::default());
     }
 
+    // A flat output carries an occurrence-addressed tuple. Keep source
+    // version metadata available at the source boundary so joined-side
+    // changes can be represented as maintained replacements.
+    if !flat_join_payload_fields(plan).is_empty() {
+        for requirements in requirements.values_mut() {
+            requirements
+                .metadata
+                .insert(SourceMetadataRequirement::VersionWitnesses);
+        }
+    }
+
     if let Some(app_rows) = &output.app_rows {
         if !matches!(
             plan,
@@ -4580,10 +4591,16 @@ fn lower_value_ref(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == source_id => Ok(LoweredValueRef::Field(require_source_field(
-            source,
-            &user_column_field(field),
-        )?)),
+        } if value_source == source_id => {
+            let field = if source.row_shape.descriptor.field_index(field).is_some() {
+                field.clone()
+            } else {
+                user_column_field(field)
+            };
+            Ok(LoweredValueRef::Field(require_source_field(
+                source, &field,
+            )?))
+        }
         NormalizedValueRef::SourceField { source, .. } => Err(UnsupportedReason::Operator(
             format!("predicate references unsupported source {:?}", source),
         )),
@@ -5566,16 +5583,23 @@ fn fact_output_with_terminal(
                 });
             }
             let version = version_witness_fields(&source.row_shape)?;
+            let occurrence_id_fields = flat_join_occurrence_id_fields(plan, source);
+            let payload_fields = flat_join_payload_fields(plan);
+            let settle_position_field = payload_fields
+                .is_empty()
+                .then(|| settle_position_field(&source.row_shape))
+                .flatten();
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
                 row_field: source.row_shape.row_uuid_field.clone(),
-                occurrence_id_fields: vec![source.row_shape.row_uuid_field.clone()],
+                occurrence_id_fields,
+                payload_fields,
                 branch_or_prefix_field: version.branch_or_prefix_field.clone(),
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),
                     tx_node_field: "content_tx_node_id".to_owned(),
                 }),
-                settle_position_field: settle_position_field(&source.row_shape),
+                settle_position_field,
                 routing_param_fields,
             })
         }
@@ -5629,6 +5653,48 @@ fn fact_output_with_terminal(
         terminal,
         schema,
     })
+}
+
+fn flat_join_occurrence_id_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+) -> Vec<String> {
+    let mut fields = vec![source.row_shape.row_uuid_field.clone()];
+    let Some(LinearStep::Project(columns)) = root_linear_steps(plan).and_then(|steps| steps.last())
+    else {
+        return fields;
+    };
+    fields.extend(columns.iter().filter_map(|column| {
+        column
+            .output
+            .name
+            .strip_prefix("__flat_join_row_")
+            .map(|_| column.output.name.clone())
+    }));
+    fields
+}
+
+fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
+    root_linear_steps(plan)
+        .and_then(|steps| match steps.last() {
+            Some(LinearStep::Project(columns)) => Some(columns),
+            _ => None,
+        })
+        .map(|columns| {
+            columns
+                .iter()
+                .filter(|column| column.output.name.contains('.'))
+                .map(|column| column.output.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
+    match plan {
+        AnalyzedQueryPlan::Linear(plan) => Some(&plan.steps),
+        _ => None,
+    }
 }
 
 fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<String> {
@@ -5728,7 +5794,13 @@ fn fact_terminal_graph(
                     routing_param_fields,
                 )?));
             }
-            Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
+            Ok(graph.project_fields(result_membership_fields(
+                source,
+                routing_param_fields,
+                &flat_join_payload_fields(plan),
+                &flat_join_occurrence_id_fields(plan, source),
+                flat_join_payload_fields(plan).is_empty(),
+            )?))
         }
         ProgramFactKey::VersionWitnesses => {
             content_version_witness_graph(source, "version_content")
@@ -6018,9 +6090,14 @@ fn content_version_witness_graph(
 fn result_membership_fields(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
+    payload_fields: &[TypedOutputField],
+    occurrence_id_fields: &[String],
+    include_settle_position: bool,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let version = version_witness_fields(&source.row_shape)?;
-    let settle_position = settle_position_field(&source.row_shape);
+    let settle_position = include_settle_position
+        .then(|| settle_position_field(&source.row_shape))
+        .flatten();
     let mut fields = vec![
         ProjectField::literal("event_kind", Value::String("result_current".to_owned())),
         ProjectField::literal(
@@ -6031,6 +6108,13 @@ fn result_membership_fields(
         ProjectField::renamed(version.tx_time_field, "content_tx_time"),
         ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
     ];
+    fields.extend(
+        occurrence_id_fields
+            .iter()
+            .filter(|field| **field != source.row_shape.row_uuid_field)
+            .cloned()
+            .map(ProjectField::named),
+    );
     if let Some(field) = settle_position {
         fields.push(ProjectField::renamed(field, "settle_position"));
     } else {
@@ -6040,6 +6124,11 @@ fn result_membership_fields(
         ));
     }
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
+    fields.extend(
+        payload_fields
+            .iter()
+            .map(|field| ProjectField::named(field.name.clone())),
+    );
     Ok(fields)
 }
 

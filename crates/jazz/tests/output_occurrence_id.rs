@@ -9,7 +9,7 @@ use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, ObjectId, OutputOccurrenceId, QueryBuilder, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableSchema,
+    SubscriptionStreamItem, TableSchema, Value,
 };
 use support::TestingClient;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ async fn next_delta_with_added(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn plain_table_output_occurrence_is_root_stable_across_reset_and_join_order_is_positional() {
+async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
@@ -125,18 +125,50 @@ async fn plain_table_output_occurrence_is_root_stable_across_reset_and_join_orde
             assert_eq!(by_occurrence.get(&ordered), Some(&"ordered"));
 
             let joined_query = QueryBuilder::new("todos")
+                .alias("root")
                 .join("todos")
-                .on("todos.id", "todos.id")
+                .alias("joined")
+                .on("root.id", "joined.id")
                 .build();
-            let error = match client.subscribe(joined_query).await {
-                Ok(_) => panic!("joined maintained output cannot default to root identity"),
-                Err(error) => error,
-            };
+            let mut joined_stream = client
+                .subscribe(joined_query)
+                .await
+                .expect("joined maintained output is supported");
+            let joined = next_delta_with_added(&mut joined_stream).await;
+            assert_eq!(joined.added.len(), 1);
+            assert_eq!(joined.added[0].id.root(), root);
+            assert_eq!(joined.added[0].id.joined(), &[root]);
+
+            let (second, _, batch) = client
+                .insert("todos", row_input!("title" => "second", "done" => false))
+                .expect("insert second matching join row");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("second todo settles");
+            let fan_out = next_delta_with_added(&mut joined_stream).await;
             assert!(
-                error
-                    .to_string()
-                    .contains("OutputOccurrenceId source tuples"),
-                "joined subscription must fail loudly: {error}"
+                fan_out
+                    .added
+                    .iter()
+                    .any(|row| row.id == OutputOccurrenceId::new(root, [second])),
+                "a second matching source produces a distinct occurrence under the same root: {fan_out:?}"
+            );
+
+            let batch = client
+                .update(root, vec![("title".to_owned(), Value::Text("revised".to_owned()))])
+                .expect("replace root source content");
+            client
+                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .await
+                .expect("replacement settles");
+            let replacement = next_delta(&mut joined_stream).await;
+            assert!(
+                replacement
+                    .updated
+                    .iter()
+                    .any(|row| row.id == OutputOccurrenceId::new(root, [second])),
+                "a joined-source replacement is addressed by its composite occurrence id"
             );
 
             client.shutdown().await.expect("shutdown test client");

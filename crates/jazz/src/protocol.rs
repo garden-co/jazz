@@ -1652,6 +1652,13 @@ impl RealRowMemberEntry {
         self
     }
 
+    /// Attach the rendered-output revision. Flat joins use this to distinguish
+    /// a source-content replacement while retaining the same occurrence id.
+    pub fn with_row_digest(mut self, row_digest: Vec<u8>) -> Self {
+        self.row_digest = Some(row_digest);
+        self
+    }
+
     /// Stable output occurrence identity. Old persisted members without this
     /// field are normalized to their legacy single-source identity.
     pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
