@@ -339,22 +339,22 @@ explicitly not a columnar-only design.
 
 For a table selected for this representation, a base chunk covers a bounded
 primary-key range and contains a primary-key stream plus one encoded stream per
-record field. The chunk directory chooses a generation for each range. The row
-delta is a separate durable, primary-keyed store of complete current rows or
-tombstones. It is the authoritative current state, not a cache, a best-effort
-write buffer, or an optional optimisation.
+record field. The row delta is a separate durable, primary-keyed store of
+complete current rows or tombstones. It is the authoritative current state, not
+a cache, a best-effort write buffer, or an optional optimisation.
 
 The proposed interactive write path appends/replaces the affected row's delta
 entry under the ordinary storage atomicity and durability boundary. It does not
 read, decode, modify, and rewrite a base chunk. Reads reconstruct a logical
-table by combining the selected base generation with the delta: a delta row
-replaces a base row of the same primary key, a tombstone hides it, and a
-delta-only key is included in a range scan. Compaction later reads a stable
-base-plus-delta view for a range, writes new immutable chunk generation(s), and
-publishes the directory change atomically before reclaiming superseded material.
-The exact delta visibility and reclamation rules are intentionally open below;
-the preceding paragraph is the proposed representation, not a claim that those
-rules already exist.
+table by combining the base for a range with the delta: a delta row replaces a
+base row of the same primary key, a tombstone hides it, and a delta-only key is
+included in a range scan. Compaction later reads a base-plus-delta view for a
+range, writes new immutable chunk(s), makes them current, and reclaims
+superseded material.
+
+How a reader locates the current base for a range, and how compaction makes new
+chunks current, is deliberately left open below. That mechanism is not chosen
+here, and this section should not be read as having chosen one.
 
 In particular, inserts whose keys fall into an existing chunk range use the
 same durable delta path. Whether their later compaction cost and scheduling
@@ -491,11 +491,28 @@ record descriptors, and reopen/migration diagnostics.
 
 ### Open questions
 
-- 🔶 **Columnar-delta visibility semantics.** Before this draft can become a
-  contract, decide the snapshot point at which a durable delta is visible, how
-  a reader selects a base generation and its overlay, and when old deltas and
-  chunk generations may be reclaimed. This is a correctness and recovery
-  design question, not a performance-tuning choice.
+- 🔶 **How a base is located, made current, and reclaimed.** The draft above
+  fixes the representation (immutable chunks + durable delta) but deliberately
+  does not choose the mechanism that connects them. Four coupled decisions are
+  open, and this is a correctness and recovery question rather than a
+  performance-tuning one:
+  - How a reader finds the current base for a primary-key range, given that
+    chunk boundaries are data-dependent and change when compaction splits or
+    merges ranges.
+  - What makes a newly compacted chunk current, and at what point that becomes
+    observable to a reader.
+  - Whether a reader must be isolated from a compaction that publishes while
+    the reader is mid-scan. Note as input, not as a conclusion: today
+    `OrderedKvStorage` offers `get`/`scan_range`/`scan_prefix`/`write_many`
+    with no snapshot or read-version, so a scan observes whatever is committed
+    as it runs. Whichever way this is settled — by constraining when
+    compaction may run, by keeping superseded material addressable, by
+    changing the storage contract, or otherwise — should follow from the
+    decision, not drive it.
+  - When superseded chunks and folded-in delta entries may be reclaimed. One
+    concrete hazard to preserve in any answer: compaction must retire exactly
+    the delta entries it consumed, not a key range, or rows written during the
+    compaction window are lost.
 - 🔶 **Compaction rule: per backend or one portable rule?** RocksDB's observed
   coalescing points are `m=32`/`128`/`2048` at `k=64`/`512`/`4096`; OPFS is
   later or absent in the matched sweep (`none through 64`, `m=512`, and only a
