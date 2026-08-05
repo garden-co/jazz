@@ -349,8 +349,14 @@ async fn local_first_and_jwt_clients_coexist_impl() {
     .expect("connect alice (local-first)");
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
-    // Bob authenticates via the default HS256 JWT minted by JazzServer.
-    let mut bob_ctx = server.make_client_context_for_user(test_schema(), "bob");
+    // Bob authenticates via the default HS256 JWT minted by JazzServer. The
+    // testing helper derives a stable wire principal for a symbolic subject,
+    // because WebSocket sessions validate principals as UUIDs, so Bob's
+    // provenance is that derived id rather than the literal subject.
+    let bob_subject = "bob";
+    let bob_user_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, bob_subject.as_bytes()).to_string();
+    let mut bob_ctx = server.make_client_context_for_user(test_schema(), bob_subject);
     bob_ctx.backend_secret = None;
     bob_ctx.admin_secret = None;
     let bob = JazzClient::connect(bob_ctx)
@@ -374,7 +380,7 @@ async fn local_first_and_jwt_clients_coexist_impl() {
     let bob_row = vec![
         Value::Text("bob via jwt".to_string()),
         Value::Boolean(true),
-        Value::Text("bob".to_string()),
+        Value::Text(bob_user_id.clone()),
     ];
 
     wait_for_rows(
