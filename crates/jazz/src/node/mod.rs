@@ -3199,8 +3199,8 @@ where
         self.database.last_tick_metrics()
     }
 
-    #[cfg(feature = "testing")]
     /// Test/bench-only runtime diagnostics used by performance receipts.
+    #[cfg(any(test, feature = "testing"))]
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats()
     }

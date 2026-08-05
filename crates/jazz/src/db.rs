@@ -1115,6 +1115,13 @@ where
                 &opts.read_view,
                 Some(_local_plan),
             )?;
+        let local_subscription_id = subscription.subscription_id();
+        let local_node = Rc::clone(&self.node.node);
+        let mut local_cleanup = CleanupGuard::new(Box::new(move || {
+            local_node
+                .borrow_mut()
+                .unsubscribe_groove_subscription(local_subscription_id);
+        }));
         let maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
@@ -1185,7 +1192,7 @@ where
             .borrow_mut()
             .push(Rc::downgrade(&state));
         let cleanup = if upstream_subscription_handles.is_empty() {
-            None
+            local_cleanup.take()
         } else {
             let owner = Rc::downgrade(&state);
             register_upstream_subscription_owner(
@@ -1193,12 +1200,18 @@ where
                 &upstream_subscription_handles,
                 &state,
             );
-            Some(self.upstream_subscription_cleanup(upstream_subscription_handles, owner))
+            let upstream_cleanup =
+                self.upstream_subscription_cleanup(upstream_subscription_handles, owner);
+            let local_cleanup = local_cleanup.take();
+            Box::new(move || {
+                local_cleanup();
+                upstream_cleanup();
+            })
         };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
-            cleanup,
+            cleanup: Some(cleanup),
         })
     }
 
@@ -3143,7 +3156,7 @@ where
         self.node.node.borrow().sync_metrics().clone()
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Test/bench-only runtime diagnostics used by performance receipts.
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
@@ -7937,6 +7950,32 @@ pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
     cleanup: Option<Box<dyn FnOnce()>>,
+}
+
+struct CleanupGuard {
+    cleanup: Option<Box<dyn FnOnce()>>,
+}
+
+impl CleanupGuard {
+    fn new(cleanup: Box<dyn FnOnce()>) -> Self {
+        Self {
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn take(&mut self) -> Box<dyn FnOnce()> {
+        self.cleanup
+            .take()
+            .expect("cleanup guard must only be disarmed once")
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
 }
 
 impl SubscriptionStream {
