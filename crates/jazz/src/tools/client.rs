@@ -2168,24 +2168,46 @@ impl JazzClient {
         }
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
-        if !query.joins.is_empty() {
-            return Err(JazzError::Query(
-                "flat joined output requires complete OutputOccurrenceId source tuples; a root row id alone is unsafe"
-                    .to_string(),
-            ));
-        }
         if query.disjuncts.len() != 1
             || !query.array_subqueries.is_empty()
             || query.recursive.is_some()
             || query.include_deleted
             || query.result_element_index.is_some()
             || (query.aggregate.is_some() && query.select_columns.is_some())
+            || (!query.joins.is_empty()
+                && (query.select_columns.is_some()
+                    || !query.order_by.is_empty()
+                    || query.limit.is_some()
+                    || query.offset != 0
+                    || query.aggregate.is_some()))
         {
             return Err(JazzError::Query(
                 "JazzClient currently supports simple table queries only".to_string(),
             ));
         }
         let mut core_query = crate::query::Query::from(query.table.as_str());
+        if !query.joins.is_empty() {
+            core_query.flat_join = Some(crate::query::FlatJoin {
+                root_alias: query.alias.clone(),
+                sources: query
+                    .joins
+                    .iter()
+                    .map(|join| {
+                        let (left, right) = join.on.clone().ok_or_else(|| {
+                            JazzError::Query(format!(
+                                "flat join {} is missing an ON equality",
+                                join.effective_name()
+                            ))
+                        })?;
+                        Ok(crate::query::FlatJoinSource {
+                            table: join.table.as_str().to_owned(),
+                            alias: join.alias.clone(),
+                            on: crate::query::FlatJoinOn { left, right },
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            });
+        }
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(query.table.as_str()))
@@ -2274,6 +2296,44 @@ impl JazzClient {
                 .map(|row| {
                     let row_id = ObjectId::from_uuid(row.row_uuid().0);
                     let values = aggregate_public_values(query, table_schema, &row)?;
+                    Ok((row_id, values))
+                })
+                .collect();
+        }
+        if !query.joins.is_empty() {
+            let mut output_columns = Vec::new();
+            let mut sources = vec![(query.effective_name().to_owned(), query.table.clone())];
+            sources.extend(
+                query
+                    .joins
+                    .iter()
+                    .map(|join| (join.effective_name().to_owned(), join.table.clone())),
+            );
+            for (source, table) in sources {
+                let table_schema = schema
+                    .get(&table)
+                    .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
+                for column in &table_schema.columns.columns {
+                    output_columns.push((
+                        format!("{source}.{}", column.name),
+                        column.column_type.clone(),
+                    ));
+                }
+            }
+            return rows
+                .into_iter()
+                .map(|row| {
+                    let row_id = ObjectId::from_uuid(row.row_uuid().0);
+                    let values = output_columns
+                        .iter()
+                        .map(|(field, ty)| {
+                            row.raw_field(field)
+                                .ok_or_else(|| {
+                                    JazzError::Query(format!("flat join row missing {field}"))
+                                })
+                                .and_then(|value| core_to_public_value_for_column_type(value, ty))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
                     Ok((row_id, values))
                 })
                 .collect();
