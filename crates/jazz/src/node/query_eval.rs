@@ -7599,6 +7599,13 @@ where
             }
         }
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
+        let mut payload_states = BTreeMap::<
+            ResultMemberEntry,
+            (
+                Option<ResultMemberPayloadEntry>,
+                Option<ResultMemberPayloadEntry>,
+            ),
+        >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         loop {
             match local.subscription.try_recv() {
@@ -7623,6 +7630,20 @@ where
                             .and_modify(|(_, after)| *after = false)
                             .or_insert((before, false));
                     }
+                    for member in transitions.result_payload_removes {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = None)
+                            .or_insert((before, None));
+                    }
+                    for (member, payload) in transitions.result_payload_adds {
+                        let before = local.result_payloads.get(&member).cloned();
+                        payload_states
+                            .entry(member)
+                            .and_modify(|(_, after)| *after = Some(payload.clone()))
+                            .or_insert((before, Some(payload)));
+                    }
                     for fact in transitions.program_fact_adds {
                         let before = local.program_facts.contains(&fact);
                         fact_states
@@ -7644,7 +7665,7 @@ where
                 }
             }
         }
-        if states.is_empty() && fact_states.is_empty() {
+        if states.is_empty() && payload_states.is_empty() && fact_states.is_empty() {
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
@@ -7652,6 +7673,17 @@ where
             match (before, after) {
                 (false, true) => transitions.adds.push(entry),
                 (true, false) => transitions.removes.push(entry),
+                _ => {}
+            }
+        }
+        for (member, (before, after)) in payload_states {
+            match (before, after) {
+                (None, Some(payload)) => transitions.result_payload_adds.push((member, payload)),
+                (Some(_), None) => transitions.result_payload_removes.push(member),
+                (Some(before), Some(after)) if before != after => {
+                    transitions.result_payload_removes.push(member.clone());
+                    transitions.result_payload_adds.push((member, after));
+                }
                 _ => {}
             }
         }
