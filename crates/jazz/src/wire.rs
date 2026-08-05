@@ -1173,6 +1173,9 @@ mod tests {
                     crate::protocol::ResultMemberEntry::Row(crate::protocol::RealRowMemberEntry {
                         table: groove::Intern::new("res_l_child_3".to_owned()),
                         row_uuid: row,
+                        occurrence_id: Some(crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(row.0),
+                        )),
                         content_tx: Some(tx),
                         layer: Default::default(),
                         deletion_tx: None,

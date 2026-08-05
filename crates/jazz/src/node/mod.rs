@@ -81,7 +81,7 @@ pub(crate) use query_eval::{
 };
 pub(crate) use views::MaintainedViewBundleInputs;
 
-type ResultRowMembershipKey = (groove::Intern<String>, RowUuid);
+type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
 use branches::BranchRecord;
 use codec::*;
@@ -339,7 +339,7 @@ struct QueryServing {
     registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
     /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
-    /// Point index for ordinary current-row settled result members.
+    /// Point index for settled real-row output occurrences.
     ///
     /// This mirrors the row-shaped subset of `settled_result_sets` so applying a
     /// new current winner can remove the previous winner without scanning the
@@ -792,9 +792,7 @@ where
     }
 
     fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
-        member
-            .as_row()
-            .map(|(table, row_uuid, _)| (table, row_uuid))
+        member.output_occurrence_id()
     }
 
     fn insert_settled_result_member_indexed(
@@ -844,18 +842,16 @@ where
         removed
     }
 
-    fn remove_settled_result_member_for_row_indexed(
+    fn remove_settled_result_member_for_occurrence_indexed(
         &mut self,
         binding_view_key: BindingViewKey,
-        table: groove::Intern<String>,
-        row_uuid: RowUuid,
+        occurrence_id: ResultRowMembershipKey,
     ) -> Option<ResultMemberEntry> {
-        let row_key = (table, row_uuid);
         let previous = self
             .query
             .settled_result_row_index
             .get_mut(&binding_view_key)
-            .and_then(|index| index.remove(&row_key))?;
+            .and_then(|index| index.remove(&occurrence_id))?;
         if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
             members.remove(&previous);
         }

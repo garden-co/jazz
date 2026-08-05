@@ -870,12 +870,11 @@ where
                 if self.remove_settled_result_member_indexed(binding_view_key, &member) {
                     continue;
                 }
-                if let Some((removed_table, removed_row_uuid, _)) = member.as_row()
+                if let Some(occurrence_id) = member.output_occurrence_id()
                     && self
-                        .remove_settled_result_member_for_row_indexed(
+                        .remove_settled_result_member_for_occurrence_indexed(
                             binding_view_key,
-                            removed_table,
-                            removed_row_uuid,
+                            occurrence_id,
                         )
                         .is_some()
                 {
@@ -883,12 +882,11 @@ where
                 }
             }
             for member in result_member_adds {
-                if let Some((added_table, added_row_uuid, _)) = member.as_row() {
+                if let Some(occurrence_id) = member.output_occurrence_id() {
                     result_members_need_rewrite |= self
-                        .remove_settled_result_member_for_row_indexed(
+                        .remove_settled_result_member_for_occurrence_indexed(
                             binding_view_key,
-                            added_table,
-                            added_row_uuid,
+                            occurrence_id,
                         )
                         .is_some();
                 }
@@ -935,20 +933,15 @@ where
         // debug_assert, so it is wasted work in release. Gate to debug builds.
         #[cfg(debug_assertions)]
         {
-            let row_result_set = self
+            if let Some((occurrence_id, first, second)) = self
                 .query
                 .settled_result_sets
                 .get(&binding_view_key)
-                .into_iter()
-                .flat_map(|members| members.iter())
-                .filter_map(ResultMemberEntry::as_row)
-                .collect::<BTreeSet<_>>();
-            if let Some((table, row_uuid, first, second)) =
-                duplicate_row_result_set(&row_result_set)
+                .and_then(duplicate_output_occurrence_result_set)
             {
                 debug_assert!(
                     first == second,
-                    "settled binding view {binding_view_key:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+                    "settled binding view {binding_view_key:?} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
                 );
             }
         }
