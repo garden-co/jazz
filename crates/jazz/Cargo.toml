@@ -172,6 +172,10 @@ name = "known_state_scaling"
 harness = false
 
 [[bench]]
+name = "maintained_rehydrate_scaling"
+harness = false
+
+[[bench]]
 name = "cold_subscription"
 harness = false
 
