@@ -66,6 +66,7 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
+use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
@@ -7865,7 +7866,7 @@ struct SubscriptionState {
 
 #[derive(Clone, Default)]
 struct RelationSnapshotIndex {
-    roots: BTreeMap<(String, RowUuid), usize>,
+    roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
     edges: BTreeSet<RelationEdge>,
 }
@@ -7876,7 +7877,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert((row.table().to_owned(), row.row_uuid()), position);
+                .insert(single_source_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -7910,6 +7911,25 @@ pub struct RemovedRow {
     pub table: String,
     /// Stable row identity.
     pub row_uuid: RowUuid,
+    /// Stable identity of the removed output occurrence.
+    pub occurrence_id: OutputOccurrenceId,
+}
+
+/// One row addressed by its maintained output occurrence identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionOutputRow {
+    /// Stable output occurrence identity.
+    pub occurrence_id: OutputOccurrenceId,
+    /// Materialized row body for this output occurrence.
+    pub row: CurrentRow,
+}
+
+impl std::ops::Deref for SubscriptionOutputRow {
+    type Target = CurrentRow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
 }
 
 /// Materialized relation edge removed from a subscription result.
@@ -7925,9 +7945,9 @@ pub enum SubscriptionEvent {
         /// Fresh subscriptions start with a reset delta from the empty result.
         reset: bool,
         /// Rows newly visible to the subscription.
-        added: Vec<CurrentRow>,
+        added: Vec<SubscriptionOutputRow>,
         /// Rows still visible with changed projected cells.
-        updated: Vec<CurrentRow>,
+        updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
         /// Related rows newly referenced by relation edges.
@@ -8045,7 +8065,11 @@ fn subscription_reset_event(
 ) -> SubscriptionEvent {
     SubscriptionEvent::Delta {
         reset: true,
-        added: current.rows,
+        added: current
+            .rows
+            .into_iter()
+            .map(subscription_output_row)
+            .collect(),
         updated: Vec::new(),
         removed: Vec::new(),
         added_related: Vec::new(),
@@ -8089,8 +8113,10 @@ fn subscription_delta_event_with_reset(
 
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
-            None => added.push((*row).clone()),
-            Some(previous_row) if *previous_row != *row => updated.push((*row).clone()),
+            None => added.push(subscription_output_row((*row).clone())),
+            Some(previous_row) if *previous_row != *row => {
+                updated.push(subscription_output_row((*row).clone()))
+            }
             Some(_) => {}
         }
     }
@@ -8100,6 +8126,7 @@ fn subscription_delta_event_with_reset(
             removed.push(RemovedRow {
                 table: key.0.clone(),
                 row_uuid: key.1,
+                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
             });
         }
     }
@@ -8144,7 +8171,10 @@ fn apply_maintained_update_to_snapshot(
             *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
             return SubscriptionEvent::Delta {
                 reset: false,
-                added: update_added,
+                added: update_added
+                    .into_iter()
+                    .map(subscription_output_row)
+                    .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
                 added_related: Vec::new(),
@@ -8186,7 +8216,11 @@ fn apply_maintained_update_to_snapshot(
 
         return SubscriptionEvent::Delta {
             reset: false,
-            added: event_added,
+            added: event_added
+                .iter()
+                .cloned()
+                .map(subscription_output_row)
+                .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
             added_related,
@@ -8206,23 +8240,22 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let key = (row.table().to_owned(), row.row_uuid());
+        let key = single_source_occurrence_id(row);
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
-                updated.push(row.clone());
+                updated.push(subscription_output_row(row.clone()));
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
             for position in snapshot_index.related.values_mut() {
                 *position += 1;
             }
-            snapshot_index.roots.insert(
-                (row.table().to_owned(), row.row_uuid()),
-                snapshot.root_count,
-            );
+            snapshot_index
+                .roots
+                .insert(single_source_occurrence_id(row), snapshot.root_count);
             snapshot.root_count += 1;
-            added.push(row.clone());
+            added.push(subscription_output_row(row.clone()));
         }
     }
 
@@ -8238,10 +8271,13 @@ fn apply_maintained_update_to_snapshot(
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
-            snapshot_index.roots.remove(&row_key);
+            snapshot_index
+                .roots
+                .remove(&single_source_occurrence_id(&row));
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
+                occurrence_id: single_source_occurrence_id(&row),
             });
         } else {
             index += 1;
@@ -8268,10 +8304,11 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let key = (row.table().to_owned(), row.row_uuid());
-        if snapshot_index.roots.contains_key(&key) {
+        let root_key = single_source_occurrence_id(row);
+        if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
+        let key = (row.table().to_owned(), row.row_uuid());
         if let Some(position) = snapshot_index.related.get(&key).copied() {
             snapshot.rows[position] = row.clone();
         } else {
@@ -8287,7 +8324,11 @@ fn apply_maintained_update_to_snapshot(
                 && edge.target_row == removed_edge.target_row
         });
         let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
-        let is_root = snapshot_index.roots.contains_key(&target_key);
+        let is_root = snapshot_index
+            .roots
+            .contains_key(&OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                target_key.1.0,
+            )));
         if !still_referenced && !is_root {
             if let Some(position) = snapshot_index.related.remove(&target_key) {
                 snapshot.rows.remove(position);
@@ -8349,6 +8390,17 @@ where
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions { tier, read_view }.read_view_key(),
     })
+}
+
+fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+}
+
+fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
+    SubscriptionOutputRow {
+        occurrence_id: single_source_occurrence_id(&row),
+        row,
+    }
 }
 
 fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {

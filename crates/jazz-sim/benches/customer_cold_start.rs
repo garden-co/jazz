@@ -1855,7 +1855,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
                 rows.remove(&row.row_uuid);
             }
             for row in added.into_iter().chain(updated) {
-                rows.insert(row.row_uuid());
+                rows.insert(row.row.row_uuid());
             }
         }
         SubscriptionEvent::Rejected { reason } => {

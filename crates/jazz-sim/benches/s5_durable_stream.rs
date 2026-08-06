@@ -1186,8 +1186,11 @@ fn subscription_opened_rows(event: SubscriptionEvent) -> Vec<jazz::node::Current
             updated,
             ..
         } => {
-            let mut rows = added;
-            rows.extend(updated);
+            let mut rows = added
+                .into_iter()
+                .map(|output| output.row)
+                .collect::<Vec<_>>();
+            rows.extend(updated.into_iter().map(|output| output.row));
             rows
         }
         other => panic!("expected subscription snapshot, got {other:?}"),
@@ -1220,7 +1223,7 @@ fn apply_subscription_event(rows: &mut Vec<jazz::node::CurrentRow>, event: Subsc
                 .map(|row| row.row_uuid)
                 .collect::<BTreeSet<_>>();
             rows.retain(|row| !removed.contains(&row.row_uuid()));
-            for row in added.into_iter().chain(updated) {
+            for row in added.into_iter().chain(updated).map(|output| output.row) {
                 if let Some(slot) = rows
                     .iter_mut()
                     .find(|existing| existing.row_uuid() == row.row_uuid())

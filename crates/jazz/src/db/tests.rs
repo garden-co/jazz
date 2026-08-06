@@ -77,6 +77,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             }
 
             for row in updated {
+                let row = row.row;
                 if let Some(position) = snapshot.rows.iter().position(|current| {
                     current.table() == row.table() && current.row_uuid() == row.row_uuid()
                 }) {
@@ -85,6 +86,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             }
 
             for row in added {
+                let row = row.row;
                 if let Some(position) =
                     snapshot
                         .rows
@@ -201,7 +203,11 @@ fn delta_rows(event: SubscriptionEvent) -> (Vec<CurrentRow>, Vec<CurrentRow>, Ve
             updated,
             removed,
             ..
-        } => (added, updated, removed),
+        } => (
+            added.into_iter().map(|output| output.row).collect(),
+            updated.into_iter().map(|output| output.row).collect(),
+            removed,
+        ),
         other => panic!("expected subscription delta event, got {other:?}"),
     }
 }

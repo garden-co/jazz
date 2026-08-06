@@ -2399,7 +2399,7 @@ fn apply_db_subscription_event(
             for row in removed {
                 current.remove(&row.row_uuid);
             }
-            for row in added.into_iter().chain(updated) {
+            for row in added.into_iter().chain(updated).map(|output| output.row) {
                 current.insert(row.row_uuid(), row);
             }
         }

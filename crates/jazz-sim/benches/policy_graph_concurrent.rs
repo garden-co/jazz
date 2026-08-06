@@ -1172,7 +1172,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) -> bool {
                 rows.remove(&row.row_uuid);
             }
             for row in added.into_iter().chain(updated) {
-                rows.insert(row.row_uuid());
+                rows.insert(row.row.row_uuid());
             }
             settled
         }

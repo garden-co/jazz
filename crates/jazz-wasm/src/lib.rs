@@ -2465,6 +2465,17 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             settled,
             tier,
         } => {
+            // The current native wire remains source-row addressed. Occurrence
+            // identity is maintained in the Rust subscription boundary until a
+            // later wire-format revision carries it explicitly.
+            let added = added
+                .into_iter()
+                .map(|output| output.row)
+                .collect::<Vec<_>>();
+            let updated = updated
+                .into_iter()
+                .map(|output| output.row)
+                .collect::<Vec<_>>();
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
             let relation_delta = encode_relation_subscription_delta(
