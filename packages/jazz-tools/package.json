@@ -166,7 +166,7 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
-    "better-auth": "^1.5.5",
+    "better-auth": "1.6.24",
     "fake-indexeddb": "^5.0.2",
     "jazz-rn": "workspace:*",
     "jsdom": "^26.0.0",
@@ -184,7 +184,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "better-auth": "^1.5.5",
+    "better-auth": "1.6.24",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",

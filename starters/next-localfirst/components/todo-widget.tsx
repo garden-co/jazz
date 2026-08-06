@@ -7,11 +7,11 @@ export function TodoWidget() {
   const db = useDb();
   const { data: todos = [] } = useAll(app.todos);
 
-  function add(formData: FormData) {
+  async function add(formData: FormData) {
     const title = formData.get("title") as string;
     const trimmed = title.trim();
     if (!trimmed) return;
-    db.insert(app.todos, { title: trimmed, done: false });
+    await db.insert(app.todos, { title: trimmed, done: false }).wait({ tier: "local" });
   }
 
   return (

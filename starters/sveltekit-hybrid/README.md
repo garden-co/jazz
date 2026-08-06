@@ -90,7 +90,7 @@ page mounts, so it builds the authenticated client directly instead of
 briefly rendering the stale anonymous one.
 
 The layout also installs a `db.onAuthChanged` listener that re-mints the
-JWT via `authClient.token()` whenever Better Auth reports the token as
+JWT via `authClient.$fetch("/token")` whenever Better Auth reports the token as
 expired — long-lived sessions won't silently drop to unauthenticated.
 
 ## Extending the schema
