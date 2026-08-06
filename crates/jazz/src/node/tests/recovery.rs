@@ -45,6 +45,68 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
+fn opening_defers_malformed_current_row_to_read() {
+    // This is necessarily an internal regression test: planting malformed
+    // persisted bytes requires direct storage access, and the core point-read
+    // path is where the persisted row key is available for error context.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(0xff), 10).cells(title_cells("persisted")),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let table = schema.tables[0].global_current_storage_tables()[0]
+            .name
+            .clone();
+        let (key, raw) = node
+            .database
+            .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
+            .unwrap()
+            .unwrap()
+            .into_parts();
+        node.database.close().unwrap();
+        drop(node);
+
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        let storage =
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        storage.set(&table, &key, &raw[..1]).unwrap();
+        storage.close().unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut reopened = NodeState::new(node(1), schema, storage).unwrap();
+    let error = reopened
+        .local_current_row("todos", row(0xff))
+        .expect_err("malformed current row must fail when read");
+    assert!(
+        matches!(
+            error,
+            Error::MalformedCurrentRow {
+                ref table,
+                row_uuid,
+                ..
+            } if table == "todos" && row_uuid == row(0xff)
+        ),
+        "unexpected current-row read error: {error}"
+    );
+}
+
+#[test]
 fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();

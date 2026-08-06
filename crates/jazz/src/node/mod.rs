@@ -2175,7 +2175,7 @@ where
             .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
         {
             let record = raw.record();
-            let tx = self.current_record_sort_key(record)?;
+            let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
             candidates.push((decode_current_row(table, record)?, tx));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2193,7 +2193,7 @@ where
                 ],
             )? {
                 let record = raw.record();
-                let tx = self.current_record_sort_key(record)?;
+                let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
                 candidates.push((decode_current_row(table, record)?, tx));
             }
         }
@@ -2216,7 +2216,7 @@ where
                 deletion_event_from_value(
                     record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                 )?,
-                self.current_record_sort_key(record)?,
+                self.current_record_sort_key(&table.name, row_uuid, record)?,
             ));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2238,7 +2238,7 @@ where
                     deletion_event_from_value(
                         record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                     )?,
-                    self.current_record_sort_key(record)?,
+                    self.current_record_sort_key(&table.name, row_uuid, record)?,
                 ));
             }
         }
@@ -2247,11 +2247,25 @@ where
 
     fn current_record_sort_key(
         &self,
+        table: &str,
+        row_uuid: RowUuid,
         record: BorrowedRecord<'_>,
     ) -> Result<(TxTime, NodeUuid), Error> {
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let malformed = |source| Error::MalformedCurrentRow {
+            table: table.to_owned(),
+            row_uuid,
+            source,
+        };
+        let tx_time = TxTime(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                .map_err(malformed)?,
+        );
+        let tx_node_alias = NodeAlias(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .map_err(malformed)?,
+        );
         let tx_node = self
             .node_aliases
             .iter()
@@ -5118,6 +5132,17 @@ pub enum Error {
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),
+    /// A persisted current row could not be decoded at the point of use.
+    #[error("malformed current row in table {table} for {row_uuid:?}: {source}")]
+    MalformedCurrentRow {
+        /// Logical table containing the row.
+        table: String,
+        /// Primary-key row identity of the malformed record.
+        row_uuid: RowUuid,
+        /// The record decoding failure.
+        #[source]
+        source: records::Error,
+    },
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),
