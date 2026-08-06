@@ -246,6 +246,60 @@ fn history_top_by_stamp_asc_offset(offset: u64, limit: u64) -> GraphBuilder {
     )
 }
 
+fn history_collect_by(limit: u64) -> GraphBuilder {
+    GraphBuilder::collect_by(
+        GraphBuilder::table("history"),
+        ["row"],
+        [CollectByField::named("row")],
+        [
+            CollectByField::renamed("node", "child_id"),
+            CollectByField::renamed("title", "child_title"),
+        ],
+        "children",
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        0,
+        TopByLimit::Finite(limit),
+    )
+}
+
+fn collect_parent(row: u64, children: &[(u64, &str)]) -> Vec<Value> {
+    let child_descriptor = RecordDescriptor::new([
+        ("child_id", ValueType::U64),
+        ("child_title", ValueType::String),
+    ]);
+    vec![
+        Value::U64(row),
+        Value::Array(
+            children
+                .iter()
+                .map(|(id, title)| {
+                    Value::Record(crate::records::OwnedRecord::new(
+                        child_descriptor
+                            .create(&[Value::U64(*id), Value::String((*title).to_owned())])
+                            .unwrap(),
+                        child_descriptor,
+                    ))
+                })
+                .collect(),
+        ),
+    ]
+}
+
+fn reachability_collect_by(limit: u64) -> GraphBuilder {
+    GraphBuilder::collect_by(
+        reachability_graph(32),
+        ["src"],
+        [CollectByField::named("src")],
+        [CollectByField::renamed("dst", "child_id")],
+        "children",
+        [TopByOrder::asc("dst")],
+        ["dst"],
+        0,
+        TopByLimit::Finite(limit),
+    )
+}
+
 fn nullable_scores_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
         "scores",
@@ -4728,6 +4782,142 @@ fn top_by_suppresses_outside_window_changes() {
     batch.delete("history", history_key(1, 30, 1));
     database.commit_batch(batch).unwrap();
     assert!(subscription.try_recv().is_err());
+}
+
+#[test]
+fn collect_by_round_trips_ordered_explicit_child_ids() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database.subscribe_one_sink(history_collect_by(3)).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    // Deliberately not in declared stamp order.
+    batch.insert("history", history_values(1, 30, 30, "third"));
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(
+            collect_parent(1, &[(10, "first"), (20, "second"), (30, "third")]),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn collect_by_rejects_every_consumer_including_another_collector() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let collector = history_collect_by(2);
+    let consumers = [
+        collector
+            .clone()
+            .filter(PredicateExpr::eq("row", Value::U64(1))),
+        collector.clone().project(["row"]),
+        GraphBuilder::join(
+            collector.clone(),
+            GraphBuilder::table("history"),
+            ["row"],
+            ["row"],
+        ),
+        GraphBuilder::collect_by(
+            collector,
+            ["row"],
+            [CollectByField::named("row")],
+            [CollectByField::named("row")],
+            "nested",
+            [TopByOrder::asc("row")],
+            ["row"],
+            0,
+            TopByLimit::Finite(1),
+        ),
+    ];
+    for graph in consumers {
+        assert!(matches!(
+            database.subscribe_one_sink(graph),
+            Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+        ));
+    }
+}
+
+#[test]
+fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 30, 30, "outside"));
+    database.commit_batch(batch).unwrap();
+    assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).unwrap();
+    let replacement = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(replacement.len(), 2);
+    assert_eq!(
+        replacement[0],
+        (collect_parent(1, &[(10, "first"), (20, "second")]), -1)
+    );
+    assert_eq!(
+        replacement[1],
+        (collect_parent(1, &[(5, "front"), (10, "first")]), 1)
+    );
+}
+
+#[test]
+fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
+    fn run(chain_len: u64) -> (usize, usize, Vec<(Vec<Value>, i64)>) {
+        let storage = MemoryStorage::new(&["edges"]);
+        let mut database = Database::new(edges_schema(), storage).unwrap();
+        database.set_tick_runtime_stats_enabled(true);
+        let subscription = database
+            .subscribe_one_sink(reachability_collect_by(1))
+            .unwrap();
+        assert!(subscription.recv().unwrap().is_empty());
+        let mut batch = database.open_batch();
+        for edge in 1..chain_len {
+            insert_edge(&mut batch, edge, edge, edge + 1);
+        }
+        database.commit_batch(batch).unwrap();
+        let output = subscription.recv().unwrap().to_values().unwrap();
+        let stats = &database.last_commit_metrics().unwrap().tick.runtime_stats;
+        (
+            stats.recursive_accumulated_rows,
+            stats.arrangement_rows,
+            output,
+        )
+    }
+
+    let (small_recursive_rows, small_arrangement_rows, small_output) = run(4);
+    let (large_recursive_rows, large_arrangement_rows, large_output) = run(6);
+    assert!(
+        small_recursive_rows > 1,
+        "the collector limit must not cap closure state"
+    );
+    assert!(large_recursive_rows > small_recursive_rows);
+    assert!(large_arrangement_rows > small_arrangement_rows);
+    assert!(
+        small_output.iter().all(
+            |(parent, _)| matches!(parent[1], Value::Array(ref children) if children.len() == 1)
+        )
+    );
+    assert!(
+        large_output.iter().all(
+            |(parent, _)| matches!(parent[1], Value::Array(ref children) if children.len() == 1)
+        )
+    );
 }
 
 #[test]

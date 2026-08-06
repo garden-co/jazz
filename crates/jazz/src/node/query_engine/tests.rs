@@ -62,6 +62,7 @@ fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeS
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
         | GraphBuilder::Aggregate { input, .. } => {
             collect_binding_source_fingerprint(input, sources);
         }
