@@ -5,8 +5,9 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 #[cfg(feature = "sync-autopsy")]
@@ -63,8 +64,13 @@ use crate::query::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
+pub use crate::result_tree::{
+    MAX_RESULT_TREE_PARENT_BYTES, ParentTooLargeError, ResultNode, ResultRelation, ResultTree,
+    ResultTreeReplacement,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
+use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
     FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
@@ -243,10 +249,6 @@ enum PendingUpstreamCommand {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
     },
-    SessionClaims {
-        identity: AuthorId,
-        claims: BTreeMap<String, Value>,
-    },
 }
 
 #[derive(Clone)]
@@ -287,6 +289,32 @@ pub struct WriteState {
     pub fate: Fate,
     /// Highest durability tier observed by this `Db`.
     pub durability: DurabilityTier,
+}
+
+/// Explicit client durability cadence while the first server snapshot is
+/// loading.
+///
+/// A crash can lose up to `M - 1` writes since the last completed boundary,
+/// where `M` is this value. Older completed boundaries recover from the
+/// storage WAL. The final partial initial-sync batch is always flushed before
+/// the client returns to per-write durability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialSyncFlushCadence(NonZeroUsize);
+
+impl InitialSyncFlushCadence {
+    /// The client default: a durability boundary every 512 initial-sync writes.
+    pub const DEFAULT: Self = Self(NonZeroUsize::new(512).expect("non-zero"));
+
+    /// Create a cadence with one durability boundary per `writes` initial-sync
+    /// writes.
+    pub const fn every(writes: NonZeroUsize) -> Self {
+        Self(writes)
+    }
+
+    /// Number of writes between completed durability boundaries.
+    pub const fn writes(self) -> usize {
+        self.0.get()
+    }
 }
 
 /// Usage-site query coverage attachment.
@@ -378,11 +406,13 @@ where
             false,
             config.large_value_checkpoint_op_interval,
         )?;
+        let node = Node::new(node);
+        node.restore_pending_uploads(config.identity)?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             identity: config.identity,
-            node: Node::new(node),
+            node,
             row_id_source: RefCell::new(
                 config
                     .id_source
@@ -421,6 +451,21 @@ where
     /// close the underlying storage.
     pub fn close(&self) -> Result<(), Error> {
         Ok(self.node.node.borrow_mut().close()?)
+    }
+
+    /// Configure this client database's first-snapshot durability cadence.
+    ///
+    /// Servers do not call this client-only setting and retain their existing
+    /// storage durability behavior.
+    pub fn set_initial_sync_flush_cadence(
+        &self,
+        cadence: InitialSyncFlushCadence,
+    ) -> Result<(), Error> {
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .set_initial_sync_flush_cadence(cadence.writes())?)
     }
 
     /// Seed a settled mergeable row for server bootstrap/import flows.
@@ -819,6 +864,20 @@ where
             .map_err(Into::into)
     }
 
+    /// Tier-gated canonical structured result read.
+    ///
+    /// This is the sole Jazz-boundary materialization of relation facts into
+    /// recursive output. Wire delivery deliberately remains on its v3 carrier
+    /// until the structured delivery migration.
+    pub async fn all_result_tree(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.all_relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
     /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
     pub async fn all_relation_query(
         &self,
@@ -1073,6 +1132,13 @@ where
                 &opts.read_view,
                 Some(_local_plan),
             )?;
+        // Array output is admitted only as a complete terminal-rendered parent.
+        // Validate the reset before retaining subscription state or publishing
+        // its reset event, so an over-budget parent cannot become a partial
+        // replacement through the maintained path.
+        if !prepared.shape.query().array_subqueries.is_empty() {
+            materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
+        }
         let maintained_subscription = Some(subscription);
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
@@ -1719,7 +1785,10 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, self.identity.author)?
+            .is_some()
+        {
             let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
             (cells, parent.into_iter().collect())
         } else {
@@ -1737,7 +1806,10 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row(table, row)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, self.identity.author)?
+            .is_some()
+        {
             let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
             (cells, parent.into_iter().collect())
         } else {
@@ -1764,7 +1836,10 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, identity)?
+            .is_some()
+        {
             let (cells, parent) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
             (cells, parent.into_iter().collect())
@@ -1784,7 +1859,10 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self.local_row_for_identity(table, row, identity)?.is_some() {
+        let (cells, parents) = if self
+            .upsert_target_for_identity(table, row, identity)?
+            .is_some()
+        {
             let (cells, parent) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
             (cells, parent.into_iter().collect())
@@ -1838,7 +1916,7 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
                 self.identity.author,
@@ -1846,7 +1924,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
                 now_ms,
             ),
@@ -1856,7 +1934,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
             ),
         }
@@ -1871,13 +1949,14 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
-        let (_, parent) = self.merge_existing_cells(table, row, BTreeMap::new())?;
+        self.ensure_row_not_deleted(table, row)?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         self.write_mergeable_as_session_subject(
             made_by,
             table,
             row,
             BTreeMap::new(),
-            parent.into_iter().collect(),
+            parents,
             Some(DeletionEvent::Deleted),
         )
     }
@@ -1917,8 +1996,7 @@ where
                 format!("policy denied DELETE on table {table}"),
             ));
         }
-        let (_, parent) =
-            self.merge_existing_cells_for_identity(table, row, BTreeMap::new(), identity)?;
+        let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
                 identity,
@@ -1926,7 +2004,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
                 now_ms,
             ),
@@ -1936,7 +2014,7 @@ where
                 table,
                 row,
                 BTreeMap::new(),
-                parent.into_iter().collect(),
+                parents,
                 Some(DeletionEvent::Deleted),
             ),
         }
@@ -1984,15 +2062,15 @@ where
 
     /// Attach process-local auth claims for `identity`.
     pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
-        self.node
-            .node
-            .borrow_mut()
-            .set_session_claims(identity, claims.clone());
-        self.node
-            .upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::SessionClaims { identity, claims });
-        self.node.schedule_tick(TickUrgency::Deferred);
+        let changed = {
+            let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_session_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
     }
 
     /// Return whether this Db's author can delete the current local row.
@@ -2785,8 +2863,20 @@ where
         Ok(cells)
     }
 
-    fn local_row(&self, table: &str, row: RowUuid) -> Result<Option<CurrentRow>, Error> {
-        self.local_row_for_identity(table, row, self.identity.author)
+    fn upsert_target_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target = self.local_row_for_identity(table, row, identity)?;
+        if target.is_some()
+            || identity == AuthorId::SYSTEM
+            || self.table_schema(table)?.read_policy.is_none()
+        {
+            return Ok(target);
+        }
+        Err(read_for_write_denied("UPSERT", table))
     }
 
     /// Read one locally-current row by primary key without evaluating a table
@@ -2923,19 +3013,36 @@ where
     ) -> Result<(RowCells, Option<TxId>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
-        let mut cells = BTreeMap::new();
-        let mut parent = None;
-        if let Some(existing) = self.local_row_for_identity(table, row, identity)? {
-            for column in &table_schema.columns {
-                if column.large_value.is_some() {
-                    continue;
-                }
-                if let Some(value) = existing.cell(table_schema, &column.name) {
-                    cells.insert(column.name.clone(), value);
-                }
-            }
-            parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            // A full-row write does not observe user data. Its causal parent is
+            // storage bookkeeping, so obtain only that parent with system
+            // authority rather than evaluating the writer's read policy.
+            let parent = self
+                .local_current_row(table, row)?
+                .as_ref()
+                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
+            return Ok((patch, parent));
         }
+        if !self.can_read_for_identity(table, row, identity)? {
+            return Err(read_for_write_denied("partial UPDATE", table));
+        }
+        let mut cells = BTreeMap::new();
+        let existing = self
+            .local_row_for_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(table_schema, &column.name) {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
         cells.extend(patch);
         Ok((cells, parent))
     }
@@ -3486,9 +3593,30 @@ where
     }
 
     fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
-        self.outbox.borrow_mut().push(PendingUpload { tx_id, unit });
+        let mut outbox = self.outbox.borrow_mut();
+        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+            return;
+        }
+        outbox.push(PendingUpload { tx_id, unit });
+        drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
+    }
+
+    /// Restore locally originated, unsettled durable writes into the
+    /// process-local upload queue after reopening client storage.
+    fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
+        let pending = self
+            .node
+            .borrow_mut()
+            .pending_transaction_ids_for(identity.node, identity.author)?;
+        let mut restored = HashSet::new();
+        for tx_id in pending {
+            if restored.insert(tx_id) {
+                self.queue_pending_upload(tx_id, None);
+            }
+        }
+        Ok(())
     }
 
     fn mark_subscriber_connections_dirty(&self) {
@@ -3669,6 +3797,7 @@ where
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 announced_shapes: BTreeSet::new(),
+                sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
@@ -4746,6 +4875,10 @@ enum ConnectionLink {
         upstream_subscriptions: PendingUpstreamCommands,
         /// Shapes already registered on this connection.
         announced_shapes: BTreeSet<ShapeRegistrationKey>,
+        /// Latest session-claim revision shipped for each identity on this
+        /// connection. A fresh link starts empty and therefore receives every
+        /// current claim map, even if another link has already received it.
+        sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
         /// Locally-authored transactions to upload (shared with the `Db`).
         outbox: Outbox,
         /// Transactions already shipped on this connection (dedup across ticks).
@@ -4826,6 +4959,7 @@ where
         else {
             unreachable!("subscriber identity requires a subscriber link")
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -4933,6 +5067,7 @@ where
         else {
             return Ok(());
         };
+        peer.advance_authorization_progress();
         let groups = coverage_groups
             .iter()
             .map(|(coverage, group)| {
@@ -4950,7 +5085,7 @@ where
                 binding_id: coverage.binding_id,
                 read_view: coverage.opts.read_view_key(),
             };
-            let mut update = {
+            let update = {
                 let mut node = self.node.borrow_mut();
                 peer.rehydrate_query_for_subscription_with_opts(
                     &mut node,
@@ -4960,15 +5095,6 @@ where
                     coverage.opts.clone(),
                 )?
             };
-            // A policy-head rehydrate is authoritative. Force reset framing
-            // even when the peer's known-state cursor is current: permissions
-            // are not represented in that cursor.
-            if let SyncMessage::ViewUpdate {
-                reset_result_set, ..
-            } = &mut update
-            {
-                *reset_result_set = true;
-            }
             for subscription in subscribers {
                 let update = retarget_view_update(update.clone(), subscription);
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
@@ -4991,12 +5117,32 @@ where
                 pending,
                 upstream_subscriptions,
                 announced_shapes,
+                sent_session_claim_revisions,
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
                 pending_view_update_chunks,
             } => {
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
+                let claims = self.node.borrow().session_claims_with_revisions();
+                for (identity, claims, revision) in claims {
+                    if sent_session_claim_revisions
+                        .get(&identity)
+                        .is_some_and(|sent| *sent >= revision)
+                    {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .transport
+                        .send(SyncMessage::SessionClaims { identity, claims })
+                    {
+                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
+                            return Ok(stats);
+                        }
+                        return Err(transport_error(error));
+                    }
+                    sent_session_claim_revisions.insert(identity, revision);
+                }
                 let pending_index = 0;
                 while pending_index < pending.len() {
                     match &pending[pending_index] {
@@ -5091,21 +5237,6 @@ where
                                     extent: extent.clone(),
                                 })
                             {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
-                                }
-                                return Err(transport_error(error));
-                            }
-                        }
-                        PendingUpstreamCommand::SessionClaims { identity, claims } => {
-                            if let Err(error) = self.transport.send(SyncMessage::SessionClaims {
-                                identity: *identity,
-                                claims: claims.clone(),
-                            }) {
                                 if handle_transport_backpressure(
                                     &self.node,
                                     &self.scheduler,
@@ -6044,6 +6175,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6069,6 +6201,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_carriers,
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+            authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
             program_fact_adds,
@@ -6321,6 +6454,23 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let mut message = message;
+    match &mut message {
+        SyncMessage::ViewUpdate {
+            subscription,
+            peer_payload_inventory,
+            ..
+        }
+        | SyncMessage::ViewUpdateChunk {
+            subscription,
+            peer_payload_inventory,
+            ..
+        } => {
+            peer_payload_inventory.authorization_progress =
+                Some(peer.authorization_progress_for_subscription(*subscription));
+        }
+        _ => {}
+    }
     let extents = match &message {
         SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
@@ -6946,6 +7096,15 @@ fn row_already_deleted(row: RowUuid) -> Error {
     Error::new(
         ErrorCode::WriteRejected,
         format!("row already deleted: {}", row.0),
+    )
+}
+
+fn read_for_write_denied(operation: &str, table: &str) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!(
+            "read policy denied {operation} on table {table}: the operation requires read permission on the target row"
+        ),
     )
 }
 
@@ -7783,6 +7942,101 @@ fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
 }
 
+/// Render the flat maintained/query fact boundary once, at the Jazz public
+/// result boundary. In particular, consumers must not rebuild relation trees
+/// from `RelationSnapshot` rows and edges themselves.
+fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
+    type RowKey = (String, RowUuid);
+    let roots = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .collect::<Vec<_>>();
+    let rows = snapshot
+        .rows
+        .into_iter()
+        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
+        .collect::<BTreeMap<RowKey, CurrentRow>>();
+    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
+    for edge in snapshot.edges {
+        edges
+            .entry((edge.source_table.clone(), edge.source_row))
+            .or_default()
+            .push(edge);
+    }
+
+    fn node(
+        row_key: &(String, RowUuid),
+        row: &CurrentRow,
+        arrays: &[crate::query::ArraySubquery],
+        rows: &BTreeMap<RowKey, CurrentRow>,
+        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
+        root: bool,
+    ) -> Result<ResultNode, Error> {
+        let mut relations = BTreeMap::new();
+        for array in arrays {
+            let children = edges
+                .get(row_key)
+                .into_iter()
+                .flatten()
+                .filter(|edge| edge.relation == array.column_name)
+                .filter_map(|edge| {
+                    let key = (edge.target_table.clone(), edge.target_row);
+                    rows.get(&key).map(|child| (key, child))
+                })
+                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+        }
+        let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
+        let rendered_bytes = rendered_node_bytes(row, &relations);
+        if rendered_bytes > MAX_RESULT_TREE_PARENT_BYTES {
+            let relation_path = arrays
+                .first()
+                .map(|array| array.column_name.clone())
+                .unwrap_or_default();
+            return Err(Error::new(
+                ErrorCode::Query,
+                ParentTooLargeError {
+                    parent: row.row_uuid(),
+                    relation_path,
+                    rendered_bytes,
+                    limit: MAX_RESULT_TREE_PARENT_BYTES,
+                }
+                .to_string(),
+            ));
+        }
+        let _ = root;
+        Ok(ResultNode {
+            occurrence,
+            row: row.clone(),
+            relations,
+        })
+    }
+
+    let roots = roots
+        .into_iter()
+        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
+        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResultTree { roots })
+}
+
+fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRelation>) -> usize {
+    let mut bytes = row.encoded_record().1.len();
+    for (name, relation) in relations {
+        bytes += name.len();
+        if let ResultRelation::Array(children) = relation {
+            bytes += children
+                .iter()
+                .map(|child| rendered_node_bytes(&child.row, &child.relations))
+                .sum::<usize>();
+        }
+    }
+    bytes
+}
+
 struct SubscriptionState {
     kind: SubscriptionKind,
     groove_runtime_token: u64,
@@ -7800,7 +8054,7 @@ struct SubscriptionState {
 
 #[derive(Clone, Default)]
 struct RelationSnapshotIndex {
-    roots: BTreeMap<(String, RowUuid), usize>,
+    roots: BTreeMap<OutputOccurrenceId, usize>,
     related: BTreeMap<(String, RowUuid), usize>,
     edges: BTreeSet<RelationEdge>,
 }
@@ -7811,7 +8065,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert((row.table().to_owned(), row.row_uuid()), position);
+                .insert(single_source_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -7845,6 +8099,25 @@ pub struct RemovedRow {
     pub table: String,
     /// Stable row identity.
     pub row_uuid: RowUuid,
+    /// Stable identity of the removed output occurrence.
+    pub occurrence_id: OutputOccurrenceId,
+}
+
+/// One row addressed by its maintained output occurrence identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionOutputRow {
+    /// Stable output occurrence identity.
+    pub occurrence_id: OutputOccurrenceId,
+    /// Materialized row body for this output occurrence.
+    pub row: CurrentRow,
+}
+
+impl std::ops::Deref for SubscriptionOutputRow {
+    type Target = CurrentRow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
 }
 
 /// Materialized relation edge removed from a subscription result.
@@ -7860,9 +8133,9 @@ pub enum SubscriptionEvent {
         /// Fresh subscriptions start with a reset delta from the empty result.
         reset: bool,
         /// Rows newly visible to the subscription.
-        added: Vec<CurrentRow>,
+        added: Vec<SubscriptionOutputRow>,
         /// Rows still visible with changed projected cells.
-        updated: Vec<CurrentRow>,
+        updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
         /// Related rows newly referenced by relation edges.
@@ -7980,7 +8253,11 @@ fn subscription_reset_event(
 ) -> SubscriptionEvent {
     SubscriptionEvent::Delta {
         reset: true,
-        added: current.rows,
+        added: current
+            .rows
+            .into_iter()
+            .map(subscription_output_row)
+            .collect(),
         updated: Vec::new(),
         removed: Vec::new(),
         added_related: Vec::new(),
@@ -8024,8 +8301,10 @@ fn subscription_delta_event_with_reset(
 
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
-            None => added.push((*row).clone()),
-            Some(previous_row) if *previous_row != *row => updated.push((*row).clone()),
+            None => added.push(subscription_output_row((*row).clone())),
+            Some(previous_row) if *previous_row != *row => {
+                updated.push(subscription_output_row((*row).clone()))
+            }
             Some(_) => {}
         }
     }
@@ -8035,6 +8314,7 @@ fn subscription_delta_event_with_reset(
             removed.push(RemovedRow {
                 table: key.0.clone(),
                 row_uuid: key.1,
+                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
             });
         }
     }
@@ -8079,7 +8359,10 @@ fn apply_maintained_update_to_snapshot(
             *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
             return SubscriptionEvent::Delta {
                 reset: false,
-                added: update_added,
+                added: update_added
+                    .into_iter()
+                    .map(subscription_output_row)
+                    .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
                 added_related: Vec::new(),
@@ -8121,7 +8404,11 @@ fn apply_maintained_update_to_snapshot(
 
         return SubscriptionEvent::Delta {
             reset: false,
-            added: event_added,
+            added: event_added
+                .iter()
+                .cloned()
+                .map(subscription_output_row)
+                .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
             added_related,
@@ -8141,23 +8428,22 @@ fn apply_maintained_update_to_snapshot(
     let mut added_related = Vec::new();
 
     for row in &update_added {
-        let key = (row.table().to_owned(), row.row_uuid());
+        let key = single_source_occurrence_id(row);
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
-                updated.push(row.clone());
+                updated.push(subscription_output_row(row.clone()));
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
             for position in snapshot_index.related.values_mut() {
                 *position += 1;
             }
-            snapshot_index.roots.insert(
-                (row.table().to_owned(), row.row_uuid()),
-                snapshot.root_count,
-            );
+            snapshot_index
+                .roots
+                .insert(single_source_occurrence_id(row), snapshot.root_count);
             snapshot.root_count += 1;
-            added.push(row.clone());
+            added.push(subscription_output_row(row.clone()));
         }
     }
 
@@ -8173,10 +8459,13 @@ fn apply_maintained_update_to_snapshot(
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
-            snapshot_index.roots.remove(&row_key);
+            snapshot_index
+                .roots
+                .remove(&single_source_occurrence_id(&row));
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
+                occurrence_id: single_source_occurrence_id(&row),
             });
         } else {
             index += 1;
@@ -8203,10 +8492,11 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let key = (row.table().to_owned(), row.row_uuid());
-        if snapshot_index.roots.contains_key(&key) {
+        let root_key = single_source_occurrence_id(row);
+        if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
+        let key = (row.table().to_owned(), row.row_uuid());
         if let Some(position) = snapshot_index.related.get(&key).copied() {
             snapshot.rows[position] = row.clone();
         } else {
@@ -8222,7 +8512,11 @@ fn apply_maintained_update_to_snapshot(
                 && edge.target_row == removed_edge.target_row
         });
         let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
-        let is_root = snapshot_index.roots.contains_key(&target_key);
+        let is_root = snapshot_index
+            .roots
+            .contains_key(&OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                target_key.1.0,
+            )));
         if !still_referenced && !is_root {
             if let Some(position) = snapshot_index.related.remove(&target_key) {
                 snapshot.rows.remove(position);
@@ -8284,6 +8578,17 @@ where
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions { tier, read_view }.read_view_key(),
     })
+}
+
+fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+}
+
+fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
+    SubscriptionOutputRow {
+        occurrence_id: single_source_occurrence_id(&row),
+        row,
+    }
 }
 
 fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {

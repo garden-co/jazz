@@ -389,10 +389,16 @@ export class NativeRuntimeAdapter implements Runtime {
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string; db?: NativeDb },
+    opts?: { persistentPath?: string; db?: NativeDb; initialSyncFlushEvery?: number },
   ) {
     this.schemaBytes = encodeSchema(schema);
-    this.configBytes = openConfig(node, author, sourceId, historyComplete);
+    this.configBytes = openConfig(
+      node,
+      author,
+      sourceId,
+      historyComplete,
+      opts?.initialSyncFlushEvery,
+    );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
@@ -1562,8 +1568,10 @@ export class NativeRuntimeAdapter implements Runtime {
         const next = await source.source.read();
         if (next.done || subscription.cancelled) return;
         void this.applySubscriptionChunk(subscription, next.value).catch((error: unknown) => {
-          subscription.cancelled = true;
-          console.error("Core subscription failed", error);
+          this.failSubscription(
+            subscription,
+            error instanceof Error ? error : new Error(String(error)),
+          );
         });
       }
     } finally {
@@ -1580,8 +1588,10 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const event of source.source.readAll()) {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
       void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
-        subscription.cancelled = true;
-        console.error("Core subscription failed", error);
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       });
     }
   }
@@ -1596,6 +1606,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (chunk.type === "rejected") {
+      if (chunk.reason.type === "ShapeRegistrationPendingCatalogueAdmission") {
+        return;
+      }
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
@@ -4098,7 +4111,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       type: "rejected";
       reason:
         | { type: "UnsupportedShapeCapability"; detail: string }
-        | { type: "ServerFailure"; code: string };
+        | { type: "ServerFailure"; code: string }
+        | { type: "ShapeRegistrationPendingCatalogueAdmission" };
     }
   | { type: "closed" } {
   if (!chunk || typeof chunk !== "object") throw new Error("expected subscription chunk");
@@ -4157,13 +4171,17 @@ function normalizeSubscriptionRejectionReason(
   reason: unknown,
 ):
   | { type: "UnsupportedShapeCapability"; detail: string }
-  | { type: "ServerFailure"; code: string } {
+  | { type: "ServerFailure"; code: string }
+  | { type: "ShapeRegistrationPendingCatalogueAdmission" } {
   if (!reason || typeof reason !== "object") {
     throw new Error("expected subscription rejection reason");
   }
   const record = reason as { type?: unknown; detail?: unknown; code?: unknown };
   if (record.type === "UnsupportedShapeCapability" && typeof record.detail === "string") {
     return { type: "UnsupportedShapeCapability", detail: record.detail };
+  }
+  if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
+    return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
   if (record.type === "ServerFailure" && typeof record.code === "string") {
     return { type: "ServerFailure", code: record.code };
@@ -4174,9 +4192,15 @@ function normalizeSubscriptionRejectionReason(
 function subscriptionRejectionError(
   reason:
     | { type: "UnsupportedShapeCapability"; detail: string }
-    | { type: "ServerFailure"; code: string },
+    | { type: "ServerFailure"; code: string }
+    | { type: "ShapeRegistrationPendingCatalogueAdmission" },
 ): Error {
-  const detail = reason.type === "UnsupportedShapeCapability" ? reason.detail : reason.code;
+  const detail =
+    reason.type === "UnsupportedShapeCapability"
+      ? reason.detail
+      : reason.type === "ServerFailure"
+        ? reason.code
+        : "catalogue admission pending";
   return new Error(`Subscription rejected: ${reason.type}: ${detail}`);
 }
 

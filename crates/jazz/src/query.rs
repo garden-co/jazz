@@ -1825,6 +1825,15 @@ pub struct ArraySubquery {
     /// Child-local row limit.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Whether the child array is explicitly unbounded.
+    ///
+    /// This is deliberately distinct from an absent `limit`: array
+    /// boundedness must be declared, so neither field being set is invalid.
+    #[serde(default)]
+    pub unbounded: bool,
+    /// Number of child rows to skip after filtering and ordering.
+    #[serde(default)]
+    pub offset: usize,
     /// Parent membership requirement for this relation.
     #[serde(default)]
     pub requirement: ArraySubqueryRequirement,
@@ -1850,6 +1859,8 @@ impl ArraySubquery {
             select: None,
             order_by: Vec::new(),
             limit: None,
+            unbounded: false,
+            offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
         }
@@ -1879,6 +1890,23 @@ impl ArraySubquery {
     /// Limit child rows after filtering and ordering.
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
+        self.unbounded = false;
+        self
+    }
+
+    /// Explicitly retain every child after filtering, ordering, and offset.
+    ///
+    /// This is a supported production mode. It must be selected explicitly so
+    /// an omitted bound cannot accidentally create an unbounded array.
+    pub fn unbounded(mut self) -> Self {
+        self.limit = None;
+        self.unbounded = true;
+        self
+    }
+
+    /// Skip child rows after filtering and ordering.
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
         self
     }
 
@@ -2534,6 +2562,18 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Structured array results must declare whether they are bounded.
+    #[error("array subquery {relation_path} must specify limit(...) or unbounded()")]
+    UnboundedArraySubquery {
+        /// Dot-separated relation path from the root result.
+        relation_path: String,
+    },
+    /// An array subquery cannot be both finite and unbounded.
+    #[error("array subquery {relation_path} cannot specify both limit(...) and unbounded()")]
+    ConflictingArraySubqueryBound {
+        /// Dot-separated relation path from the root result.
+        relation_path: String,
+    },
     /// Referenced table does not exist.
     #[error("unknown table {0}")]
     UnknownTable(String),
@@ -2980,7 +3020,9 @@ fn validate_array_subqueries(
                 path: subquery.column_name.clone(),
             });
         }
-        validate_array_subquery(schema, parent, subquery, params)?;
+    }
+    for subquery in subqueries {
+        validate_array_subquery(schema, parent, subquery, params, &subquery.column_name)?;
     }
     Ok(())
 }
@@ -2990,12 +3032,23 @@ fn validate_array_subquery(
     parent: &TableSchema,
     subquery: &ArraySubquery,
     params: &mut BTreeMap<String, ColumnType>,
+    relation_path: &str,
 ) -> Result<(), QueryError> {
     let child = table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
     let child_type = planner_column_type(&child, &subquery.inner_column)?;
     if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
+    }
+    if subquery.limit.is_none() && !subquery.unbounded {
+        return Err(QueryError::UnboundedArraySubquery {
+            relation_path: relation_path.to_owned(),
+        });
+    }
+    if subquery.limit.is_some() && subquery.unbounded {
+        return Err(QueryError::ConflictingArraySubqueryBound {
+            relation_path: relation_path.to_owned(),
+        });
     }
     for predicate in &subquery.filters {
         validate_predicate(&child, predicate, params)?;
@@ -3008,7 +3061,16 @@ fn validate_array_subquery(
     for order in &subquery.order_by {
         planner_column_type(&child, &order.column)?;
     }
-    validate_array_subqueries(schema, &child, &subquery.nested_arrays, params)?;
+    let mut names = std::collections::BTreeSet::new();
+    for nested in &subquery.nested_arrays {
+        if nested.column_name.is_empty() || !names.insert(nested.column_name.as_str()) {
+            return Err(QueryError::BadIncludePath {
+                path: nested.column_name.clone(),
+            });
+        }
+        let nested_path = format!("{relation_path}.{}", nested.column_name);
+        validate_array_subquery(schema, &child, nested, params, &nested_path)?;
+    }
     Ok(())
 }
 
@@ -3611,6 +3673,13 @@ fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
         bytes.push(b'l');
         put_len(&mut bytes, limit);
     }
+    if subquery.unbounded {
+        bytes.push(b'u');
+    }
+    if subquery.offset != 0 {
+        bytes.push(b'f');
+        put_len(&mut bytes, subquery.offset);
+    }
     bytes.push(match subquery.requirement {
         ArraySubqueryRequirement::Optional => b'?',
         ArraySubqueryRequirement::AtLeastOne => b'+',
@@ -4010,6 +4079,9 @@ fn value_type(value: &Value) -> ColumnType {
             .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))),
         Value::Nullable(Some(value)) => ColumnType::Nullable(Box::new(value_type(value))),
         Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
+        Value::Record(_) => {
+            panic!("record-valued query bindings are not part of the current Jazz query surface")
+        }
     }
 }
 
@@ -4041,6 +4113,9 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         (Value::Nullable(Some(value)), ColumnType::Nullable(inner)) => {
             value_matches_type(value, inner)
         }
+        // Jazz has no public record column type in this step, so records are
+        // never accepted as query-bound values.
+        (Value::Record(_), _) => false,
         _ => false,
     }
 }
@@ -4117,6 +4192,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(13);
             bytes.push(1);
             put_value(bytes, value);
+        }
+        Value::Record(_) => {
+            panic!("record-valued query bindings have no current canonical encoding")
         }
     }
 }
@@ -4437,7 +4515,11 @@ mod tests {
                     .order_by("tag", OrderDirection::Asc)
                     .limit(5)
                     .requirement(ArraySubqueryRequirement::AtLeastOne)
-                    .nested(ArraySubquery::new("tagRows", "tags", "id", "tag").select(["name"])),
+                    .nested(
+                        ArraySubquery::new("tagRows", "tags", "id", "tag")
+                            .select(["name"])
+                            .limit(5),
+                    ),
             )
             .validate(&schema())
             .unwrap();
@@ -4460,27 +4542,23 @@ mod tests {
             .array_subquery(
                 ArraySubquery::new("tags", "issue_tags", "issue", "id")
                     .filter(eq(col("tag"), param("tag")))
-                    .filter(ne(col("issue"), param("issue"))),
+                    .filter(ne(col("issue"), param("issue")))
+                    .limit(10),
             )
-            .array_subquery(ArraySubquery::new(
-                "projectIssues",
-                "issues",
-                "project",
-                "project",
-            ))
+            .array_subquery(
+                ArraySubquery::new("projectIssues", "issues", "project", "project").limit(10),
+            )
             .validate(&schema())
             .unwrap();
         let right = Query::from("issues")
-            .array_subquery(ArraySubquery::new(
-                "projectIssues",
-                "issues",
-                "project",
-                "project",
-            ))
+            .array_subquery(
+                ArraySubquery::new("projectIssues", "issues", "project", "project").limit(10),
+            )
             .array_subquery(
                 ArraySubquery::new("tags", "issue_tags", "issue", "id")
                     .filter(ne(col("issue"), param("issue")))
-                    .filter(eq(col("tag"), param("tag"))),
+                    .filter(eq(col("tag"), param("tag")))
+                    .limit(10),
             )
             .validate(&schema())
             .unwrap();
@@ -4516,6 +4594,58 @@ mod tests {
             .validate(&schema)
             .unwrap_err();
         assert!(matches!(err, QueryError::BadIncludePath { .. }));
+    }
+
+    #[test]
+    fn array_subqueries_require_declared_bounds_recursively_and_include_offset_in_identity() {
+        let schema = schema();
+        let undeclared = Query::from("issues").array_subquery(ArraySubquery::new(
+            "tags",
+            "issue_tags",
+            "issue",
+            "id",
+        ));
+        assert_eq!(
+            undeclared.validate(&schema).unwrap_err(),
+            QueryError::UnboundedArraySubquery {
+                relation_path: "tags".to_owned(),
+            }
+        );
+
+        let nested_undeclared = Query::from("issues").array_subquery(
+            ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                .limit(1)
+                .nested(ArraySubquery::new("tagRows", "tags", "id", "tag")),
+        );
+        assert_eq!(
+            nested_undeclared.validate(&schema).unwrap_err(),
+            QueryError::UnboundedArraySubquery {
+                relation_path: "tags.tagRows".to_owned(),
+            }
+        );
+
+        let zero = Query::from("issues").array_subquery(
+            ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                .offset(2)
+                .limit(0),
+        );
+        let one = Query::from("issues").array_subquery(
+            ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                .offset(3)
+                .limit(0),
+        );
+        let zero = zero.validate(&schema).unwrap();
+        assert_eq!(zero.query().array_subqueries[0].offset, 2);
+        assert_ne!(zero.shape_id(), one.validate(&schema).unwrap().shape_id());
+
+        Query::from("issues")
+            .array_subquery(
+                ArraySubquery::new("tags", "issue_tags", "issue", "id")
+                    .offset(2)
+                    .unbounded(),
+            )
+            .validate(&schema)
+            .unwrap();
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::time::TxTime;
+use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
 /// Messages exchanged between Jazz nodes.
@@ -278,6 +279,9 @@ pub struct PeerPayloadInventory {
     /// exclusive coverage must remain explicit `VersionBundle` payloads until
     /// the wire protocol grows finer-grained inventory refs.
     pub complete_tx_payloads: Vec<TxId>,
+    /// Server-stamped authorization generation for the binding view carried by
+    /// this update. It qualifies a subsequent fast known-state declaration.
+    pub authorization_progress: Option<u64>,
 }
 
 /// One immutable row-version payload carried by a committed transaction.
@@ -1471,6 +1475,16 @@ pub enum KnownStateDeclaration {
         /// Server-stamped settled-through position being echoed.
         position: GlobalSeq,
     },
+    /// Fast declaration qualified by the authorization state under which the
+    /// receiver applied it.
+    FastWithAuthorizationProgress {
+        /// Completeness class this declaration claims.
+        completeness: KnownStateCompleteness,
+        /// Server-stamped settled-through position being echoed.
+        position: GlobalSeq,
+        /// Server-stamped authorization generation echoed by the receiver.
+        authorization_progress: u64,
+    },
     /// Exact declaration of row-version payloads currently held by the receiver.
     ExactVersionSet {
         /// Explicit version refs the receiver can satisfy without a body.
@@ -1575,6 +1589,11 @@ pub struct RealRowMemberEntry {
     pub table: groove::Intern<String>,
     /// Row identity.
     pub row_uuid: RowUuid,
+    /// Stable identity of the rendered output occurrence. This is the root
+    /// row for ordinary single-source output and the ordered source tuple for
+    /// a flat join. It deliberately does not include content-version fields,
+    /// so replacements retain their output address.
+    pub occurrence_id: Option<OutputOccurrenceId>,
     /// Visible content transaction, when this member has a content row.
     #[serde(default)]
     pub content_tx: Option<TxId>,
@@ -1616,6 +1635,9 @@ impl RealRowMemberEntry {
         Self {
             table,
             row_uuid,
+            occurrence_id: Some(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                row_uuid.0,
+            ))),
             content_tx: Some(content_tx),
             layer: ResultRowLayer::Content,
             deletion_tx: None,
@@ -1633,6 +1655,21 @@ impl RealRowMemberEntry {
     pub fn with_settle_position(mut self, settle_position: Option<GlobalSeq>) -> Self {
         self.settle_position = settle_position;
         self
+    }
+
+    /// Attach the stable rendered-output address supplied by the maintained
+    /// terminal. Join contributors remain in declared source order.
+    pub fn with_occurrence_id(mut self, occurrence_id: OutputOccurrenceId) -> Self {
+        self.occurrence_id = Some(occurrence_id);
+        self
+    }
+
+    /// Stable output occurrence identity. Old persisted members without this
+    /// field are normalized to their legacy single-source identity.
+    pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
+        self.occurrence_id.clone().unwrap_or_else(|| {
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
+        })
     }
 
     /// Return the ordinary current-content projection when available.
@@ -1746,6 +1783,12 @@ impl ResultMemberEntry {
             Self::Row(entry) => Some(entry),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
+    }
+
+    /// Return the stable rendered-output address for a real-row member.
+    pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
+        self.as_real_row()
+            .map(RealRowMemberEntry::output_occurrence_id)
     }
 
     /// Return the ordinary current-content projection when this member has one.
@@ -2347,6 +2390,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 }
                 None => bytes.push(0),
             }
+        }
+        Value::Record(_) => {
+            panic!("record-valued values have no v3 protocol encoding")
         }
     }
 }

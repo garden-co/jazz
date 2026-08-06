@@ -48,7 +48,7 @@ pub use crate::db::TextEdit;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
-pub use object::ObjectId;
+pub use object::{ObjectId, OutputOccurrenceId};
 #[cfg(feature = "client")]
 pub use sync::ClientId;
 #[cfg(feature = "client")]

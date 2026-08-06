@@ -647,4 +647,47 @@ describe("PersistentBrowserOpfsRuntime", () => {
     expect(worker.terminated).toBe(true);
     expect(worker.messages.some((message) => message.method === "close")).toBe(true);
   });
+
+  it("forwards the configured initial-sync flush cadence to the OPFS owner", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-flush-cadence-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+      17,
+    );
+    const worker = FakeWorker.instances[0];
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "open")).toBe(true);
+    });
+    const openMessage = worker.messages.find((message) => message.method === "open");
+    expect(openMessage?.args[5]).toBe(17);
+
+    await runtime.close();
+  });
+
+  it("defaults the OPFS owner initial-sync flush cadence to 512 writes", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-default-flush-cadence-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "open")).toBe(true);
+    });
+    const openMessage = worker.messages.find((message) => message.method === "open");
+    expect(openMessage?.args[5]).toBe(512);
+
+    await runtime.close();
+  });
 });

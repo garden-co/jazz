@@ -94,6 +94,12 @@ export interface DbConfig {
   backendSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
   dbName?: string;
+  /**
+   * Initial-sync durability boundary, in writes (default: 512 for clients).
+   * A crash can lose up to M - 1 writes since the previous boundary; older
+   * boundaries recover from the storage WAL.
+   */
+  initialSyncFlushEvery?: number;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
   /** Optional OTLP/HTTP collector URL for WASM trace telemetry. */

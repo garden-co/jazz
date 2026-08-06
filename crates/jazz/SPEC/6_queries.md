@@ -56,6 +56,8 @@ Invariant digest:
 - `INV-QUERY-19`: Exclusive transaction view shipping MUST be view-atomic, not transport-atomic: a visible exclusive result for a maintained subscription view MUST include every exclusive version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
 - `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
 - `INV-QUERY-21`: Array subqueries MUST be represented separately from forward `Include` paths and MUST emit relation payload edges `(source_table, source_row_uuid, relation, target_table, target_row_uuid)` plus row batches; child filters/select/order/limit affect only child relation material, optional unreadable children are omitted with their edges while readable parents remain, and explicit requirements are the only array-subquery form that can filter root membership.
+- `INV-QUERY-22`: Structured query output MUST be constructed only by the output terminal as an ordered tree; maintained graph deltas remain flat, and a changed rendered parent is delivered as one whole-parent replacement.
+- `INV-QUERY-23`: A flat joined output occurrence MUST be identified by its ordered contributing source-row ids, not by its root row id; maintained delivery MUST address additions, removals, and replacements by that composite occurrence identity.
 
 ## Details
 
@@ -99,6 +101,12 @@ reject subquery joins unless those joins have defined query and
 maintained-subscription semantics. `array_subqueries` are
 canonicalized into shape identity separately from includes; sibling ordering is
 not semantic, but duplicate sibling `column_name`s are rejected.
+
+`JoinVia` is an existential reference/junction traversal: it constrains root
+membership and supplies join witnesses; it is not a general relational join
+whose record is publicly returned. Flat joined output is a separate target AST
+form, described in §6.4.1. Conflating these two forms would make policy
+traversal accidentally promise a public tuple shape.
 
 ### 6.1.1 Membership and containment filters
 
@@ -218,7 +226,7 @@ sharing. Lowering MUST use the established policy-comparison path for claim
 comparisons; any policy-only normalization remains scoped to that comparison
 path and MUST NOT change ordinary arrangement-key encodings.
 
-### 6.4 Result sets, include paths, and relation payloads
+### 6.4 Result sets, include paths, and structured output
 
 A result set is the authoritative membership for a query in a read view.
 Result-set sharing MUST be keyed by every semantic input that can affect
@@ -244,18 +252,112 @@ subscription payload. Sync membership keeps holes first-class: a readable parent
 is never dropped from sync solely because an included target is absent or
 unreadable (`INV-QUERY-10`).
 
-Array subqueries produce relation payload material, not nested row values inside
-core rows. A relation payload is a set of row batches plus typed relation facts
-that identify the source and target rows across each relation level. It MUST
-retain the membership, ordering, and visibility information required to apply
-child changes correctly.
-For a reverse relation array, the edge source is the parent row and the target
-is each visible correlated child row. For nested array subqueries, child rows
-become the source for the next relation level. Child filters, select columns,
-ordering, and limits affect only the child relation material; they do not change
-root row membership unless the array subquery has an explicit requirement.
-Unreadable child rows and their edges are omitted, while readable parents remain
-visible for optional array subqueries (`INV-QUERY-21`).
+**Decision, Anselm 2026-08-05 — one output terminal, two shapes.** Joins
+produce flat, wide rows in the Groove graph. `CollectBy` is the sole output
+terminal and chooses the public shape: **collect** renders an ordered recursive
+tree, while **expand** renders flat tuples. Nothing on the Jazz side renders,
+fan-ins, or otherwise reshapes maintained output. The IVM graph and its
+lowering remain flat and DBSP-native: parent rows, child rows, associations, and
+joined tuples are ordinary weighted rows. A graph delta MUST NOT update an
+inner collection or carry an already-rendered form.
+
+**Implementation status (2026-08-04).** This is a target design. Current core
+still emits flat root rows plus relation facts and the consumer-side materializer
+reassembles them; no structured terminal, recursive record value, or v4 wire
+exists yet.
+
+Nesting and flat expansion are constructed only by Groove's output-terminal
+`CollectBy` (`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT
+feed any graph node, including another collector; graph validation MUST reject
+that shape. In collect mode, one terminal-owned internal collection tree reads
+flat associations and writes the final recursive value. In expand mode, the same
+terminal reads flat wide tuples and writes tuples directly. The descriptor MUST
+encode every input that affects either output, as required by
+`groove/SPEC/INVARIANTS.md::INV-QUERY-1A`; Jazz names the query shape,
+correlation, projection, ordering, bounds, source positions, and terminal mode
+that supply those inputs. Jazz has no renderer or terminal policy-composition
+role.
+
+The only v1 incremental structured delta is a **whole-parent replacement**:
+retract the previously rendered parent node and add the complete new parent
+node, addressed by its stable output occurrence. There is no children-only,
+child-insert, child-remove, or position delta in v1. The structured-delta wire
+envelope MUST be extensible so a narrower parent/child delta family can be added
+later without reinterpreting v1 data. A touched parent replacement is an
+ordinary incremental delta, not a reset; attach/rebuild/reset triggers retain
+their existing meaning. The current maintained path instead emits flat root
+adds/removes and relation-edge changes (`crates/jazz/src/node/query_eval.rs:496-501`)
+and `Db` caches `RelationSnapshot` rows and edges
+(`crates/jazz/src/db.rs:7786-7824`); that is current implementation behavior,
+not this target result model.
+
+Child order is semantic and is represented by array position in the replacement
+value. There is no explicit rank/position field. The query comparator remains
+the source of that order: child `order_by` when supplied, otherwise ascending
+`RowUuid`, with the specified stable tie-break. Replacing the whole parent makes
+every child position correct after a front insert, reorder, or TopBy boundary
+crossing without sending a renumbering delta. For example, a new eleventh child
+that sorts fifth in a limit-ten relation replaces the old ten-child parent with
+the newly ordered ten-child parent. It does not emit a child retract/add pair.
+
+Array subqueries MUST support `order_by`, `offset`, and a finite `limit` with
+the same semantics as those clauses at the root query. The bounded form is
+mandatory: for limit `L`, the rendered collection contribution is bounded by
+`R(L)`, rather than `R(group)`, and query validation/planning can keep a parent
+payload below `MAX_WIRE_FRAME_BYTES`. A finite zero limit yields an empty child
+array. Child filtering, selection, ordering, offset, and limit change only the
+rendered child relation unless the array subquery has an explicit requirement;
+unreadable children are omitted while readable parents remain visible for an
+optional relation.
+
+The terminal's recursive value uses Groove's inline
+`ValueType::Record(Box<RecordDescriptor>)` descriptor form, not a descriptor
+registry. Nested record bytes MUST be canonical on decode: decode, recreate
+with the declared descriptor, and byte-compare before accepting them. This is
+required because `OwnedRecord::new` currently accepts arbitrary raw bytes
+(`crates/groove/src/records/mod.rs:1577-1582`), and non-canonical bytes would
+break weighted-delta consolidation. A record-valued value, or a type containing
+one, MUST be rejected in arrangement keys and durable primary keys; it is an
+opaque rendered value, never an ordering/key codec (`groove/SPEC/2_storage_model.md`
+§2.2 and `groove/SPEC/3_queries_operators.md` §3.6.1).
+
+**Decision, Anselm 2026-08-04 — children carry explicit ids.** Every child
+record in a structured result MUST carry its source row id as an explicitly
+projected field. Deterministic array position alone would satisfy delta
+application, but an explicit id is what lets a consumer preserve object identity
+across reorders without re-deriving keys — and key derivation in the consumer is
+precisely the duplicated semantics this design removes.
+
+The id MUST be an explicit projected field. It MUST NOT be recovered from
+implicit source-row bytes, because that would make an internal encoding load
+bearing at the public boundary.
+
+A child id identifies the source **row**, not the output **occurrence**: one row
+may appear under more than one parent, and under bag semantics the same row may
+occur more than once within a single parent's array. Position therefore remains
+the occurrence discriminator, and consumers MUST NOT assume a child id is unique
+within one parent's array unless the query shape guarantees it.
+
+**Decision, Anselm 2026-08-04 — bounded arrays are enforced, with a runtime
+over-size error as backstop.** Two mechanisms, both required:
+
+1. **Validation enforces the bound.** An array subquery MUST carry a finite
+   child limit; query validation MUST reject an unbounded array subquery in a
+   structured result. This makes the size bound a property of the query rather
+   than of the data.
+2. **A runtime over-size error backstops it.** A bounded array can still render
+   a parent larger than `MAX_WIRE_FRAME_BYTES` (2 MiB;
+   `crates/jazz/src/protocol_limits.rs:16`) when individual children are large.
+   The terminal MUST then fail with a structured, named error identifying the
+   parent row, the relation, the rendered byte size and the limit exceeded. It
+   MUST NOT silently truncate the array, drop children, or emit a partial
+   parent: a partial parent is a wrong answer, whereas a named error is a
+   diagnosable one.
+
+Fragmenting one logical parent replacement across chunks was considered and
+rejected for this revision: it preserves expressiveness at the cost of atomic
+receiver assembly and a recursive fragment format, and the mandatory child limit
+already makes the common case bounded. Nothing here forecloses adding it later.
 
 Alpha-style relation traversal has an output-changing query surface. A
 relation-query facade MUST normalize into the same row-set program vocabulary as
@@ -268,7 +370,167 @@ normalizes into this program family. Multi-hop traversal and `gather` are
 currently rejected because matching maintained semantics have not yet been
 defined.
 
-### 6.4.1 Default result ordering
+### 6.4.1 Flat joined output, wide lowering, and output occurrences
+
+**Decision, Anselm 2026-08-05 — expand is the other `CollectBy` mode.** A
+flat join emits one row for every matching ordered tuple of the root source
+followed by the declared join sources. Its public data columns are the flattened
+columns of that tuple; it is not a nested relation payload and it does not
+change the semantics of `JoinVia`. It is `CollectBy(mode = Expand)` over a
+unary, already-wide association stream, not a Jazz renderer over several
+sinks.
+
+Flat-join lowering MUST resolve, read-policy-filter, and read-view-project each
+source before it reaches the join. It then lowers the declared `FlatJoin` chain
+as ordinary Groove inner joins. After each join it projects the joined
+descriptor back to the stable, qualified source columns while retaining **all**
+prior left-source columns and adding the new right-source columns. Thus the next
+join sees the accumulated wide left row, and the final terminal input carries
+every source needed for the tuple and its identity. The contribution lowerer
+used for include closure intentionally does something narrower: it projects a
+join to `RIGHT_JOIN_PREFIX` only
+(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+correct for a source-membership fact, but MUST NOT be reused for flat output.
+
+This is achievable with the existing Groove join representation. An inner join
+infers a descriptor containing all left fields followed by all right fields
+(`crates/groove/src/ivm/runtime/mod.rs:1354-1357` and
+`7900-7917`), and its descriptor retains the ordered left and right input
+descriptors (`crates/groove/src/ivm/op_types.rs:167-175`). Join arrangements are
+keyed by the declared join keys, not by every carried output column
+(`crates/groove/src/ivm/runtime/mod.rs:5703-5758`), so wider payload rows do not
+create an arrangement-key arity obstacle. They do increase arrangement value and
+terminal-payload bytes, which are ordinary descriptor/payload costs, not a
+reason to introduce a second terminal. The source resolver already supplies the
+policy-filtered projected source boundary before query composition
+(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+preserves that ordering.
+
+The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
+and converts the row id from the materialized root row
+(`crates/jazz/src/tools/client.rs:2052-2102`). For a flat join its first element
+MUST remain that root `ObjectId` for source compatibility. It is a representative
+root id, not the identity of the joined result: several joined output rows may
+therefore carry the same first element. One-shot callers receive complete tuples
+at once and perform no incremental address-based application, so this is not an
+ambiguity in one-shot semantics.
+
+For a maintained subscription, every flat joined row MUST instead carry an
+`OutputOccurrenceId`. It is the ordered vector of contributing source row ids:
+`(root-row-id, join[0]-row-id, ..., join[n]-row-id)`. Source position is part of
+the encoding; the query shape supplies the table/alias at each position. The
+wire value is opaque to callers except for equality and reconciliation, and its
+canonical positional encoding MUST be usable as a terminal-state key and for
+consolidation. It MUST NOT be derived from result position, payload bytes, a
+content transaction id, or an unordered set of source ids. It is consequently
+stable across ticks, resets, source-content replacements, and result reordering.
+
+This is one type with variable arity, not two identity schemes. A collect-mode
+parent has a one-element `OutputOccurrenceId`, its parent source-row id. An
+expand-mode tuple has the ordered vector above. The terminal configuration
+declares source position and arity, so both use the same canonical bytes as
+terminal-state keys, subscriber-cache keys, and wire addresses. A source row id
+remains useful object identity but is not by itself an occurrence identity: a
+joined row can occur under multiple roots, and a root can occur in multiple
+joined tuples.
+
+**Multiplicity boundary.** Groove joins are weighted
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`). The stated flat-join surface admits
+exactly one current-row occurrence for each declared source alias, so its
+ordered source-id vector is unique. It MUST reject a bag or multi-path input
+whose two visible copies have the same source-id vector. If that surface is ever
+admitted, the producing graph MUST carry a stable, canonical occurrence or
+derivation discriminator and `OutputOccurrenceId` MUST be extended to include
+it; delivery, cache, reset, and consolidation semantics MUST then be revised
+together. Collapsing copies under the current vector is forbidden.
+
+🔶 **Open question: bag occurrence discriminator.** A path label and an
+upstream per-copy identity are both plausible sources, but neither is defined
+for arbitrary weighted Groove input today. Bag support remains rejected until a
+stable discriminator is chosen and propagated below the terminal.
+
+Maintained flat-join additions, removals, updates, reset snapshots, and the
+subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
+MUST NOT be used as that key. Today this target does not exist. The local public
+adapter rejects any `Query` with `joins` (`crates/jazz/src/tools/client.rs:1956-1967`),
+and the current maintained bridge is root rows plus relation edges
+(`crates/jazz/src/node/query_eval.rs:496-501`). If joins were enabled without
+this boundary change, the adapter would silently collapse outputs sharing a root:
+it searches and replaces `current_rows` by `row_uuid`
+(`crates/jazz/src/tools/client.rs:2160-2192`), and its ordered delta ids are that
+same `ObjectId` (`crates/jazz/src/tools/client.rs:2202-2239`). This is neither a
+loud failure nor a valid delta application.
+
+The maintained wire MUST carry `OutputOccurrenceId` as the address of each
+flat-join output add, removal, and replacement, including reset snapshots. It
+MAY continue to reference the ordinary typed source members/version payloads for
+row bodies; it MUST NOT add a per-source provenance envelope, multi-sink
+terminal input, or terminal policy-composition field merely to construct joined
+output identity.
+
+The flat-join descriptor is constructed in declared source order: root first,
+then each `JoinSpec`. Every field name is qualified as
+`<effective-source-name>.<column>`; the effective source name is the root alias
+or root table name, and for a join its alias or table name. Aliases MUST be
+unique across the root and joins. An unaliased repeated table name is therefore
+rejected, as are duplicate effective names. `select`, predicates, and
+`order_by` referring to a flat join MUST use qualified names unless validation
+can prove an unqualified name has exactly one candidate; canonical shape bytes
+and the emitted descriptor use the qualified spelling in all cases. Thus columns
+with the same physical name never collide, descriptor names and field order are
+stable, and a descriptor does not depend on runtime data.
+
+The existing public `JoinSpec { table, alias, on }` advertises aliases and an
+arbitrary equality from the accumulated left result to the newly joined table
+(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+not that form: it has no alias or accumulated-left scope, and only represents a
+root- or immediately-nested reference/junction traversal with a target column,
+optional source column/lookup, correlations, filters, and nested joins
+(`crates/jazz/src/query.rs:2045-2071`; validation at
+`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+a separately named flat-join AST and lower the public `JoinSpec` into it; do not
+try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
+leave the public builder advertising a shape that the client rejects. This is a
+small, explicit surface addition rather than a policy-model change.
+
+`result_element_index` is not part of core `Query`
+(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+public flat-join surface. It is fully expressible as a qualified projection:
+select the desired source's qualified columns (including its explicit row-id
+field where needed), or make that table the query root when its `ObjectId` is the
+desired representative id. Keeping a positional tuple selector would duplicate
+projection semantics and create a second, underspecified answer to which object
+id identifies a flat row.
+
+Read-policy filtering and read-view/lens projection are source operations. Each
+flat-join input MUST use its resolved, policy-filtered, read-view-projected
+source before it reaches the join; ordinary join retraction then propagates a
+permission or source-row removal. No terminal policy composition,
+facade-side fan-in, or source-specific ordering contract is required. A join
+node has ordered input descriptors, each already encoding its source/read-view
+and policy semantics, satisfying `groove/SPEC/INVARIANTS.md::INV-QUERY-1A` by
+construction. Groove's inner `JoinOp` already emits matching joined records with
+left-weight times right-weight on changes from either input
+(`groove/SPEC/INVARIANTS.md::INV-QUERY-9`); this design adds only wide lowering,
+the terminal mode/descriptor, and occurrence-addressed delivery.
+
+The surviving `wip/flat-join-output` design material is the separately named
+`FlatJoin` AST, lowering of public `JoinSpec` into that AST, source-resolved
+policy-filtered chained joins, and `OutputOccurrenceId`. This decision discards
+the Jazz maintained-terminal renderer, facade-side fan-in/materialization,
+multiple terminal sinks, and any lowering that drops already-joined source
+columns before flat expansion. `result_element_index` remains discarded as a
+duplicate of qualified projection semantics.
+
+**Implementation status (2026-08-04).** Target/untested. No public flat join is
+currently executable: the public client rejects `joins`, core query reads
+materialize root `CurrentRow`s, and the maintained wire carries root membership
+plus relation facts rather than flat join occurrences. The ordinary current
+source resolver already applies source authorization and schema projection
+before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+`2036-2184`); this target relies on that existing source boundary.
+
+### 6.4.2 Default result ordering
 
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
@@ -288,7 +550,17 @@ where it appears. Ordered row-valued results remain total and replay-stable:
 after the user-declared order terms, ties are broken by ascending row id unless
 the query surface later exposes an explicit, stable tie policy. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
-parents or sibling relation payloads.
+parents or sibling relation payloads. A child relation's default and tie row id
+is the child source row id, and its ordering is independently evaluated within
+each parent/correlation group before that child's `offset` and `limit`; it never
+uses parent order or another group’s child rows. This same comparator is required
+for one-shot snapshots, maintained hydration, resets, and whole-parent
+replacements.
+
+For a flat joined result, `order_by` is the only cross-source ordering contract:
+its qualified fields order output occurrences and the complete occurrence id is
+the deterministic final tie-breaker. No join declaration order is an output sort
+rule, and no source contributes an independent terminal ordering rule.
 
 Aggregate or grouped outputs that do not have a real row id default to ascending
 group-key order. Composite group keys compare lexicographically in the query's
@@ -304,13 +576,13 @@ the stable tie-breaker.
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
 settled subscriber reads must all reduce to the same ordered result as a
-one-shot read at the same frontier. Incremental delivery must include enough
-position/order information for insertions, removals, updates, and boundary churn
-to be applied in the specified order. This composes with
-`groove/SPEC/INVARIANTS.md::INV-INC-1`: because default row ordering is by
-immutable id, a single-row content update that does not change membership must
-not reorder neighboring rows, and a single-row insert must publish its ordered
-position without scanning or diffing the accumulated relation state.
+one-shot read at the same frontier. For a structured child relation, the
+replacement array's positions are the complete order information; no separate
+rank field or successor-position deltas are sent. This composes with
+`groove/SPEC/INVARIANTS.md::INV-INC-1`: a default-id content update that does
+not affect a rendered relation must not reorder neighboring children, while a
+child insert/order change replaces only its touched rendered parent group rather
+than scanning or diffing the accumulated view.
 
 ### 6.5 Query-driven sync
 
@@ -322,14 +594,13 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The serving authority maintains the settled result set for each program instance:
-the result member set plus its matched include paths, relation edges, and join
-witnesses (§6.4).
-The subscriber receives and stores its own **settled subscription result set**:
-the rows, typed program facts, and matched include/relation material it can
-answer settled reads from (§6.6).
-The two sides share entry shape, but have different roles. A `ViewUpdate` with
-`reset_result_set = true` resets the subscriber's settled result set.
+The serving authority maintains flat result members, association state, and
+version witnesses for each program instance, then its output terminal renders
+the structured result tree (§6.4). The subscriber receives and stores its own
+**settled structured subscription result** and applies reset snapshots or
+whole-parent replacements directly; its environment-specific facade performs
+only the minimal conversion from that tree (§6.6). A `ViewUpdate` with
+`reset_result_set = true` resets that settled result.
 
 Two correctness properties govern result-set maintenance. Incremental
 result-set updates converge to the same typed result-member and program-fact
@@ -394,16 +665,16 @@ surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
   `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
-  to assert ordered equality rather than set equality for root rows and every
-  relation payload. The oracle should keep using public query shapes/builders
-  and compare the maintained stream's reduced result to the one-shot result at
-  each checkpoint.
+  to compare the canonical `ResultTree` specified in appendix D, rather than a
+  root-id set. The oracle should keep using public query shapes/builders and
+  compare the maintained stream's reduced result to the one-shot result at each
+  checkpoint.
 - Extend the TS query API coverage in
   `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
   currently sort ids before comparison become ordered-equality assertions. Add
   explicit cases for
   default root ordering, reverse/forward relation include arrays ordered by
-  child id, nested relation payloads, and explicit `orderBy` preserving its
+  child id, nested structured arrays, and explicit `orderBy` preserving its
   override with row-id tie-breaks.
 - Add grouped/aggregate conformance cases for default group-key ordering:
   scalar/global aggregate output, single-column groups, and composite groups
@@ -413,8 +684,8 @@ surface. The test plan below records additional intended coverage.
   `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
-  the delivered insert position/order, and keep the existing scale-independent
-  allocation/byte expectation so ordered insertion remains covered by
+  the complete touched-parent replacement's order, and pin the bounded
+  allocation/byte expectation for the collector exception to
   `groove/SPEC/INVARIANTS.md::INV-INC-1`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
@@ -433,10 +704,8 @@ validated shape identity.
 
 Array subqueries remain distinct from include paths. They represent correlated
 one-to-many result fields with parent-column to child-column bindings. One-shot
-and maintained subscriptions use the same relation-payload contract; the
-maintained-vs-one-shot equivalence is covered by
-`array_subquery_one_shot_and_maintained_subscription_are_equivalent` in
-`crates/jazz/src/db/tests.rs`.
+and maintained subscriptions use the same structured-output contract; no current
+test is cited for this target design.
 
 SQL is an entry surface, not a second semantic model. A Jazz SQL dialect should
 lower into the same query AST and reject unsupported SQL constructs loudly.

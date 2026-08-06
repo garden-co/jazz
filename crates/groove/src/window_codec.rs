@@ -941,15 +941,24 @@ fn order_preserving_i32_bits(value: i32) -> u32 {
 }
 
 fn is_integer_type(value_type: &ValueType) -> bool {
-    matches!(
-        value_type,
+    match value_type {
         ValueType::U8
-            | ValueType::U16
-            | ValueType::U32
-            | ValueType::U64
-            | ValueType::I32
-            | ValueType::I64
-    )
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64 => true,
+        ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::Enum(_)
+        | ValueType::Tuple(_)
+        | ValueType::Array(_)
+        | ValueType::Nullable(_)
+        | ValueType::Record(_) => false,
+    }
 }
 
 fn integer_value(value: &Value, value_type: &ValueType) -> Option<u128> {
@@ -984,7 +993,16 @@ fn integer_to_value(value: u128, value_type: &ValueType) -> Result<Value, Window
         ValueType::I64 => u64::try_from(value)
             .map(|value| Value::I64((value ^ (1_u64 << 63)) as i64))
             .map_err(|_| WindowCodecError::Invalid("i64 delta value out of range")),
-        _ => Err(WindowCodecError::Invalid("non-integer delta column")),
+        ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::Enum(_)
+        | ValueType::Tuple(_)
+        | ValueType::Array(_)
+        | ValueType::Nullable(_)
+        | ValueType::Record(_) => Err(WindowCodecError::Invalid("non-integer delta column")),
     }
 }
 

@@ -1889,7 +1889,7 @@ fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: Subs
                 visible_rows.remove(&row.row_uuid);
             }
             for row in added.into_iter().chain(updated) {
-                visible_rows.insert(row.row_uuid());
+                visible_rows.insert(row.row.row_uuid());
             }
         }
         SubscriptionEvent::Rejected { reason } => {

@@ -19,6 +19,12 @@ use crate::tools::websocket_prelude_auth::AuthConfig;
 
 const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+// The serving route caps each WebSocket message at one MiB. Keep a small
+// postcard framing reserve so a burst of individually-valid wire frames never
+// becomes an invalid WebSocket message.
+const WS_CLIENT_BATCH_BYTES: usize = 1 << 20;
+const POSTCARD_FRAME_LENGTH_RESERVE: usize = 5;
+const POSTCARD_BATCH_LENGTH_RESERVE: usize = 5;
 
 #[derive(Debug)]
 pub enum WebSocketClientError {
@@ -255,11 +261,32 @@ async fn run_ws_pump(
                     return;
                 };
                 let mut batch = vec![first_frame];
+                let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
+                    + batch[0].len()
+                    + POSTCARD_FRAME_LENGTH_RESERVE;
                 while let Ok(frame) = outbound.try_recv() {
+                    let frame_bytes = frame.len() + POSTCARD_FRAME_LENGTH_RESERVE;
+                    if batch_bytes.saturating_add(frame_bytes) > WS_CLIENT_BATCH_BYTES {
+                        let Ok(bytes) = postcard::to_allocvec(&batch) else {
+                            return;
+                        };
+                        #[cfg(feature = "sync-autopsy")]
+                        crate::db::sync_autopsy::record(format!(
+                            "client websocket send batch frames={} bytes={}",
+                            batch.len(),
+                            bytes.len()
+                        ));
+                        if ws.send(Message::Binary(bytes.into())).await.is_err() {
+                            return;
+                        }
+                        batch = Vec::new();
+                        batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE;
+                    }
+                    batch_bytes = batch_bytes.saturating_add(frame_bytes);
                     batch.push(frame);
                 }
                 let Ok(bytes) = postcard::to_allocvec(&batch) else {
-                    continue;
+                    return;
                 };
                 #[cfg(feature = "sync-autopsy")]
                 crate::db::sync_autopsy::record(format!(

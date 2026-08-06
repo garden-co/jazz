@@ -98,6 +98,22 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
+            "subscribe_fast_known_state_authorization_progress",
+            "Subscribe",
+            SyncMessage::Subscribe(Subscribe {
+                shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: Some(
+                    jazz::protocol::KnownStateDeclaration::FastWithAuthorizationProgress {
+                        completeness: jazz::protocol::KnownStateCompleteness::FastCurrentMembership,
+                        position: GlobalSeq(7),
+                        authorization_progress: 9,
+                    },
+                ),
+            }),
+        ),
+        (
             "subscribe_rejected_unsupported_shape",
             "SubscribeRejected",
             SyncMessage::SubscribeRejected {
@@ -128,6 +144,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: Some(9),
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
@@ -147,6 +164,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 version_bundles: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
+                    authorization_progress: Some(9),
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
@@ -379,7 +397,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v3",
+        fixture_set: "jazz-wire-message-frames-v4",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

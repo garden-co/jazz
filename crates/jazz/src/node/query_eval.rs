@@ -60,6 +60,12 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
+#[derive(Clone, Copy)]
+struct RelationSnapshotWindow {
+    offset: usize,
+    limit: Option<usize>,
+}
+
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
     _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
@@ -295,6 +301,13 @@ fn fact_public_fields(
         }
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
+            fields.extend(
+                schema
+                    .occurrence_id_fields
+                    .iter()
+                    .filter(|field| **field != schema.row_field)
+                    .cloned(),
+            );
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
@@ -3246,7 +3259,7 @@ fn normalize_array_subquery(
         child_current = order_node;
     }
 
-    if subquery.limit.is_some() {
+    if subquery.limit.is_some() || subquery.offset != 0 {
         let slice_node = RowSetNodeId(format!("array_subquery:{path_id}:slice"));
         nodes.insert(
             slice_node.clone(),
@@ -3259,7 +3272,7 @@ fn normalize_array_subquery(
                 limit: subquery
                     .limit
                     .map(|limit| limit.min(u32::MAX as usize) as u32),
-                offset: 0,
+                offset: subquery.offset.min(u32::MAX as usize) as u32,
                 tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
                     child_source.clone(),
                 ))],
@@ -5117,13 +5130,14 @@ where
             return Ok(None);
         };
         let content_record = content_raw.record();
-        let content_tx = self.current_record_sort_key(content_record)?;
+        let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
         if let Some(deletion_raw) = self
             .database
             .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
         {
             let deletion_record = deletion_raw.record();
-            let deletion_tx = self.current_record_sort_key(deletion_record)?;
+            let deletion_tx =
+                self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
             let deletion = deletion_event_from_value(
                 deletion_record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
             )?;
@@ -5202,9 +5216,23 @@ where
             return Ok(None);
         }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
-            return Ok(Some(KnownStateDeclaration::Fast {
-                completeness: KnownStateCompleteness::FastCurrentMembership,
-                position,
+            let authorization_progress = self
+                .query
+                .authorization_progress_by_binding_view
+                .get(&binding_view_key)
+                .copied();
+            return Ok(Some(match authorization_progress {
+                Some(authorization_progress) => {
+                    KnownStateDeclaration::FastWithAuthorizationProgress {
+                        completeness: KnownStateCompleteness::FastCurrentMembership,
+                        position,
+                        authorization_progress,
+                    }
+                }
+                None => KnownStateDeclaration::Fast {
+                    completeness: KnownStateCompleteness::FastCurrentMembership,
+                    position,
+                },
             }));
         }
         if let Some(position) = self.load_known_state_fact(binding_view_key)? {
@@ -8241,7 +8269,7 @@ where
             target_tx_node: NodeAlias,
         }
 
-        let limits = Self::relation_snapshot_no_order_limits(&shape.query().array_subqueries);
+        let windows = Self::relation_snapshot_no_order_windows(&shape.query().array_subqueries);
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
@@ -8297,13 +8325,18 @@ where
                 candidate.edge.relation.clone(),
             );
             let count = counts.entry(group).or_default();
-            if limits
-                .get(&candidate.edge.relation)
-                .is_some_and(|limit| *count >= *limit)
-            {
-                continue;
-            }
+            let window = windows.get(&candidate.edge.relation).copied();
+            let ordinal = *count;
             *count += 1;
+            if let Some(window) = window {
+                if ordinal < window.offset
+                    || window
+                        .limit
+                        .is_some_and(|limit| ordinal >= window.offset.saturating_add(limit))
+                {
+                    continue;
+                }
+            }
             if row_keys.insert((
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
@@ -8372,19 +8405,25 @@ where
             ))
     }
 
-    fn relation_snapshot_no_order_limits(subqueries: &[ArraySubquery]) -> BTreeMap<String, usize> {
-        let mut limits = BTreeMap::new();
+    fn relation_snapshot_no_order_windows(
+        subqueries: &[ArraySubquery],
+    ) -> BTreeMap<String, RelationSnapshotWindow> {
+        let mut windows = BTreeMap::new();
         for subquery in subqueries {
-            if subquery.order_by.is_empty()
-                && let Some(limit) = subquery.limit
-            {
-                limits.insert(subquery.column_name.clone(), limit);
+            if subquery.order_by.is_empty() && (subquery.limit.is_some() || subquery.offset != 0) {
+                windows.insert(
+                    subquery.column_name.clone(),
+                    RelationSnapshotWindow {
+                        offset: subquery.offset,
+                        limit: subquery.limit,
+                    },
+                );
             }
-            limits.extend(Self::relation_snapshot_no_order_limits(
+            windows.extend(Self::relation_snapshot_no_order_windows(
                 &subquery.nested_arrays,
             ));
         }
-        limits
+        windows
     }
 
     fn materialize_relation_snapshot_root_rows(
@@ -8703,6 +8742,11 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<(), Error> {
+        // `JoinVia` is an existential constraint on this query's root-row
+        // result, not flat joined output: maintained membership and delivery
+        // remain addressed by the selected root row. Flat public join output,
+        // which can contain several occurrences for one root, remains rejected
+        // at the public-client boundary until it supplies source tuples.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,
@@ -8971,13 +9015,27 @@ where
             },
             Err(err) => return Err(err),
         };
+        // Authorization is existential per protected row and binding route:
+        // multiple policy branches or multiple qualifying grant rows are
+        // alternative proofs, not additional copies of the application row.
+        // Collapse those proofs before the protected source reaches ordinary
+        // relational operators (especially finite TopBy windows). Route
+        // fields are part of the key because one prepared authorization graph
+        // can serve several independently routed bindings.
+        let mut authorization_keys = vec!["row_uuid".to_owned()];
+        authorization_keys.extend(authorized.route_fields.iter().cloned());
+        let authorized_graph = GraphBuilder::arg_max_by(
+            authorized.graph,
+            authorization_keys.clone(),
+            authorization_keys,
+        );
         if authorized.route_fields.is_empty() {
             let fields = output_fields
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone()))
                 .collect::<Vec<_>>();
             return Ok(PolicyAuthorizationGraph {
-                graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+                graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                     .project_fields(fields),
                 route_fields: authorized.route_fields,
             });
@@ -8993,7 +9051,7 @@ where
                 .map(|field| ProjectField::renamed(right_field(field), field.clone())),
         );
         Ok(PolicyAuthorizationGraph {
-            graph: GraphBuilder::join(base, authorized.graph, ["row_uuid"], ["row_uuid"])
+            graph: GraphBuilder::join(base, authorized_graph, ["row_uuid"], ["row_uuid"])
                 .project_fields(fields),
             route_fields: authorized.route_fields,
         })
@@ -11509,12 +11567,28 @@ mod tests {
         SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
-        lit, lte, param,
+        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, contains,
+        eq, gt, in_list, lit, lte, param,
     };
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn unordered_array_windows_materialize_per_parent_row_id_order() {
+        let windows =
+            NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
+                "comments", "comments", "todo_id", "id",
+            )
+            .offset(1)
+            .limit(2)]);
+        assert_eq!(
+            windows
+                .get("comments")
+                .map(|window| (window.offset, window.limit)),
+            Some((1, Some(2)))
+        );
+    }
 
     #[test]
     fn chained_renames_preserve_the_original_projection_source() {

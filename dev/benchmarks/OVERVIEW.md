@@ -142,12 +142,17 @@ Ranked by their ability to change an engineering decision:
 1. **Policy and selective-hydration cost receipts.** Extract the stable lanes
    from #1170: authorized write-to-reader visibility, route/subscription scale,
    policy churn/reconnect, and selective Global hydration.
-2. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
+   `ROUTE_SUBSCRIPTION_CURVE.md` now extracts the current-core
+   route/subscription lane and attributes its remaining slope to binding-private
+   full-source version/replacement witness state.
+2. **PERF-5 maintained versus rehydrate.** Compare work, bytes, and retained
+   state over increasing view sizes while asserting identical results.
+3. **S4 fixed-delta/varying-view gate.** S4 already separates settlement and
    propagation; add a deterministic structural bound proving propagation stays
    proportional to the affected delta.
-3. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
+4. **S8 branch/merge/offline lifecycle.** Cover accumulated offline edits,
    reconnect, merge-back, conflicts, and payload reuse end to end.
-4. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
+5. **S5–S7 promised dimensions.** Add remote resume and evicted-prefix coverage
    for S5, full-history memory for S6, and native-versus-lens plus migration-wave
    costs for S7.
 

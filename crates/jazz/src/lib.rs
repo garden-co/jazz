@@ -124,6 +124,8 @@ pub mod protocol;
 pub mod protocol_limits;
 /// Pure query AST, validation, canonicalization, and ids.
 pub mod query;
+/// Canonical recursive structured query-result boundary types.
+pub mod result_tree;
 /// Jazz schema and storage lowering.
 pub mod schema;
 /// Operational server-shell APIs formerly provided by jazz-server.

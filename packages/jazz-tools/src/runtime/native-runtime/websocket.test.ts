@@ -40,6 +40,36 @@ describe("websocket frame carrier", () => {
     ]);
   });
 
+  // This is intentionally transport-level: the public Db API cannot expose
+  // individual WebSocket message boundaries, which are the limit being kept.
+  it("splits a burst of wire frames into server-sized websocket messages", async () => {
+    let socket: RecordingWebSocket | undefined;
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket: class extends RecordingWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    await carrier.ready();
+    socket!.sent.length = 0;
+    const frames = [new Uint8Array(600_000), new Uint8Array(600_000), new Uint8Array(600_000)];
+    await carrier.sendBatch(frames);
+
+    const batches = socket!.sent.filter(
+      (message): message is Uint8Array => message instanceof Uint8Array,
+    );
+    expect(batches).toHaveLength(3);
+    expect(batches.every((batch) => batch.byteLength <= 1 << 20)).toBe(true);
+    expect(batches.flatMap((batch) => decodeWebSocketFrameBatch(batch))).toEqual(frames);
+  });
+
   it("uses app-scoped websocket URLs without identity query parameters", () => {
     expect(webSocketUrl("http://127.0.0.1:4200", "app-a")).toBe(
       "ws://127.0.0.1:4200/apps/app-a/ws",
@@ -203,5 +233,18 @@ class MessageWebSocket {
 
   emitMessage(data: Uint8Array): void {
     for (const listener of this.messageListeners) listener({ data });
+  }
+}
+
+class RecordingWebSocket extends MessageWebSocket {
+  sent: Array<Uint8Array | string> = [];
+
+  constructor(url: string, onCreate?: (socket: RecordingWebSocket) => void) {
+    super(url);
+    onCreate?.(this);
+  }
+
+  override send(data: Uint8Array | string): void {
+    this.sent.push(data);
   }
 }

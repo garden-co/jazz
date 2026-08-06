@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 autobins = false
 autobenches = false
-autotests = false
+autotests = true
 
 [features]
 default = ["rocksdb", "server", "transport-compression-zstd"]
@@ -224,41 +224,10 @@ harness = false
 name = "subscription_benchmark"
 harness = false
 
-[[test]]
-name = "column_defaults"
-
-[[test]]
-name = "fate_regressions"
-
-[[test]]
-name = "four_tier"
-
-[[test]]
-name = "incremental_delivery_canary"
-
-[[test]]
-name = "row_provenance"
-
-[[test]]
-name = "shared_coverage_differential"
-
-[[test]]
-name = "threaded_four_tier"
-
-[[test]]
-name = "warm_reopen_differential"
-
-[[test]]
-name = "wire_fixtures"
-
-[[test]]
-name = "admin_schema_api"
-
-[[test]]
-name = "auth_admission"
-
-[[test]]
-name = "cli_dry_run"
+[[bench]]
+name = "route_subscription_curve"
+harness = false
+required-features = ["testing"]
 
 [[test]]
 name = "large_blob_permissions"
@@ -313,17 +282,15 @@ name = "flush_once_per_refresh"
 required-features = ["test"]
 
 [[test]]
-name = "coverage_group_flush_once"
-
-[[test]]
-name = "edge_fate_authority"
-
-[[test]]
 name = "rename_write_authorization"
 required-features = ["test"]
 
 [[test]]
 name = "parameterized_subscription_routing"
+required-features = ["test"]
+
+[[test]]
+name = "authorization_scope_reentry"
 required-features = ["test"]
 
 [[test]]

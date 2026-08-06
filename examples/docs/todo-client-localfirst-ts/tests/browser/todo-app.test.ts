@@ -7,9 +7,8 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-import { app } from "../../schema.js";
-import { createDb, DbConfig } from "jazz-tools";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { type Db, type DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,16 +55,24 @@ describe("Vanilla TS Todo App E2E", () => {
 
   /** Mount the app into a fresh container. */
   async function mount(config?: Partial<DbConfig>): Promise<HTMLDivElement> {
+    const { container } = await mountWithDb(config);
+    return container;
+  }
+
+  /** Mount the app into a fresh container and expose its public Db API. */
+  async function mountWithDb(
+    config?: Partial<DbConfig>,
+  ): Promise<{ container: HTMLDivElement; db: Db }> {
     const el = document.createElement("div");
     document.body.appendChild(el);
 
-    const { destroy } = await startApp(el, config);
+    const { db, destroy } = await startApp(el, config);
     instances.push({ container: el, destroy });
 
     // Wait for the app to render
     await waitFor(() => el.querySelector("#todo-list") !== null, 5000, "App should render");
 
-    return el;
+    return { container: el, db };
   }
 
   /** Destroy a specific instance. */
@@ -264,20 +271,31 @@ describe("Vanilla TS Todo App E2E", () => {
   it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
-    const el1 = await mount({
+    const { container: el1, db: db1 } = await mountWithDb({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      auth: { localFirstSecret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68" },
-      adminSecret: ADMIN_SECRET,
+      secret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68",
     });
-    const el2 = await mount({
+    const { container: el2, db: db2 } = await mountWithDb({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      auth: { localFirstSecret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE" },
-      adminSecret: ADMIN_SECRET,
+      secret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE",
     });
+
+    await waitFor(
+      () => db1.getAuthState().authMode === "local-first",
+      5000,
+      "App 1 should reach local-first auth",
+    );
+    await waitFor(
+      () => db2.getAuthState().authMode === "local-first",
+      5000,
+      "App 2 should reach local-first auth",
+    );
+    expect(db1.getAuthState().session?.authMode).toBe("local-first");
+    expect(db2.getAuthState().session?.authMode).toBe("local-first");
 
     // Let both app instances finish server/event-stream setup before mutating.
     await new Promise((r) => setTimeout(r, 750));

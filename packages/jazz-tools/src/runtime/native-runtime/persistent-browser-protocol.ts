@@ -11,6 +11,7 @@ type OpenRequest = {
     schema: WasmSchema,
     node: Uint8Array,
     author: Uint8Array,
+    initialSyncFlushEvery: number | undefined,
   ];
 };
 
