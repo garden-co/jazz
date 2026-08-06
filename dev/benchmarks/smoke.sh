@@ -428,6 +428,11 @@ run_scenario \
   env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
 
 run_scenario \
+  "jazz/route_subscription_curve" \
+  "JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve" \
+  env JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
+
+run_scenario \
   "jazz-sim/micro" \
   "JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro # no JAZZ_SMOKE; fixed size ladders remain" \
   env JAZZ_MICRO_ITERS=1 cargo bench -p jazz-sim --bench micro
