@@ -59,6 +59,7 @@ Current topology coverage:
 - writer/server/reader sync fanout: `realistic_phase1/r10_sync_fanout`
 - byte-wire reconnect/resume canary: `realistic_phase1/r11_byte_wire_resume`
 - recursive permission read/subscription visibility: `realistic_phase1/r12_recursive_permissions`
+- permission-filtered reconnect/resume transitions: `realistic_phase1/r13_permission_filtered_resume`
 
 Run only the cold-load benchmark:
 
