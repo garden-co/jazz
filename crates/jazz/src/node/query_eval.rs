@@ -5124,13 +5124,14 @@ where
             return Ok(None);
         };
         let content_record = content_raw.record();
-        let content_tx = self.current_record_sort_key(content_record)?;
+        let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
         if let Some(deletion_raw) = self
             .database
             .primary_key_get_raw(&global_tables[1].name, &[Value::Uuid(row_uuid.0)])?
         {
             let deletion_record = deletion_raw.record();
-            let deletion_tx = self.current_record_sort_key(deletion_record)?;
+            let deletion_tx =
+                self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
             let deletion = deletion_event_from_value(
                 deletion_record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
             )?;

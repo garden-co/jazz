@@ -724,6 +724,25 @@ where
             .unwrap_or_default()
     }
 
+    /// Return the current process-local claims together with their revisions.
+    ///
+    /// Upstream links use this snapshot to decide which claims have not yet
+    /// reached that particular connection.
+    pub(crate) fn session_claims_with_revisions(
+        &self,
+    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+        self.session_claims
+            .iter()
+            .map(|(identity, claims)| {
+                (
+                    *identity,
+                    claims.clone(),
+                    self.session_claim_revision(*identity),
+                )
+            })
+            .collect()
+    }
+
     /// Gate session-scoped serving until an authority has installed its
     /// permissions head. Local/offline nodes stay ready by default.
     pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
@@ -2175,7 +2194,7 @@ where
             .primary_key_get_raw(&global_tables[0].name, &[Value::Uuid(row_uuid.0)])?
         {
             let record = raw.record();
-            let tx = self.current_record_sort_key(record)?;
+            let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
             candidates.push((decode_current_row(table, record)?, tx));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2193,7 +2212,7 @@ where
                 ],
             )? {
                 let record = raw.record();
-                let tx = self.current_record_sort_key(record)?;
+                let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
                 candidates.push((decode_current_row(table, record)?, tx));
             }
         }
@@ -2216,7 +2235,7 @@ where
                 deletion_event_from_value(
                     record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                 )?,
-                self.current_record_sort_key(record)?,
+                self.current_record_sort_key(&table.name, row_uuid, record)?,
             ));
         }
         let ahead_tables = table.ahead_current_storage_tables();
@@ -2238,7 +2257,7 @@ where
                     deletion_event_from_value(
                         record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
                     )?,
-                    self.current_record_sort_key(record)?,
+                    self.current_record_sort_key(&table.name, row_uuid, record)?,
                 ));
             }
         }
@@ -2247,11 +2266,27 @@ where
 
     fn current_record_sort_key(
         &self,
+        table: &str,
+        row_uuid: RowUuid,
         record: BorrowedRecord<'_>,
     ) -> Result<(TxTime, NodeUuid), Error> {
-        let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
-        let tx_node_alias =
-            NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
+        let malformed = |source| {
+            Error::MalformedCurrentRow(Box::new(MalformedCurrentRow {
+                table: table.to_owned(),
+                row_uuid,
+                source,
+            }))
+        };
+        let tx_time = TxTime(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                .map_err(malformed)?,
+        );
+        let tx_node_alias = NodeAlias(
+            record
+                .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                .map_err(malformed)?,
+        );
         let tx_node = self
             .node_aliases
             .iter()
@@ -5109,6 +5144,19 @@ fn storage_consistency_marker_key() -> [Value; 1] {
     [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
+/// Details of a persisted current row that could not be decoded at the point of use.
+#[derive(Debug, thiserror::Error)]
+#[error("malformed current row in table {table} for {row_uuid:?}: {source}")]
+pub struct MalformedCurrentRow {
+    /// Logical table containing the row.
+    pub table: String,
+    /// Primary-key row identity of the malformed record.
+    pub row_uuid: RowUuid,
+    /// The record decoding failure.
+    #[source]
+    pub source: records::Error,
+}
+
 /// Error type returned by the storage-backed node API.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -5118,6 +5166,9 @@ pub enum Error {
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),
+    /// A persisted current row could not be decoded at the point of use.
+    #[error(transparent)]
+    MalformedCurrentRow(#[from] Box<MalformedCurrentRow>),
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),
