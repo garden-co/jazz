@@ -2875,6 +2875,45 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
 }
 
 #[test]
+fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    let parent = row(0x41);
+    db.insert_with_id(
+        "todos",
+        parent,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+    )
+    .unwrap();
+    for id in [0xb1, 0xb2, 0xb3] {
+        db.insert_with_id(
+            "comments",
+            row(id),
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("tie".to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(parent.0)),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .offset(1)
+            .limit(1),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(snapshot.edges.len(), 1);
+    assert_eq!(snapshot.edges[0].source_row, parent);
+    assert_eq!(snapshot.edges[0].target_row, row(0xb2));
+}
+
+#[test]
 fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
     let schema = JazzSchema::new([
         TableSchema::new("projects", [ColumnSchema::new("name", ColumnType::String)])

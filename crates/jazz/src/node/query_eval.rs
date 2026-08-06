@@ -60,6 +60,12 @@ use crate::schema::{ColumnSchema, branch_metadata_table_schema, global_current_i
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
+#[derive(Clone, Copy)]
+struct RelationSnapshotWindow {
+    offset: usize,
+    limit: Option<usize>,
+}
+
 pub(crate) struct LocalMaintainedViewSubscription {
     subscription: MultisinkSubscription,
     _retained_prepared_plan: Option<PreparedQueryPlanHandle>,
@@ -3253,7 +3259,7 @@ fn normalize_array_subquery(
         child_current = order_node;
     }
 
-    if subquery.limit.is_some() {
+    if subquery.limit.is_some() || subquery.offset != 0 {
         let slice_node = RowSetNodeId(format!("array_subquery:{path_id}:slice"));
         nodes.insert(
             slice_node.clone(),
@@ -3266,7 +3272,7 @@ fn normalize_array_subquery(
                 limit: subquery
                     .limit
                     .map(|limit| limit.min(u32::MAX as usize) as u32),
-                offset: 0,
+                offset: subquery.offset.min(u32::MAX as usize) as u32,
                 tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
                     child_source.clone(),
                 ))],
@@ -8249,7 +8255,7 @@ where
             target_tx_node: NodeAlias,
         }
 
-        let limits = Self::relation_snapshot_no_order_limits(&shape.query().array_subqueries);
+        let windows = Self::relation_snapshot_no_order_windows(&shape.query().array_subqueries);
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
@@ -8305,13 +8311,18 @@ where
                 candidate.edge.relation.clone(),
             );
             let count = counts.entry(group).or_default();
-            if limits
-                .get(&candidate.edge.relation)
-                .is_some_and(|limit| *count >= *limit)
-            {
-                continue;
-            }
+            let window = windows.get(&candidate.edge.relation).copied();
+            let ordinal = *count;
             *count += 1;
+            if let Some(window) = window {
+                if ordinal < window.offset
+                    || window
+                        .limit
+                        .is_some_and(|limit| ordinal >= window.offset.saturating_add(limit))
+                {
+                    continue;
+                }
+            }
             if row_keys.insert((
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
@@ -8380,19 +8391,25 @@ where
             ))
     }
 
-    fn relation_snapshot_no_order_limits(subqueries: &[ArraySubquery]) -> BTreeMap<String, usize> {
-        let mut limits = BTreeMap::new();
+    fn relation_snapshot_no_order_windows(
+        subqueries: &[ArraySubquery],
+    ) -> BTreeMap<String, RelationSnapshotWindow> {
+        let mut windows = BTreeMap::new();
         for subquery in subqueries {
-            if subquery.order_by.is_empty()
-                && let Some(limit) = subquery.limit
-            {
-                limits.insert(subquery.column_name.clone(), limit);
+            if subquery.order_by.is_empty() && (subquery.limit.is_some() || subquery.offset != 0) {
+                windows.insert(
+                    subquery.column_name.clone(),
+                    RelationSnapshotWindow {
+                        offset: subquery.offset,
+                        limit: subquery.limit,
+                    },
+                );
             }
-            limits.extend(Self::relation_snapshot_no_order_limits(
+            windows.extend(Self::relation_snapshot_no_order_windows(
                 &subquery.nested_arrays,
             ));
         }
-        limits
+        windows
     }
 
     fn materialize_relation_snapshot_root_rows(
@@ -11536,12 +11553,28 @@ mod tests {
         SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, JoinSourceLookup, OrderDirection, Query, claim, col, contains, eq, gt, in_list,
-        lit, lte, param,
+        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, Query, claim, col, contains,
+        eq, gt, in_list, lit, lte, param,
     };
     use crate::schema::{JazzSchema, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn unordered_array_windows_materialize_per_parent_row_id_order() {
+        let windows =
+            NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
+                "comments", "comments", "todo_id", "id",
+            )
+            .offset(1)
+            .limit(2)]);
+        assert_eq!(
+            windows
+                .get("comments")
+                .map(|window| (window.offset, window.limit)),
+            Some((1, Some(2)))
+        );
+    }
 
     #[test]
     fn chained_renames_preserve_the_original_projection_source() {

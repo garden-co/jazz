@@ -855,17 +855,14 @@ fn validate_output_capabilities(
     ));
 }
 
-/// Root queries have a public default order even when callers do not spell an
-/// `order_by`: ascending row id. Make that order part of a root *window's*
-/// executable plan so `limit`/`offset` is a real `TopBy` window instead of
-/// depending on source scan order. Unbounded root delivery already restores
-/// the same public default while materializing result rows. `TopBy` also
-/// retains its full-record final tie-breaker, which keeps the maintained bag
-/// order total when equal records are present.
+/// Row-valued root windows have a public default order when callers do not
+/// spell `order_by`: ascending source row id. Make that order part of each
+/// root window's executable plan so `limit`/`offset` is a real `TopBy` window
+/// instead of depending on source scan order.
 ///
-/// This deliberately does not inject order into relation subtrees. Their
-/// ordering contract is distinct from root result ordering and some recursive
-/// and policy-composed relation paths cannot yet carry an added order node.
+/// Relation-edge materialization applies the equivalent child-local comparator
+/// per correlation group; recursive closures intentionally have no injected
+/// order (SPEC/16_maintained_subscription_views.md).
 fn plan_with_default_result_order(
     mut plan: AnalyzedQueryPlan,
     request: &QueryProgramRequest,
@@ -889,7 +886,8 @@ fn plan_with_default_result_order(
             // in that output tail, not to the parent input.
             inject_default_root_order(&path.parent.root, &mut path.output_steps);
         }
-        AnalyzedQueryPlan::Union(_) | AnalyzedQueryPlan::RecursiveRelation(_) => {}
+        AnalyzedQueryPlan::Union(_) => {}
+        AnalyzedQueryPlan::RecursiveRelation(_) => {}
     }
     plan
 }
@@ -925,7 +923,11 @@ fn default_root_order(source: SourceId) -> LinearStep {
 }
 
 fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
-    collect_plan_fragments(plan)
+    let fragments = collect_plan_fragments(plan);
+    !fragments.recursives.iter().any(|recursive| {
+        recursive.seed.steps.iter().any(is_slice_step)
+            || recursive.step.steps.iter().any(is_slice_step)
+    }) && fragments
         .linears
         .iter()
         .all(|fragment| linear_window_supported(fragment.steps))
@@ -952,23 +954,15 @@ fn root_aggregate_step(
     }
 }
 
-fn linear_window_supported(steps: &[LinearStep]) -> bool {
-    let mut has_order = false;
-    for step in steps {
-        match step {
-            LinearStep::OrderBy(_) => has_order = true,
-            LinearStep::Slice { limit, offset, .. } => {
-                if !has_order && (*offset != 0 || !matches!(limit, None | Some(1))) {
-                    return false;
-                }
-            }
-            LinearStep::Filter(_)
-            | LinearStep::Join { .. }
-            | LinearStep::Project(_)
-            | LinearStep::Aggregate { .. } => {}
-        }
-    }
+fn linear_window_supported(_steps: &[LinearStep]) -> bool {
+    // Relation-local slices use their declared row-id tie-breaker as the
+    // default ascending comparator within the edge materializer. Root slices
+    // have an explicit row-id OrderBy injected above.
     true
+}
+
+fn is_slice_step(step: &LinearStep) -> bool {
+    matches!(step, LinearStep::Slice { .. })
 }
 
 fn analyze_root_node(

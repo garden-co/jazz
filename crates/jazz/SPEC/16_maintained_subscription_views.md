@@ -217,10 +217,22 @@ Window limitations:
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
   views. Explicit order keys retain ascending row id as their stable tie-break.
-- default-order injection is deliberately root-only. Unordered bounded
-  `array_subqueries` and other relation/recursive subtrees remain rejected
-  loudly until their maintained graph fragments can carry that relation-local
-  ordering contract without perturbing policy or recursion maintenance.
+- The same rule applies to every non-recursive relation-local window, including
+  an `array_subquery`: without child `order_by`, each parent/correlation group
+  is ordered by ascending child row id before its child-local `offset` and
+  `limit`; explicit child keys retain ascending child row id as their stable
+  tie-break. The child `TopBy` is partitioned by its correlation/parent key, so
+  a child in one parent group cannot displace a child in another. This is the
+  ch. 6 structured-child ordering contract made executable in maintained
+  lowering, not source scan order.
+- A bounded window over a recursive closure remains rejected loudly. A recursive
+  graph produces closure tuples across seed/step iterations and depths, and its
+  current public relation does not carry one source-child row id that totals
+  those tuples. Ordering per iteration or per depth would be a different,
+  unstable observable contract, while adding a closure-wide occurrence identity
+  is larger than this maintained-window change. We therefore define no invented
+  recursive default order here; recursion must gain an explicit closure identity
+  and ordering contract before a recursive window can lower through `TopBy`.
 
 Maintained error debt after a supported maintained path fails:
 
