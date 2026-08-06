@@ -237,10 +237,15 @@ pub enum GraphBuilder {
 /// recursive graph-builder value carried by unrelated query paths.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CollectByBuilder {
+    pub mode: CollectByMode,
     pub group_cols: Vec<FieldRef>,
     pub parent_fields: Vec<CollectByField>,
     pub child_fields: Vec<CollectByField>,
     pub collection_field: String,
+    /// Flat output projection used by [`CollectByMode::Expand`].
+    pub tuple_fields: Vec<CollectByField>,
+    /// Ordered source-row identity fields used by [`CollectByMode::Expand`].
+    pub occurrence_id_cols: Vec<FieldRef>,
     pub order_cols: Vec<TopByOrder>,
     pub tie_cols: Vec<FieldRef>,
     pub offset: u64,
@@ -482,16 +487,78 @@ impl GraphBuilder {
         Self::CollectBy {
             input: Box::new(input),
             collect: Box::new(CollectByBuilder {
+                mode: CollectByMode::Collect,
                 group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
                 parent_fields: parent_fields.into_iter().collect(),
                 child_fields: child_fields.into_iter().collect(),
                 collection_field: collection_field.into(),
+                tuple_fields: Vec::new(),
+                occurrence_id_cols: Vec::new(),
                 order_cols: order_cols.into_iter().collect(),
                 tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
                 offset,
                 limit,
             }),
         }
+    }
+
+    /// Render the selected rows of a grouped ordered stream as flat tuples.
+    ///
+    /// `occurrence_id_cols` are source-row ids in root-then-join order. They
+    /// address the rendered tuple independently of its bytes, so equal tuples
+    /// from different joins remain distinct while ambiguous duplicate ids are
+    /// rejected by the terminal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn collect_by_expand(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        tuple_fields: impl IntoIterator<Item = CollectByField>,
+        occurrence_id_cols: impl IntoIterator<Item = impl Into<String>>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
+        Self::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(CollectByBuilder {
+                mode: CollectByMode::Expand,
+                group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+                parent_fields: Vec::new(),
+                child_fields: Vec::new(),
+                collection_field: String::new(),
+                tuple_fields: tuple_fields.into_iter().collect(),
+                occurrence_id_cols: occurrence_id_cols.into_iter().map(FieldRef::name).collect(),
+                order_cols: order_cols.into_iter().collect(),
+                tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+                offset,
+                limit,
+            }),
+        }
+    }
+
+    /// Alias for callers that prefer the terminal mode before its name.
+    #[allow(clippy::too_many_arguments)]
+    pub fn expand_by(
+        input: GraphBuilder,
+        group_cols: impl IntoIterator<Item = impl Into<String>>,
+        tuple_fields: impl IntoIterator<Item = CollectByField>,
+        occurrence_id_cols: impl IntoIterator<Item = impl Into<String>>,
+        order_cols: impl IntoIterator<Item = TopByOrder>,
+        tie_cols: impl IntoIterator<Item = impl Into<String>>,
+        offset: u64,
+        limit: TopByLimit,
+    ) -> Self {
+        Self::collect_by_expand(
+            input,
+            group_cols,
+            tuple_fields,
+            occurrence_id_cols,
+            order_cols,
+            tie_cols,
+            offset,
+            limit,
+        )
     }
 
     pub fn aggregate(
@@ -940,6 +1007,70 @@ impl NodeDescriptor {
             }
             OpType::CollectBy(collect_by) => {
                 expect_arity(&self.inputs, 1)?;
+                if collect_by.mode == CollectByMode::Expand {
+                    if collect_by.tuple_fields.is_empty()
+                        || collect_by.occurrence_id_field_indices.is_empty()
+                        || collect_by.sort_field_indices.len() != collect_by.sort_directions.len()
+                        || collect_by.sort_field_indices.len()
+                            != collect_by.order_fields.len() + collect_by.tie_fields.len()
+                        || collect_by.order_fields.is_empty()
+                        || collect_by.tie_fields.is_empty()
+                        || self.output.fields().len() != collect_by.tuple_fields.len()
+                    {
+                        return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                    }
+                    for field in collect_by
+                        .group_field_indices
+                        .iter()
+                        .chain(&collect_by.sort_field_indices)
+                        .chain(&collect_by.occurrence_id_field_indices)
+                        .chain(collect_by.tuple_fields.iter().map(|field| &field.field_idx))
+                    {
+                        if *field >= input_outputs[0].fields().len() {
+                            return Err(GraphValidationError::FieldIndexOutOfBounds {
+                                index: *field,
+                                len: input_outputs[0].fields().len(),
+                            });
+                        }
+                    }
+                    for (output_field, projection) in
+                        self.output.fields().iter().zip(&collect_by.tuple_fields)
+                    {
+                        let input_field = &input_outputs[0].fields()[projection.field_idx];
+                        if output_field.name.as_deref() != Some(projection.output_name.as_str())
+                            || output_field.value_type != input_field.value_type
+                        {
+                            return Err(GraphValidationError::CollectByOutputDescriptorMismatch);
+                        }
+                    }
+                    for &field_idx in collect_by
+                        .group_field_indices
+                        .iter()
+                        .chain(&collect_by.sort_field_indices)
+                        .chain(&collect_by.occurrence_id_field_indices)
+                    {
+                        let value_type = &input_outputs[0].fields()[field_idx].value_type;
+                        let scalar = matches!(
+                            value_type,
+                            ValueType::U8
+                                | ValueType::U16
+                                | ValueType::U32
+                                | ValueType::U64
+                                | ValueType::I32
+                                | ValueType::I64
+                                | ValueType::F64
+                                | ValueType::Bool
+                                | ValueType::String
+                                | ValueType::Bytes
+                                | ValueType::Uuid
+                                | ValueType::Enum(_)
+                        );
+                        if !scalar || value_type.contains_record() {
+                            return Err(GraphValidationError::CollectByKeyFieldMustBeScalar);
+                        }
+                    }
+                    return Ok(());
+                }
                 if collect_by.collection_field_index >= self.output.fields().len() {
                     return Err(GraphValidationError::FieldIndexOutOfBounds {
                         index: collect_by.collection_field_index,
@@ -1559,6 +1690,7 @@ mod tests {
         let collector = graph.dedup_node(
             NodeDescriptor::new(
                 OpType::CollectBy(Box::new(CollectByOp {
+                    mode: CollectByMode::Collect,
                     group_fields: vec!["f0".to_owned()],
                     group_field_indices: vec![0],
                     parent_fields: vec![CollectByProjection {
@@ -1574,6 +1706,9 @@ mod tests {
                     child_descriptor: child,
                     collection_field: "children".to_owned(),
                     collection_field_index: 1,
+                    tuple_fields: Vec::new(),
+                    occurrence_id_fields: Vec::new(),
+                    occurrence_id_field_indices: Vec::new(),
                     order_fields: vec![TopByOrderField {
                         field: "f0".to_owned(),
                         direction: TopByDirection::Asc,
