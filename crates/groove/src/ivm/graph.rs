@@ -265,6 +265,10 @@ pub struct CollectBySlotBuilder {
     pub slots: Vec<CollectBySlotBuilder>,
     pub order_cols: Vec<TopByOrder>,
     pub tie_cols: Vec<FieldRef>,
+    /// Optional boolean input field marking records that contribute a real
+    /// child to this slot. This lets callers retain parent anchor records for
+    /// empty collections without treating the anchor as a null child.
+    pub presence_col: Option<FieldRef>,
     pub offset: u64,
     pub limit: TopByLimit,
 }
@@ -293,9 +297,17 @@ impl CollectBySlotBuilder {
             slots: slots.into_iter().collect(),
             order_cols: order_cols.into_iter().collect(),
             tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
+            presence_col: None,
             offset,
             limit,
         }
+    }
+
+    /// Require a true boolean marker before an input record contributes to
+    /// this slot. Unmarked records still may serve as parent anchors.
+    pub fn with_presence_col(mut self, presence_col: impl Into<String>) -> Self {
+        self.presence_col = Some(FieldRef::name(presence_col));
+        self
     }
 }
 

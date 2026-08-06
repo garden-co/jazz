@@ -2467,13 +2467,9 @@ impl IvmRuntime {
             .collect::<Result<Vec<_>, _>>()?;
         let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
         if collect.mode == CollectByMode::Collect && !collect.slots.is_empty() {
-            if parent_fields.is_empty()
-                || parent_fields
-                    .iter()
-                    .any(|field| !group_field_indices.contains(&field.field_idx))
-            {
+            if parent_fields.is_empty() {
                 return Err(IvmRuntimeError::InvalidCollectBy(
-                    "parent projection fields must be grouping fields".into(),
+                    "tree collect requires a parent projection".into(),
                 ));
             }
             validate_collect_by_key_types(&input_output, &group_field_indices)?;
@@ -6994,6 +6990,18 @@ fn collect_by_slots(
                 .iter()
                 .map(|field| resolve_field_ref(input, field))
                 .collect::<Result<Vec<_>, _>>()?;
+            let presence_field_index = builder
+                .presence_col
+                .as_ref()
+                .map(|field| resolve_field_ref(input, field))
+                .transpose()?;
+            if let Some(index) = presence_field_index
+                && input.fields()[index].value_type != ValueType::Bool
+            {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "a tree collection presence field must be boolean".into(),
+                ));
+            }
             if order_field_indices.is_empty() || tie_field_indices.is_empty() {
                 return Err(IvmRuntimeError::InvalidCollectBy(
                     "order and tie fields must both be complete and non-empty".into(),
@@ -7033,6 +7041,7 @@ fn collect_by_slots(
                     .iter()
                     .map(|field| field_name_at(input, *field))
                     .collect::<Result<Vec<_>, _>>()?,
+                presence_field_index,
                 sort_field_indices: order_field_indices
                     .iter()
                     .chain(&tie_field_indices)
@@ -9053,6 +9062,11 @@ fn render_collect_by_slots(
                 if *weight <= 0
                     || encoded_record_key_part(input_desc, record, &slot.group_field_indices)?
                         != owner_key
+                {
+                    continue;
+                }
+                if let Some(presence_field_index) = slot.presence_field_index
+                    && !BorrowedRecord::new(record, &input_desc).get_bool(presence_field_index)?
                 {
                     continue;
                 }

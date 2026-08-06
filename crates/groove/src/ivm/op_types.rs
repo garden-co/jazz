@@ -292,6 +292,9 @@ pub struct CollectBySlot {
     pub slots: Vec<CollectBySlot>,
     pub order_fields: Vec<TopByOrderField>,
     pub tie_fields: Vec<String>,
+    /// Optional boolean field that distinguishes a real association row from
+    /// a parent anchor retained solely to render an empty collection.
+    pub presence_field_index: Option<usize>,
     pub sort_field_indices: Vec<usize>,
     pub sort_directions: Vec<TopByDirection>,
     pub offset: u64,
