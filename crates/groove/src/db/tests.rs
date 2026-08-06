@@ -1685,7 +1685,9 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
     let results = Value::Array(vec![Value::Record(first), Value::Record(second)]);
     let store = database.direct_record_store("rendered_results").unwrap();
 
-    store.set(&[Value::U64(7)], &[results.clone()]).unwrap();
+    store
+        .set(&[Value::U64(7)], std::slice::from_ref(&results))
+        .unwrap();
 
     assert_eq!(
         store
