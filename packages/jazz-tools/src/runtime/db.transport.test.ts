@@ -83,9 +83,11 @@ function makeClientStub() {
     shutdown: vi.fn(async () => undefined),
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
+    disconnectTransport: vi.fn(),
     getRuntime: vi.fn(() => ({}) as never),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
+    disconnectTransport: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -168,6 +170,55 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     db.exposeGetClient(makeSchema());
 
     expect((client as any).connectTransport).not.toHaveBeenCalled();
+  });
+
+  it("DBRT-U02b disconnects and reconnects existing clients through the public Db API", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+      adminSecret: "admin-y",
+    });
+    db.exposeGetClient(makeSchema());
+
+    await db.disconnect();
+    await db.reconnect();
+
+    expect((client as any).disconnectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(2);
+    expect((client as any).connectTransport).toHaveBeenLastCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
+  });
+
+  it("DBRT-U02c keeps lazily-created clients offline until reconnect", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+    });
+
+    await db.disconnect();
+    db.exposeGetClient(makeSchema());
+    expect((client as any).connectTransport).not.toHaveBeenCalled();
+
+    await db.reconnect();
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: undefined,
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
   });
 
   it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
