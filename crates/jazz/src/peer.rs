@@ -21,7 +21,7 @@ use crate::node::maintained_subscription_view::{
     MaintainedTerminalSchemas, ResultTransitions,
 };
 use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
@@ -32,6 +32,7 @@ use crate::protocol::{
 use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
+use crate::tools::OutputOccurrenceId;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
 
 const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
@@ -143,7 +144,7 @@ struct MaintainedRehydrateRequest<'a> {
     read_view: &'a ReadViewSpec,
 }
 
-type RowKey = (groove::Intern<String>, RowUuid);
+type RowKey = OutputOccurrenceId;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MemberIndexKey {
@@ -1916,17 +1917,12 @@ impl PeerState {
         // (this sat under the measured record_outgoing_view_update hotspot).
         #[cfg(debug_assertions)]
         {
-            let row_result_set = state
-                .result_member_set
-                .iter()
-                .filter_map(ResultMemberEntry::as_row)
-                .collect::<BTreeSet<_>>();
-            if let Some((table, row_uuid, first, second)) =
-                duplicate_row_result_set(&row_result_set)
+            if let Some((occurrence_id, first, second)) =
+                duplicate_output_occurrence_result_set(&state.result_member_set)
             {
                 debug_assert!(
                     first == second,
-                    "peer subscription {subscription:?} has multiple content versions for {table}.{row_uuid:?}: {first:?} and {second:?}"
+                    "peer subscription {subscription:?} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
                 );
             }
         }
@@ -1934,9 +1930,7 @@ impl PeerState {
 }
 
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
-    member
-        .as_row()
-        .map(|(table, row_uuid, _)| (table, row_uuid))
+    member.output_occurrence_id()
 }
 
 fn member_index_key(member: &ResultMemberEntry) -> MemberIndexKey {
@@ -2054,13 +2048,19 @@ fn apply_contribution_remove<'a>(
 }
 
 #[cfg(debug_assertions)]
-fn duplicate_row_result_set(
-    result_set: &BTreeSet<ResultRowEntry>,
-) -> Option<(String, RowUuid, TxId, TxId)> {
+fn duplicate_output_occurrence_result_set(
+    result_set: &BTreeSet<ResultMemberEntry>,
+) -> Option<(OutputOccurrenceId, TxId, TxId)> {
     let mut rows = BTreeMap::new();
-    for (table, row_uuid, tx_id) in result_set {
-        if let Some(first) = rows.insert((*table, *row_uuid), *tx_id) {
-            return Some((table.to_string(), *row_uuid, first, *tx_id));
+    for member in result_set {
+        let Some(occurrence_id) = member.output_occurrence_id() else {
+            continue;
+        };
+        let Some((_, _, tx_id)) = member.as_row() else {
+            continue;
+        };
+        if let Some(first) = rows.insert(occurrence_id.clone(), tx_id) {
+            return Some((occurrence_id, first, tx_id));
         }
     }
     None
@@ -2264,7 +2264,7 @@ mod tests {
 
     use crate::ids::{NodeUuid, RowUuid};
     use crate::node::MergeableCommit;
-    use crate::protocol::{ProgramFactEntry, SyncMessage, VersionRecord};
+    use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
     use crate::query::{
         Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
     };
@@ -2288,6 +2288,70 @@ mod tests {
         let mut bytes = [0; 16];
         bytes[..8].copy_from_slice(&value.to_be_bytes());
         RowUuid::from_bytes(bytes)
+    }
+
+    fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
+        RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            root,
+            TxId::new(crate::time::TxTime(time), node(0xee)),
+        ))
+        .with_occurrence_id(crate::tools::OutputOccurrenceId::new(
+            crate::tools::ObjectId::from_uuid(root.0),
+            [crate::tools::ObjectId::from_uuid(joined.0)],
+        ))
+        .into()
+    }
+
+    // This exercises the maintained protocol boundary directly: public joined
+    // subscriptions remain deliberately rejected until the next PR, so no
+    // black-box public query can produce two output occurrences yet.
+    #[test]
+    fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
+        let root = row(0x41);
+        let first = output_member(root, row(0x42), 10);
+        let second = output_member(root, row(0x43), 11);
+        let replacement = output_member(root, row(0x42), 12);
+        let subscription = SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(1)),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
+            read_view: Default::default(),
+        };
+        let update = |reset_result_set, adds, removes| SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(0),
+            reset_result_set,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let mut peer = PeerState::default();
+
+        peer.apply_outgoing_view_update_result_set(&update(
+            true,
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+        ));
+        peer.apply_outgoing_view_update_result_set(&update(
+            false,
+            vec![replacement.clone()],
+            vec![first],
+        ));
+        peer.apply_outgoing_view_update_result_set(&update(
+            true,
+            vec![replacement.clone(), second.clone()],
+            Vec::new(),
+        ));
+
+        assert_eq!(
+            peer.subscriptions[&subscription].result_member_set,
+            BTreeSet::from([replacement, second])
+        );
+        assert_eq!(peer.subscriptions[&subscription].member_index.len(), 2);
     }
 
     fn current_row_pair(row: crate::node::CurrentRow) -> (RowUuid, BTreeMap<String, Value>) {

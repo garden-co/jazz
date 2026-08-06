@@ -85,7 +85,11 @@ async fn subscription_orders_by_unprojected_field() {
             };
 
             assert_eq!(
-                delta.added.iter().map(|added| added.id).collect::<Vec<_>>(),
+                delta
+                    .added
+                    .iter()
+                    .map(|added| added.id.clone())
+                    .collect::<Vec<_>>(),
                 vec![ids[1], ids[2], ids[0]],
                 "subscription reset must follow rank even when rank is not projected"
             );

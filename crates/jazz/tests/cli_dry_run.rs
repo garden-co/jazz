@@ -229,8 +229,8 @@ fn subscription_fields(
                 for removed in removed {
                     rows.remove(&removed.row_uuid);
                 }
-                ingest_current_rows(&mut rows, table, &added);
-                ingest_current_rows(&mut rows, table, &updated);
+                ingest_current_rows(&mut rows, table, added.iter().map(|output| &output.row));
+                ingest_current_rows(&mut rows, table, updated.iter().map(|output| &output.row));
             }
             SubscriptionEvent::Rejected { reason } => {
                 panic!("subscription rejected unexpectedly: {reason:?}")
@@ -243,10 +243,10 @@ fn subscription_fields(
     fields
 }
 
-fn ingest_current_rows(
+fn ingest_current_rows<'a>(
     rows: &mut BTreeMap<RowUuid, (String, bool)>,
     table: &TableSchema,
-    current: &[jazz::node::CurrentRow],
+    current: impl IntoIterator<Item = &'a jazz::node::CurrentRow>,
 ) {
     for row in current {
         let Some(Value::String(title)) = row.cell(table, "title") else {

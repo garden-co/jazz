@@ -1787,8 +1787,11 @@ fn r12_recursive_permissions(c: &mut Criterion) {
                     updated,
                     ..
                 }) => {
-                    let mut rows = added;
-                    rows.extend(updated);
+                    let mut rows = added
+                        .into_iter()
+                        .map(|output| output.row)
+                        .collect::<Vec<_>>();
+                    rows.extend(updated.into_iter().map(|output| output.row));
                     assert_recursive_docs_visible(&rows);
                 }
                 other => panic!("expected recursive docs reset event, got {other:?}"),

@@ -295,6 +295,13 @@ fn fact_public_fields(
         }
         ProgramFactSchema::ResultMembership(schema) => {
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
+            fields.extend(
+                schema
+                    .occurrence_id_fields
+                    .iter()
+                    .filter(|field| **field != schema.row_field)
+                    .cloned(),
+            );
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
@@ -8703,6 +8710,11 @@ where
         identity: AuthorId,
         read_view: &ReadViewSpec,
     ) -> Result<(), Error> {
+        // `JoinVia` is an existential constraint on this query's root-row
+        // result, not flat joined output: maintained membership and delivery
+        // remain addressed by the selected root row. Flat public join output,
+        // which can contain several occurrences for one root, remains rejected
+        // at the public-client boundary until it supplies source tuples.
         self.compile_current_query_program_for_read_view(
             shape,
             binding,

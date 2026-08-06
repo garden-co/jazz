@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 
 use crate::tools::metadata::RowProvenance;
-use crate::tools::object::ObjectId;
+use crate::tools::object::OutputOccurrenceId;
 use crate::tools::transaction::BatchId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -67,10 +67,10 @@ impl<'de> Deserialize<'de> for RowBytes {
     }
 }
 
-/// A row with its object ID, binary data, and batch identity.
+/// A maintained output row with its occurrence identity, binary data, and batch identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub id: ObjectId,
+    pub id: OutputOccurrenceId,
     /// Binary encoded row data.
     pub data: RowBytes,
     pub batch_id: BatchId,
@@ -79,7 +79,7 @@ pub struct Row {
 
 impl Row {
     pub fn new(
-        id: ObjectId,
+        id: OutputOccurrenceId,
         data: impl Into<RowBytes>,
         batch_id: BatchId,
         provenance: RowProvenance,
@@ -101,7 +101,7 @@ pub struct RowDelta {
     pub removed: Vec<Row>,
     /// Rows that stayed in-window but changed position.
     /// Semantics: detach these IDs from current order, then append in listed order.
-    pub moved: Vec<ObjectId>,
+    pub moved: Vec<OutputOccurrenceId>,
     /// Updated rows as (old, new) pairs.
     pub updated: Vec<(Row, Row)>,
 }
@@ -121,20 +121,20 @@ impl RowDelta {
 
 #[derive(Debug, Clone)]
 pub struct OrderedAdded {
-    pub id: ObjectId,
+    pub id: OutputOccurrenceId,
     pub index: usize,
     pub row: Row,
 }
 
 #[derive(Debug, Clone)]
 pub struct OrderedRemoved {
-    pub id: ObjectId,
+    pub id: OutputOccurrenceId,
     pub index: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct OrderedUpdated {
-    pub id: ObjectId,
+    pub id: OutputOccurrenceId,
     pub old_index: usize,
     pub new_index: usize,
     pub row: Option<Row>,

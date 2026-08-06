@@ -1597,8 +1597,11 @@ fn subscription_snapshot_row_set(
             updated,
             ..
         } => {
-            let mut rows = added;
-            rows.extend(updated);
+            let mut rows = added
+                .into_iter()
+                .map(|output| output.row)
+                .collect::<Vec<_>>();
+            rows.extend(updated.into_iter().map(|output| output.row));
             row_set(rows)
         }
         event => panic!("expected subscription snapshot, got {event:?}"),
@@ -1635,7 +1638,7 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
                 rows.remove(&(row.table, row.row_uuid));
             }
             for row in added.into_iter().chain(updated) {
-                rows.insert((row.table().to_owned(), row.row_uuid()));
+                rows.insert((row.row.table().to_owned(), row.row.row_uuid()));
             }
         }
         SubscriptionEvent::Rejected { reason } => {
