@@ -36,6 +36,9 @@ Invariant digest:
   reader only when its target row exists as a current row AND satisfies the target
   table's read policy for that reader; a parent whose required target is missing or
   unreadable MUST be dropped from the result set.
+- `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
+  read policy; partial updates and upserts therefore require read permission,
+  while full-row writes and row-id deletes do not.
 
 ## Details
 
@@ -100,6 +103,35 @@ update, `update_using` is evaluated against the previous content row and
 present both must pass. For a delete, `delete_using` is evaluated against the row
 being deleted. Missing clauses preserve the operation-level public default rather
 than falling back to another operation's policy.
+
+#### Read-for-write authorization
+
+jazz follows PostgreSQL's rule: **reads require read permission, including reads
+performed as part of a write** (`INV-RLS-20`). This is not a rule that write
+permission implies read permission. The policy unit is the target **row**: jazz
+read policies are row-level rather than column-level, so it does not make a
+PostgreSQL-style per-column `SELECT` decision.
+
+An update is **partial** when its input omits any schema-declared column. A
+partial update reads the current target row to merge its omitted cells and MUST
+be rejected with an authorization error unless the writer may read that row. An
+update that specifies every schema-declared column is a full-row write: it reads
+no user data and therefore requires only the applicable write policy. It remains
+available to a write-only principal.
+
+An upsert asks whether its target row exists. If there is a current target row,
+that is a read and an upsert MUST be rejected unless the writer may read it. If
+there is no target row, a table with no read policy may take the insert path; a
+table with a row policy MUST deny rather than treating an unreadable target as
+absent. Callers that only need to create a row use `insert`. A delete addressed
+by row id reads no user data and remains available to a write-only principal,
+subject to its delete write policy.
+
+`AuthorId::SYSTEM` is reserved here for internal bookkeeping, not for deciding
+whether a user read is convenient: causal parent links, index maintenance, and
+integrity checks such as `ensure_row_not_deleted` may inspect storage under
+system authority. Merging omitted user cells and deciding whether an upsert
+target exists are user reads and MUST be evaluated as the writer.
 
 Uploaded commit units are authorized under the **authenticated link identity**,
 not under the self-declared `Transaction.made_by`. A normal `Session` link must

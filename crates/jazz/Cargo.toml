@@ -281,6 +281,10 @@ name = "parameterized_subscription_routing"
 required-features = ["test"]
 
 [[test]]
+name = "authorization_scope_reentry"
+required-features = ["test"]
+
+[[test]]
 name = "catalogue_sync_integration"
 required-features = ["test"]
 
