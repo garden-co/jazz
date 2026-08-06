@@ -10,7 +10,7 @@
 //! [`crate::ivm::graph`], and storage mechanics in [`crate::storage`].
 
 use bytes::{Bytes, BytesMut};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
@@ -75,6 +75,45 @@ impl Hash for SnapshotSourceSet {
             .collect::<Vec<_>>();
         entry_hashes.sort_unstable();
         entry_hashes.hash(state);
+    }
+}
+
+#[derive(Debug, Default)]
+struct SnapshotSourceSetRetention {
+    live: Cell<usize>,
+    peak: Cell<usize>,
+}
+
+impl SnapshotSourceSetRetention {
+    fn track(&self, table_deltas: Vec<TableDelta>) -> MaterializedSnapshotSourceSet<'_> {
+        let live = self.live.get() + 1;
+        self.live.set(live);
+        self.peak.set(self.peak.get().max(live));
+        MaterializedSnapshotSourceSet {
+            table_deltas,
+            retention: self,
+        }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.get()
+    }
+}
+
+struct MaterializedSnapshotSourceSet<'a> {
+    table_deltas: Vec<TableDelta>,
+    retention: &'a SnapshotSourceSetRetention,
+}
+
+impl MaterializedSnapshotSourceSet<'_> {
+    fn table_deltas(&self) -> &[TableDelta] {
+        &self.table_deltas
+    }
+}
+
+impl Drop for MaterializedSnapshotSourceSet<'_> {
+    fn drop(&mut self) {
+        self.retention.live.set(self.retention.live.get() - 1);
     }
 }
 
@@ -616,18 +655,26 @@ impl IvmRuntime {
         }
         let mut sinks = BTreeMap::new();
         let groups = group_outputs_by_snapshot_sources(&self.graph, outputs)?;
-        self.hydration_snapshot_peak_cached_source_sets = usize::from(!groups.is_empty());
+        let retention = SnapshotSourceSetRetention::default();
         for (sources, outputs) in groups {
-            let table_deltas = materialize_snapshot_table_deltas(&self.schema, storage, sources.0)?;
+            let table_deltas = retention.track(materialize_snapshot_table_deltas(
+                &self.schema,
+                storage,
+                sources.0,
+            )?);
             for (sink, output) in outputs {
-                let records =
-                    self.hydration_snapshot_from_table_deltas(output.node, storage, &table_deltas)?;
+                let records = self.hydration_snapshot_from_table_deltas(
+                    output.node,
+                    storage,
+                    table_deltas.table_deltas(),
+                )?;
                 if records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
                 sinks.insert(sink, records);
             }
         }
+        self.hydration_snapshot_peak_cached_source_sets = retention.peak();
         Ok(MultisinkDeltas { sinks })
     }
 
@@ -706,14 +753,18 @@ impl IvmRuntime {
         }
         let mut sinks = BTreeMap::new();
         let groups = group_outputs_by_snapshot_sources(&self.graph, outputs)?;
-        self.hydration_snapshot_peak_cached_source_sets = usize::from(!groups.is_empty());
+        let retention = SnapshotSourceSetRetention::default();
         for (sources, outputs) in groups {
-            let table_deltas = materialize_snapshot_table_deltas(&self.schema, storage, sources.0)?;
+            let table_deltas = retention.track(materialize_snapshot_table_deltas(
+                &self.schema,
+                storage,
+                sources.0,
+            )?);
             for (sink, output) in outputs {
                 let records = self.subscription_hydration_snapshot_from_table_deltas(
                     output.node,
                     storage,
-                    &table_deltas,
+                    table_deltas.table_deltas(),
                 )?;
                 if records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
@@ -721,6 +772,7 @@ impl IvmRuntime {
                 sinks.insert(sink, records);
             }
         }
+        self.hydration_snapshot_peak_cached_source_sets = retention.peak();
         Ok(MultisinkDeltas { sinks })
     }
 
