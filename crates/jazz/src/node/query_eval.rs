@@ -3266,7 +3266,7 @@ fn normalize_array_subquery(
                 limit: subquery
                     .limit
                     .map(|limit| limit.min(u32::MAX as usize) as u32),
-                offset: 0,
+                offset: subquery.offset.min(u32::MAX as usize) as u32,
                 tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(
                     child_source.clone(),
                 ))],

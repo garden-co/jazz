@@ -3090,8 +3090,9 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id").limit(usize::MAX),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3212,8 +3213,9 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         ]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id").limit(usize::MAX),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
@@ -3360,8 +3362,9 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
         )
         .unwrap();
     }
-    let query = Query::from("todos")
-        .array_subquery(ArraySubquery::new("comments", "comments", "todo_id", "id"));
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id").limit(usize::MAX),
+    );
     let prepared_query = prepared(&db, &query);
 
     let admin = block_on(db.all_relation_snapshot_for_identity(
@@ -3445,7 +3448,8 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     }
     let query = Query::from("todos").array_subquery(
         ArraySubquery::new("comments", "comments", "todo_id", "id")
-            .order_by("body", OrderDirection::Asc),
+            .order_by("body", OrderDirection::Asc)
+            .limit(usize::MAX),
     );
     let prepared_query = prepared(&db, &query);
     let one_shot =
@@ -3485,9 +3489,11 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
     )
     .unwrap();
-    let query = Query::from("todos")
-        .select(["title"])
-        .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
+    let query = Query::from("todos").select(["title"]).array_subquery(
+        ArraySubquery::new("owner", "users", "id", "owner_id")
+            .select(["name"])
+            .limit(usize::MAX),
+    );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
@@ -3539,7 +3545,9 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
-        ArraySubquery::new("project", "projects", "id", "project").select(["name"]),
+        ArraySubquery::new("project", "projects", "id", "project")
+            .select(["name"])
+            .limit(usize::MAX),
     );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
@@ -6924,7 +6932,7 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id").limit(usize::MAX))
         .validate(&schema)
         .unwrap();
 
@@ -8492,7 +8500,8 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .limit(usize::MAX)
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").limit(usize::MAX)),
     );
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
 
@@ -8517,7 +8526,8 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
-            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
+            .limit(usize::MAX)
+            .nested(ArraySubquery::new("comments", "comments", "todo_id", "id").limit(usize::MAX)),
     );
     let prepared = prepared(&client, &query);
     let attachment = client

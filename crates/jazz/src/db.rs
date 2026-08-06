@@ -64,6 +64,9 @@ use crate::query::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
+pub use crate::result_tree::{
+    ParentTooLargeError, ResultNode, ResultRelation, ResultTree, ResultTreeReplacement,
+};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::{ObjectId, OutputOccurrenceId};
@@ -860,6 +863,20 @@ where
                 &opts.read_view,
             )
             .map_err(Into::into)
+    }
+
+    /// Tier-gated canonical structured result read.
+    ///
+    /// This is the sole Jazz-boundary materialization of relation facts into
+    /// recursive output. Wire delivery deliberately remains on its v3 carrier
+    /// until the structured delivery migration.
+    pub async fn all_result_tree(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.all_relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
     }
 
     /// Tier-gated one-shot output-changing relation read evaluated as the database identity.
@@ -7824,6 +7841,101 @@ where
 
 fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
+}
+
+/// Render the flat maintained/query fact boundary once, at the Jazz public
+/// result boundary. In particular, consumers must not rebuild relation trees
+/// from `RelationSnapshot` rows and edges themselves.
+fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
+    type RowKey = (String, RowUuid);
+    let roots = snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .map(|row| (row.table().to_owned(), row.row_uuid()))
+        .collect::<Vec<_>>();
+    let rows = snapshot
+        .rows
+        .into_iter()
+        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
+        .collect::<BTreeMap<RowKey, CurrentRow>>();
+    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
+    for edge in snapshot.edges {
+        edges
+            .entry((edge.source_table.clone(), edge.source_row))
+            .or_default()
+            .push(edge);
+    }
+
+    fn node(
+        row_key: &(String, RowUuid),
+        row: &CurrentRow,
+        arrays: &[crate::query::ArraySubquery],
+        rows: &BTreeMap<RowKey, CurrentRow>,
+        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
+        root: bool,
+    ) -> Result<ResultNode, Error> {
+        let mut relations = BTreeMap::new();
+        for array in arrays {
+            let children = edges
+                .get(row_key)
+                .into_iter()
+                .flatten()
+                .filter(|edge| edge.relation == array.column_name)
+                .filter_map(|edge| {
+                    let key = (edge.target_table.clone(), edge.target_row);
+                    rows.get(&key).map(|child| (key, child))
+                })
+                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+        }
+        let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
+        let rendered_bytes = rendered_node_bytes(row, &relations);
+        if rendered_bytes > MAX_WIRE_FRAME_BYTES {
+            let relation_path = arrays
+                .first()
+                .map(|array| array.column_name.clone())
+                .unwrap_or_default();
+            return Err(Error::new(
+                ErrorCode::Query,
+                ParentTooLargeError {
+                    parent: row.row_uuid(),
+                    relation_path,
+                    rendered_bytes,
+                    limit: MAX_WIRE_FRAME_BYTES,
+                }
+                .to_string(),
+            ));
+        }
+        let _ = root;
+        Ok(ResultNode {
+            occurrence,
+            row: row.clone(),
+            relations,
+        })
+    }
+
+    let roots = roots
+        .into_iter()
+        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
+        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResultTree { roots })
+}
+
+fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRelation>) -> usize {
+    let mut bytes = row.encoded_record().1.len();
+    for (name, relation) in relations {
+        bytes += name.len();
+        if let ResultRelation::Array(children) = relation {
+            bytes += children
+                .iter()
+                .map(|child| rendered_node_bytes(&child.row, &child.relations))
+                .sum::<usize>();
+        }
+    }
+    bytes
 }
 
 struct SubscriptionState {
