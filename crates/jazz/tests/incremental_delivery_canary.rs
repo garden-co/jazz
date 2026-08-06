@@ -213,7 +213,9 @@ fn row(seed: u64) -> RowUuid {
 
 fn relation_query() -> Query {
     Query::from("parents").array_subquery(
-        ArraySubquery::new("children", "children", "parent_id", "id").select(["label", "ordinal"]),
+        ArraySubquery::new("children", "children", "parent_id", "id")
+            .select(["label", "ordinal"])
+            .unbounded(),
     )
 }
 
