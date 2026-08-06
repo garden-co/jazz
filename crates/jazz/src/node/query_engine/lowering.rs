@@ -1,8 +1,9 @@
 use super::*;
 use groove::ivm::{
     AggregateExpr as GrooveAggregateExpr, AggregateFunction as GrooveAggregateFunction,
-    LiteralValue, PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind,
-    ProjectField, TopByLimit, TopByOrder,
+    CollectByField, CollectBySlotBuilder, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
+    PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind, ProjectField,
+    TopByLimit, TopByOrder,
 };
 use groove::records::ValueType;
 
@@ -1845,6 +1846,9 @@ fn source_requirements(
             PayloadProjection::ShapeDefault => FieldRequirement::All,
             PayloadProjection::Tree(tree) => tree.fields.clone().into(),
         };
+        if let PayloadProjection::Tree(tree) = &app_rows.projection {
+            collect_app_path_projection_requirements(&tree.paths, &mut requirements)?;
+        }
     }
 
     for fact in &output.facts {
@@ -1931,6 +1935,38 @@ fn source_requirements(
     collect_plan_requirements(plan, &mut requirements)?;
 
     Ok(requirements)
+}
+
+fn collect_app_path_projection_requirements(
+    paths: &[AppPathProjection],
+    requirements: &mut BTreeMap<SourceId, SourceRequirements>,
+) -> CapabilityResult<()> {
+    for path in paths {
+        let source_requirements = requirements.get_mut(&path.path.child).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "app projection path child source {:?} was not initialized",
+                path.path.child
+            )))
+        })?;
+        merge_field_requirement(
+            &mut source_requirements.app_fields,
+            path.fields.clone().into(),
+        );
+        collect_app_path_projection_requirements(&path.children, requirements)?;
+    }
+    Ok(())
+}
+
+fn merge_field_requirement(existing: &mut FieldRequirement, incoming: FieldRequirement) {
+    match incoming {
+        FieldRequirement::None => {}
+        FieldRequirement::All => *existing = FieldRequirement::All,
+        FieldRequirement::Fields(incoming) => match existing {
+            FieldRequirement::None => *existing = FieldRequirement::Fields(incoming),
+            FieldRequirement::All => {}
+            FieldRequirement::Fields(existing) => existing.extend(incoming),
+        },
+    }
 }
 
 fn collect_plan_requirements(
@@ -4820,21 +4856,48 @@ fn lowered_terminals(
                 &root_route_fields,
             ))
     };
-    if request.output.app_rows.is_some() {
-        let graph = if root_route_fields.is_empty() {
-            closure.visible_root.clone()
-        } else {
-            visible_root_with_routes.clone()
+    if let Some(app_rows) = &request.output.app_rows {
+        let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
+            PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
+                if !root_route_fields.is_empty() {
+                    return Err(single_gap_report(UnsupportedReason::Operator(
+                        "tree app projections with routed parameters are not lowered yet"
+                            .to_owned(),
+                    )));
+                }
+                let collected = lower_collect_by_app_rows(
+                    closure.visible_root.clone(),
+                    &tree,
+                    plan,
+                    source,
+                    resolved_sources,
+                    request,
+                )?;
+                (
+                    collected.graph,
+                    collected.descriptor,
+                    collected.hidden_fields,
+                )
+            }
+            _ => (
+                if root_route_fields.is_empty() {
+                    closure.visible_root.clone()
+                } else {
+                    visible_root_with_routes.clone()
+                },
+                source.row_shape.descriptor.clone(),
+                hidden_source_fields(&source.row_shape)
+                    .into_iter()
+                    .chain(root_route_fields.clone())
+                    .collect(),
+            ),
         };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph,
             output: OutputTerminalSchema::AppRows(AppRowSchema {
-                descriptor: source.row_shape.descriptor,
-                hidden_fields: hidden_source_fields(&source.row_shape)
-                    .into_iter()
-                    .chain(root_route_fields.clone())
-                    .collect(),
+                descriptor,
+                hidden_fields,
             }),
         });
     }
@@ -5043,6 +5106,505 @@ fn lowered_terminals(
     }
 
     Ok(terminals)
+}
+
+/// One fully typed flat input field for the association collector.  The
+/// resulting stream is deliberately source-row based: no target id is later
+/// dereferenced to reconstruct a child payload.
+#[derive(Clone, Debug)]
+struct CollectFlatField {
+    input: String,
+    output: String,
+    value_type: ValueType,
+    source_field: Option<String>,
+    is_row_id: bool,
+    is_presence: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CollectSlotLayout {
+    path: ProgramPathId,
+    collection_field: String,
+    fields: Vec<CollectFlatField>,
+    row_id_input: String,
+    presence_input: String,
+    children: Vec<CollectSlotLayout>,
+}
+
+#[derive(Clone, Debug)]
+struct CollectLayout {
+    root_fields: Vec<CollectFlatField>,
+    slots: Vec<CollectSlotLayout>,
+}
+
+#[derive(Clone, Debug)]
+struct LoweredCollectByAppRows {
+    graph: GraphBuilder,
+    descriptor: RecordDescriptor,
+    hidden_fields: BTreeSet<String>,
+}
+
+fn lower_collect_by_app_rows(
+    visible_root: GraphBuilder,
+    projection: &AppProjectionTree,
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<LoweredCollectByAppRows> {
+    let layout = collect_layout(projection, root_source, resolved_sources)?;
+    let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
+    let mut association_graphs = Vec::new();
+    for slot in &layout.slots {
+        let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "app projection path {:?} is not a correlated path in the query shape",
+                slot.path
+            )))
+        })?;
+        association_graphs.extend(lower_collect_slot_graphs(
+            slot,
+            path,
+            root_context.clone(),
+            root_source,
+            root_source,
+            &layout,
+            &BTreeSet::new(),
+            resolved_sources,
+            request,
+        )?);
+    }
+    let anchor = collect_anchor_graph(visible_root, &layout)?;
+    let input = GraphBuilder::union(std::iter::once(anchor).chain(association_graphs));
+    let descriptor = collect_output_descriptor(&layout)?;
+    let root_group = layout
+        .root_fields
+        .iter()
+        .find(|field| field.is_row_id)
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(
+                "collector root projection did not retain the row id".to_owned(),
+            ))
+        })?
+        .input
+        .clone();
+    let graph = GraphBuilder::collect_by_tree(
+        input,
+        [root_group.clone()],
+        layout
+            .root_fields
+            .iter()
+            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+        layout
+            .slots
+            .iter()
+            .map(|slot| collect_slot_builder(slot, &root_group)),
+    );
+    Ok(LoweredCollectByAppRows {
+        graph,
+        descriptor,
+        hidden_fields: hidden_source_fields(&root_source.row_shape),
+    })
+}
+
+fn collect_layout(
+    projection: &AppProjectionTree,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<CollectLayout> {
+    let root_fields = root_source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            field.name.as_ref().map(|name| CollectFlatField {
+                input: format!("__collect_root_{name}"),
+                output: name.clone(),
+                value_type: field.value_type.clone(),
+                source_field: Some(name.clone()),
+                is_row_id: name == &root_source.row_shape.row_uuid_field,
+                is_presence: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut next_slot = 0usize;
+    let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
+    Ok(CollectLayout { root_fields, slots })
+}
+
+fn collect_slot_layouts(
+    paths: &[AppPathProjection],
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    depth: usize,
+    next_slot: &mut usize,
+) -> CapabilityResult<Vec<CollectSlotLayout>> {
+    if depth > MAX_COLLECT_BY_TREE_DEPTH {
+        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+            "association projection depth {depth} exceeds Groove MAX_COLLECT_BY_TREE_DEPTH ({MAX_COLLECT_BY_TREE_DEPTH})"
+        ))));
+    }
+    paths
+        .iter()
+        .map(|path| {
+            let source = resolved_sources.get(&path.path.child).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "app projection path child source {:?} was not resolved",
+                    path.path.child
+                )))
+            })?;
+            let slot_id = *next_slot;
+            *next_slot += 1;
+            let prefix = format!("__collect_path_{slot_id}");
+            let mut selected = BTreeSet::from([source.row_shape.row_uuid_field.clone()]);
+            match &path.fields {
+                FieldProjection::All => selected.extend(
+                    source
+                        .table_schema
+                        .columns
+                        .iter()
+                        .map(|column| user_column_field(&column.name)),
+                ),
+                FieldProjection::Fields(fields) => selected.extend(
+                    fields
+                        .iter()
+                        .filter(|field| field.as_str() != "id")
+                        .map(|field| user_column_field(field)),
+                ),
+            }
+            let fields = selected
+                .into_iter()
+                .map(|source_field| {
+                    let value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Operator(format!(
+                            "association projection source {:?} does not provide field {source_field:?}",
+                            source.row_shape.source
+                        )))
+                    })?;
+                    let is_row_id = source_field == source.row_shape.row_uuid_field;
+                    if !is_row_id && !matches!(value_type, ValueType::Nullable(_)) {
+                        return Err(single_gap_report(UnsupportedReason::Operator(format!(
+                            "association projection field {source_field:?} must be nullable to retain parent anchors"
+                        ))));
+                    }
+                    Ok(CollectFlatField {
+                        input: format!("{prefix}_{source_field}"),
+                        output: if is_row_id {
+                            source_field.clone()
+                        } else {
+                            logical_user_column(&source_field).to_owned()
+                        },
+                        value_type,
+                        source_field: Some(source_field),
+                        is_row_id,
+                        is_presence: false,
+                    })
+                })
+                .collect::<CapabilityResult<Vec<_>>>()?;
+            let row_id_input = fields
+                .iter()
+                .find(|field| field.is_row_id)
+                .expect("collector child projection always includes its row id")
+                .input
+                .clone();
+            let presence_input = format!("{prefix}_present");
+            let children = collect_slot_layouts(&path.children, resolved_sources, depth + 1, next_slot)?;
+            Ok(CollectSlotLayout {
+                path: path.path.clone(),
+                collection_field: path.field.clone(),
+                fields,
+                row_id_input,
+                presence_input,
+                children,
+            })
+        })
+        .collect()
+}
+
+fn root_collect_context_graph(
+    graph: GraphBuilder,
+    layout: &CollectLayout,
+) -> CapabilityResult<GraphBuilder> {
+    let fields = layout
+        .root_fields
+        .iter()
+        .flat_map(|field| {
+            let source_field = field
+                .source_field
+                .as_ref()
+                .expect("root collector fields retain their source field");
+            [
+                ProjectField::named(source_field),
+                ProjectField::renamed(source_field, &field.input),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Ok(graph.project_fields(fields))
+}
+
+fn collect_anchor_graph(
+    graph: GraphBuilder,
+    layout: &CollectLayout,
+) -> CapabilityResult<GraphBuilder> {
+    Ok(graph.project_fields(collect_flat_projection(layout, None, &BTreeSet::new())?))
+}
+
+fn lower_collect_slot_graphs(
+    slot: &CollectSlotLayout,
+    path: &CorrelatedPathPlan,
+    parent_graph: GraphBuilder,
+    parent_source: &ResolvedSource,
+    _root_source: &ResolvedSource,
+    layout: &CollectLayout,
+    inherited_flat_fields: &BTreeSet<String>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<Vec<GraphBuilder>> {
+    let joined = lower_correlated_path_relation_graph_from_parent(
+        path,
+        parent_graph,
+        parent_source,
+        resolved_sources,
+        request,
+    )
+    .map_err(single_gap_report)?
+    .graph;
+    let association = joined.clone().project_fields(collect_flat_projection(
+        layout,
+        Some(slot),
+        inherited_flat_fields,
+    )?);
+    let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Runtime(format!(
+            "collector child source {:?} was not resolved",
+            slot.path.child
+        )))
+    })?;
+    let context = joined.project_fields(collect_child_context_projection(
+        layout,
+        slot,
+        child_source,
+        inherited_flat_fields,
+    )?);
+    let mut graphs = vec![association];
+    let mut child_inherited = inherited_flat_fields.clone();
+    child_inherited.extend(collect_slot_flat_field_names(slot));
+    for nested_slot in &slot.children {
+        let nested_path =
+            find_nested_correlated_path(path, &nested_slot.path).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Operator(format!(
+                    "app projection path {:?} is not nested below {:?}",
+                    nested_slot.path, slot.path
+                )))
+            })?;
+        graphs.extend(lower_collect_slot_graphs(
+            nested_slot,
+            nested_path,
+            context.clone(),
+            child_source,
+            _root_source,
+            layout,
+            &child_inherited,
+            resolved_sources,
+            request,
+        )?);
+    }
+    Ok(graphs)
+}
+
+fn collect_flat_projection(
+    layout: &CollectLayout,
+    current_slot: Option<&CollectSlotLayout>,
+    inherited_flat_fields: &BTreeSet<String>,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let mut fields = layout
+        .root_fields
+        .iter()
+        .map(|field| match current_slot {
+            Some(_) => ProjectField::renamed(left_field(&field.input), &field.input),
+            None => ProjectField::renamed(
+                field
+                    .source_field
+                    .as_ref()
+                    .expect("root collector fields retain their source field"),
+                &field.input,
+            ),
+        })
+        .collect::<Vec<_>>();
+    for slot in collect_all_slots(&layout.slots) {
+        let is_current = current_slot.is_some_and(|current| current.path == slot.path);
+        for field in &slot.fields {
+            fields.push(if is_current {
+                ProjectField::renamed(
+                    right_field(
+                        field
+                            .source_field
+                            .as_ref()
+                            .expect("collector child fields retain their source field"),
+                    ),
+                    &field.input,
+                )
+            } else if inherited_flat_fields.contains(&field.input) {
+                ProjectField::renamed(left_field(&field.input), &field.input)
+            } else {
+                collect_flat_default(field)?
+            });
+        }
+        fields.push(if is_current {
+            ProjectField::literal(&slot.presence_input, Value::Bool(true))
+        } else if inherited_flat_fields.contains(&slot.presence_input) {
+            ProjectField::renamed(left_field(&slot.presence_input), &slot.presence_input)
+        } else {
+            ProjectField::literal(&slot.presence_input, Value::Bool(false))
+        });
+    }
+    Ok(fields)
+}
+
+fn collect_child_context_projection(
+    layout: &CollectLayout,
+    current_slot: &CollectSlotLayout,
+    child_source: &ResolvedSource,
+    inherited_flat_fields: &BTreeSet<String>,
+) -> CapabilityResult<Vec<ProjectField>> {
+    let mut fields = child_source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.as_ref())
+        .map(|name| ProjectField::renamed(right_field(name), name))
+        .collect::<Vec<_>>();
+    fields.extend(collect_flat_projection(
+        layout,
+        Some(current_slot),
+        inherited_flat_fields,
+    )?);
+    Ok(fields)
+}
+
+fn collect_flat_default(field: &CollectFlatField) -> CapabilityResult<ProjectField> {
+    if field.is_row_id {
+        return Ok(ProjectField::literal(
+            &field.input,
+            Value::Uuid(uuid::Uuid::nil()),
+        ));
+    }
+    if field.is_presence {
+        return Ok(ProjectField::literal(&field.input, Value::Bool(false)));
+    }
+    Ok(ProjectField::null_typed(
+        &field.input,
+        field.value_type.clone(),
+    ))
+}
+
+fn collect_all_slots(slots: &[CollectSlotLayout]) -> Vec<&CollectSlotLayout> {
+    let mut all = Vec::new();
+    for slot in slots {
+        all.push(slot);
+        all.extend(collect_all_slots(&slot.children));
+    }
+    all
+}
+
+fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
+    slot.fields
+        .iter()
+        .map(|field| field.input.clone())
+        .chain(std::iter::once(slot.presence_input.clone()))
+        .collect()
+}
+
+fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> CollectBySlotBuilder {
+    CollectBySlotBuilder::new(
+        [parent_row_id],
+        slot.fields
+            .iter()
+            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+        &slot.collection_field,
+        slot.children
+            .iter()
+            .map(|child| collect_slot_builder(child, &slot.row_id_input)),
+        [TopByOrder::asc(&slot.row_id_input)],
+        [&slot.row_id_input],
+        0,
+        TopByLimit::Unbounded,
+    )
+    .with_presence_col(&slot.presence_input)
+}
+
+fn collect_output_descriptor(layout: &CollectLayout) -> CapabilityResult<RecordDescriptor> {
+    let mut fields = layout
+        .root_fields
+        .iter()
+        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    fields.extend(
+        layout
+            .slots
+            .iter()
+            .map(collect_slot_output_field)
+            .collect::<CapabilityResult<Vec<_>>>()?,
+    );
+    Ok(RecordDescriptor::new(fields))
+}
+
+fn collect_slot_output_field(slot: &CollectSlotLayout) -> CapabilityResult<(String, ValueType)> {
+    Ok((
+        slot.collection_field.clone(),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(
+            collect_slot_output_descriptor(slot)?,
+        )))),
+    ))
+}
+
+fn collect_slot_output_descriptor(slot: &CollectSlotLayout) -> CapabilityResult<RecordDescriptor> {
+    let mut fields = slot
+        .fields
+        .iter()
+        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    fields.extend(
+        slot.children
+            .iter()
+            .map(collect_slot_output_field)
+            .collect::<CapabilityResult<Vec<_>>>()?,
+    );
+    Ok(RecordDescriptor::new(fields))
+}
+
+fn find_correlated_path<'a>(
+    plan: &'a AnalyzedQueryPlan,
+    path: &ProgramPathId,
+) -> Option<&'a CorrelatedPathPlan> {
+    let AnalyzedQueryPlan::CorrelatedPath(root) = plan else {
+        return None;
+    };
+    find_correlated_path_in_tree(root, path)
+}
+
+fn find_nested_correlated_path<'a>(
+    parent: &'a CorrelatedPathPlan,
+    path: &ProgramPathId,
+) -> Option<&'a CorrelatedPathPlan> {
+    parent
+        .nested
+        .iter()
+        .find_map(|candidate| find_correlated_path_in_tree(candidate, path))
+}
+
+fn find_correlated_path_in_tree<'a>(
+    path: &'a CorrelatedPathPlan,
+    target: &ProgramPathId,
+) -> Option<&'a CorrelatedPathPlan> {
+    if &path.path == target {
+        return Some(path);
+    }
+    path.siblings
+        .iter()
+        .chain(&path.nested)
+        .find_map(|candidate| find_correlated_path_in_tree(candidate, target))
 }
 
 fn lowered_aggregate_terminals(
